@@ -166,3 +166,64 @@ class TestAcceptResult:
         result = AcceptResult(accepted=True, trigger=False)
         assert hasattr(result, "batch_id")
         assert result.batch_id is None  # Set by engine in Phase 3
+
+
+class TestPluginsPublicAPI:
+    """Public API exports from elspeth.plugins."""
+
+    def test_results_importable(self) -> None:
+        from elspeth.plugins import (
+            AcceptResult,
+            GateResult,
+            RoutingAction,
+            RowOutcome,
+            TransformResult,
+        )
+
+        assert RowOutcome is not None
+        assert TransformResult is not None
+
+    def test_context_importable(self) -> None:
+        from elspeth.plugins import PluginContext
+
+        assert PluginContext is not None
+
+    def test_schemas_importable(self) -> None:
+        from elspeth.plugins import PluginSchema, check_compatibility
+
+        assert PluginSchema is not None
+
+    def test_protocols_importable(self) -> None:
+        from elspeth.plugins import (
+            AggregationProtocol,
+            CoalescePolicy,
+            CoalesceProtocol,
+            GateProtocol,
+            SinkProtocol,
+            SourceProtocol,
+            TransformProtocol,
+        )
+
+        assert SourceProtocol is not None
+
+    def test_base_classes_importable(self) -> None:
+        from elspeth.plugins import (
+            BaseAggregation,
+            BaseGate,
+            BaseSink,
+            BaseSource,
+            BaseTransform,
+        )
+
+        assert BaseTransform is not None
+
+    def test_manager_importable(self) -> None:
+        from elspeth.plugins import PluginManager
+
+        assert PluginManager is not None
+
+    def test_hookspecs_importable(self) -> None:
+        from elspeth.plugins import hookimpl, hookspec
+
+        assert hookspec is not None
+        assert hookimpl is not None

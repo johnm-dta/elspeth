@@ -94,18 +94,38 @@ class ExecutionGraph:
     def validate(self) -> None:
         """Validate the execution graph.
 
+        Validates:
+        1. Graph is acyclic (no cycles)
+        2. Exactly one source node exists
+        3. At least one sink node exists
+
         Raises:
             GraphValidationError: If validation fails
         """
+        # Check for cycles
         if not self.is_acyclic():
-            # Find the cycle for error message
             try:
                 cycle = nx.find_cycle(self._graph)
                 cycle_str = " -> ".join(f"{u}" for u, v in cycle)
                 raise GraphValidationError(f"Graph contains a cycle: {cycle_str}")
             except nx.NetworkXNoCycle:
-                # Shouldn't happen if is_acyclic() returned False
                 raise GraphValidationError("Graph contains a cycle")
+
+        # Check for exactly one source
+        sources = [
+            node_id
+            for node_id, data in self._graph.nodes(data=True)
+            if data.get("info") and data["info"].node_type == "source"
+        ]
+        if len(sources) != 1:
+            raise GraphValidationError(
+                f"Graph must have exactly one source, found {len(sources)}"
+            )
+
+        # Check for at least one sink
+        sinks = self.get_sinks()
+        if len(sinks) < 1:
+            raise GraphValidationError("Graph must have at least one sink")
 
     def topological_order(self) -> list[str]:
         """Return nodes in topological order.
@@ -120,3 +140,28 @@ class ExecutionGraph:
             return list(nx.topological_sort(self._graph))
         except nx.NetworkXUnfeasible as e:
             raise GraphValidationError(f"Cannot sort graph: {e}") from e
+
+    def get_source(self) -> str | None:
+        """Get the source node ID.
+
+        Returns:
+            The source node ID, or None if not exactly one source exists.
+        """
+        sources = [
+            node_id
+            for node_id, data in self._graph.nodes(data=True)
+            if data.get("info") and data["info"].node_type == "source"
+        ]
+        return sources[0] if len(sources) == 1 else None
+
+    def get_sinks(self) -> list[str]:
+        """Get all sink node IDs.
+
+        Returns:
+            List of sink node IDs.
+        """
+        return [
+            node_id
+            for node_id, data in self._graph.nodes(data=True)
+            if data.get("info") and data["info"].node_type == "sink"
+        ]

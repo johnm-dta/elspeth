@@ -108,3 +108,68 @@ class TestDAGValidation:
         assert order[-1] == "sink"
         # t1 must come before t2
         assert order.index("t1") < order.index("t2")
+
+
+class TestSourceSinkValidation:
+    """Validation of source and sink constraints."""
+
+    def test_validate_requires_exactly_one_source(self) -> None:
+        from elspeth.core.dag import ExecutionGraph, GraphValidationError
+
+        graph = ExecutionGraph()
+        graph.add_node("t1", node_type="transform", plugin_name="x")
+        graph.add_node("sink", node_type="sink", plugin_name="csv")
+        graph.add_edge("t1", "sink", label="continue")
+
+        with pytest.raises(GraphValidationError, match="exactly one source"):
+            graph.validate()
+
+    def test_validate_requires_at_least_one_sink(self) -> None:
+        from elspeth.core.dag import ExecutionGraph, GraphValidationError
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("t1", node_type="transform", plugin_name="x")
+        graph.add_edge("source", "t1", label="continue")
+
+        with pytest.raises(GraphValidationError, match="at least one sink"):
+            graph.validate()
+
+    def test_validate_multiple_sinks_allowed(self) -> None:
+        from elspeth.core.dag import ExecutionGraph
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("gate", node_type="gate", plugin_name="classifier")
+        graph.add_node("sink1", node_type="sink", plugin_name="csv")
+        graph.add_node("sink2", node_type="sink", plugin_name="csv")
+
+        graph.add_edge("source", "gate", label="continue")
+        graph.add_edge("gate", "sink1", label="normal")
+        graph.add_edge("gate", "sink2", label="flagged")
+
+        # Should not raise
+        graph.validate()
+
+    def test_get_source_node(self) -> None:
+        from elspeth.core.dag import ExecutionGraph
+
+        graph = ExecutionGraph()
+        graph.add_node("my_source", node_type="source", plugin_name="csv")
+        graph.add_node("sink", node_type="sink", plugin_name="csv")
+        graph.add_edge("my_source", "sink", label="continue")
+
+        assert graph.get_source() == "my_source"
+
+    def test_get_sink_nodes(self) -> None:
+        from elspeth.core.dag import ExecutionGraph
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("sink1", node_type="sink", plugin_name="csv")
+        graph.add_node("sink2", node_type="sink", plugin_name="json")
+        graph.add_edge("source", "sink1", label="continue")
+        graph.add_edge("source", "sink2", label="continue")
+
+        sinks = graph.get_sinks()
+        assert set(sinks) == {"sink1", "sink2"}

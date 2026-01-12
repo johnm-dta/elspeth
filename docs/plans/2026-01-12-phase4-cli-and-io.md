@@ -15,6 +15,28 @@
 
 ---
 
+## ⚠️ SINK INTERFACE NOTE
+
+**Phase 2 `SinkProtocol` vs Phase 3B `SinkLike`:**
+
+| Layer | Signature | Returns |
+|-------|-----------|---------|
+| Phase 2 `SinkProtocol` | `write(row: dict, ctx) -> None` | Nothing |
+| Phase 3B `SinkLike` | `write(rows: list[dict], ctx) -> dict` | Artifact info |
+
+**IMPORTANT:** Phase 3B `SinkExecutor` expects the bulk `SinkLike` interface - it does NOT loop over rows internally. It calls `sink.write(rows, ctx)` once with the full list.
+
+Phase 4 sinks implement the Phase 2 row-wise protocol (simpler for plugin authors). **Phase 4 must provide a `SinkAdapter`** that:
+1. Implements `SinkLike` (bulk interface expected by SinkExecutor)
+2. Wraps a Phase 2 sink
+3. Loops calling `sink.write(row, ctx)` for each row
+4. Calls `sink.flush()` and `sink.close()`
+5. Generates artifact info from the resulting file
+
+**This means:** Phase 4 sinks are correct for plugin authors. The CLI `run` command wraps them in `SinkAdapter` before passing to Orchestrator.
+
+---
+
 ## Task 1: CLI Foundation - Typer App Scaffold
 
 **Context:** Create the main CLI entry point using Typer. The entry point `elspeth = "elspeth.cli:app"` is already defined in pyproject.toml but the module doesn't exist.
@@ -36,7 +58,9 @@
 import pytest
 from typer.testing import CliRunner
 
-runner = CliRunner()
+# IMPORTANT: mix_stderr=True ensures error messages are captured in stdout
+# for consistent test assertions (Typer/Click writes errors to stderr by default)
+runner = CliRunner(mix_stderr=True)
 
 
 class TestCLIBasics:
@@ -1567,7 +1591,9 @@ git commit -m "feat(plugins): add DatabaseSink plugin with SQLAlchemy Core"
 import pytest
 from typer.testing import CliRunner
 
-runner = CliRunner()
+# IMPORTANT: mix_stderr=True ensures error messages are captured in stdout
+# for consistent test assertions (Typer/Click writes errors to stderr by default)
+runner = CliRunner(mix_stderr=True)
 
 
 class TestPluginsListCommand:
@@ -1652,7 +1678,15 @@ def plugins_list(
     ),
 ) -> None:
     """List available plugins."""
-    # Collect built-in plugins
+    # NOTE: For Phase 4, we hard-code built-in plugins.
+    # Future enhancement: Use PluginManager.get_sources(), etc.
+    # when third-party plugin discovery is added.
+    #
+    # TODO(Phase 5+): Replace with:
+    #   from elspeth.plugins.manager import PluginManager
+    #   manager = PluginManager()
+    #   manager.discover()  # Auto-discover registered plugins
+    #   sources = manager.get_sources()
     plugins = {
         "sources": [
             {"name": CSVSource.name, "description": "Load rows from CSV files"},
@@ -1721,7 +1755,9 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-runner = CliRunner()
+# IMPORTANT: mix_stderr=True ensures error messages are captured in stdout
+# Without this, errors printed with err=True won't appear in result.stdout
+runner = CliRunner(mix_stderr=True)
 
 
 class TestValidateCommand:
@@ -1905,6 +1941,289 @@ git commit -m "feat(cli): implement validate command"
 
 ---
 
+## Task 8.5: SinkAdapter Module
+
+**Context:** Phase 3B's `SinkExecutor` expects sinks implementing the bulk `SinkLike` interface (`write(rows, ctx) -> dict`), but Phase 4 sinks implement the simpler Phase 2 row-wise interface (`write(row, ctx) -> None`). This task creates a proper adapter module to bridge the gap.
+
+**Note:** Phase 3B has a **lifecycle gap** - Orchestrator closes source but never closes sinks. The adapter's `close()` method fills this gap, and the CLI must call it after `orchestrator.run()`.
+
+**Files:**
+- Create: `src/elspeth/engine/adapters.py`
+- Create: `tests/engine/test_adapters.py`
+
+### Step 1: Write the failing test
+
+```python
+# tests/engine/test_adapters.py
+"""Tests for sink adapters."""
+
+import hashlib
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+
+class MockRowWiseSink:
+    """Mock Phase 2 row-wise sink for testing."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.config = config
+        self.rows_written: list[dict] = []
+        self.flushed = False
+        self.closed = False
+
+    def write(self, row: dict[str, Any], ctx: Any) -> None:
+        self.rows_written.append(row)
+
+    def flush(self) -> None:
+        self.flushed = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestSinkAdapter:
+    """Tests for SinkAdapter."""
+
+    def test_adapter_implements_bulk_write(self) -> None:
+        """Adapter converts bulk write to row-wise writes."""
+        from elspeth.engine.adapters import SinkAdapter
+
+        mock_sink = MockRowWiseSink({"path": "/tmp/test.csv"})
+        adapter = SinkAdapter(mock_sink, name="test", artifact_path="/tmp/test.csv")
+
+        rows = [{"id": 1}, {"id": 2}, {"id": 3}]
+        result = adapter.write(rows, ctx=None)
+
+        # Should have called write() for each row
+        assert mock_sink.rows_written == rows
+        # Should have flushed after writing
+        assert mock_sink.flushed is True
+        # Should NOT close in write() - lifecycle managed separately
+        assert mock_sink.closed is False
+        # Should return artifact info
+        assert "path" in result
+
+    def test_adapter_close_calls_sink_close(self) -> None:
+        """Adapter.close() closes the wrapped sink."""
+        from elspeth.engine.adapters import SinkAdapter
+
+        mock_sink = MockRowWiseSink({"path": "/tmp/test.csv"})
+        adapter = SinkAdapter(mock_sink, name="test", artifact_path="/tmp/test.csv")
+
+        adapter.close()
+        assert mock_sink.closed is True
+
+    def test_adapter_computes_artifact_hash(self, tmp_path: Path) -> None:
+        """Adapter computes content hash from artifact file."""
+        from elspeth.engine.adapters import SinkAdapter
+
+        # Create a test file
+        test_file = tmp_path / "output.csv"
+        test_content = b"id,name\n1,alice\n2,bob\n"
+        test_file.write_bytes(test_content)
+        expected_hash = hashlib.sha256(test_content).hexdigest()
+
+        mock_sink = MockRowWiseSink({"path": str(test_file)})
+        adapter = SinkAdapter(mock_sink, name="test", artifact_path=str(test_file))
+
+        result = adapter.write([{"id": 1}], ctx=None)
+
+        assert result["path"] == str(test_file)
+        assert result["size_bytes"] == len(test_content)
+        assert result["content_hash"] == expected_hash
+
+    def test_adapter_handles_missing_file(self) -> None:
+        """Adapter handles non-existent artifact file gracefully."""
+        from elspeth.engine.adapters import SinkAdapter
+
+        mock_sink = MockRowWiseSink({"path": "/nonexistent/file.csv"})
+        adapter = SinkAdapter(mock_sink, name="test", artifact_path="/nonexistent/file.csv")
+
+        result = adapter.write([{"id": 1}], ctx=None)
+
+        assert result["path"] == "/nonexistent/file.csv"
+        assert result["size_bytes"] == 0
+        assert result["content_hash"] == ""
+
+    def test_adapter_has_node_id_attribute(self) -> None:
+        """Adapter has node_id for SinkLike protocol compliance."""
+        from elspeth.engine.adapters import SinkAdapter
+
+        mock_sink = MockRowWiseSink({"path": "/tmp/test.csv"})
+        adapter = SinkAdapter(mock_sink, name="test", artifact_path="/tmp/test.csv")
+
+        # node_id starts empty, set by Orchestrator during registration
+        assert hasattr(adapter, "node_id")
+        adapter.node_id = "sink-001"
+        assert adapter.node_id == "sink-001"
+```
+
+### Step 2: Run test to verify it fails
+
+Run: `pytest tests/engine/test_adapters.py -v`
+Expected: FAIL (ImportError)
+
+### Step 3: Write implementation
+
+```python
+# src/elspeth/engine/adapters.py
+"""Adapters for bridging Phase 2 plugins to Phase 3B engine interfaces.
+
+Phase 2 plugins use simpler row-wise interfaces for ease of implementation.
+Phase 3B engine expects bulk interfaces for efficiency and audit semantics.
+These adapters bridge the gap.
+"""
+
+import hashlib
+import os
+from typing import Any, Protocol
+
+
+class RowWiseSinkProtocol(Protocol):
+    """Protocol for Phase 2 row-wise sinks."""
+
+    config: dict[str, Any]
+
+    def write(self, row: dict[str, Any], ctx: Any) -> None: ...
+    def flush(self) -> None: ...
+    def close(self) -> None: ...
+
+
+class SinkAdapter:
+    """Adapts Phase 2 row-wise sinks to Phase 3B bulk SinkLike interface.
+
+    Phase 2 SinkProtocol: write(row: dict, ctx) -> None (row-wise)
+    Phase 3B SinkLike: write(rows: list[dict], ctx) -> dict (bulk, artifact info)
+
+    Usage:
+        raw_sink = CSVSink({"path": "output.csv"})
+        adapter = SinkAdapter(raw_sink, name="output", artifact_path="output.csv")
+
+        # Pass adapter to PipelineConfig (implements SinkLike)
+        config = PipelineConfig(source=src, transforms=[], sinks={"output": adapter})
+
+        # After orchestrator.run(), close the adapter (fills Phase 3B lifecycle gap)
+        adapter.close()
+    """
+
+    def __init__(
+        self,
+        sink: RowWiseSinkProtocol,
+        name: str,
+        artifact_path: str,
+    ) -> None:
+        """Wrap a Phase 2 row-wise sink.
+
+        Args:
+            sink: Phase 2 sink implementing write(row, ctx) -> None
+            name: Sink name for identification
+            artifact_path: Path to the output artifact (for hash computation)
+        """
+        self._sink = sink
+        self.name = name
+        self.node_id: str = ""  # Set by Orchestrator during registration
+        self._artifact_path = artifact_path
+
+    def write(self, rows: list[dict[str, Any]], ctx: Any) -> dict[str, Any]:
+        """Write rows using the wrapped sink's row-wise interface.
+
+        Loops over rows, calling sink.write() for each, then flushes.
+        Does NOT close the sink - close() must be called separately.
+
+        Args:
+            rows: List of row dicts to write
+            ctx: Plugin context
+
+        Returns:
+            Artifact info dict with path, size_bytes, content_hash
+        """
+        # Loop over rows, calling Phase 2 row-wise write
+        for row in rows:
+            self._sink.write(row, ctx)
+
+        # Flush buffered data (but don't close - lifecycle managed separately)
+        self._sink.flush()
+
+        # Compute artifact metadata
+        return self._compute_artifact_info()
+
+    def close(self) -> None:
+        """Close the wrapped sink.
+
+        Must be called after orchestrator.run() completes.
+        Fills the Phase 3B lifecycle gap where Orchestrator doesn't close sinks.
+        """
+        self._sink.close()
+
+    def _compute_artifact_info(self) -> dict[str, Any]:
+        """Compute artifact metadata from the output file.
+
+        Uses chunked hashing to avoid loading large files into memory.
+
+        Returns:
+            Dict with path, size_bytes, content_hash
+        """
+        path = self._artifact_path
+        size_bytes = 0
+        content_hash = ""
+
+        if path and os.path.exists(path):
+            size_bytes = os.path.getsize(path)
+            content_hash = self._hash_file_chunked(path)
+
+        return {
+            "path": path,
+            "size_bytes": size_bytes,
+            "content_hash": content_hash,
+        }
+
+    @staticmethod
+    def _hash_file_chunked(path: str, chunk_size: int = 65536) -> str:
+        """Hash a file in chunks to avoid memory issues with large files.
+
+        Args:
+            path: Path to file
+            chunk_size: Bytes to read per chunk (default 64KB)
+
+        Returns:
+            SHA-256 hex digest
+        """
+        sha256 = hashlib.sha256()
+        with open(path, "rb") as f:
+            while chunk := f.read(chunk_size):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+```
+
+### Step 4: Update engine __init__.py exports
+
+Add to `src/elspeth/engine/__init__.py`:
+
+```python
+from elspeth.engine.adapters import SinkAdapter
+
+__all__ = [
+    # ... existing exports ...
+    "SinkAdapter",
+]
+```
+
+### Step 5: Run tests to verify they pass
+
+Run: `pytest tests/engine/test_adapters.py -v`
+Expected: PASS (5 tests)
+
+### Step 6: Commit
+
+```bash
+git add src/elspeth/engine/adapters.py tests/engine/test_adapters.py
+git commit -m "feat(engine): add SinkAdapter for Phase 2/3B interface bridging"
+```
+
+---
+
 ## Task 9: CLI `run` Command
 
 **Context:** Implement the `elspeth run` command to execute a pipeline. This integrates with the Phase 3 Orchestrator.
@@ -1925,7 +2244,9 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-runner = CliRunner()
+# IMPORTANT: mix_stderr=True ensures error messages are captured in stdout
+# Without this, errors printed with err=True won't appear in result.stdout
+runner = CliRunner(mix_stderr=True)
 
 
 class TestRunCommand:
@@ -1942,9 +2263,12 @@ class TestRunCommand:
     def pipeline_settings(self, tmp_path: Path, sample_data: Path) -> Path:
         """Create a complete pipeline configuration."""
         output_file = tmp_path / "output.json"
+        landscape_db = tmp_path / "landscape.db"
         settings = {
             "source": {"plugin": "csv", "path": str(sample_data)},
             "sinks": {"output": {"plugin": "json", "path": str(output_file)}},
+            # Use temp-path DB to avoid polluting CWD during tests
+            "landscape": {"url": f"sqlite:///{landscape_db}"},
         }
         settings_file = tmp_path / "settings.yaml"
         settings_file.write_text(yaml.dump(settings))
@@ -2067,7 +2391,9 @@ def _execute_pipeline(config: dict, verbose: bool = False) -> dict:
     Returns:
         Dict with run_id, status, rows_processed.
     """
-    import uuid
+    from elspeth.core.landscape import LandscapeDB
+    from elspeth.engine import Orchestrator, PipelineConfig
+    from elspeth.engine.adapters import SinkAdapter
 
     # Instantiate source
     source_config = config["source"]
@@ -2081,48 +2407,54 @@ def _execute_pipeline(config: dict, verbose: bool = False) -> dict:
     else:
         raise ValueError(f"Unknown source plugin: {source_plugin}")
 
-    # Instantiate sinks
-    sinks = {}
+    # Instantiate sinks and wrap in SinkAdapter for Phase 3B compatibility
+    sinks: dict[str, SinkAdapter] = {}
     for sink_name, sink_config in config["sinks"].items():
         sink_plugin = sink_config["plugin"]
         sink_options = {k: v for k, v in sink_config.items() if k != "plugin"}
 
         if sink_plugin == "csv":
-            sinks[sink_name] = CSVSink(sink_options)
+            raw_sink = CSVSink(sink_options)
         elif sink_plugin == "json":
-            sinks[sink_name] = JSONSink(sink_options)
+            raw_sink = JSONSink(sink_options)
         elif sink_plugin == "database":
-            sinks[sink_name] = DatabaseSink(sink_options)
+            raw_sink = DatabaseSink(sink_options)
         else:
             raise ValueError(f"Unknown sink plugin: {sink_plugin}")
 
-    # Simple execution (Phase 4 - no transforms, no Orchestrator yet)
-    # This will be replaced with Orchestrator.run() in Phase 3 integration
-    run_id = str(uuid.uuid4())[:8]
-    ctx = PluginContext(run_id=run_id, config=config)
+        # Get artifact path from config (database sinks use table name instead)
+        artifact_path = sink_options.get("path", "")
 
-    rows_processed = 0
-    default_sink = list(sinks.values())[0]  # Use first sink as default
+        # Wrap Phase 2 sink in adapter for Phase 3B SinkLike interface
+        sinks[sink_name] = SinkAdapter(raw_sink, name=sink_name, artifact_path=artifact_path)
+
+    # Get database URL from settings or use default
+    db_url = config.get("landscape", {}).get("url", "sqlite:///elspeth_runs.db")
+    db = LandscapeDB.from_url(db_url)
+
+    # Build PipelineConfig
+    pipeline_config = PipelineConfig(
+        source=source,
+        transforms=[],  # No transforms in basic Phase 4
+        sinks=sinks,
+    )
 
     if verbose:
-        typer.echo(f"Starting run {run_id}...")
+        typer.echo("Starting pipeline execution...")
 
-    try:
-        for row in source.load(ctx):
-            default_sink.write(row, ctx)
-            rows_processed += 1
-            if verbose and rows_processed % 100 == 0:
-                typer.echo(f"  Processed {rows_processed} rows...")
-    finally:
-        source.close()
-        for sink in sinks.values():
-            sink.flush()
-            sink.close()
+    # Execute via Orchestrator (creates full audit trail)
+    # NOTE: Orchestrator takes LandscapeDB, not LandscapeRecorder - it creates its own recorder
+    orchestrator = Orchestrator(db)
+    result = orchestrator.run(pipeline_config)
+
+    # Close all sinks (fills Phase 3B lifecycle gap - Orchestrator doesn't close sinks)
+    for adapter in sinks.values():
+        adapter.close()
 
     return {
-        "run_id": run_id,
-        "status": "completed",
-        "rows_processed": rows_processed,
+        "run_id": result.run_id,
+        "status": result.status,
+        "rows_processed": result.rows_processed,
     }
 ```
 
@@ -2227,7 +2559,7 @@ class TestExplainFunction:
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
-            row_data={"id": 1},
+            data={"id": 1},
         )
         token = recorder.create_token(row_id=row.row_id)
         recorder.complete_run(run.run_id, status="completed")
@@ -2260,7 +2592,7 @@ class TestExplainFunction:
             run_id=run.run_id,
             source_node_id=node.node_id,
             row_index=0,
-            row_data={"id": 1},
+            data={"id": 1},
         )
         token = recorder.create_token(row_id=row.row_id)
         recorder.complete_run(run.run_id, status="completed")
@@ -2637,7 +2969,9 @@ git commit -m "feat(tui): add Textual ExplainApp foundation"
 import pytest
 from typer.testing import CliRunner
 
-runner = CliRunner()
+# IMPORTANT: mix_stderr=True ensures error messages are captured in stdout
+# for consistent test assertions (Typer/Click writes errors to stderr by default)
+runner = CliRunner(mix_stderr=True)
 
 
 class TestExplainCommand:
@@ -2913,7 +3247,9 @@ def configure_logging(
         ),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(),
-        cache_logger_on_first_use=True,
+        # IMPORTANT: Disable caching to allow reconfiguration in tests
+        # Without this, tests that reconfigure logging will get stale loggers
+        cache_logger_on_first_use=False,
     )
 
 
@@ -2970,7 +3306,9 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-runner = CliRunner()
+# IMPORTANT: mix_stderr=True ensures error messages are captured in stdout
+# Without this, errors printed with err=True won't appear in result.stdout
+runner = CliRunner(mix_stderr=True)
 
 
 class TestCLIIntegration:
@@ -2998,6 +3336,8 @@ class TestCLIIntegration:
                     "path": str(tmp_path / "output.csv"),
                 },
             },
+            # Use temp-path DB to avoid polluting CWD during tests
+            "landscape": {"url": f"sqlite:///{tmp_path / 'landscape.db'}"},
         }
         config_file = tmp_path / "settings.yaml"
         config_file.write_text(yaml.dump(config))

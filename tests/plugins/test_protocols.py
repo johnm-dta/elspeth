@@ -65,6 +65,7 @@ class TestTransformProtocol:
 
     def test_transform_implementation(self) -> None:
         from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.protocols import TransformProtocol
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -80,6 +81,8 @@ class TestTransformProtocol:
             name = "double"
             input_schema = InputSchema
             output_schema = OutputSchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
 
             def __init__(self, config: dict) -> None:
                 self.config = config
@@ -116,6 +119,7 @@ class TestGateProtocol:
 
     def test_gate_implementation(self) -> None:
         from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.protocols import GateProtocol
         from elspeth.plugins.results import GateResult, RoutingAction
         from elspeth.plugins.schemas import PluginSchema
@@ -127,6 +131,8 @@ class TestGateProtocol:
             name = "threshold"
             input_schema = RowSchema
             output_schema = RowSchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
 
             def __init__(self, config: dict) -> None:
                 self.threshold = config["threshold"]
@@ -173,6 +179,7 @@ class TestAggregationProtocol:
 
     def test_aggregation_implementation(self) -> None:
         from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.protocols import AggregationProtocol
         from elspeth.plugins.results import AcceptResult
         from elspeth.plugins.schemas import PluginSchema
@@ -188,6 +195,8 @@ class TestAggregationProtocol:
             name = "sum"
             input_schema = InputSchema
             output_schema = OutputSchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
 
             def __init__(self, config: dict) -> None:
                 self.batch_size = config["batch_size"]
@@ -259,6 +268,7 @@ class TestCoalesceProtocol:
         from typing import ClassVar
 
         from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.protocols import CoalescePolicy, CoalesceProtocol
         from elspeth.plugins.schemas import PluginSchema
 
@@ -271,6 +281,8 @@ class TestCoalesceProtocol:
             quorum_threshold = 2  # At least 2 branches must arrive
             expected_branches: ClassVar[list[str]] = ["branch_a", "branch_b", "branch_c"]
             output_schema = OutputSchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
 
             def __init__(self, config: dict) -> None:
                 pass
@@ -300,6 +312,7 @@ class TestCoalesceProtocol:
         from typing import ClassVar
 
         from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.protocols import CoalescePolicy, CoalesceProtocol
         from elspeth.plugins.schemas import PluginSchema
 
@@ -312,6 +325,8 @@ class TestCoalesceProtocol:
             quorum_threshold = None
             expected_branches: ClassVar[list[str]] = ["branch_a", "branch_b"]
             output_schema = OutputSchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
 
             def __init__(self, config: dict) -> None:
                 pass
@@ -349,6 +364,7 @@ class TestSinkProtocol:
         from typing import ClassVar
 
         from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.protocols import SinkProtocol
         from elspeth.plugins.schemas import PluginSchema
 
@@ -361,6 +377,8 @@ class TestSinkProtocol:
             name = "memory"
             input_schema = InputSchema
             idempotent = True
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
             rows: ClassVar[list[dict]] = []
 
             def __init__(self, config: dict) -> None:
@@ -404,3 +422,50 @@ class TestSinkProtocol:
 
         # Protocol should have idempotent attribute
         assert hasattr(SinkProtocol, "__protocol_attrs__")
+
+
+class TestProtocolMetadata:
+    """Test that protocols include metadata attributes."""
+
+    def test_transform_has_determinism_attribute(self) -> None:
+        from elspeth.plugins.protocols import TransformProtocol
+
+        # Protocol attributes are tracked in __protocol_attrs__
+        assert "determinism" in TransformProtocol.__protocol_attrs__
+
+    def test_transform_has_version_attribute(self) -> None:
+        from elspeth.plugins.protocols import TransformProtocol
+
+        assert "plugin_version" in TransformProtocol.__protocol_attrs__
+
+    def test_deterministic_transform(self) -> None:
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.enums import Determinism
+        from elspeth.plugins.results import TransformResult
+
+        class MyTransform:
+            name = "my_transform"
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+
+            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+                return TransformResult.success(row)
+
+        t = MyTransform()
+        assert t.determinism == Determinism.DETERMINISTIC
+
+    def test_nondeterministic_transform(self) -> None:
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.enums import Determinism
+        from elspeth.plugins.results import TransformResult
+
+        class LLMTransform:
+            name = "llm_classifier"
+            determinism = Determinism.NONDETERMINISTIC
+            plugin_version = "0.1.0"
+
+            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+                return TransformResult.success(row)
+
+        t = LLMTransform()
+        assert t.determinism == Determinism.NONDETERMINISTIC

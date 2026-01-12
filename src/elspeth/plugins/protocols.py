@@ -17,6 +17,8 @@ from collections.abc import Iterator
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from elspeth.plugins.enums import Determinism
+
 if TYPE_CHECKING:
     from elspeth.plugins.context import PluginContext
     from elspeth.plugins.results import AcceptResult, GateResult, TransformResult
@@ -101,6 +103,10 @@ class TransformProtocol(Protocol):
     input_schema: type["PluginSchema"]
     output_schema: type["PluginSchema"]
 
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism
+    plugin_version: str
+
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
         ...
@@ -163,6 +169,10 @@ class GateProtocol(Protocol):
     name: str
     input_schema: type["PluginSchema"]
     output_schema: type["PluginSchema"]
+
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism
+    plugin_version: str
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
@@ -240,6 +250,10 @@ class AggregationProtocol(Protocol):
     name: str
     input_schema: type["PluginSchema"]
     output_schema: type["PluginSchema"]
+
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism
+    plugin_version: str
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
@@ -351,6 +365,10 @@ class CoalesceProtocol(Protocol):
     expected_branches: list[str]
     output_schema: type["PluginSchema"]
 
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism
+    plugin_version: str
+
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
         ...
@@ -413,6 +431,10 @@ class SinkProtocol(Protocol):
     name: str
     input_schema: type["PluginSchema"]
     idempotent: bool  # Can this sink handle retries safely?
+
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism
+    plugin_version: str
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""

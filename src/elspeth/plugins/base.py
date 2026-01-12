@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from elspeth.plugins.context import PluginContext
+from elspeth.plugins.enums import Determinism
 from elspeth.plugins.results import (
     AcceptResult,
     GateResult,
@@ -40,6 +41,10 @@ class BaseTransform(ABC):
     name: str
     input_schema: type[PluginSchema]
     output_schema: type[PluginSchema]
+
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism = Determinism.DETERMINISTIC
+    plugin_version: str = "0.0.0"
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
@@ -109,6 +114,10 @@ class BaseGate(ABC):
     name: str
     input_schema: type[PluginSchema]
     output_schema: type[PluginSchema]
+
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism = Determinism.DETERMINISTIC
+    plugin_version: str = "0.0.0"
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
@@ -183,6 +192,10 @@ class BaseAggregation(ABC):
     input_schema: type[PluginSchema]
     output_schema: type[PluginSchema]
 
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism = Determinism.DETERMINISTIC
+    plugin_version: str = "0.0.0"
+
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
         self.config = config
@@ -252,6 +265,10 @@ class BaseSink(ABC):
     name: str
     input_schema: type[PluginSchema]
     idempotent: bool = False
+
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism = Determinism.DETERMINISTIC
+    plugin_version: str = "0.0.0"
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""

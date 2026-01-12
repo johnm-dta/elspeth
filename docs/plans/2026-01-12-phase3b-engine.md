@@ -951,6 +951,7 @@ Each executor handles a specific plugin type:
 """
 
 import time
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from elspeth.core.canonical import stable_hash
@@ -958,7 +959,7 @@ from elspeth.core.landscape import LandscapeRecorder
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenInfo
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.results import TransformResult
+from elspeth.plugins.results import GateResult, TransformResult
 
 
 class TransformLike(Protocol):
@@ -1457,7 +1458,7 @@ class GateExecutor:
         state = self._recorder.begin_node_state(
             token_id=token.token_id,
             node_id=gate.node_id,
-            step_index=token.step_index,
+            step_index=step_in_pipeline,  # Orchestrator is authority for position
             input_data=token.row_data,
         )
 
@@ -1841,24 +1842,27 @@ class AggregationExecutor:
             result = aggregation.accept(token.row_data, ctx)
             duration_ms = (time.perf_counter() - start) * 1000
 
-            # Persist membership immediately (crash-safe)
-            ordinal = self._member_counts[aggregation._batch_id]
-            self._recorder.add_batch_member(
-                batch_id=aggregation._batch_id,
-                token_id=token.token_id,
-                ordinal=ordinal,
-            )
-            self._member_counts[aggregation._batch_id] = ordinal + 1
+            # Only record batch membership if accepted
+            # CRITICAL: accepted=False means token was evaluated but rejected
+            # by the aggregation's criteria - it should NOT be in the batch
+            if result.accepted:
+                ordinal = self._member_counts[aggregation._batch_id]
+                self._recorder.add_batch_member(
+                    batch_id=aggregation._batch_id,
+                    token_id=token.token_id,
+                    ordinal=ordinal,
+                )
+                self._member_counts[aggregation._batch_id] = ordinal + 1
+                result.batch_id = aggregation._batch_id
 
-            # Complete node state - status is "completed", terminal state
-            # (CONSUMED_IN_BATCH) is derived from batch_members table
+            # Complete node state - status reflects acceptance
+            # Terminal state (CONSUMED_IN_BATCH) is derived from batch_members table
             self._recorder.complete_node_state(
                 state_id=state.state_id,
-                status="completed",
+                status="completed" if result.accepted else "rejected",
                 duration_ms=duration_ms,
             )
 
-            result.batch_id = aggregation._batch_id
             return result
 
         except Exception as e:
@@ -1876,13 +1880,19 @@ class AggregationExecutor:
         aggregation: AggregationLike,
         ctx: PluginContext,
         trigger_reason: str,
+        step_in_pipeline: int,
     ) -> list[dict[str, Any]]:
         """Flush an aggregation with status management.
+
+        NOTE: flush() is a batch-level operation, not token-level. The audit
+        trail is maintained via batch status transitions rather than node_states.
+        The batch_events table (or batch status history) records the flush.
 
         Args:
             aggregation: Aggregation plugin
             ctx: Plugin context
             trigger_reason: Why flush was triggered
+            step_in_pipeline: Current position for output tokens
 
         Returns:
             List of output rows
@@ -1891,19 +1901,28 @@ class AggregationExecutor:
         if batch_id is None:
             return []
 
-        # Transition to executing
+        # Transition to executing - this IS the audit record for flush start
         self._recorder.update_batch_status(
             batch_id,
             "executing",
             trigger_reason=trigger_reason,
         )
 
+        start = time.perf_counter()
         with self._spans.aggregation_span(aggregation.name, batch_id=batch_id):
             try:
                 outputs = aggregation.flush(ctx)
+                duration_ms = (time.perf_counter() - start) * 1000
 
-                # Transition to completed
-                self._recorder.update_batch_status(batch_id, "completed")
+                # Transition to completed with timing - this IS the audit record
+                # for flush completion. Batch status transitions serve as the
+                # "node_state equivalent" for batch-level operations.
+                self._recorder.update_batch_status(
+                    batch_id,
+                    "completed",
+                    duration_ms=duration_ms,
+                    output_count=len(outputs),
+                )
 
                 # Reset for next batch
                 aggregation._batch_id = None
@@ -1913,9 +1932,12 @@ class AggregationExecutor:
                 return outputs
 
             except Exception as e:
+                duration_ms = (time.perf_counter() - start) * 1000
                 self._recorder.update_batch_status(
                     batch_id,
                     "failed",
+                    duration_ms=duration_ms,
+                    error=str(e),
                 )
                 raise
 ```
@@ -2411,7 +2433,7 @@ class RetryManager:
                     jitter=self._config.jitter,
                 ),
                 retry=retry_if_exception(is_retryable),
-                reraise=True,
+                reraise=False,  # Must be False so RetryError is raised, not original
             ):
                 with attempt_state:
                     attempt = attempt_state.retry_state.attempt_number
@@ -2815,7 +2837,9 @@ class TestOrchestrator:
 
         class CollectSink:
             name = "collect"
-            results: list = []
+
+            def __init__(self):
+                self.results = []  # Instance attribute, not class attribute
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -2878,7 +2902,9 @@ class TestOrchestrator:
 
         class CollectSink:
             name = "collect"
-            results: list = []
+
+            def __init__(self):
+                self.results = []  # Instance attribute, not class attribute
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -3041,12 +3067,14 @@ class Orchestrator:
             sequence=0,
         )
 
-        # Register transform nodes
+        # Register transform nodes and track gates for sink edge registration
         edge_map: dict[tuple[str, str], str] = {}
         prev_node_id = source_node.node_id
+        gate_node_ids: list[str] = []  # Track gates that may route to sinks
 
         for i, transform in enumerate(config.transforms):
-            node_type = "gate" if hasattr(transform, "evaluate") else "transform"
+            is_gate = hasattr(transform, "evaluate")
+            node_type = "gate" if is_gate else "transform"
             node = recorder.register_node(
                 run_id=run_id,
                 plugin_name=transform.name,
@@ -3056,6 +3084,10 @@ class Orchestrator:
                 sequence=i + 1,
             )
             transform.node_id = node.node_id
+
+            # Track gates - they may route to any sink
+            if is_gate:
+                gate_node_ids.append(node.node_id)
 
             # Register continue edge
             edge = recorder.register_edge(
@@ -3081,7 +3113,7 @@ class Orchestrator:
             sink.node_id = node.node_id
             sink_nodes[sink_name] = node
 
-            # Register edge from last transform to sink
+            # Register edge from last transform to sink (for continue path)
             edge = recorder.register_edge(
                 run_id=run_id,
                 from_node_id=prev_node_id,
@@ -3090,6 +3122,19 @@ class Orchestrator:
                 mode="move",
             )
             edge_map[(prev_node_id, sink_name)] = edge.edge_id
+
+            # CRITICAL: Register edges from ALL gates to this sink
+            # Gates at any position may route_to_sink, not just the last node
+            for gate_node_id in gate_node_ids:
+                if gate_node_id != prev_node_id:  # Don't duplicate
+                    gate_edge = recorder.register_edge(
+                        run_id=run_id,
+                        from_node_id=gate_node_id,
+                        to_node_id=node.node_id,
+                        label=sink_name,
+                        mode="move",
+                    )
+                    edge_map[(gate_node_id, sink_name)] = gate_edge.edge_id
 
         # Create context
         ctx = PluginContext(
@@ -3442,7 +3487,10 @@ class TestEngineIntegration:
 
         class Collector:
             name = "collector"
-            items = []
+
+            def __init__(self):
+                self.items = []  # Instance attribute, not class attribute
+
             def write(self, rows, ctx):
                 self.items.extend(rows)
                 return {"path": "mem://", "size_bytes": 0, "content_hash": "x"}

@@ -1,15 +1,16 @@
-# Phase 4B: Built-in Transforms, Gates, and TUI Enhancements (Tasks 1-10)
+# Phase 4B: Built-in Transforms, Gates, TUI, and Export (Tasks 1-11)
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add built-in transforms and gates so pipelines can do more than source → sink, and enhance the TUI explain command with proper lineage visualization.
+**Goal:** Add built-in transforms and gates so pipelines can do more than source → sink, enhance the TUI explain command with proper lineage visualization, and provide audit trail export for compliance and analysis.
 
 **Rationale:** Phase 4 delivers working CLI and I/O plugins, but sets `transforms=[]` - pipelines can only copy data from source to sink. This phase adds the missing pieces:
 - **Transforms:** PassThrough (testing/debugging), FieldMapper (rename/select fields), Filter (row filtering)
 - **Gates:** ThresholdGate (numeric routing), FieldMatchGate (pattern-based routing)
 - **TUI:** Tree widget for lineage visualization, detail panels for inspecting node states
+- **Export:** CLI command and config option to export Landscape audit trail to CSV for compliance, archival, and external analysis
 
-**Tech Stack:** Python 3.11+, Textual (TUI widgets), re (regex for field matching)
+**Tech Stack:** Python 3.11+, Textual (TUI widgets), re (regex for field matching), pandas (CSV export)
 
 **Dependencies:**
 - Phase 2: `elspeth.plugins` (protocols, base, context, results, schemas)
@@ -2914,6 +2915,857 @@ git commit -m "docs(phase4): update Not Yet Complete section with Phase 4B cover
 
 ---
 
+## Task 11: Landscape Export Command
+
+**Context:** Add a CLI command and configuration option to export the Landscape audit trail to CSV format. Essential for compliance, external analysis, archival, and integration with data warehouses or auditing tools.
+
+**Files:**
+- Create: `src/elspeth/core/landscape/export.py`
+- Modify: `src/elspeth/cli.py`
+- Create: `tests/core/landscape/test_export_csv.py`
+- Create: `tests/cli/test_export_command.py`
+
+### Step 1: Write the failing test for export module
+
+```python
+# tests/core/landscape/test_export_csv.py
+"""Tests for Landscape CSV export functionality."""
+
+from pathlib import Path
+
+import pytest
+
+from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+
+
+class TestLandscapeExport:
+    """Tests for exporting Landscape data to CSV."""
+
+    @pytest.fixture
+    def db_with_data(self) -> LandscapeDB:
+        """Create a LandscapeDB with sample run data."""
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Create a run with nodes, rows, tokens, and states
+        run = recorder.begin_run(config={"test": True}, canonical_version="v1")
+
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={"path": "/data/input.csv"},
+        )
+
+        transform = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="filter",
+            node_type="transform",
+            plugin_version="1.0",
+            config={"field": "score", "greater_than": 50},
+        )
+
+        sink = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={"path": "/data/output.csv"},
+        )
+
+        # Create edges
+        recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=source.node_id,
+            to_node_id=transform.node_id,
+            label="default",
+            mode="move",
+        )
+        recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=transform.node_id,
+            to_node_id=sink.node_id,
+            label="default",
+            mode="move",
+        )
+
+        # Create rows and tokens
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={"id": 1, "name": "alice", "score": 75},
+        )
+
+        token = recorder.create_token(row_id=row.row_id)
+
+        # Record node states (two-phase: begin then complete)
+        row_data = {"id": 1, "name": "alice", "score": 75}
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=source.node_id,
+            step_index=0,
+            input_data=row_data,
+        )
+        recorder.complete_node_state(
+            state_id=state.state_id,
+            status="completed",
+            output_data=row_data,
+        )
+
+        recorder.complete_run(run.run_id, status="completed")
+
+        return db
+
+    def test_can_import_exporter(self) -> None:
+        """LandscapeExporter can be imported."""
+        from elspeth.core.landscape.export import LandscapeExporter
+
+        assert LandscapeExporter is not None
+
+    def test_export_runs_table(self, db_with_data: LandscapeDB, tmp_path: Path) -> None:
+        """Export runs table to CSV."""
+        from elspeth.core.landscape.export import LandscapeExporter
+
+        exporter = LandscapeExporter(db_with_data)
+        output_file = tmp_path / "runs.csv"
+
+        exporter.export_table("runs", output_file)
+
+        assert output_file.exists()
+        content = output_file.read_text()
+        assert "run_id" in content
+        assert "completed" in content
+
+    def test_export_nodes_table(self, db_with_data: LandscapeDB, tmp_path: Path) -> None:
+        """Export nodes table to CSV."""
+        from elspeth.core.landscape.export import LandscapeExporter
+
+        exporter = LandscapeExporter(db_with_data)
+        output_file = tmp_path / "nodes.csv"
+
+        exporter.export_table("nodes", output_file)
+
+        assert output_file.exists()
+        content = output_file.read_text()
+        assert "node_id" in content
+        assert "csv_source" in content
+        assert "filter" in content
+        assert "csv_sink" in content
+
+    def test_export_node_states_table(self, db_with_data: LandscapeDB, tmp_path: Path) -> None:
+        """Export node_states table to CSV."""
+        from elspeth.core.landscape.export import LandscapeExporter
+
+        exporter = LandscapeExporter(db_with_data)
+        output_file = tmp_path / "node_states.csv"
+
+        exporter.export_table("node_states", output_file)
+
+        assert output_file.exists()
+        content = output_file.read_text()
+        assert "state_id" in content
+        assert "input_hash" in content
+
+    def test_export_all_tables(self, db_with_data: LandscapeDB, tmp_path: Path) -> None:
+        """Export all tables to a directory."""
+        from elspeth.core.landscape.export import LandscapeExporter
+
+        exporter = LandscapeExporter(db_with_data)
+        output_dir = tmp_path / "export"
+
+        exporter.export_all(output_dir)
+
+        # Check all expected files exist (all 13 Landscape tables)
+        assert (output_dir / "runs.csv").exists()
+        assert (output_dir / "nodes.csv").exists()
+        assert (output_dir / "edges.csv").exists()
+        assert (output_dir / "rows.csv").exists()
+        assert (output_dir / "tokens.csv").exists()
+        assert (output_dir / "token_parents.csv").exists()
+        assert (output_dir / "node_states.csv").exists()
+        assert (output_dir / "calls.csv").exists()
+        assert (output_dir / "artifacts.csv").exists()
+        assert (output_dir / "routing_events.csv").exists()
+        assert (output_dir / "batches.csv").exists()
+        assert (output_dir / "batch_members.csv").exists()
+        assert (output_dir / "batch_outputs.csv").exists()
+
+    def test_export_single_run(self, db_with_data: LandscapeDB, tmp_path: Path) -> None:
+        """Export only data for a specific run."""
+        from elspeth.core.landscape.export import LandscapeExporter
+
+        exporter = LandscapeExporter(db_with_data)
+
+        # Get the run_id from the database
+        with db_with_data.engine.connect() as conn:
+            from elspeth.core.landscape.schema import runs_table
+            result = conn.execute(runs_table.select()).fetchone()
+            run_id = result.run_id
+
+        output_dir = tmp_path / "single_run"
+        exporter.export_all(output_dir, run_id=run_id)
+
+        assert (output_dir / "runs.csv").exists()
+        # Verify the run_id is in the exported data
+        runs_content = (output_dir / "runs.csv").read_text()
+        assert run_id in runs_content
+
+    def test_export_empty_table(self, tmp_path: Path) -> None:
+        """Export empty table produces header-only CSV."""
+        from elspeth.core.landscape.export import LandscapeExporter
+
+        db = LandscapeDB.in_memory()
+        exporter = LandscapeExporter(db)
+        output_file = tmp_path / "empty_runs.csv"
+
+        exporter.export_table("runs", output_file)
+
+        assert output_file.exists()
+        content = output_file.read_text()
+        # Should have header row
+        assert "run_id" in content
+        # Should only be one line (header)
+        lines = [l for l in content.strip().split("\n") if l]
+        assert len(lines) == 1
+
+    def test_export_with_run_filter_excludes_other_runs(
+        self, db_with_data: LandscapeDB, tmp_path: Path
+    ) -> None:
+        """Run filter excludes data from other runs."""
+        from elspeth.core.landscape.export import LandscapeExporter
+
+        # Create a second run
+        recorder = LandscapeRecorder(db_with_data)
+        run2 = recorder.begin_run(config={"test": 2}, canonical_version="v1")
+        recorder.register_node(
+            run_id=run2.run_id,
+            plugin_name="other_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+        recorder.complete_run(run2.run_id, status="completed")
+
+        # Export only the first run
+        exporter = LandscapeExporter(db_with_data)
+
+        with db_with_data.engine.connect() as conn:
+            from elspeth.core.landscape.schema import runs_table
+            result = conn.execute(runs_table.select()).fetchall()
+            first_run_id = result[0].run_id
+
+        output_dir = tmp_path / "filtered"
+        exporter.export_all(output_dir, run_id=first_run_id)
+
+        # Nodes should only include first run's nodes
+        nodes_content = (output_dir / "nodes.csv").read_text()
+        assert "csv_source" in nodes_content
+        assert "other_source" not in nodes_content
+
+    def test_invalid_table_name_raises(self, db_with_data: LandscapeDB, tmp_path: Path) -> None:
+        """Invalid table name raises ValueError."""
+        from elspeth.core.landscape.export import LandscapeExporter
+
+        exporter = LandscapeExporter(db_with_data)
+
+        with pytest.raises(ValueError, match="Unknown table"):
+            exporter.export_table("nonexistent_table", tmp_path / "out.csv")
+```
+
+### Step 2: Run test to verify it fails
+
+Run: `pytest tests/core/landscape/test_export_csv.py -v`
+Expected: FAIL with `ModuleNotFoundError`
+
+### Step 3: Write the export module
+
+```python
+# src/elspeth/core/landscape/export.py
+"""Landscape audit trail export functionality.
+
+Exports Landscape tables to CSV format for compliance, archival,
+and external analysis.
+"""
+
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+from sqlalchemy import select
+
+from elspeth.core.landscape.db import LandscapeDB
+from elspeth.core.landscape.schema import (
+    artifacts_table,
+    batch_members_table,
+    batch_outputs_table,
+    batches_table,
+    calls_table,
+    edges_table,
+    node_states_table,
+    nodes_table,
+    routing_events_table,
+    rows_table,
+    runs_table,
+    token_parents_table,
+    tokens_table,
+)
+
+
+class LandscapeExporter:
+    """Export Landscape audit trail to CSV format.
+
+    Supports exporting individual tables or all tables at once.
+    Can filter by run_id to export only a specific run's data.
+
+    Example:
+        exporter = LandscapeExporter(db)
+
+        # Export single table
+        exporter.export_table("runs", Path("runs.csv"))
+
+        # Export all tables to directory
+        exporter.export_all(Path("./export/"))
+
+        # Export specific run only
+        exporter.export_all(Path("./export/"), run_id="run-abc123")
+    """
+
+    # Mapping of table names to SQLAlchemy table objects
+    TABLES = {
+        "runs": runs_table,
+        "nodes": nodes_table,
+        "edges": edges_table,
+        "rows": rows_table,
+        "tokens": tokens_table,
+        "token_parents": token_parents_table,
+        "node_states": node_states_table,
+        "calls": calls_table,
+        "artifacts": artifacts_table,
+        "routing_events": routing_events_table,
+        "batches": batches_table,
+        "batch_members": batch_members_table,
+        "batch_outputs": batch_outputs_table,
+    }
+
+    # Tables that have direct run_id column for filtering
+    TABLES_WITH_RUN_ID = {
+        "runs", "nodes", "edges", "rows", "artifacts", "batches"
+    }
+
+    # Tables that need join through other tables to filter by run
+    # token -> row -> run
+    # node_states -> token -> row -> run (or node_states -> node -> run)
+    # etc.
+
+    def __init__(self, db: LandscapeDB) -> None:
+        """Initialize exporter with database connection.
+
+        Args:
+            db: LandscapeDB instance
+        """
+        self._db = db
+
+    def export_table(
+        self,
+        table_name: str,
+        output_path: Path,
+        run_id: str | None = None,
+    ) -> int:
+        """Export a single table to CSV.
+
+        Args:
+            table_name: Name of the table to export
+            output_path: Path to write CSV file
+            run_id: Optional run_id to filter by
+
+        Returns:
+            Number of rows exported
+
+        Raises:
+            ValueError: If table_name is not valid
+        """
+        if table_name not in self.TABLES:
+            raise ValueError(
+                f"Unknown table: {table_name}. "
+                f"Valid tables: {sorted(self.TABLES.keys())}"
+            )
+
+        table = self.TABLES[table_name]
+
+        # Build query with optional run_id filter
+        query = select(table)
+
+        if run_id is not None:
+            query = self._apply_run_filter(query, table_name, run_id)
+
+        # Execute query and load into DataFrame
+        with self._db.engine.connect() as conn:
+            df = pd.read_sql(query, conn)
+
+        # Ensure output directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write to CSV
+        df.to_csv(output_path, index=False)
+
+        return len(df)
+
+    def export_all(
+        self,
+        output_dir: Path,
+        run_id: str | None = None,
+        tables: list[str] | None = None,
+    ) -> dict[str, int]:
+        """Export all tables (or specified subset) to a directory.
+
+        Args:
+            output_dir: Directory to write CSV files
+            run_id: Optional run_id to filter by
+            tables: Optional list of table names to export (default: all)
+
+        Returns:
+            Dict mapping table name to rows exported
+        """
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        tables_to_export = tables or list(self.TABLES.keys())
+        results: dict[str, int] = {}
+
+        for table_name in tables_to_export:
+            if table_name not in self.TABLES:
+                continue
+
+            output_path = output_dir / f"{table_name}.csv"
+            count = self.export_table(table_name, output_path, run_id=run_id)
+            results[table_name] = count
+
+        return results
+
+    def _apply_run_filter(
+        self,
+        query: Any,
+        table_name: str,
+        run_id: str,
+    ) -> Any:
+        """Apply run_id filter to query.
+
+        Args:
+            query: SQLAlchemy select query
+            table_name: Name of the table being queried
+            run_id: Run ID to filter by
+
+        Returns:
+            Query with filter applied
+        """
+        table = self.TABLES[table_name]
+
+        # Direct run_id column
+        if table_name in self.TABLES_WITH_RUN_ID:
+            return query.where(table.c.run_id == run_id)
+
+        # tokens -> rows -> run_id
+        if table_name == "tokens":
+            # Join tokens to rows to filter by run_id
+            return query.where(
+                table.c.row_id.in_(
+                    select(rows_table.c.row_id).where(rows_table.c.run_id == run_id)
+                )
+            )
+
+        # token_parents -> tokens -> rows -> run_id
+        if table_name == "token_parents":
+            token_ids = select(tokens_table.c.token_id).where(
+                tokens_table.c.row_id.in_(
+                    select(rows_table.c.row_id).where(rows_table.c.run_id == run_id)
+                )
+            )
+            return query.where(table.c.token_id.in_(token_ids))
+
+        # node_states -> nodes -> run_id
+        if table_name == "node_states":
+            return query.where(
+                table.c.node_id.in_(
+                    select(nodes_table.c.node_id).where(nodes_table.c.run_id == run_id)
+                )
+            )
+
+        # calls -> node_states -> nodes -> run_id
+        if table_name == "calls":
+            state_ids = select(node_states_table.c.state_id).where(
+                node_states_table.c.node_id.in_(
+                    select(nodes_table.c.node_id).where(nodes_table.c.run_id == run_id)
+                )
+            )
+            return query.where(table.c.state_id.in_(state_ids))
+
+        # routing_events -> node_states -> nodes -> run_id
+        if table_name == "routing_events":
+            state_ids = select(node_states_table.c.state_id).where(
+                node_states_table.c.node_id.in_(
+                    select(nodes_table.c.node_id).where(nodes_table.c.run_id == run_id)
+                )
+            )
+            return query.where(table.c.state_id.in_(state_ids))
+
+        # batch_members -> batches -> run_id
+        if table_name == "batch_members":
+            return query.where(
+                table.c.batch_id.in_(
+                    select(batches_table.c.batch_id).where(batches_table.c.run_id == run_id)
+                )
+            )
+
+        # batch_outputs -> batches -> run_id
+        if table_name == "batch_outputs":
+            return query.where(
+                table.c.batch_id.in_(
+                    select(batches_table.c.batch_id).where(batches_table.c.run_id == run_id)
+                )
+            )
+
+        # Should never reach here - all tables are handled above
+        # Fail fast rather than silently returning unfiltered data
+        raise ValueError(f"No run filter defined for table: {table_name}")
+
+    def get_table_names(self) -> list[str]:
+        """Get list of exportable table names.
+
+        Returns:
+            Sorted list of table names
+        """
+        return sorted(self.TABLES.keys())
+```
+
+### Step 4: Run test to verify it passes
+
+Run: `pytest tests/core/landscape/test_export_csv.py -v`
+Expected: PASS (9 tests)
+
+### Step 5: Write CLI command test
+
+```python
+# tests/cli/test_export_command.py
+"""Tests for export CLI command."""
+
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+
+runner = CliRunner(mix_stderr=True)
+
+
+class TestExportCommand:
+    """Tests for elspeth export command."""
+
+    @pytest.fixture
+    def db_path(self, tmp_path: Path) -> Path:
+        """Create a database with test data."""
+        db_file = tmp_path / "test.db"
+        db = LandscapeDB.from_url(f"sqlite:///{db_file}")
+
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={"test": True}, canonical_version="v1")
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+        recorder.complete_run(run.run_id, status="completed")
+
+        return db_file
+
+    def test_export_command_exists(self) -> None:
+        """Export command is registered."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, ["--help"])
+        assert "export" in result.stdout
+
+    def test_export_all_tables(self, db_path: Path, tmp_path: Path) -> None:
+        """Export all tables to directory."""
+        from elspeth.cli import app
+
+        output_dir = tmp_path / "export"
+
+        result = runner.invoke(app, [
+            "export",
+            "--db", str(db_path),
+            "--output", str(output_dir),
+        ])
+
+        assert result.exit_code == 0
+        assert (output_dir / "runs.csv").exists()
+        assert (output_dir / "nodes.csv").exists()
+
+    def test_export_single_table(self, db_path: Path, tmp_path: Path) -> None:
+        """Export a single table."""
+        from elspeth.cli import app
+
+        output_file = tmp_path / "runs.csv"
+
+        result = runner.invoke(app, [
+            "export",
+            "--db", str(db_path),
+            "--output", str(output_file),
+            "--table", "runs",
+        ])
+
+        assert result.exit_code == 0
+        assert output_file.exists()
+        content = output_file.read_text()
+        assert "run_id" in content
+
+    def test_export_specific_run(self, db_path: Path, tmp_path: Path) -> None:
+        """Export data for a specific run."""
+        from elspeth.cli import app
+
+        # First get the run_id
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}")
+        with db.engine.connect() as conn:
+            from elspeth.core.landscape.schema import runs_table
+            result = conn.execute(runs_table.select()).fetchone()
+            run_id = result.run_id
+
+        output_dir = tmp_path / "run_export"
+
+        result = runner.invoke(app, [
+            "export",
+            "--db", str(db_path),
+            "--output", str(output_dir),
+            "--run", run_id,
+        ])
+
+        assert result.exit_code == 0
+        assert "Exported" in result.stdout or "exported" in result.stdout.lower()
+
+    def test_export_multiple_tables(self, db_path: Path, tmp_path: Path) -> None:
+        """Export multiple specific tables."""
+        from elspeth.cli import app
+
+        output_dir = tmp_path / "partial"
+
+        result = runner.invoke(app, [
+            "export",
+            "--db", str(db_path),
+            "--output", str(output_dir),
+            "--table", "runs",
+            "--table", "nodes",
+        ])
+
+        assert result.exit_code == 0
+        assert (output_dir / "runs.csv").exists()
+        assert (output_dir / "nodes.csv").exists()
+        # Other tables should not be exported
+        assert not (output_dir / "edges.csv").exists()
+
+    def test_export_with_format_option(self, db_path: Path, tmp_path: Path) -> None:
+        """Format option accepts csv (future: json, parquet)."""
+        from elspeth.cli import app
+
+        output_dir = tmp_path / "csv_export"
+
+        result = runner.invoke(app, [
+            "export",
+            "--db", str(db_path),
+            "--output", str(output_dir),
+            "--format", "csv",
+        ])
+
+        assert result.exit_code == 0
+
+    def test_export_invalid_table_fails(self, db_path: Path, tmp_path: Path) -> None:
+        """Invalid table name shows error."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, [
+            "export",
+            "--db", str(db_path),
+            "--output", str(tmp_path / "out.csv"),
+            "--table", "nonexistent",
+        ])
+
+        assert result.exit_code != 0
+        assert "unknown" in result.stdout.lower() or "invalid" in result.stdout.lower()
+
+    def test_export_list_tables(self, db_path: Path) -> None:
+        """List available tables for export."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, [
+            "export",
+            "--db", str(db_path),
+            "--list-tables",
+        ])
+
+        assert result.exit_code == 0
+        assert "runs" in result.stdout
+        assert "nodes" in result.stdout
+        assert "node_states" in result.stdout
+```
+
+### Step 6: Implement CLI command
+
+Add to `src/elspeth/cli.py`:
+
+```python
+@app.command()
+def export(
+    db: str = typer.Option(
+        ...,
+        "--db",
+        "-d",
+        help="Path to Landscape database file.",
+    ),
+    output: str = typer.Option(
+        ...,
+        "--output",
+        "-o",
+        help="Output path (directory for all tables, file for single table).",
+    ),
+    table: list[str] = typer.Option(
+        None,
+        "--table",
+        "-t",
+        help="Specific table(s) to export. Can be specified multiple times.",
+    ),
+    run_id: str = typer.Option(
+        None,
+        "--run",
+        "-r",
+        help="Export only data for this run ID.",
+    ),
+    format: str = typer.Option(
+        "csv",
+        "--format",
+        "-f",
+        help="Output format (currently only 'csv' supported).",
+    ),
+    list_tables: bool = typer.Option(
+        False,
+        "--list-tables",
+        help="List available tables and exit.",
+    ),
+) -> None:
+    """Export Landscape audit trail to CSV.
+
+    Examples:
+
+        # Export all tables to a directory
+        elspeth export --db runs.db --output ./export/
+
+        # Export specific table
+        elspeth export --db runs.db --output runs.csv --table runs
+
+        # Export specific run only
+        elspeth export --db runs.db --output ./export/ --run run-abc123
+
+        # List available tables
+        elspeth export --db runs.db --list-tables
+    """
+    from pathlib import Path
+
+    from elspeth.core.landscape import LandscapeDB
+    from elspeth.core.landscape.export import LandscapeExporter
+
+    # Validate format
+    if format != "csv":
+        typer.echo(f"Unsupported format: {format}. Currently only 'csv' is supported.", err=True)
+        raise typer.Exit(1)
+
+    # Connect to database
+    db_path = Path(db)
+    if not db_path.exists():
+        typer.echo(f"Database not found: {db}", err=True)
+        raise typer.Exit(1)
+
+    landscape_db = LandscapeDB.from_url(f"sqlite:///{db_path}")
+    exporter = LandscapeExporter(landscape_db)
+
+    # List tables mode
+    if list_tables:
+        typer.echo("Available tables for export:")
+        for table_name in exporter.get_table_names():
+            typer.echo(f"  - {table_name}")
+        raise typer.Exit(0)
+
+    output_path = Path(output)
+
+    # Single table export
+    if table and len(table) == 1:
+        table_name = table[0]
+        if table_name not in exporter.get_table_names():
+            typer.echo(f"Unknown table: {table_name}", err=True)
+            typer.echo(f"Valid tables: {', '.join(exporter.get_table_names())}", err=True)
+            raise typer.Exit(1)
+
+        try:
+            count = exporter.export_table(table_name, output_path, run_id=run_id)
+            typer.echo(f"Exported {count} rows from '{table_name}' to {output_path}")
+        except Exception as e:
+            typer.echo(f"Export failed: {e}", err=True)
+            raise typer.Exit(1)
+        return
+
+    # Multi-table or all-table export
+    tables_to_export = table if table else None
+
+    # Validate table names if specified
+    if tables_to_export:
+        valid_tables = set(exporter.get_table_names())
+        invalid = set(tables_to_export) - valid_tables
+        if invalid:
+            typer.echo(f"Unknown table(s): {', '.join(invalid)}", err=True)
+            typer.echo(f"Valid tables: {', '.join(sorted(valid_tables))}", err=True)
+            raise typer.Exit(1)
+
+    try:
+        results = exporter.export_all(output_path, run_id=run_id, tables=tables_to_export)
+
+        total_rows = sum(results.values())
+        typer.echo(f"Exported {total_rows} total rows to {output_path}/")
+        for table_name, count in sorted(results.items()):
+            typer.echo(f"  {table_name}: {count} rows")
+
+    except Exception as e:
+        typer.echo(f"Export failed: {e}", err=True)
+        raise typer.Exit(1)
+```
+
+### Step 7: Update landscape module exports
+
+Add to `src/elspeth/core/landscape/__init__.py`:
+
+```python
+from elspeth.core.landscape.export import LandscapeExporter
+
+# Add to __all__
+__all__ = [
+    # ... existing exports ...
+    "LandscapeExporter",
+]
+```
+
+### Step 8: Run tests to verify they pass
+
+Run: `pytest tests/core/landscape/test_export_csv.py tests/cli/test_export_command.py -v`
+Expected: PASS (17 tests)
+
+### Step 9: Commit
+
+```bash
+git add src/elspeth/core/landscape/export.py src/elspeth/cli.py tests/
+git commit -m "feat(landscape): add CSV export command for audit trail"
+```
+
+---
+
 ## Deliverables Summary
 
 After Phase 4B:
@@ -2930,8 +3782,10 @@ After Phase 4B:
 | NodeDetailPanel widget | Done (Task 8) |
 | ExplainScreen integration | Done (Task 9) |
 | Documentation update | Done (Task 10) |
+| Landscape CSV export | Done (Task 11) |
 
 **Phase 4B closes the gaps** that Phase 4 left open:
 - Pipelines can now filter, transform, and route data through gates
 - The explain TUI properly visualizes lineage with tree navigation
 - The misleading "simple loop" documentation is corrected
+- Audit trail can be exported to CSV for compliance, archival, and external analysis

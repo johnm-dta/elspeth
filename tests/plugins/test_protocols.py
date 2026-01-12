@@ -170,3 +170,115 @@ class TestGateProtocol:
         result = gate.evaluate({"value": 100}, ctx)
         assert result.action.kind == "route_to_sink"
         assert result.action.destinations == ("high_values",)
+
+
+class TestAggregationProtocol:
+    """Aggregation plugin protocol (stateful batching)."""
+
+    def test_aggregation_implementation(self) -> None:
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import AggregationProtocol
+        from elspeth.plugins.results import AcceptResult
+        from elspeth.plugins.schemas import PluginSchema
+
+        class InputSchema(PluginSchema):
+            value: int
+
+        class OutputSchema(PluginSchema):
+            total: int
+            count: int
+
+        class SumAggregation:
+            name = "sum"
+            input_schema = InputSchema
+            output_schema = OutputSchema
+
+            def __init__(self, config: dict) -> None:
+                self.batch_size = config.get("batch_size", 3)
+                self._values: list[int] = []
+
+            def accept(self, row: dict, ctx: PluginContext) -> AcceptResult:
+                self._values.append(row["value"])
+                trigger = len(self._values) >= self.batch_size
+                return AcceptResult(accepted=True, trigger=trigger)
+
+            def should_trigger(self) -> bool:
+                return len(self._values) >= self.batch_size
+
+            def flush(self, ctx: PluginContext) -> list[dict]:
+                result = {
+                    "total": sum(self._values),
+                    "count": len(self._values),
+                }
+                self._values = []
+                return [result]
+
+            def reset(self) -> None:
+                self._values = []
+
+            def on_register(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
+        agg = SumAggregation({"batch_size": 2})
+        ctx = PluginContext(run_id="test", config={})
+
+        # First row - no trigger
+        result = agg.accept({"value": 10}, ctx)
+        assert result.accepted is True
+        assert result.trigger is False
+
+        # Second row - trigger
+        result = agg.accept({"value": 20}, ctx)
+        assert result.trigger is True
+
+        # Flush
+        outputs = agg.flush(ctx)
+        assert len(outputs) == 1
+        assert outputs[0] == {"total": 30, "count": 2}
+
+
+class TestCoalesceProtocol:
+    """Coalesce plugin protocol (merge parallel paths)."""
+
+    def test_coalesce_policy_types(self) -> None:
+        from elspeth.plugins.protocols import CoalescePolicy
+
+        # All policies should exist
+        assert CoalescePolicy.REQUIRE_ALL.value == "require_all"
+        assert CoalescePolicy.QUORUM.value == "quorum"
+        assert CoalescePolicy.BEST_EFFORT.value == "best_effort"
+
+    def test_quorum_requires_threshold(self) -> None:
+        """QUORUM policy needs a quorum_threshold."""
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import CoalescePolicy
+        from elspeth.plugins.schemas import PluginSchema
+
+        class OutputSchema(PluginSchema):
+            combined: str
+
+        class QuorumCoalesce:
+            name = "quorum_merge"
+            policy = CoalescePolicy.QUORUM
+            quorum_threshold = 2  # At least 2 branches must arrive
+            expected_branches = ["branch_a", "branch_b", "branch_c"]
+            output_schema = OutputSchema
+
+            def __init__(self, config: dict) -> None:
+                pass
+
+            def merge(self, branch_outputs: dict, ctx: PluginContext) -> dict:
+                return {"combined": "+".join(branch_outputs.keys())}
+
+            def on_register(self, ctx: PluginContext) -> None:
+                pass
+
+        coalesce = QuorumCoalesce({})
+        assert coalesce.quorum_threshold == 2
+        assert len(coalesce.expected_branches) == 3

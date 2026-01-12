@@ -13,6 +13,7 @@ Plugin Types:
 - Sink: Outputs data (one or more per run)
 """
 
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Iterator, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -194,4 +195,183 @@ class GateProtocol(Protocol):
 
     def on_complete(self, ctx: "PluginContext") -> None:
         """Called at end of run."""
+        ...
+
+
+class CoalescePolicy(Enum):
+    """How coalesce handles partial arrivals."""
+
+    REQUIRE_ALL = "require_all"   # Wait for all branches; any failure fails
+    QUORUM = "quorum"             # Merge if >= n branches succeed
+    BEST_EFFORT = "best_effort"   # Merge whatever arrives by timeout
+
+
+@runtime_checkable
+class AggregationProtocol(Protocol):
+    """Protocol for aggregation transforms (stateful batching).
+
+    Aggregations accumulate rows until a trigger condition, then flush.
+
+    Phase 3 Integration:
+    - Engine creates Landscape batch on first accept()
+    - Engine persists batch membership on every accept()
+    - Engine transitions batch status on flush()
+
+    Example:
+        class StatsAggregation:
+            name = "stats"
+            input_schema = InputSchema
+            output_schema = StatsSchema
+
+            def accept(self, row, ctx) -> AcceptResult:
+                self._values.append(row["value"])
+                return AcceptResult(
+                    accepted=True,
+                    trigger=len(self._values) >= self.batch_size,
+                )
+
+            def flush(self, ctx) -> list[dict]:
+                result = {"mean": statistics.mean(self._values)}
+                self._values = []
+                return [result]
+    """
+
+    name: str
+    input_schema: type["PluginSchema"]
+    output_schema: type["PluginSchema"]
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        """Initialize with configuration."""
+        ...
+
+    def accept(
+        self,
+        row: dict[str, Any],
+        ctx: "PluginContext",
+    ) -> "AcceptResult":
+        """Accept a row into the batch.
+
+        Called for each row. Implementation should:
+        1. Store the row in internal buffer
+        2. Return trigger=True when batch should flush
+
+        Note: In Phase 3, the engine wraps this to manage Landscape batches.
+
+        Args:
+            row: Input row
+            ctx: Plugin context
+
+        Returns:
+            AcceptResult indicating acceptance and trigger state
+        """
+        ...
+
+    def should_trigger(self) -> bool:
+        """Check if batch should flush now.
+
+        Called by engine to check trigger condition outside of accept().
+        """
+        ...
+
+    def flush(self, ctx: "PluginContext") -> list[dict[str, Any]]:
+        """Process accumulated rows and return results.
+
+        Called when trigger condition is met or at end of source.
+        Should reset internal state after processing.
+
+        Note: In Phase 3, the engine wraps this to:
+        1. Transition batch to "executing"
+        2. Record results
+        3. Transition batch to "completed" or "failed"
+
+        Args:
+            ctx: Plugin context
+
+        Returns:
+            List of output rows (usually one aggregate result)
+        """
+        ...
+
+    def reset(self) -> None:
+        """Reset internal state.
+
+        Called by engine on error recovery.
+        """
+        ...
+
+    # === Optional Lifecycle Hooks ===
+
+    def on_register(self, ctx: "PluginContext") -> None:
+        """Called when plugin is registered."""
+        ...
+
+    def on_start(self, ctx: "PluginContext") -> None:
+        """Called at start of run."""
+        ...
+
+    def on_complete(self, ctx: "PluginContext") -> None:
+        """Called at end of run."""
+        ...
+
+
+@runtime_checkable
+class CoalesceProtocol(Protocol):
+    """Protocol for coalesce transforms (merge parallel paths).
+
+    Coalesce merges results from parallel branches back into a single path.
+
+    Configuration:
+    - policy: How to handle partial arrivals
+    - quorum_threshold: Minimum branches for QUORUM policy (None otherwise)
+    - inputs: Which branches to expect
+    - key: How to correlate branch outputs (Phase 3 engine concern)
+
+    Example:
+        class SimpleCoalesce:
+            name = "merge"
+            policy = CoalescePolicy.REQUIRE_ALL
+            quorum_threshold = None  # Only used for QUORUM policy
+
+            def merge(self, branch_outputs, ctx) -> dict:
+                merged = {}
+                for branch_name, output in branch_outputs.items():
+                    merged.update(output)
+                return merged
+
+        class QuorumCoalesce:
+            name = "quorum_merge"
+            policy = CoalescePolicy.QUORUM
+            quorum_threshold = 2  # Proceed if >= 2 branches arrive
+    """
+
+    name: str
+    policy: CoalescePolicy
+    quorum_threshold: int | None  # Required if policy == QUORUM
+    expected_branches: list[str]
+    output_schema: type["PluginSchema"]
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        """Initialize with configuration."""
+        ...
+
+    def merge(
+        self,
+        branch_outputs: dict[str, dict[str, Any]],
+        ctx: "PluginContext",
+    ) -> dict[str, Any]:
+        """Merge outputs from multiple branches.
+
+        Args:
+            branch_outputs: Map of branch_name -> output_row
+            ctx: Plugin context
+
+        Returns:
+            Merged output row
+        """
+        ...
+
+    # === Optional Lifecycle Hooks ===
+
+    def on_register(self, ctx: "PluginContext") -> None:
+        """Called when plugin is registered."""
         ...

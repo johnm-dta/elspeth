@@ -867,6 +867,7 @@ class TestTransformExecutor:
             transform=transform,
             token=token,
             ctx=ctx,
+            step_in_pipeline=0,
         )
 
         assert result.status == "success"
@@ -924,6 +925,7 @@ class TestTransformExecutor:
             transform=transform,
             token=token,
             ctx=ctx,
+            step_in_pipeline=0,
         )
 
         assert result.status == "error"
@@ -1008,16 +1010,26 @@ class TransformExecutor:
         transform: TransformLike,
         token: TokenInfo,
         ctx: PluginContext,
+        step_in_pipeline: int,
     ) -> tuple[TransformResult, TokenInfo]:
         """Execute a transform with full audit recording.
+
+        This method handles a SINGLE ATTEMPT. Retry logic is the caller's
+        responsibility (e.g., RetryManager wraps this for retryable transforms).
+        Each attempt gets its own node_state record with attempt number tracked
+        by the caller.
 
         Args:
             transform: Transform plugin to execute
             token: Current token with row data
             ctx: Plugin context
+            step_in_pipeline: Current position in DAG (Orchestrator is authority)
 
         Returns:
             Tuple of (TransformResult with audit fields, updated TokenInfo)
+
+        Raises:
+            Exception: Re-raised from transform.process() after recording failure
         """
         input_hash = stable_hash(token.row_data)
 
@@ -1025,7 +1037,7 @@ class TransformExecutor:
         state = self._recorder.begin_node_state(
             token_id=token.token_id,
             node_id=transform.node_id,
-            step_index=token.step_index,
+            step_index=step_in_pipeline,
             input_data=token.row_data,
         )
 
@@ -1065,9 +1077,9 @@ class TransformExecutor:
                 token_id=token.token_id,
                 row_data=result.row,
                 branch_name=token.branch_name,
-                step_index=token.step_index + 1,
             )
         else:
+            # Transform returned error status (not exception)
             self._recorder.complete_node_state(
                 state_id=state.state_id,
                 status="failed",
@@ -1084,7 +1096,38 @@ class TransformExecutor:
 Run: `pytest tests/engine/test_executors.py::TestTransformExecutor -v`
 Expected: PASS
 
-### Step 5: Commit
+### Step 5: RetryManager Integration Note
+
+**How TransformExecutor integrates with RetryManager:**
+
+TransformExecutor handles a *single attempt*. Retry logic is external:
+
+```python
+# In RowProcessor/Orchestrator (not TransformExecutor):
+def execute_with_retry(transform, token, ctx, step, retry_manager):
+    """Execute transform with retry wrapping."""
+    attempt = 0
+
+    @retry_manager.with_retry(transform.retry_policy)
+    def _attempt():
+        nonlocal attempt
+        attempt += 1
+        # Each attempt gets its own node_state
+        return executor.execute_transform(
+            transform=transform,
+            token=token,
+            ctx=ctx,
+            step_in_pipeline=step,
+            # Note: attempt number is tracked in node_state via Landscape
+        )
+
+    return _attempt()
+```
+
+This separation keeps TransformExecutor focused on audit recording while RetryManager
+handles backoff, limits, and exception classification. See Task 17 for RetryManager.
+
+### Step 6: Commit
 
 ```bash
 git add src/elspeth/engine/executors.py tests/engine/test_executors.py
@@ -1613,7 +1656,9 @@ class TestAggregationExecutor:
         )
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
-        result = executor.accept(aggregation=agg, token=token, ctx=ctx)
+        result = executor.accept(
+            aggregation=agg, token=token, ctx=ctx, step_in_pipeline=0
+        )
 
         assert result.accepted is True
         assert result.batch_id is not None  # Batch created
@@ -1671,7 +1716,9 @@ class TestAggregationExecutor:
                 row_id=token.row_id,
             )
             recorder.create_token(row_id=row.row_id, token_id=token.token_id)
-            result = executor.accept(aggregation=agg, token=token, ctx=ctx)
+            result = executor.accept(
+                aggregation=agg, token=token, ctx=ctx, step_in_pipeline=0
+            )
 
         # Flush
         outputs = executor.flush(aggregation=agg, ctx=ctx, trigger_reason="threshold")
@@ -1754,13 +1801,18 @@ class AggregationExecutor:
         aggregation: AggregationLike,
         token: TokenInfo,
         ctx: PluginContext,
+        step_in_pipeline: int,
     ) -> AcceptResult:
         """Accept a row into an aggregation with batch tracking.
+
+        Each accept creates a node_state (open→completed) for audit trail.
+        Token's terminal state becomes CONSUMED_IN_BATCH (derived from batch_members).
 
         Args:
             aggregation: Aggregation plugin
             token: Current token
             ctx: Plugin context
+            step_in_pipeline: Current position in DAG (Orchestrator is authority)
 
         Returns:
             AcceptResult with batch_id populated
@@ -1770,24 +1822,54 @@ class AggregationExecutor:
             batch = self._recorder.create_batch(
                 run_id=self._run_id,
                 aggregation_node_id=aggregation.node_id,
+                sequence_in_pipeline=step_in_pipeline,  # Track when batch was created
             )
             aggregation._batch_id = batch.batch_id
             self._member_counts[batch.batch_id] = 0
 
-        # Persist membership immediately (crash-safe)
-        ordinal = self._member_counts[aggregation._batch_id]
-        self._recorder.add_batch_member(
-            batch_id=aggregation._batch_id,
+        # Begin node state for this accept operation
+        state = self._recorder.begin_node_state(
             token_id=token.token_id,
-            ordinal=ordinal,
+            node_id=aggregation.node_id,
+            step_index=step_in_pipeline,
+            input_data=token.row_data,
         )
-        self._member_counts[aggregation._batch_id] = ordinal + 1
 
-        # Call plugin accept
-        result = aggregation.accept(token.row_data, ctx)
-        result.batch_id = aggregation._batch_id
+        start = time.perf_counter()
+        try:
+            # Call plugin accept
+            result = aggregation.accept(token.row_data, ctx)
+            duration_ms = (time.perf_counter() - start) * 1000
 
-        return result
+            # Persist membership immediately (crash-safe)
+            ordinal = self._member_counts[aggregation._batch_id]
+            self._recorder.add_batch_member(
+                batch_id=aggregation._batch_id,
+                token_id=token.token_id,
+                ordinal=ordinal,
+            )
+            self._member_counts[aggregation._batch_id] = ordinal + 1
+
+            # Complete node state - status is "completed", terminal state
+            # (CONSUMED_IN_BATCH) is derived from batch_members table
+            self._recorder.complete_node_state(
+                state_id=state.state_id,
+                status="completed",
+                duration_ms=duration_ms,
+            )
+
+            result.batch_id = aggregation._batch_id
+            return result
+
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start) * 1000
+            self._recorder.complete_node_state(
+                state_id=state.state_id,
+                status="failed",
+                duration_ms=duration_ms,
+                error={"exception": str(e), "type": type(e).__name__},
+            )
+            raise
 
     def flush(
         self,
@@ -1918,6 +2000,7 @@ class TestSinkExecutor:
             sink=sink,
             tokens=[token],
             ctx=ctx,
+            step_in_pipeline=0,
         )
 
         assert artifact is not None
@@ -1988,13 +2071,19 @@ class SinkExecutor:
         sink: SinkLike,
         tokens: list[TokenInfo],
         ctx: PluginContext,
+        step_in_pipeline: int,
     ) -> Artifact | None:
         """Write tokens to sink with artifact recording.
 
+        CRITICAL: Creates a node_state for EACH token written. This is how
+        we derive the COMPLETED terminal state - every token that reaches
+        a sink gets a completed node_state at the sink node.
+
         Args:
             sink: Sink plugin
-            tokens: Tokens to write
+            tokens: Tokens to write (preserves TokenInfo, not just dicts!)
             ctx: Plugin context
+            step_in_pipeline: Current position in DAG (Orchestrator is authority)
 
         Returns:
             Artifact if produced, None otherwise
@@ -2002,17 +2091,19 @@ class SinkExecutor:
         if not tokens:
             return None
 
-        # Use first token for node state (sink processes batch)
-        first_token = tokens[0]
         rows = [t.row_data for t in tokens]
 
-        # Begin node state
-        state = self._recorder.begin_node_state(
-            token_id=first_token.token_id,
-            node_id=sink.node_id,
-            step_index=first_token.step_index,
-            input_data={"rows": rows},
-        )
+        # Create node_state for EACH token - this is how we know they reached the sink
+        # and can derive COMPLETED terminal state
+        states: list[tuple[TokenInfo, Any]] = []  # (token, state) pairs
+        for token in tokens:
+            state = self._recorder.begin_node_state(
+                token_id=token.token_id,
+                node_id=sink.node_id,
+                step_index=step_in_pipeline,
+                input_data=token.row_data,
+            )
+            states.append((token, state))
 
         with self._spans.sink_span(sink.name):
             start = time.perf_counter()
@@ -2021,25 +2112,29 @@ class SinkExecutor:
                 duration_ms = (time.perf_counter() - start) * 1000
             except Exception as e:
                 duration_ms = (time.perf_counter() - start) * 1000
-                self._recorder.complete_node_state(
-                    state_id=state.state_id,
-                    status="failed",
-                    duration_ms=duration_ms,
-                    error={"exception": str(e), "type": type(e).__name__},
-                )
+                # Mark all token states as failed
+                for _, state in states:
+                    self._recorder.complete_node_state(
+                        state_id=state.state_id,
+                        status="failed",
+                        duration_ms=duration_ms,
+                        error={"exception": str(e), "type": type(e).__name__},
+                    )
                 raise
 
-        # Complete node state
-        self._recorder.complete_node_state(
-            state_id=state.state_id,
-            status="completed",
-            duration_ms=duration_ms,
-        )
+        # Complete all token states - each token now has COMPLETED terminal state
+        for _, state in states:
+            self._recorder.complete_node_state(
+                state_id=state.state_id,
+                status="completed",
+                duration_ms=duration_ms,
+            )
 
-        # Register artifact
+        # Register artifact (linked to first state for simplicity)
+        first_state = states[0][1]
         artifact = self._recorder.register_artifact(
             run_id=self._run_id,
-            state_id=state.state_id,
+            state_id=first_state.state_id,
             sink_node_id=sink.node_id,
             artifact_type=sink.name,
             path=artifact_info.get("path", ""),

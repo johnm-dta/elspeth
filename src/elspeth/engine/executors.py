@@ -322,6 +322,11 @@ class GateExecutor:
             sink_name = action.destinations[0]
 
         elif action.kind == "fork_to_paths":
+            if token_manager is None:
+                raise RuntimeError(
+                    f"Gate {gate.node_id} returned fork_to_paths but no TokenManager provided. "
+                    "Cannot create child tokens - audit integrity would be compromised."
+                )
             # Record routing events for all paths
             self._record_routing(
                 state_id=state.state_id,
@@ -329,13 +334,12 @@ class GateExecutor:
                 action=action,
             )
             # Create child tokens
-            if token_manager is not None:
-                child_tokens = token_manager.fork_token(
-                    parent_token=token,
-                    branches=list(action.destinations),
-                    step_in_pipeline=step_in_pipeline,
-                    row_data=result.row,
-                )
+            child_tokens = token_manager.fork_token(
+                parent_token=token,
+                branches=list(action.destinations),
+                step_in_pipeline=step_in_pipeline,
+                row_data=result.row,
+            )
 
         # Complete node state - always "completed" for successful execution
         # Terminal state is DERIVED from routing_events, not stored here

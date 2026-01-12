@@ -666,6 +666,102 @@ class TestGateExecutor:
         group_ids = {e.routing_group_id for e in events}
         assert len(group_ids) == 1
 
+    def test_fork_without_token_manager_raises_error(self) -> None:
+        """Gate fork without token_manager raises RuntimeError for audit integrity."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import GateExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenInfo
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import GateResult, RoutingAction
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register gate and path nodes
+        gate_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="splitter",
+            node_type="gate",
+            plugin_version="1.0",
+            config={},
+        )
+        path_a_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="path_a",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+        )
+        path_b_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="path_b",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+        )
+
+        # Register edges
+        edge_a = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=path_a_node.node_id,
+            label="path_a",
+            mode="copy",
+        )
+        edge_b = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=path_b_node.node_id,
+            label="path_b",
+            mode="copy",
+        )
+
+        # Mock gate that forks to multiple paths
+        class SplitterGate:
+            name = "splitter"
+            node_id = gate_node.node_id
+
+            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
+                return GateResult(
+                    row=row,
+                    action=RoutingAction.fork_to_paths(["path_a", "path_b"]),
+                )
+
+        gate = SplitterGate()
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        edge_map = {
+            (gate_node.node_id, "path_a"): edge_a.edge_id,
+            (gate_node.node_id, "path_b"): edge_b.edge_id,
+        }
+        executor = GateExecutor(recorder, SpanFactory(), edge_map)
+
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="token-1",
+            row_data={"value": 42},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=gate_node.node_id,
+            row_index=0,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+
+        # Call without token_manager - should raise RuntimeError
+        with pytest.raises(RuntimeError, match="audit integrity would be compromised"):
+            executor.execute_gate(
+                gate=gate,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=1,
+                token_manager=None,  # Explicitly None
+            )
+
     def test_execute_gate_exception_records_failure(self) -> None:
         """Gate raising exception still records audit state."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder

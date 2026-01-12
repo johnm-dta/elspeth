@@ -89,3 +89,24 @@ def _normalize_value(obj: Any) -> Any:
         return str(obj)
 
     return obj
+
+
+def _normalize_for_canonical(data: Any) -> Any:
+    """Recursively normalize a data structure for canonical JSON.
+
+    Converts pandas/numpy types to JSON-safe primitives.
+
+    Args:
+        data: Any data structure (dict, list, primitive)
+
+    Returns:
+        Normalized data structure with only JSON-safe types
+
+    Raises:
+        ValueError: If data contains NaN, Infinity, or other non-serializable values
+    """
+    if isinstance(data, dict):
+        return {k: _normalize_for_canonical(v) for k, v in data.items()}
+    if isinstance(data, (list, tuple)):
+        return [_normalize_for_canonical(v) for v in data]
+    return _normalize_value(data)

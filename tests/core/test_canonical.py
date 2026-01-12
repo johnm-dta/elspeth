@@ -184,3 +184,53 @@ class TestSpecialTypeConversion:
         result = _normalize_value(Decimal("123.456789012345"))
         assert result == "123.456789012345"
         assert type(result) is str
+
+
+class TestRecursiveNormalization:
+    """Nested structures must be normalized recursively."""
+
+    def test_dict_with_numpy_values(self) -> None:
+        from elspeth.core.canonical import _normalize_for_canonical
+
+        data = {"count": np.int64(42), "rate": np.float64(3.14)}
+        result = _normalize_for_canonical(data)
+        assert result == {"count": 42, "rate": 3.14}
+        assert type(result["count"]) is int
+        assert type(result["rate"]) is float
+
+    def test_list_with_mixed_types(self) -> None:
+        from elspeth.core.canonical import _normalize_for_canonical
+
+        data = [np.int64(1), pd.Timestamp("2026-01-12"), None]
+        result = _normalize_for_canonical(data)
+        assert result[0] == 1
+        assert "2026-01-12" in result[1]
+        assert result[2] is None
+
+    def test_nested_dict(self) -> None:
+        from elspeth.core.canonical import _normalize_for_canonical
+
+        data = {
+            "outer": {
+                "inner": np.int64(42),
+                "list": [np.float64(1.0), np.float64(2.0)],
+            }
+        }
+        result = _normalize_for_canonical(data)
+        assert result["outer"]["inner"] == 42
+        assert result["outer"]["list"] == [1.0, 2.0]
+
+    def test_tuple_converts_to_list(self) -> None:
+        from elspeth.core.canonical import _normalize_for_canonical
+
+        data = (1, 2, 3)
+        result = _normalize_for_canonical(data)
+        assert result == [1, 2, 3]
+        assert type(result) is list
+
+    def test_nan_in_nested_raises(self) -> None:
+        from elspeth.core.canonical import _normalize_for_canonical
+
+        data = {"values": [1.0, float("nan"), 3.0]}
+        with pytest.raises(ValueError, match="non-finite"):
+            _normalize_for_canonical(data)

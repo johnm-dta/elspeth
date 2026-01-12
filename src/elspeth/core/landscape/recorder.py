@@ -742,31 +742,33 @@ class LandscapeRecorder:
         self,
         state_id: str,
         edge_id: str,
-        routing_group_id: str,
-        ordinal: int,
         mode: str,
+        reason: dict[str, Any] | None = None,
         *,
         event_id: str | None = None,
-        reason: dict[str, Any] | None = None,
+        routing_group_id: str | None = None,
+        ordinal: int = 0,
+        reason_ref: str | None = None,
     ) -> RoutingEvent:
-        """Record a routing decision at a gate.
+        """Record a single routing event.
 
         Args:
-            state_id: Node state that made the decision
+            state_id: Node state that made the routing decision
             edge_id: Edge that was taken
-            routing_group_id: Groups related routing decisions (e.g., fork to multiple)
-            ordinal: Order within the routing group
-            mode: Routing mode ("move" or "copy")
-            event_id: Optional event ID (generated if not provided)
-            reason: Optional reason/explanation for audit trail
+            mode: Routing mode (move or copy)
+            reason: Reason for this routing decision
+            event_id: Optional event ID
+            routing_group_id: Group ID (for multi-destination routing)
+            ordinal: Position in routing group
+            reason_ref: Optional payload store reference
 
         Returns:
             RoutingEvent model
         """
         event_id = event_id or _generate_id()
-        now = _now()
-
+        routing_group_id = routing_group_id or _generate_id()
         reason_hash = stable_hash(reason) if reason else None
+        now = _now()
 
         event = RoutingEvent(
             event_id=event_id,
@@ -776,6 +778,7 @@ class LandscapeRecorder:
             ordinal=ordinal,
             mode=mode,
             reason_hash=reason_hash,
+            reason_ref=reason_ref,
             created_at=now,
         )
 
@@ -789,11 +792,67 @@ class LandscapeRecorder:
                     ordinal=event.ordinal,
                     mode=event.mode,
                     reason_hash=event.reason_hash,
+                    reason_ref=event.reason_ref,
                     created_at=event.created_at,
                 )
             )
 
         return event
+
+    def record_routing_events(
+        self,
+        state_id: str,
+        routes: list[dict[str, str]],
+        reason: dict[str, Any] | None = None,
+    ) -> list[RoutingEvent]:
+        """Record multiple routing events (fork/multi-destination).
+
+        All events share the same routing_group_id.
+
+        Args:
+            state_id: Node state that made the routing decision
+            routes: List of {"edge_id": str, "mode": str}
+            reason: Shared reason for all routes
+
+        Returns:
+            List of RoutingEvent models
+        """
+        routing_group_id = _generate_id()
+        reason_hash = stable_hash(reason) if reason else None
+        now = _now()
+        events = []
+
+        with self._db.connection() as conn:
+            for ordinal, route in enumerate(routes):
+                event_id = _generate_id()
+                event = RoutingEvent(
+                    event_id=event_id,
+                    state_id=state_id,
+                    edge_id=route["edge_id"],
+                    routing_group_id=routing_group_id,
+                    ordinal=ordinal,
+                    mode=route["mode"],
+                    reason_hash=reason_hash,
+                    reason_ref=None,
+                    created_at=now,
+                )
+
+                conn.execute(
+                    routing_events_table.insert().values(
+                        event_id=event.event_id,
+                        state_id=event.state_id,
+                        edge_id=event.edge_id,
+                        routing_group_id=event.routing_group_id,
+                        ordinal=event.ordinal,
+                        mode=event.mode,
+                        reason_hash=event.reason_hash,
+                        created_at=event.created_at,
+                    )
+                )
+
+                events.append(event)
+
+        return events
 
     # === Batch Management ===
 
@@ -879,24 +938,33 @@ class LandscapeRecorder:
         self,
         batch_id: str,
         status: str,
-    ) -> Batch:
+        *,
+        trigger_reason: str | None = None,
+        state_id: str | None = None,
+    ) -> None:
         """Update batch status.
 
         Args:
             batch_id: Batch to update
-            status: New status
-
-        Returns:
-            Updated Batch model
+            status: New status (executing, completed, failed)
+            trigger_reason: Why the batch was triggered
+            state_id: Node state for the flush operation
         """
+        updates: dict[str, Any] = {"status": status}
+
+        if trigger_reason:
+            updates["trigger_reason"] = trigger_reason
+        if state_id:
+            updates["aggregation_state_id"] = state_id
+        if status in ("completed", "failed"):
+            updates["completed_at"] = _now()
+
         with self._db.connection() as conn:
             conn.execute(
                 batches_table.update()
                 .where(batches_table.c.batch_id == batch_id)
-                .values(status=status)
+                .values(**updates)
             )
-
-        return self.get_batch(batch_id)  # type: ignore[return-value]
 
     def complete_batch(
         self,
@@ -962,6 +1030,75 @@ class LandscapeRecorder:
             created_at=row.created_at,
             completed_at=row.completed_at,
         )
+
+    def get_batches(
+        self,
+        run_id: str,
+        *,
+        status: str | None = None,
+        node_id: str | None = None,
+    ) -> list[Batch]:
+        """Get batches for a run.
+
+        Args:
+            run_id: Run ID
+            status: Optional status filter
+            node_id: Optional aggregation node filter
+
+        Returns:
+            List of Batch models
+        """
+        query = select(batches_table).where(batches_table.c.run_id == run_id)
+
+        if status:
+            query = query.where(batches_table.c.status == status)
+        if node_id:
+            query = query.where(batches_table.c.aggregation_node_id == node_id)
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            rows = result.fetchall()
+
+        return [
+            Batch(
+                batch_id=row.batch_id,
+                run_id=row.run_id,
+                aggregation_node_id=row.aggregation_node_id,
+                aggregation_state_id=row.aggregation_state_id,
+                trigger_reason=row.trigger_reason,
+                attempt=row.attempt,
+                status=row.status,
+                created_at=row.created_at,
+                completed_at=row.completed_at,
+            )
+            for row in rows
+        ]
+
+    def get_batch_members(self, batch_id: str) -> list[BatchMember]:
+        """Get all members of a batch.
+
+        Args:
+            batch_id: Batch ID
+
+        Returns:
+            List of BatchMember models (ordered by ordinal)
+        """
+        with self._db.connection() as conn:
+            result = conn.execute(
+                select(batch_members_table)
+                .where(batch_members_table.c.batch_id == batch_id)
+                .order_by(batch_members_table.c.ordinal)
+            )
+            rows = result.fetchall()
+
+        return [
+            BatchMember(
+                batch_id=row.batch_id,
+                token_id=row.token_id,
+                ordinal=row.ordinal,
+            )
+            for row in rows
+        ]
 
     # === Artifact Registration ===
 

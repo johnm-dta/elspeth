@@ -539,13 +539,12 @@ class TestLandscapeRecorderRouting:
         event = recorder.record_routing_event(
             state_id=state.state_id,
             edge_id=edge.edge_id,
-            routing_group_id="group1",
-            ordinal=0,
             mode="move",
             reason={"rule": "value > 1000", "result": True},
         )
 
         assert event.event_id is not None
+        assert event.routing_group_id is not None  # Auto-generated
         assert event.edge_id == edge.edge_id
         assert event.mode == "move"
 
@@ -608,26 +607,21 @@ class TestLandscapeRecorderRouting:
             input_data={},
         )
 
-        # Fork to both paths - same routing_group_id
-        group_id = "fork_group_123"
-        event_a = recorder.record_routing_event(
+        # Fork to both paths using batch method
+        events = recorder.record_routing_events(
             state_id=state.state_id,
-            edge_id=edge_a.edge_id,
-            routing_group_id=group_id,
-            ordinal=0,
-            mode="copy",
-        )
-        event_b = recorder.record_routing_event(
-            state_id=state.state_id,
-            edge_id=edge_b.edge_id,
-            routing_group_id=group_id,
-            ordinal=1,
-            mode="copy",
+            routes=[
+                {"edge_id": edge_a.edge_id, "mode": "copy"},
+                {"edge_id": edge_b.edge_id, "mode": "copy"},
+            ],
+            reason={"action": "fork"},
         )
 
-        assert event_a.routing_group_id == event_b.routing_group_id
-        assert event_a.ordinal == 0
-        assert event_b.ordinal == 1
+        assert len(events) == 2
+        # All events share the same routing_group_id
+        assert events[0].routing_group_id == events[1].routing_group_id
+        assert events[0].ordinal == 0
+        assert events[1].ordinal == 1
 
 
 class TestLandscapeRecorderBatches:
@@ -695,6 +689,11 @@ class TestLandscapeRecorderBatches:
 
         assert member.batch_id == batch.batch_id
         assert member.token_id == token.token_id
+
+        # Verify we can retrieve members
+        members = recorder.get_batch_members(batch.batch_id)
+        assert len(members) == 1
+        assert members[0].token_id == token.token_id
 
     def test_complete_batch(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
@@ -767,19 +766,56 @@ class TestLandscapeRecorderBatches:
             )
 
         # Move to executing
-        executing = recorder.update_batch_status(
+        recorder.update_batch_status(
             batch_id=batch.batch_id,
             status="executing",
         )
+        executing = recorder.get_batch(batch.batch_id)
+        assert executing is not None
         assert executing.status == "executing"
 
-        # Complete
-        completed = recorder.complete_batch(
+        # Complete with trigger_reason
+        recorder.update_batch_status(
             batch_id=batch.batch_id,
             status="completed",
             trigger_reason="count=3",
         )
+        completed = recorder.get_batch(batch.batch_id)
+        assert completed is not None
         assert completed.status == "completed"
+        assert completed.trigger_reason == "count=3"
+        assert completed.completed_at is not None
+
+    def test_get_batches_by_status(self) -> None:
+        """For crash recovery - find incomplete batches."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="sum_agg",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+        )
+
+        batch1 = recorder.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id=agg.node_id,
+        )
+        batch2 = recorder.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id=agg.node_id,
+        )
+        recorder.update_batch_status(batch2.batch_id, "completed")
+
+        # Get only draft batches
+        drafts = recorder.get_batches(run.run_id, status="draft")
+        assert len(drafts) == 1
+        assert drafts[0].batch_id == batch1.batch_id
 
 
 class TestLandscapeRecorderArtifacts:
@@ -1147,12 +1183,10 @@ class TestLandscapeRecorderQueryMethods:
             input_data={},
         )
 
-        # Record routing event
+        # Record routing event (using new API with auto-generated routing_group_id)
         recorder.record_routing_event(
             state_id=state.state_id,
             edge_id=edge.edge_id,
-            routing_group_id="group1",
-            ordinal=0,
             mode="move",
         )
 

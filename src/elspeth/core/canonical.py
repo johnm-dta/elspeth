@@ -10,7 +10,10 @@ IMPORTANT: NaN and Infinity are strictly REJECTED, not silently converted.
 This is defense-in-depth for audit integrity.
 """
 
+import base64
 import math
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import numpy as np
@@ -72,5 +75,17 @@ def _normalize_value(obj: Any) -> Any:
     # Intentional missing values (NOT NaN - that's rejected above)
     if obj is pd.NA or (isinstance(obj, type(pd.NaT)) and obj is pd.NaT):
         return None
+
+    # Standard library types
+    if isinstance(obj, datetime):
+        if obj.tzinfo is None:
+            obj = obj.replace(tzinfo=timezone.utc)
+        return obj.astimezone(timezone.utc).isoformat()
+
+    if isinstance(obj, bytes):
+        return {"__bytes__": base64.b64encode(obj).decode("ascii")}
+
+    if isinstance(obj, Decimal):
+        return str(obj)
 
     return obj

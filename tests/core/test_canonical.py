@@ -146,3 +146,41 @@ class TestPandasTypeConversion:
 
         result = _normalize_value(pd.NA)
         assert result is None
+
+
+import base64
+from datetime import datetime, timezone
+from decimal import Decimal
+
+
+class TestSpecialTypeConversion:
+    """Special Python types must be converted consistently."""
+
+    def test_datetime_naive_to_utc_iso(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        dt = datetime(2026, 1, 12, 10, 30, 0)
+        result = _normalize_value(dt)
+        assert result == "2026-01-12T10:30:00+00:00"
+
+    def test_datetime_aware_to_utc_iso(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        dt = datetime(2026, 1, 12, 10, 30, 0, tzinfo=timezone.utc)
+        result = _normalize_value(dt)
+        assert result == "2026-01-12T10:30:00+00:00"
+
+    def test_bytes_to_base64_wrapper(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        data = b"hello world"
+        result = _normalize_value(data)
+        assert result == {"__bytes__": base64.b64encode(data).decode("ascii")}
+
+    def test_decimal_to_string(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        # Decimal preserves precision as string
+        result = _normalize_value(Decimal("123.456789012345"))
+        assert result == "123.456789012345"
+        assert type(result) is str

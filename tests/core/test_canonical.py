@@ -301,3 +301,41 @@ class TestStableHash:
         canonical = canonical_json(data)
         expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         assert hash_result == expected
+
+
+class TestCrossProcessStability:
+    """Hash must be stable across processes and time."""
+
+    def test_golden_hash_stability(self) -> None:
+        """Verify hash matches known golden value.
+
+        This test catches accidental changes to canonicalization.
+        If it fails, audit trail integrity may be compromised.
+        """
+        from elspeth.core.canonical import stable_hash
+
+        # Fixed test data with multiple types
+        data = {
+            "string": "hello",
+            "int": 42,
+            "float": 3.14,
+            "bool": True,
+            "null": None,
+            "list": [1, 2, 3],
+            "nested": {"a": 1},
+        }
+
+        # Golden hash computed once, verified forever
+        golden_hash = "aed53055632a45e17618f46527c07dba463b2ae719e2f6832b2735308a3bf2e1"
+
+        result = stable_hash(data)
+        assert result == golden_hash, (
+            f"Hash stability broken! Got {result}, expected {golden_hash}. "
+            "This may indicate audit trail integrity issues."
+        )
+
+    def test_version_constant_exists(self) -> None:
+        """CANONICAL_VERSION must be available for audit records."""
+        from elspeth.core.canonical import CANONICAL_VERSION
+
+        assert CANONICAL_VERSION == "sha256-rfc8785-v1"

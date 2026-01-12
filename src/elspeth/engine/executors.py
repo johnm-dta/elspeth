@@ -754,9 +754,9 @@ class SinkExecutor:
             state_id=first_state.state_id,
             sink_node_id=sink.node_id,
             artifact_type=sink.name,
-            path=artifact_info.get("path", ""),
-            content_hash=artifact_info.get("content_hash", ""),
-            size_bytes=artifact_info.get("size_bytes", 0),
+            path=artifact_info["path"],
+            content_hash=artifact_info["content_hash"],
+            size_bytes=artifact_info["size_bytes"],
         )
 
         return artifact

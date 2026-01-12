@@ -107,6 +107,7 @@ CREATE TABLE nodes (
     plugin_name TEXT NOT NULL,
     node_type TEXT NOT NULL,               -- source, transform, gate, aggregation, coalesce, sink
     plugin_version TEXT NOT NULL,
+    determinism TEXT NOT NULL DEFAULT 'unknown',  -- pure, io_read, io_write, external_call, non_deterministic, unknown
     config_hash TEXT NOT NULL,
     config_json TEXT NOT NULL,
     schema_hash TEXT,                      -- Input/output schema fingerprint
@@ -230,10 +231,11 @@ CREATE TABLE batch_members (
 );
 
 CREATE TABLE batch_outputs (
+    batch_output_id TEXT PRIMARY KEY,      -- Surrogate key for simpler joins
     batch_id TEXT NOT NULL REFERENCES batches(batch_id),
-    output_type TEXT NOT NULL,
+    output_type TEXT NOT NULL,             -- token, artifact
     output_id TEXT NOT NULL,               -- token_id or artifact_id
-    PRIMARY KEY (batch_id, output_id)
+    UNIQUE(batch_id, output_type, output_id)  -- Prevent duplicate outputs
 );
 
 -- Artifacts produced by sinks
@@ -250,17 +252,31 @@ CREATE TABLE artifacts (
 );
 ```
 
-**Token Terminal States:**
+**Status Vocabulary (Two Distinct Concepts):**
 
-| State | Meaning |
-|-------|---------|
-| `COMPLETED` | Reached output sink |
-| `ROUTED` | Sent to named sink by gate (move mode) |
-| `FORKED` | Split into child tokens (parent token terminates) |
-| `CONSUMED_IN_BATCH` | Fed into aggregation (pointer to batch_id) |
-| `COALESCED` | Merged with other tokens into new token |
-| `QUARANTINED` | Failed, stored for investigation |
-| `FAILED` | Failed, not recoverable |
+There are two status systems that must not be confused:
+
+1. **`node_states.status`** - Processing status at a single node:
+
+   | Status | Meaning |
+   |--------|---------|
+   | `open` | Transform is currently executing |
+   | `completed` | Transform finished successfully |
+   | `failed` | Transform failed (may be retried) |
+
+2. **Token Terminal States** - Final disposition of a token in the pipeline (derived, not stored):
+
+   | State | Meaning | How Derived |
+   |-------|---------|-------------|
+   | `COMPLETED` | Reached output sink | Last node_state is at a sink node |
+   | `ROUTED` | Sent to named sink by gate | routing_event with move mode to sink |
+   | `FORKED` | Split into child tokens | Has child tokens in token_parents |
+   | `CONSUMED_IN_BATCH` | Fed into aggregation | Exists in batch_members |
+   | `COALESCED` | Merged with other tokens | Is parent in token_parents for join |
+   | `QUARANTINED` | Failed, stored for investigation | Last node_state.status = failed + quarantine flag |
+   | `FAILED` | Failed, not recoverable | Last node_state.status = failed, no quarantine |
+
+**Key insight:** Token terminal states are *derived* from the combination of node_states, routing_events, and batch membership—not stored as a column. This avoids redundant state that could become inconsistent.
 
 **Key Principle:** No silent drops. Every token has a terminal state. Every decision is recorded.
 

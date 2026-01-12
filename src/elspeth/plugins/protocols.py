@@ -75,3 +75,123 @@ class SourceProtocol(Protocol):
     def on_start(self, ctx: "PluginContext") -> None:
         """Called before load(). Override for setup."""
         ...
+
+
+@runtime_checkable
+class TransformProtocol(Protocol):
+    """Protocol for stateless row transforms.
+
+    Transforms process one row and emit one row (possibly modified).
+    They are stateless between rows.
+
+    Example:
+        class EnrichTransform:
+            name = "enrich"
+            input_schema = InputSchema
+            output_schema = OutputSchema
+
+            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+                enriched = {**row, "timestamp": datetime.now().isoformat()}
+                return TransformResult.success(enriched)
+    """
+
+    name: str
+    input_schema: type["PluginSchema"]
+    output_schema: type["PluginSchema"]
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        """Initialize with configuration."""
+        ...
+
+    def process(
+        self,
+        row: dict[str, Any],
+        ctx: "PluginContext",
+    ) -> "TransformResult":
+        """Process a single row.
+
+        Args:
+            row: Input row matching input_schema
+            ctx: Plugin context
+
+        Returns:
+            TransformResult with processed row or error
+        """
+        ...
+
+    # === Optional Lifecycle Hooks ===
+
+    def on_register(self, ctx: "PluginContext") -> None:
+        """Called when plugin is registered."""
+        ...
+
+    def on_start(self, ctx: "PluginContext") -> None:
+        """Called at start of run."""
+        ...
+
+    def on_complete(self, ctx: "PluginContext") -> None:
+        """Called at end of run."""
+        ...
+
+
+@runtime_checkable
+class GateProtocol(Protocol):
+    """Protocol for gate transforms (routing decisions).
+
+    Gates evaluate rows and decide routing. They can:
+    - Continue to next transform
+    - Route to a named sink
+    - Fork to multiple parallel paths
+
+    Example:
+        class SafetyGate:
+            name = "safety"
+            input_schema = InputSchema
+            output_schema = OutputSchema
+
+            def evaluate(self, row: dict, ctx: PluginContext) -> GateResult:
+                if row.get("suspicious"):
+                    return GateResult(
+                        row=row,
+                        action=RoutingAction.route_to_sink("review_queue"),
+                    )
+                return GateResult(row=row, action=RoutingAction.continue_())
+    """
+
+    name: str
+    input_schema: type["PluginSchema"]
+    output_schema: type["PluginSchema"]
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        """Initialize with configuration."""
+        ...
+
+    def evaluate(
+        self,
+        row: dict[str, Any],
+        ctx: "PluginContext",
+    ) -> "GateResult":
+        """Evaluate a row and decide routing.
+
+        Args:
+            row: Input row
+            ctx: Plugin context
+
+        Returns:
+            GateResult with (possibly modified) row and routing action
+        """
+        ...
+
+    # === Optional Lifecycle Hooks ===
+
+    def on_register(self, ctx: "PluginContext") -> None:
+        """Called when plugin is registered."""
+        ...
+
+    def on_start(self, ctx: "PluginContext") -> None:
+        """Called at start of run."""
+        ...
+
+    def on_complete(self, ctx: "PluginContext") -> None:
+        """Called at end of run."""
+        ...

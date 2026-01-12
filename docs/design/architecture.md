@@ -563,17 +563,25 @@ landscape:
 
 ## Failure Semantics
 
-### Row Outcomes
+### Token Terminal States (Derived)
 
-Every row ends in a terminal state. There are no silent drops.
+Every token ends in a terminal state. There are no silent drops.
+
+**Important:** Terminal states are *derived* from node_states, routing_events, and batch membership—not stored as a column. This avoids redundant state.
 
 ```python
-class RowOutcome(Enum):
-    COMPLETED = "completed"      # Reached output sink
-    ROUTED = "routed"            # Sent to named sink by gate
-    QUARANTINED = "quarantined"  # Failed, stored for investigation
-    FAILED = "failed"            # Failed, not recoverable
+class TokenTerminalState(Enum):
+    """Final disposition of a token - derived, not stored."""
+    COMPLETED = "completed"           # Reached output sink
+    ROUTED = "routed"                 # Sent to named sink by gate (move mode)
+    FORKED = "forked"                 # Split into child tokens
+    CONSUMED_IN_BATCH = "consumed"    # Fed into aggregation batch
+    COALESCED = "coalesced"           # Merged with other tokens
+    QUARANTINED = "quarantined"       # Failed, stored for investigation
+    FAILED = "failed"                 # Failed, not recoverable
 ```
+
+**Contrast with `node_states.status`:** The `status` column in `node_states` tracks *processing status at a single node* (`open`, `completed`, `failed`), not the token's terminal disposition.
 
 ### Transform Results
 
@@ -583,10 +591,9 @@ Transforms return a structured result:
 @dataclass
 class TransformResult:
     """Result of a transform operation."""
-    status: Literal["success", "route", "error"]
-    row: dict[str, Any] | None           # Modified row (if success/route)
-    destination: str | None              # Sink name (if route)
-    reason: dict[str, Any] | None        # Classification/error metadata
+    status: Literal["success", "error"]  # Note: "route" removed; routing is via GateResult
+    row: dict[str, Any] | None           # Modified row (if success)
+    reason: dict[str, Any] | None        # Error metadata (if error)
     retryable: bool = False              # Can this be retried?
 ```
 

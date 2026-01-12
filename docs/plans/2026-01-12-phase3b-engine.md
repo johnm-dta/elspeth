@@ -19,22 +19,74 @@
 - `PluginSpec.from_plugin()`: For plugin registration metadata
 - Note: `TransformResult.status` is now `"success" | "error"` only (no "route")
 
-**Status Vocabulary Mapping:**
-Phase 3B executors must use status strings consistent with CLAUDE.md terminal states and Phase 3A recorder:
+**Status Vocabulary (Two Distinct Concepts):**
 
-| CLAUDE.md Terminal State | Recorder Usage | Context |
-|--------------------------|----------------|---------|
-| `COMPLETED` | `node_states.status = "completed"` | Row reached output sink |
-| `ROUTED` | `node_states.status = "routed"` | Gate sent row to named sink |
-| `FORKED` | `node_states.status = "forked"` | Parent token split to paths |
-| `CONSUMED_IN_BATCH` | `node_states.status = "consumed"` | Row aggregated into batch |
-| `COALESCED` | `node_states.status = "coalesced"` | Row merged in join |
-| `QUARANTINED` | `node_states.status = "quarantined"` | Failed, stored for investigation |
-| `FAILED` | `node_states.status = "failed"` | Failed, not recoverable |
+Phase 3B executors must understand the difference between *processing status* and *terminal state*:
 
-Additionally:
+**1. `node_states.status` - Processing status at a single node:**
+
+| Status | Meaning | When Used |
+|--------|---------|-----------|
+| `open` | Transform is currently executing | `record_node_state()` called |
+| `completed` | Transform finished successfully | Transform returned without error |
+| `failed` | Transform failed (may be retried) | Transform raised exception |
+
+**2. Token Terminal States - Derived, NOT stored:**
+
+Terminal states are *computed* from relationships, not stored in a column:
+
+| Terminal State | How Derived |
+|----------------|-------------|
+| `COMPLETED` | Last node_state is at sink node with status=completed |
+| `ROUTED` | Has routing_event with move mode to a sink |
+| `FORKED` | Token has children in token_parents table |
+| `CONSUMED_IN_BATCH` | Token exists in batch_members table |
+| `COALESCED` | Token is a parent in token_parents for a join |
+| `QUARANTINED` | Last node_state.status=failed + error has quarantine flag |
+| `FAILED` | Last node_state.status=failed, no quarantine |
+
+**Other status columns:**
 - `runs.status`: `"running"`, `"completed"`, `"failed"`
 - `batches.status`: `"draft"`, `"executing"`, `"completed"`, `"failed"`
+
+---
+
+## Critical Audit Invariants
+
+**Every executor MUST satisfy these invariants. Violating them means the audit trail lies.**
+
+For every plugin call:
+
+1. **Node State Exists**: You can point at a `node_states` row and say "this token visited this node at this step; here's input hash, output hash, duration, status."
+
+2. **Routing is Recorded**: If the plugin routed, there are `routing_events` tied to that node_state, and node_state status reflects routed/forked.
+
+3. **Batching is Recorded**: If the plugin batched, there is a `batch` with `batch_members`, and a node_state that marks the token consumed.
+
+4. **Sink Output is Recorded**: If the plugin wrote output, there is a sink node_state *and* an `artifact` record.
+
+5. **Nothing is Inferred Later**: No "pick first non-default sink" logic. Audit trails are recorded facts, not vibes.
+
+**Token Identity Contract:**
+- Tokens flow through the entire pipeline, including sinks
+- Buffer `TokenInfo`, not dict rows
+- Every executor receives token context and records against it
+
+**Status Alignment Contract:**
+Each executor sets `node_states.status` based on the *semantic outcome*:
+
+| Plugin Type | Outcome | Status |
+|-------------|---------|--------|
+| Transform | Success | `completed` |
+| Transform | Error | `failed` |
+| Gate | continue | `completed` |
+| Gate | route_to_sink | `completed` (routing_event records the route) |
+| Gate | fork_to_paths | `completed` (child tokens created) |
+| Aggregation | accept | `completed` (batch_members records consumption) |
+| Aggregation | flush | `completed` |
+| Sink | write | `completed` |
+
+**Note:** Terminal states (ROUTED, FORKED, CONSUMED_IN_BATCH) are *derived* from relationships—they're not stored in `node_states.status`. A gate that routes still has `status=completed`; the routing_event proves the route.
 
 ---
 
@@ -57,47 +109,63 @@ class TestSpanFactory:
     """OpenTelemetry span creation."""
 
     def test_create_run_span(self) -> None:
-        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.spans import NoOpSpan, SpanFactory
 
         factory = SpanFactory()  # No tracer = no-op mode
 
         with factory.run_span("run-001") as span:
-            assert span is None  # No-op mode returns None
+            # No-op mode returns NoOpSpan (not None) so callers can use uniform interface
+            assert isinstance(span, NoOpSpan)
 
     def test_create_row_span(self) -> None:
-        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.spans import NoOpSpan, SpanFactory
 
         factory = SpanFactory()
 
         with factory.row_span("row-001", "token-001") as span:
-            assert span is None
+            assert isinstance(span, NoOpSpan)
 
     def test_create_transform_span(self) -> None:
-        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.spans import NoOpSpan, SpanFactory
 
         factory = SpanFactory()
 
         with factory.transform_span("my_transform", input_hash="abc123") as span:
-            assert span is None
+            assert isinstance(span, NoOpSpan)
 
     def test_with_tracer(self) -> None:
         """Test with actual tracer if opentelemetry available."""
         pytest.importorskip("opentelemetry")
-        from opentelemetry import trace
         from opentelemetry.sdk.trace import TracerProvider
 
         from elspeth.engine.spans import SpanFactory
 
-        # Set up in-memory tracer
+        # Create provider locally - do NOT set global state with set_tracer_provider()
+        # Global state causes flaky tests when other tests/libraries have already set a provider
         provider = TracerProvider()
-        trace.set_tracer_provider(provider)
-        tracer = trace.get_tracer("test")
+        tracer = provider.get_tracer("test")  # Get tracer from local provider
 
         factory = SpanFactory(tracer=tracer)
 
         with factory.run_span("run-001") as span:
             assert span is not None
             assert span.is_recording()
+
+    def test_noop_span_interface(self) -> None:
+        """Test that NoOpSpan has the same interface as real spans."""
+        from elspeth.engine.spans import NoOpSpan, SpanFactory
+
+        # NoOpSpan should be usable in place of real spans
+        noop = NoOpSpan()
+        noop.set_attribute("key", "value")  # Should not raise
+        noop.set_status(None)  # Should not raise
+        noop.record_exception(ValueError("test"))  # Should not raise
+        assert noop.is_recording() is False
+
+        # Factory in no-op mode should return NoOpSpan, not None
+        factory = SpanFactory()  # No tracer = no-op mode
+        with factory.run_span("run-001") as span:
+            assert isinstance(span, NoOpSpan)
 ```
 
 ### Step 2: Run test to verify it fails
@@ -181,18 +249,21 @@ class SpanFactory:
         """Whether tracing is enabled."""
         return self._tracer is not None
 
+    # Singleton no-op span to avoid repeated allocations
+    _NOOP_SPAN = NoOpSpan()
+
     @contextmanager
-    def run_span(self, run_id: str) -> Iterator["Span | None"]:
+    def run_span(self, run_id: str) -> Iterator["Span | NoOpSpan"]:
         """Create a span for the entire run.
 
         Args:
             run_id: Run identifier
 
         Yields:
-            Span or None if tracing disabled
+            Span or NoOpSpan if tracing disabled (never None - uniform interface)
         """
         if self._tracer is None:
-            yield None
+            yield self._NOOP_SPAN
             return
 
         with self._tracer.start_as_current_span(f"run:{run_id}") as span:
@@ -200,17 +271,17 @@ class SpanFactory:
             yield span
 
     @contextmanager
-    def source_span(self, source_name: str) -> Iterator["Span | None"]:
+    def source_span(self, source_name: str) -> Iterator["Span | NoOpSpan"]:
         """Create a span for source loading.
 
         Args:
             source_name: Name of the source plugin
 
         Yields:
-            Span or None
+            Span or NoOpSpan
         """
         if self._tracer is None:
-            yield None
+            yield self._NOOP_SPAN
             return
 
         with self._tracer.start_as_current_span(f"source:{source_name}") as span:
@@ -223,7 +294,7 @@ class SpanFactory:
         self,
         row_id: str,
         token_id: str,
-    ) -> Iterator["Span | None"]:
+    ) -> Iterator["Span | NoOpSpan"]:
         """Create a span for processing a row.
 
         Args:
@@ -231,10 +302,10 @@ class SpanFactory:
             token_id: Token identifier
 
         Yields:
-            Span or None
+            Span or NoOpSpan
         """
         if self._tracer is None:
-            yield None
+            yield self._NOOP_SPAN
             return
 
         with self._tracer.start_as_current_span(f"row:{row_id}") as span:
@@ -248,7 +319,7 @@ class SpanFactory:
         transform_name: str,
         *,
         input_hash: str | None = None,
-    ) -> Iterator["Span | None"]:
+    ) -> Iterator["Span | NoOpSpan"]:
         """Create a span for a transform operation.
 
         Args:
@@ -256,10 +327,10 @@ class SpanFactory:
             input_hash: Optional input data hash
 
         Yields:
-            Span or None
+            Span or NoOpSpan
         """
         if self._tracer is None:
-            yield None
+            yield self._NOOP_SPAN
             return
 
         with self._tracer.start_as_current_span(f"transform:{transform_name}") as span:
@@ -275,7 +346,7 @@ class SpanFactory:
         gate_name: str,
         *,
         input_hash: str | None = None,
-    ) -> Iterator["Span | None"]:
+    ) -> Iterator["Span | NoOpSpan"]:
         """Create a span for a gate operation.
 
         Args:
@@ -283,10 +354,10 @@ class SpanFactory:
             input_hash: Optional input data hash
 
         Yields:
-            Span or None
+            Span or NoOpSpan
         """
         if self._tracer is None:
-            yield None
+            yield self._NOOP_SPAN
             return
 
         with self._tracer.start_as_current_span(f"gate:{gate_name}") as span:
@@ -302,7 +373,7 @@ class SpanFactory:
         aggregation_name: str,
         *,
         batch_id: str | None = None,
-    ) -> Iterator["Span | None"]:
+    ) -> Iterator["Span | NoOpSpan"]:
         """Create a span for an aggregation flush.
 
         Args:
@@ -310,10 +381,10 @@ class SpanFactory:
             batch_id: Optional batch identifier
 
         Yields:
-            Span or None
+            Span or NoOpSpan
         """
         if self._tracer is None:
-            yield None
+            yield self._NOOP_SPAN
             return
 
         with self._tracer.start_as_current_span(f"aggregation:{aggregation_name}") as span:
@@ -327,17 +398,17 @@ class SpanFactory:
     def sink_span(
         self,
         sink_name: str,
-    ) -> Iterator["Span | None"]:
+    ) -> Iterator["Span | NoOpSpan"]:
         """Create a span for a sink write.
 
         Args:
             sink_name: Name of the sink plugin
 
         Yields:
-            Span or None
+            Span or NoOpSpan
         """
         if self._tracer is None:
-            yield None
+            yield self._NOOP_SPAN
             return
 
         with self._tracer.start_as_current_span(f"sink:{sink_name}") as span:
@@ -436,9 +507,11 @@ class TestTokenManager:
             row_data={"value": 42},
         )
 
+        # step_in_pipeline is required - Orchestrator/RowProcessor is the authority
         children = manager.fork_token(
-            parent=initial,
+            parent_token=initial,
             branches=["stats", "classifier"],
+            step_in_pipeline=1,  # Fork happens at step 1
         )
 
         assert len(children) == 2
@@ -505,13 +578,16 @@ class TokenInfo:
     """Information about a token in flight.
 
     Carries both identity (IDs) and current state (row_data).
+
+    Note: Step position is NOT tracked here - the Orchestrator/RowProcessor
+    is the authority for where a token is in the DAG. TokenInfo is just
+    identity + payload, not position.
     """
 
     row_id: str
     token_id: str
     row_data: dict[str, Any]
     branch_name: str | None = None
-    step_index: int = 0
 
 
 class TokenManager:
@@ -537,8 +613,12 @@ class TokenManager:
         # After transform
         token = manager.update_row_data(token, {"value": 42, "processed": True})
 
-        # Fork to branches
-        children = manager.fork_token(token, ["stats", "classifier"])
+        # Fork to branches (step_in_pipeline from Orchestrator)
+        children = manager.fork_token(
+            parent_token=token,
+            branches=["stats", "classifier"],
+            step_in_pipeline=2,  # Orchestrator provides step position
+        )
     """
 
     def __init__(self, recorder: LandscapeRecorder) -> None:
@@ -586,31 +666,40 @@ class TokenManager:
 
     def fork_token(
         self,
-        parent: TokenInfo,
+        parent_token: TokenInfo,
         branches: list[str],
+        step_in_pipeline: int,
+        row_data: dict[str, Any] | None = None,
     ) -> list[TokenInfo]:
         """Fork a token to multiple branches.
 
+        The step_in_pipeline is required because the Orchestrator/RowProcessor
+        owns step position - TokenManager doesn't track it.
+
         Args:
-            parent: Parent token to fork
+            parent_token: Parent token to fork
             branches: List of branch names
+            step_in_pipeline: Current step position in the DAG
+            row_data: Optional row data (defaults to parent's data)
 
         Returns:
             List of child TokenInfo, one per branch
         """
+        data = row_data if row_data is not None else parent_token.row_data
+
         children = self._recorder.fork_token(
-            parent_token_id=parent.token_id,
-            row_id=parent.row_id,
+            parent_token_id=parent_token.token_id,
+            row_id=parent_token.row_id,
             branches=branches,
+            step_in_pipeline=step_in_pipeline,
         )
 
         return [
             TokenInfo(
-                row_id=parent.row_id,
+                row_id=parent_token.row_id,
                 token_id=child.token_id,
-                row_data=parent.row_data.copy(),
+                row_data=data.copy(),
                 branch_name=child.branch_name,
-                step_index=parent.step_index,
             )
             for child in children
         ]
@@ -619,12 +708,17 @@ class TokenManager:
         self,
         parents: list[TokenInfo],
         merged_data: dict[str, Any],
+        step_in_pipeline: int,
     ) -> TokenInfo:
         """Coalesce multiple tokens into one.
+
+        The step_in_pipeline is required because the Orchestrator/RowProcessor
+        owns step position - TokenManager doesn't track it.
 
         Args:
             parents: Parent tokens to merge
             merged_data: Merged row data
+            step_in_pipeline: Current step position in the DAG
 
         Returns:
             Merged TokenInfo
@@ -635,16 +729,13 @@ class TokenManager:
         merged = self._recorder.coalesce_tokens(
             parent_token_ids=[p.token_id for p in parents],
             row_id=row_id,
+            step_in_pipeline=step_in_pipeline,
         )
-
-        # Step index is max of parents + 1
-        max_step = max(p.step_index for p in parents)
 
         return TokenInfo(
             row_id=row_id,
             token_id=merged.token_id,
             row_data=merged_data,
-            step_index=max_step + 1,
         )
 
     def update_row_data(
@@ -666,25 +757,11 @@ class TokenManager:
             token_id=token.token_id,
             row_data=new_data,
             branch_name=token.branch_name,
-            step_index=token.step_index,
         )
 
-    def advance_step(self, token: TokenInfo) -> TokenInfo:
-        """Increment token's step index.
-
-        Args:
-            token: Token to advance
-
-        Returns:
-            Updated TokenInfo with incremented step_index
-        """
-        return TokenInfo(
-            row_id=token.row_id,
-            token_id=token.token_id,
-            row_data=token.row_data,
-            branch_name=token.branch_name,
-            step_index=token.step_index + 1,
-        )
+    # NOTE: No advance_step() method - step position is the authority of
+    # Orchestrator/RowProcessor, not TokenManager. They track where tokens
+    # are in the DAG and pass step_in_pipeline when needed.
 ```
 
 ### Step 4: Run tests to verify they pass
@@ -692,7 +769,27 @@ class TokenManager:
 Run: `pytest tests/engine/test_tokens.py -v`
 Expected: PASS
 
-### Step 5: Commit
+### Step 5: Phase 3A Dependency
+
+**IMPORTANT**: This task requires Phase 3A's `LandscapeRecorder.fork_token()` and
+`LandscapeRecorder.coalesce_tokens()` to accept a `step_in_pipeline` parameter:
+
+```python
+# In LandscapeRecorder.fork_token():
+def fork_token(
+    self,
+    parent_token_id: str,
+    row_id: str,
+    branches: list[str],
+    step_in_pipeline: int,  # NEW PARAMETER
+) -> list[Token]:
+    # ... insert into token_parents with step_in_pipeline
+```
+
+The `token_parents` table has a `step_in_pipeline` column that tracks when the
+fork/join occurred in the pipeline. Without this, we'd lose DAG position audit info.
+
+### Step 6: Commit
 
 ```bash
 git add src/elspeth/engine/tokens.py tests/engine/test_tokens.py
@@ -1059,9 +1156,11 @@ class TestGateExecutor:
         )
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
-        result, _ = executor.execute_gate(gate=gate, token=token, ctx=ctx)
+        outcome = executor.execute_gate(
+            gate=gate, token=token, ctx=ctx, step_in_pipeline=0
+        )
 
-        assert result.action.kind == "continue"
+        assert outcome.result.action.kind == "continue"
 
     def test_execute_gate_route(self) -> None:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
@@ -1129,10 +1228,72 @@ class TestGateExecutor:
         )
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
-        result, _ = executor.execute_gate(gate=gate, token=token, ctx=ctx)
+        outcome = executor.execute_gate(
+            gate=gate, token=token, ctx=ctx, step_in_pipeline=0
+        )
 
-        assert result.action.kind == "route_to_sink"
-        assert result.action.destinations == ("high_values",)
+        assert outcome.result.action.kind == "route_to_sink"
+        assert outcome.result.action.destinations == ("high_values",)
+        assert outcome.sink_name == "high_values"  # GateOutcome captures destination
+
+    def test_missing_edge_raises_error(self) -> None:
+        """Missing edge registration must raise, not silently drop routing."""
+        import pytest
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import GateExecutor, MissingEdgeError
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenInfo
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import GateResult, RoutingAction
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        gate_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="threshold",
+            node_type="gate",
+            plugin_version="1.0",
+            config={},
+        )
+        # NOTE: No sink node registered, no edge registered
+
+        class ThresholdGate:
+            name = "threshold"
+            node_id = gate_node.node_id
+
+            def evaluate(self, row: dict, ctx: PluginContext) -> GateResult:
+                return GateResult(
+                    row=row,
+                    action=RoutingAction.route_to_sink("nonexistent_sink"),
+                )
+
+        gate = ThresholdGate()
+        ctx = PluginContext(run_id=run.run_id, config={})
+        # Empty edge_map - no edges registered
+        executor = GateExecutor(recorder, SpanFactory(), edge_map={})
+
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="token-1",
+            row_data={"value": 200},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=gate_node.node_id,
+            row_index=0,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+
+        with pytest.raises(MissingEdgeError) as exc_info:
+            executor.execute_gate(
+                gate=gate, token=token, ctx=ctx, step_in_pipeline=0
+            )
+
+        assert exc_info.value.node_id == gate_node.node_id
+        assert exc_info.value.label == "nonexistent_sink"
 ```
 
 ### Step 2: Run test to verify it fails
@@ -1146,6 +1307,35 @@ Expected: FAIL
 # Add to src/elspeth/engine/executors.py
 
 from elspeth.plugins.results import GateResult, RoutingAction
+
+
+class MissingEdgeError(Exception):
+    """Raised when routing refers to an unregistered edge.
+
+    This is an audit integrity error - silent edge loss is unacceptable.
+    """
+
+    def __init__(self, node_id: str, label: str) -> None:
+        self.node_id = node_id
+        self.label = label
+        super().__init__(
+            f"No edge registered from node {node_id} with label '{label}'. "
+            "Audit trail would be incomplete - refusing to proceed."
+        )
+
+
+@dataclass
+class GateOutcome:
+    """Result of gate execution with routing information.
+
+    This structured return ensures routing destinations are explicit,
+    not inferred later by the orchestrator.
+    """
+
+    result: GateResult
+    updated_token: TokenInfo
+    child_tokens: list[TokenInfo]  # Non-empty only for fork_to_paths
+    sink_name: str | None  # Non-None only for route_to_sink
 
 
 class GateLike(Protocol):
@@ -1200,16 +1390,23 @@ class GateExecutor:
         gate: GateLike,
         token: TokenInfo,
         ctx: PluginContext,
-    ) -> tuple[GateResult, TokenInfo]:
+        step_in_pipeline: int,
+        token_manager: "TokenManager | None" = None,
+    ) -> "GateOutcome":
         """Execute a gate with full audit recording.
 
         Args:
             gate: Gate plugin to execute
             token: Current token with row data
             ctx: Plugin context
+            step_in_pipeline: Current position in DAG (Orchestrator is authority)
+            token_manager: Required for fork_to_paths to create child tokens
 
         Returns:
-            Tuple of (GateResult with audit fields, updated TokenInfo)
+            GateOutcome containing result, updated token(s), and routing info
+
+        Raises:
+            MissingEdgeError: If routing refers to an unregistered edge (audit loss prevention)
         """
         input_hash = stable_hash(token.row_data)
 
@@ -1242,11 +1439,47 @@ class GateExecutor:
         result.output_hash = stable_hash(result.row)
         result.duration_ms = duration_ms
 
-        # Record routing event(s)
-        if result.action.kind != "continue":
-            self._record_routing(state.state_id, gate.node_id, result.action)
+        # Handle routing based on action kind
+        child_tokens: list[TokenInfo] = []
+        sink_name: str | None = None
 
-        # Complete node state
+        if result.action.kind == "continue":
+            # Simple continue - single updated token
+            updated_token = TokenInfo(
+                row_id=token.row_id,
+                token_id=token.token_id,
+                row_data=result.row,
+                branch_name=token.branch_name,
+            )
+        elif result.action.kind == "route_to_sink":
+            # Route to sink - record routing event, return sink destination
+            sink_name = result.action.destinations[0]
+            self._record_routing(state.state_id, gate.node_id, result.action)
+            updated_token = TokenInfo(
+                row_id=token.row_id,
+                token_id=token.token_id,
+                row_data=result.row,
+                branch_name=token.branch_name,
+            )
+        elif result.action.kind == "fork_to_paths":
+            # Fork - create child tokens for each path
+            if token_manager is None:
+                raise ValueError("token_manager required for fork_to_paths")
+
+            self._record_routing(state.state_id, gate.node_id, result.action)
+            child_tokens = token_manager.fork_token(
+                parent_token=token,
+                branches=list(result.action.destinations),
+                step_in_pipeline=step_in_pipeline,
+                row_data=result.row,
+            )
+            # Parent token terminates here - return first child as "updated"
+            updated_token = child_tokens[0] if child_tokens else token
+        else:
+            raise ValueError(f"Unknown action kind: {result.action.kind}")
+
+        # Complete node state - always "completed" for successful execution
+        # Terminal state (ROUTED, FORKED) is derived from routing_events/token_parents
         self._recorder.complete_node_state(
             state_id=state.state_id,
             status="completed",
@@ -1254,15 +1487,12 @@ class GateExecutor:
             duration_ms=duration_ms,
         )
 
-        updated_token = TokenInfo(
-            row_id=token.row_id,
-            token_id=token.token_id,
-            row_data=result.row,
-            branch_name=token.branch_name,
-            step_index=token.step_index + 1,
+        return GateOutcome(
+            result=result,
+            updated_token=updated_token,
+            child_tokens=child_tokens,
+            sink_name=sink_name,
         )
-
-        return result, updated_token
 
     def _record_routing(
         self,
@@ -1270,31 +1500,39 @@ class GateExecutor:
         node_id: str,
         action: RoutingAction,
     ) -> None:
-        """Record routing events for a routing action."""
+        """Record routing events for a routing action.
+
+        Raises:
+            MissingEdgeError: If any destination has no registered edge.
+                This is a hard error - silent audit loss is unacceptable.
+        """
         if len(action.destinations) == 1:
-            # Single destination
-            edge_id = self._edge_map.get((node_id, action.destinations[0]))
-            if edge_id:
-                self._recorder.record_routing_event(
-                    state_id=state_id,
-                    edge_id=edge_id,
-                    mode=action.mode,
-                    reason=action.reason,
-                )
+            # Single destination - must have registered edge
+            dest = action.destinations[0]
+            edge_id = self._edge_map.get((node_id, dest))
+            if edge_id is None:
+                raise MissingEdgeError(node_id=node_id, label=dest)
+
+            self._recorder.record_routing_event(
+                state_id=state_id,
+                edge_id=edge_id,
+                mode=action.mode,
+                reason=action.reason,
+            )
         else:
-            # Multiple destinations (fork)
+            # Multiple destinations (fork) - all must have registered edges
             routes = []
             for dest in action.destinations:
                 edge_id = self._edge_map.get((node_id, dest))
-                if edge_id:
-                    routes.append({"edge_id": edge_id, "mode": action.mode})
+                if edge_id is None:
+                    raise MissingEdgeError(node_id=node_id, label=dest)
+                routes.append({"edge_id": edge_id, "mode": action.mode})
 
-            if routes:
-                self._recorder.record_routing_events(
-                    state_id=state_id,
-                    routes=routes,
-                    reason=action.reason,
-                )
+            self._recorder.record_routing_events(
+                state_id=state_id,
+                routes=routes,
+                reason=action.reason,
+            )
 ```
 
 ### Step 4: Run tests to verify they pass

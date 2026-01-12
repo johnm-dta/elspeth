@@ -38,10 +38,12 @@ class TestRunCommand:
     def test_run_executes_pipeline(
         self, pipeline_settings: Path, tmp_path: Path
     ) -> None:
-        """run executes pipeline and creates output."""
+        """run --execute executes pipeline and creates output."""
         from elspeth.cli import app
 
-        result = runner.invoke(app, ["run", "--settings", str(pipeline_settings)])
+        result = runner.invoke(
+            app, ["run", "--settings", str(pipeline_settings), "--execute"]
+        )
         assert result.exit_code == 0
 
         # Check output was created
@@ -49,13 +51,23 @@ class TestRunCommand:
         assert output_file.exists()
 
     def test_run_shows_summary(self, pipeline_settings: Path) -> None:
-        """run shows execution summary."""
+        """run --execute shows execution summary."""
         from elspeth.cli import app
 
-        result = runner.invoke(app, ["run", "--settings", str(pipeline_settings)])
+        result = runner.invoke(
+            app, ["run", "--settings", str(pipeline_settings), "--execute"]
+        )
         assert result.exit_code == 0
         # Use result.output to include both stdout and stderr
         assert "completed" in result.output.lower() or "rows" in result.output.lower()
+
+    def test_run_without_execute_shows_warning(self, pipeline_settings: Path) -> None:
+        """run without --execute shows warning and exits non-zero."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, ["run", "--settings", str(pipeline_settings)])
+        assert result.exit_code != 0
+        assert "--execute" in result.output
 
     def test_run_missing_settings(self) -> None:
         """run exits non-zero for missing settings file."""

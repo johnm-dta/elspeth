@@ -58,6 +58,12 @@ def run(
         "-n",
         help="Validate and show what would run without executing.",
     ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        "-x",
+        help="Actually execute the pipeline (required for safety).",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -65,7 +71,11 @@ def run(
         help="Show detailed output.",
     ),
 ) -> None:
-    """Execute a pipeline run."""
+    """Execute a pipeline run.
+
+    Requires --execute flag to actually run (safety feature).
+    Use --dry-run to validate configuration without executing.
+    """
     settings_path = Path(settings)
 
     # Check file exists
@@ -94,6 +104,16 @@ def run(
         typer.echo(f"  Source: {config['source']['plugin']}")
         typer.echo(f"  Sinks: {', '.join(config['sinks'].keys())}")
         return
+
+    # Safety check: require explicit --execute flag
+    if not execute:
+        typer.echo("Pipeline configuration valid.")
+        typer.echo(f"  Source: {config['source']['plugin']}")
+        typer.echo(f"  Sinks: {', '.join(config['sinks'].keys())}")
+        typer.echo("")
+        typer.echo("To execute, add --execute (or -x) flag:", err=True)
+        typer.echo(f"  elspeth run -s {settings} --execute", err=True)
+        raise typer.Exit(1)
 
     # Execute pipeline
     try:

@@ -17,7 +17,12 @@ from elspeth.core.landscape import LandscapeRecorder
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenInfo
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.results import GateResult, RoutingAction, TransformResult
+from elspeth.plugins.results import (
+    AcceptResult,
+    GateResult,
+    RoutingAction,
+    TransformResult,
+)
 
 if TYPE_CHECKING:
     from elspeth.engine.tokens import TokenManager
@@ -402,3 +407,207 @@ class GateExecutor:
                 routes=routes,
                 reason=dict(action.reason) if action.reason else None,
             )
+
+
+class AggregationLike(Protocol):
+    """Protocol for aggregation-like plugins.
+
+    Aggregations collect multiple rows into batches and flush them when
+    triggered. The _batch_id is mutable state managed by AggregationExecutor.
+    """
+
+    name: str
+    node_id: str
+    _batch_id: str | None  # Mutable, managed by executor
+
+    def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
+        """Accept a row into the current batch.
+
+        Returns AcceptResult indicating if row was accepted and if batch should trigger.
+        """
+        ...
+
+    def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+        """Flush the current batch and return output rows."""
+        ...
+
+
+class AggregationExecutor:
+    """Executes aggregations with batch tracking and audit recording.
+
+    Manages the lifecycle of batches:
+    1. Create batch on first accept (if _batch_id is None)
+    2. Track batch members as rows are accepted
+    3. Transition batch through states: draft -> executing -> completed/failed
+    4. Reset _batch_id after flush for next batch
+
+    CRITICAL: Terminal state CONSUMED_IN_BATCH is DERIVED from batch_members table,
+    NOT stored in node_states.status (which is always "completed" for successful accepts).
+
+    Example:
+        executor = AggregationExecutor(recorder, span_factory, run_id)
+
+        # Accept rows into batch
+        result = executor.accept(aggregation, token, ctx, step_in_pipeline)
+        if result.trigger:
+            outputs = executor.flush(aggregation, ctx, "count_reached", step_in_pipeline)
+    """
+
+    def __init__(
+        self,
+        recorder: LandscapeRecorder,
+        span_factory: SpanFactory,
+        run_id: str,
+    ) -> None:
+        """Initialize executor.
+
+        Args:
+            recorder: Landscape recorder for audit trail
+            span_factory: Span factory for tracing
+            run_id: Run identifier for batch creation
+        """
+        self._recorder = recorder
+        self._spans = span_factory
+        self._run_id = run_id
+        self._member_counts: dict[str, int] = {}  # batch_id -> count for ordinals
+
+    def accept(
+        self,
+        aggregation: AggregationLike,
+        token: TokenInfo,
+        ctx: PluginContext,
+        step_in_pipeline: int,
+    ) -> AcceptResult:
+        """Accept a row into an aggregation batch.
+
+        Creates batch on first accept (if aggregation._batch_id is None).
+        Records batch membership for accepted rows.
+
+        Args:
+            aggregation: Aggregation plugin to execute
+            token: Current token with row data
+            ctx: Plugin context
+            step_in_pipeline: Current position in DAG (Orchestrator is authority)
+
+        Returns:
+            AcceptResult with accepted flag, trigger flag, and batch_id
+
+        Raises:
+            Exception: Re-raised from aggregation.accept() after recording failure
+        """
+        # Create batch on first accept
+        if aggregation._batch_id is None:
+            batch = self._recorder.create_batch(
+                run_id=self._run_id,
+                aggregation_node_id=aggregation.node_id,
+            )
+            aggregation._batch_id = batch.batch_id
+            self._member_counts[batch.batch_id] = 0
+
+        # Begin node state for this accept operation
+        state = self._recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=aggregation.node_id,
+            step_index=step_in_pipeline,
+            input_data=token.row_data,
+        )
+
+        start = time.perf_counter()
+        try:
+            result = aggregation.accept(token.row_data, ctx)
+            duration_ms = (time.perf_counter() - start) * 1000
+
+            if result.accepted:
+                ordinal = self._member_counts[aggregation._batch_id]
+                self._recorder.add_batch_member(
+                    batch_id=aggregation._batch_id,
+                    token_id=token.token_id,
+                    ordinal=ordinal,
+                )
+                self._member_counts[aggregation._batch_id] = ordinal + 1
+                result.batch_id = aggregation._batch_id
+
+            # Complete node state - always "completed" for successful accept
+            # Terminal state CONSUMED_IN_BATCH is derived from batch_members
+            self._recorder.complete_node_state(
+                state_id=state.state_id,
+                status="completed" if result.accepted else "rejected",
+                duration_ms=duration_ms,
+            )
+            return result
+
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start) * 1000
+            # Record failure
+            self._recorder.complete_node_state(
+                state_id=state.state_id,
+                status="failed",
+                duration_ms=duration_ms,
+                error={"exception": str(e), "type": type(e).__name__},
+            )
+            raise
+
+    def flush(
+        self,
+        aggregation: AggregationLike,
+        ctx: PluginContext,
+        trigger_reason: str,
+        step_in_pipeline: int,
+    ) -> list[dict[str, Any]]:
+        """Flush an aggregation batch and return output rows.
+
+        Transitions batch through: draft -> executing -> completed/failed.
+        Resets aggregation._batch_id to None for next batch.
+
+        Args:
+            aggregation: Aggregation plugin to flush
+            ctx: Plugin context
+            trigger_reason: Why the batch was triggered (e.g., "count_reached", "end_of_input")
+            step_in_pipeline: Current position in DAG (for audit context)
+
+        Returns:
+            List of output rows from the aggregation
+
+        Raises:
+            ValueError: If no batch to flush (aggregation._batch_id is None)
+            Exception: Re-raised from aggregation.flush() after recording failure
+        """
+        batch_id = aggregation._batch_id
+        if batch_id is None:
+            raise ValueError(
+                f"No batch to flush for aggregation {aggregation.node_id}. "
+                "Call accept() first to create a batch."
+            )
+
+        # Transition batch to executing
+        self._recorder.update_batch_status(
+            batch_id=batch_id,
+            status="executing",
+            trigger_reason=trigger_reason,
+        )
+
+        # Execute flush within aggregation span
+        with self._spans.aggregation_span(aggregation.name, batch_id=batch_id):
+            try:
+                outputs = aggregation.flush(ctx)
+
+                # Transition batch to completed
+                self._recorder.update_batch_status(
+                    batch_id=batch_id,
+                    status="completed",
+                )
+
+                # Reset for next batch
+                aggregation._batch_id = None
+                if batch_id in self._member_counts:
+                    del self._member_counts[batch_id]
+
+                return outputs
+
+            except Exception:
+                # Transition batch to failed
+                self._recorder.update_batch_status(
+                    batch_id=batch_id,
+                    status="failed",
+                )
+                raise

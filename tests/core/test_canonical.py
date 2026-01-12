@@ -110,3 +110,39 @@ class TestNumpyTypeConversion:
         assert result == [1, 2, 3]
         assert type(result) is list
         assert all(type(x) is int for x in result)
+
+
+import pandas as pd
+
+
+class TestPandasTypeConversion:
+    """Pandas types must be converted to JSON-safe primitives."""
+
+    def test_pandas_timestamp_naive_to_utc_iso(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        ts = pd.Timestamp("2026-01-12 10:30:00")
+        result = _normalize_value(ts)
+        assert result == "2026-01-12T10:30:00+00:00"
+        assert type(result) is str
+
+    def test_pandas_timestamp_aware_to_utc_iso(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        ts = pd.Timestamp("2026-01-12 10:30:00", tz="US/Eastern")
+        result = _normalize_value(ts)
+        # Should be converted to UTC
+        assert "+00:00" in result or "Z" in result
+        assert type(result) is str
+
+    def test_pandas_nat_to_none(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        result = _normalize_value(pd.NaT)
+        assert result is None
+
+    def test_pandas_na_to_none(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        result = _normalize_value(pd.NA)
+        assert result is None

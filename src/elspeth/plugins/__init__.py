@@ -17,25 +17,31 @@ Phase 3 Integration:
 """
 
 # Results
-from elspeth.plugins.results import (
-    AcceptResult,
-    GateResult,
-    RoutingAction,
-    RowOutcome,
-    TransformResult,
+# Base classes
+from elspeth.plugins.base import (
+    BaseAggregation,
+    BaseGate,
+    BaseSink,
+    BaseSource,
+    BaseTransform,
 )
 
 # Context
 from elspeth.plugins.context import PluginContext
 
-# Schemas
-from elspeth.plugins.schemas import (
-    CompatibilityResult,
-    PluginSchema,
-    SchemaValidationError,
-    check_compatibility,
-    validate_row,
+# Enums
+from elspeth.plugins.enums import (
+    Determinism,
+    NodeType,
+    RoutingKind,
+    RoutingMode,
 )
+
+# Hookspecs
+from elspeth.plugins.hookspecs import hookimpl, hookspec
+
+# Manager
+from elspeth.plugins.manager import PluginManager, PluginSpec
 
 # Protocols
 from elspeth.plugins.protocols import (
@@ -47,31 +53,24 @@ from elspeth.plugins.protocols import (
     SourceProtocol,
     TransformProtocol,
 )
-
-# Base classes
-from elspeth.plugins.base import (
-    BaseAggregation,
-    BaseGate,
-    BaseSink,
-    BaseSource,
-    BaseTransform,
+from elspeth.plugins.results import (
+    AcceptResult,
+    GateResult,
+    RoutingAction,
+    RowOutcome,
+    TransformResult,
 )
 
-# Manager
-from elspeth.plugins.manager import PluginManager, PluginSpec
-
-# Hookspecs
-from elspeth.plugins.hookspecs import hookimpl, hookspec
-
-# Enums
-from elspeth.plugins.enums import (
-    Determinism,
-    NodeType,
-    RoutingKind,
-    RoutingMode,
+# Schemas
+from elspeth.plugins.schemas import (
+    CompatibilityResult,
+    PluginSchema,
+    SchemaValidationError,
+    check_compatibility,
+    validate_row,
 )
 
-__all__ = [
+__all__ = [  # noqa: RUF022  # Grouped by category for readability
     # Results
     "AcceptResult",
     "GateResult",

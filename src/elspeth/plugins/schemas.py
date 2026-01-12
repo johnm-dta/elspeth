@@ -9,7 +9,8 @@ This enables:
 - Landscape context recording
 """
 
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from types import UnionType
 from typing import Any, TypeVar, Union, get_args, get_origin
 
@@ -184,7 +185,7 @@ def check_compatibility(
 def _type_name(t: Any) -> str:
     """Get readable name for a type annotation."""
     if hasattr(t, "__name__"):
-        return t.__name__
+        return str(t.__name__)
     return str(t)
 
 

@@ -10,9 +10,9 @@ Phase 3 Integration Points:
 - payload_store: PayloadStore for large blob storage
 """
 
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ContextManager
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # These types are available in Phase 3
@@ -85,7 +85,7 @@ class PluginContext:
                 return default
         return value
 
-    def start_span(self, name: str) -> ContextManager["Span | None"]:
+    def start_span(self, name: str) -> AbstractContextManager["Span | None"]:
         """Start an OpenTelemetry span.
 
         Returns nullcontext if tracer not configured.

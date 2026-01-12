@@ -44,7 +44,7 @@ class ElspethSourceSpec:
     """Hook specifications for source plugins."""
 
     @hookspec
-    def elspeth_get_source(self) -> list[type["SourceProtocol"]]:
+    def elspeth_get_source(self) -> list[type["SourceProtocol"]]:  # type: ignore[empty-body]
         """Return source plugin classes.
 
         Returns:
@@ -56,7 +56,7 @@ class ElspethTransformSpec:
     """Hook specifications for transform plugins."""
 
     @hookspec
-    def elspeth_get_transforms(self) -> list[type["TransformProtocol"]]:
+    def elspeth_get_transforms(self) -> list[type["TransformProtocol"]]:  # type: ignore[empty-body]
         """Return transform plugin classes.
 
         Returns:
@@ -64,7 +64,7 @@ class ElspethTransformSpec:
         """
 
     @hookspec
-    def elspeth_get_gates(self) -> list[type["GateProtocol"]]:
+    def elspeth_get_gates(self) -> list[type["GateProtocol"]]:  # type: ignore[empty-body]
         """Return gate plugin classes.
 
         Returns:
@@ -72,7 +72,7 @@ class ElspethTransformSpec:
         """
 
     @hookspec
-    def elspeth_get_aggregations(self) -> list[type["AggregationProtocol"]]:
+    def elspeth_get_aggregations(self) -> list[type["AggregationProtocol"]]:  # type: ignore[empty-body]
         """Return aggregation plugin classes.
 
         Returns:
@@ -80,7 +80,7 @@ class ElspethTransformSpec:
         """
 
     @hookspec
-    def elspeth_get_coalesces(self) -> list[type["CoalesceProtocol"]]:
+    def elspeth_get_coalesces(self) -> list[type["CoalesceProtocol"]]:  # type: ignore[empty-body]
         """Return coalesce plugin classes.
 
         Returns:
@@ -92,7 +92,7 @@ class ElspethSinkSpec:
     """Hook specifications for sink plugins."""
 
     @hookspec
-    def elspeth_get_sinks(self) -> list[type["SinkProtocol"]]:
+    def elspeth_get_sinks(self) -> list[type["SinkProtocol"]]:  # type: ignore[empty-body]
         """Return sink plugin classes.
 
         Returns:

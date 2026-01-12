@@ -6,10 +6,11 @@ All fields needed for Phase 3 Landscape/OpenTelemetry integration are
 included here, even if not used until Phase 3.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 
 class RowOutcome(Enum):

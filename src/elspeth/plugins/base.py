@@ -68,27 +68,25 @@ class BaseTransform(ABC):
         ...
 
     # === Lifecycle Hooks (Phase 3) ===
+    # These are intentionally empty - optional hooks for subclasses to override
 
-    def on_register(self, ctx: PluginContext) -> None:
+    def on_register(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called when plugin is registered with the engine.
 
         Override for one-time setup.
         """
-        pass
 
-    def on_start(self, ctx: PluginContext) -> None:
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called at the start of each run.
 
         Override for per-run initialization.
         """
-        pass
 
-    def on_complete(self, ctx: PluginContext) -> None:
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called at the end of each run.
 
         Override for cleanup.
         """
-        pass
 
 
 class BaseGate(ABC):
@@ -142,17 +140,14 @@ class BaseGate(ABC):
 
     # === Lifecycle Hooks (Phase 3) ===
 
-    def on_register(self, ctx: PluginContext) -> None:
+    def on_register(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called when plugin is registered."""
-        pass
 
-    def on_start(self, ctx: PluginContext) -> None:
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called at start of run."""
-        pass
 
-    def on_complete(self, ctx: PluginContext) -> None:
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called at end of run."""
-        pass
 
 
 class BaseAggregation(ABC):
@@ -219,26 +214,22 @@ class BaseAggregation(ABC):
         """Process batch and return results."""
         ...
 
-    def reset(self) -> None:
+    def reset(self) -> None:  # noqa: B027
         """Reset internal state.
 
         Override if you have state beyond what __init__ sets up.
         """
-        pass
 
     # === Lifecycle Hooks (Phase 3) ===
 
-    def on_register(self, ctx: PluginContext) -> None:
+    def on_register(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called when plugin is registered."""
-        pass
 
-    def on_start(self, ctx: PluginContext) -> None:
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called at start of run."""
-        pass
 
-    def on_complete(self, ctx: PluginContext) -> None:
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called at end of run."""
-        pass
 
 
 class BaseSink(ABC):
@@ -295,17 +286,14 @@ class BaseSink(ABC):
 
     # === Lifecycle Hooks (Phase 3) ===
 
-    def on_register(self, ctx: PluginContext) -> None:
+    def on_register(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called when plugin is registered."""
-        pass
 
-    def on_start(self, ctx: PluginContext) -> None:
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called at start of run."""
-        pass
 
-    def on_complete(self, ctx: PluginContext) -> None:
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called at end of run (before close)."""
-        pass
 
 
 class BaseSource(ABC):
@@ -353,6 +341,5 @@ class BaseSource(ABC):
 
     # === Lifecycle Hooks (Phase 3) ===
 
-    def on_start(self, ctx: PluginContext) -> None:
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called before load()."""
-        pass

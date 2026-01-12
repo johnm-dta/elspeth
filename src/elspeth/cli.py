@@ -98,11 +98,53 @@ plugins_app = typer.Typer(help="Plugin management commands.")
 app.add_typer(plugins_app, name="plugins")
 
 
+# Registry of built-in plugins (static for Phase 4)
+PLUGIN_REGISTRY = {
+    "source": [
+        ("csv", "Load rows from CSV files"),
+        ("json", "Load rows from JSON/JSONL files"),
+    ],
+    "transform": [
+        # No built-in transforms in Phase 4
+    ],
+    "sink": [
+        ("csv", "Write rows to CSV files"),
+        ("json", "Write rows to JSON/JSONL files"),
+        ("database", "Write rows to database tables"),
+    ],
+}
+
+
 @plugins_app.command("list")
-def plugins_list() -> None:
+def plugins_list(
+    plugin_type: str | None = typer.Option(
+        None,
+        "--type",
+        "-t",
+        help="Filter by plugin type (source, transform, sink).",
+    ),
+) -> None:
     """List available plugins."""
-    typer.echo("Plugins list not yet implemented.")
-    raise typer.Exit(1)
+    valid_types = {"source", "transform", "sink"}
+
+    if plugin_type and plugin_type not in valid_types:
+        typer.echo(f"Error: Invalid type '{plugin_type}'.", err=True)
+        typer.echo(f"Valid types: {', '.join(sorted(valid_types))}", err=True)
+        raise typer.Exit(1)
+
+    types_to_show = [plugin_type] if plugin_type else list(PLUGIN_REGISTRY.keys())
+
+    for ptype in types_to_show:
+        plugins = PLUGIN_REGISTRY.get(ptype, [])
+        if plugins:
+            typer.echo(f"\n{ptype.upper()}S:")
+            for name, description in plugins:
+                typer.echo(f"  {name:12} - {description}")
+        elif ptype in valid_types:
+            typer.echo(f"\n{ptype.upper()}S:")
+            typer.echo("  (none available)")
+
+    typer.echo()  # Final newline
 
 
 if __name__ == "__main__":

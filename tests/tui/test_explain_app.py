@@ -18,7 +18,7 @@ class TestExplainApp:
         from elspeth.tui.explain_app import ExplainApp
 
         app = ExplainApp()
-        async with app.run_test() as pilot:
+        async with app.run_test() as _pilot:
             assert app.is_running
 
     @pytest.mark.asyncio
@@ -27,7 +27,7 @@ class TestExplainApp:
         from elspeth.tui.explain_app import ExplainApp
 
         app = ExplainApp()
-        async with app.run_test() as pilot:
+        async with app.run_test() as _pilot:
             # Check for header widget
             from textual.widgets import Header
 
@@ -40,7 +40,7 @@ class TestExplainApp:
         from elspeth.tui.explain_app import ExplainApp
 
         app = ExplainApp()
-        async with app.run_test() as pilot:
+        async with app.run_test() as _pilot:
             from textual.widgets import Footer
 
             footer = app.query_one(Footer)

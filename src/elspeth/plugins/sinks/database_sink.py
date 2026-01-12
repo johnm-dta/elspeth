@@ -56,9 +56,9 @@ class DatabaseSink(BaseSink):
 
         if self._table is None:
             # Infer columns from first row (all as String for simplicity)
-            columns = [
-                Column(key, String) for key in row.keys()
-            ]
+            columns = [Column(key, String) for key in row]
+            # Metadata is always set when engine is created
+            assert self._metadata is not None
             self._table = Table(
                 self._table_name,
                 self._metadata,

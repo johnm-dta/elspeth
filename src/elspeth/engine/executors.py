@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape import LandscapeRecorder
+from elspeth.core.landscape.models import Artifact, NodeState
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenInfo
 from elspeth.plugins.context import PluginContext
@@ -611,3 +612,151 @@ class AggregationExecutor:
                     status="failed",
                 )
                 raise
+
+
+class SinkLike(Protocol):
+    """Protocol for sink-like plugins.
+
+    This is an engine-internal adapter interface, not the same as Phase 2 SinkProtocol.
+    Real SinkProtocol plugins write single rows. SinkAdapter (Phase 4) bridges between them.
+
+    The write() method accepts a list of rows (batch write) and returns artifact info.
+    """
+
+    name: str
+    node_id: str
+
+    def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> dict[str, Any]:
+        """Write rows to sink.
+
+        Args:
+            rows: List of row data dictionaries
+            ctx: Plugin context
+
+        Returns:
+            Artifact info: {"path": str, "size_bytes": int, "content_hash": str}
+        """
+        ...
+
+
+class SinkExecutor:
+    """Executes sinks with artifact recording.
+
+    Wraps sink.write() to:
+    1. Create node_state for EACH token - this is how COMPLETED terminal state is derived
+    2. Time the operation
+    3. Record artifact produced by sink
+    4. Complete all token states
+    5. Emit OpenTelemetry span
+
+    CRITICAL: Every token reaching a sink gets a node_state. This is the audit
+    proof that the row reached its terminal state. The COMPLETED terminal state
+    is DERIVED from having a completed node_state at a sink node.
+
+    Example:
+        executor = SinkExecutor(recorder, span_factory, run_id)
+        artifact = executor.write(
+            sink=my_sink,
+            tokens=tokens_to_write,
+            ctx=ctx,
+            step_in_pipeline=5,
+        )
+    """
+
+    def __init__(
+        self,
+        recorder: LandscapeRecorder,
+        span_factory: SpanFactory,
+        run_id: str,
+    ) -> None:
+        """Initialize executor.
+
+        Args:
+            recorder: Landscape recorder for audit trail
+            span_factory: Span factory for tracing
+            run_id: Run identifier for artifact registration
+        """
+        self._recorder = recorder
+        self._spans = span_factory
+        self._run_id = run_id
+
+    def write(
+        self,
+        sink: SinkLike,
+        tokens: list[TokenInfo],
+        ctx: PluginContext,
+        step_in_pipeline: int,
+    ) -> Artifact | None:
+        """Write tokens to sink with artifact recording.
+
+        CRITICAL: Creates a node_state for EACH token written. This is how
+        we derive the COMPLETED terminal state - every token that reaches
+        a sink gets a completed node_state at the sink node.
+
+        Args:
+            sink: Sink plugin to write to
+            tokens: Tokens to write (may be empty)
+            ctx: Plugin context
+            step_in_pipeline: Current position in DAG (Orchestrator is authority)
+
+        Returns:
+            Artifact if tokens were written, None if empty
+
+        Raises:
+            Exception: Re-raised from sink.write() after recording failure
+        """
+        if not tokens:
+            return None
+
+        rows = [t.row_data for t in tokens]
+
+        # Create node_state for EACH token - this is how we derive COMPLETED terminal state
+        states: list[tuple[TokenInfo, NodeState]] = []
+        for token in tokens:
+            state = self._recorder.begin_node_state(
+                token_id=token.token_id,
+                node_id=sink.node_id,
+                step_index=step_in_pipeline,
+                input_data=token.row_data,
+            )
+            states.append((token, state))
+
+        # Execute sink write with timing and span
+        with self._spans.sink_span(sink.name):
+            start = time.perf_counter()
+            try:
+                artifact_info = sink.write(rows, ctx)
+                duration_ms = (time.perf_counter() - start) * 1000
+            except Exception as e:
+                duration_ms = (time.perf_counter() - start) * 1000
+                # Mark all token states as failed
+                for _, state in states:
+                    self._recorder.complete_node_state(
+                        state_id=state.state_id,
+                        status="failed",
+                        duration_ms=duration_ms,
+                        error={"exception": str(e), "type": type(e).__name__},
+                    )
+                raise
+
+        # Complete all token states - status="completed" means they reached terminal
+        for _, state in states:
+            self._recorder.complete_node_state(
+                state_id=state.state_id,
+                status="completed",
+                duration_ms=duration_ms,
+            )
+
+        # Register artifact (linked to first state for audit lineage)
+        first_state = states[0][1]
+        artifact = self._recorder.register_artifact(
+            run_id=self._run_id,
+            state_id=first_state.state_id,
+            sink_node_id=sink.node_id,
+            artifact_type=sink.name,
+            path=artifact_info.get("path", ""),
+            content_hash=artifact_info.get("content_hash", ""),
+            size_bytes=artifact_info.get("size_bytes", 0),
+        )
+
+        return artifact

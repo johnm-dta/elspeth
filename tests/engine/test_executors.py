@@ -1327,3 +1327,352 @@ class TestAggregationExecutor:
         for batch_id in batch_ids:
             members = recorder.get_batch_members(batch_id)
             assert len(members) == 2
+
+
+class TestSinkExecutor:
+    """Sink execution with artifact recording."""
+
+    def test_write_records_artifact(self) -> None:
+        """Write tokens to sink records artifact in Landscape."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenInfo
+        from elspeth.plugins.context import PluginContext
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        sink_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_output",
+            node_type="sink",
+            plugin_version="1.0",
+            config={"path": "/tmp/output.csv"},
+        )
+
+        # Mock sink that writes rows and returns artifact info
+        class CsvSink:
+            name = "csv_output"
+            node_id = sink_node.node_id
+
+            def write(
+                self, rows: list[dict[str, Any]], ctx: PluginContext
+            ) -> dict[str, Any]:
+                # Simulate writing rows and return artifact info
+                return {
+                    "path": "/tmp/output.csv",
+                    "size_bytes": 1024,
+                    "content_hash": "abc123",
+                }
+
+        sink = CsvSink()
+        ctx = PluginContext(run_id=run.run_id, config={})
+        executor = SinkExecutor(recorder, SpanFactory(), run.run_id)
+
+        # Create tokens
+        tokens = []
+        for i in range(3):
+            token = TokenInfo(
+                row_id=f"row-{i}",
+                token_id=f"token-{i}",
+                row_data={"value": i * 10},
+            )
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=sink_node.node_id,
+                row_index=i,
+                data=token.row_data,
+                row_id=token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+            tokens.append(token)
+
+        # Write tokens to sink
+        artifact = executor.write(
+            sink=sink,
+            tokens=tokens,
+            ctx=ctx,
+            step_in_pipeline=5,
+        )
+
+        # Verify artifact returned with correct info
+        assert artifact is not None
+        assert artifact.path_or_uri == "/tmp/output.csv"
+        assert artifact.size_bytes == 1024
+        assert artifact.content_hash == "abc123"
+        assert artifact.artifact_type == "csv_output"
+        assert artifact.sink_node_id == sink_node.node_id
+
+        # Verify artifact recorded in Landscape
+        artifacts = recorder.get_artifacts(run.run_id)
+        assert len(artifacts) == 1
+        assert artifacts[0].artifact_id == artifact.artifact_id
+
+        # Verify node_state created for EACH token (COMPLETED terminal state derivation)
+        for token in tokens:
+            states = recorder.get_node_states_for_token(token.token_id)
+            assert len(states) == 1
+            assert states[0].status == "completed"
+            assert states[0].node_id == sink_node.node_id
+            assert states[0].duration_ms is not None
+
+    def test_write_empty_tokens_returns_none(self) -> None:
+        """Write with empty tokens returns None without side effects."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.context import PluginContext
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        sink_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="empty_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+        )
+
+        class EmptySink:
+            name = "empty_sink"
+            node_id = sink_node.node_id
+
+            def write(
+                self, rows: list[dict[str, Any]], ctx: PluginContext
+            ) -> dict[str, Any]:
+                raise AssertionError("Should not be called for empty tokens")
+
+        sink = EmptySink()
+        ctx = PluginContext(run_id=run.run_id, config={})
+        executor = SinkExecutor(recorder, SpanFactory(), run.run_id)
+
+        # Write with empty tokens
+        artifact = executor.write(
+            sink=sink,
+            tokens=[],
+            ctx=ctx,
+            step_in_pipeline=5,
+        )
+
+        assert artifact is None
+
+        # Verify no artifacts recorded
+        artifacts = recorder.get_artifacts(run.run_id)
+        assert len(artifacts) == 0
+
+    def test_write_exception_records_failure(self) -> None:
+        """Sink raising exception still records audit state for all tokens."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenInfo
+        from elspeth.plugins.context import PluginContext
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        sink_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="exploding_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+        )
+
+        class ExplodingSink:
+            name = "exploding_sink"
+            node_id = sink_node.node_id
+
+            def write(
+                self, rows: list[dict[str, Any]], ctx: PluginContext
+            ) -> dict[str, Any]:
+                raise RuntimeError("disk full!")
+
+        sink = ExplodingSink()
+        ctx = PluginContext(run_id=run.run_id, config={})
+        executor = SinkExecutor(recorder, SpanFactory(), run.run_id)
+
+        # Create tokens
+        tokens = []
+        for i in range(2):
+            token = TokenInfo(
+                row_id=f"row-{i}",
+                token_id=f"token-{i}",
+                row_data={"value": i},
+            )
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=sink_node.node_id,
+                row_index=i,
+                data=token.row_data,
+                row_id=token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+            tokens.append(token)
+
+        # Write should raise
+        with pytest.raises(RuntimeError, match="disk full"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,
+                ctx=ctx,
+                step_in_pipeline=5,
+            )
+
+        # Verify failure recorded for ALL tokens
+        for token in tokens:
+            states = recorder.get_node_states_for_token(token.token_id)
+            assert len(states) == 1
+            assert states[0].status == "failed"
+            assert states[0].duration_ms is not None
+
+        # Verify no artifact recorded (write failed)
+        artifacts = recorder.get_artifacts(run.run_id)
+        assert len(artifacts) == 0
+
+    def test_write_multiple_batches_creates_multiple_artifacts(self) -> None:
+        """Multiple sink writes create separate artifacts."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenInfo
+        from elspeth.plugins.context import PluginContext
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        sink_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="batch_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+        )
+
+        class BatchSink:
+            name = "batch_sink"
+            node_id = sink_node.node_id
+            _batch_count: int = 0
+
+            def write(
+                self, rows: list[dict[str, Any]], ctx: PluginContext
+            ) -> dict[str, Any]:
+                self._batch_count += 1
+                return {
+                    "path": f"/tmp/batch_{self._batch_count}.json",
+                    "size_bytes": len(rows) * 100,
+                    "content_hash": f"hash_{self._batch_count}",
+                }
+
+        sink = BatchSink()
+        ctx = PluginContext(run_id=run.run_id, config={})
+        executor = SinkExecutor(recorder, SpanFactory(), run.run_id)
+
+        artifacts = []
+        # Write two batches
+        for batch_num in range(2):
+            tokens = []
+            for i in range(2):
+                idx = batch_num * 2 + i
+                token = TokenInfo(
+                    row_id=f"row-{idx}",
+                    token_id=f"token-{idx}",
+                    row_data={"batch": batch_num, "index": i},
+                )
+                row = recorder.create_row(
+                    run_id=run.run_id,
+                    source_node_id=sink_node.node_id,
+                    row_index=idx,
+                    data=token.row_data,
+                    row_id=token.row_id,
+                )
+                recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+                tokens.append(token)
+
+            artifact = executor.write(
+                sink=sink,
+                tokens=tokens,
+                ctx=ctx,
+                step_in_pipeline=5,
+            )
+            artifacts.append(artifact)
+
+        # Verify two distinct artifacts
+        assert len(artifacts) == 2
+        assert artifacts[0] is not None
+        assert artifacts[1] is not None
+        assert artifacts[0].artifact_id != artifacts[1].artifact_id
+        assert artifacts[0].path_or_uri == "/tmp/batch_1.json"
+        assert artifacts[1].path_or_uri == "/tmp/batch_2.json"
+
+        # Verify both in Landscape
+        all_artifacts = recorder.get_artifacts(run.run_id)
+        assert len(all_artifacts) == 2
+
+    def test_artifact_linked_to_first_state(self) -> None:
+        """Artifact is linked to first token's state_id for audit lineage."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenInfo
+        from elspeth.plugins.context import PluginContext
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        sink_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="linked_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+        )
+
+        class LinkedSink:
+            name = "linked_sink"
+            node_id = sink_node.node_id
+
+            def write(
+                self, rows: list[dict[str, Any]], ctx: PluginContext
+            ) -> dict[str, Any]:
+                return {"path": "/tmp/linked.csv", "size_bytes": 512, "content_hash": "xyz"}
+
+        sink = LinkedSink()
+        ctx = PluginContext(run_id=run.run_id, config={})
+        executor = SinkExecutor(recorder, SpanFactory(), run.run_id)
+
+        # Create multiple tokens
+        tokens = []
+        for i in range(3):
+            token = TokenInfo(
+                row_id=f"row-{i}",
+                token_id=f"token-{i}",
+                row_data={"index": i},
+            )
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=sink_node.node_id,
+                row_index=i,
+                data=token.row_data,
+                row_id=token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+            tokens.append(token)
+
+        artifact = executor.write(
+            sink=sink,
+            tokens=tokens,
+            ctx=ctx,
+            step_in_pipeline=5,
+        )
+
+        # Get first token's state
+        first_token_states = recorder.get_node_states_for_token(tokens[0].token_id)
+        assert len(first_token_states) == 1
+        first_state_id = first_token_states[0].state_id
+
+        # Verify artifact is linked to first state
+        assert artifact is not None
+        assert artifact.produced_by_state_id == first_state_id

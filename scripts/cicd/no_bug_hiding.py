@@ -18,6 +18,7 @@ import argparse
 import ast
 import json
 import sys
+from calendar import monthrange
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -29,6 +30,18 @@ import yaml
 # =============================================================================
 # Data Structures
 # =============================================================================
+
+
+def _add_one_month(today: date) -> date:
+    """Return a date one month after today, clamped to month length."""
+    if today.month == 12:
+        year = today.year + 1
+        month = 1
+    else:
+        year = today.year
+        month = today.month + 1
+    day = min(today.day, monthrange(year, month)[1])
+    return date(year, month, day)
 
 
 @dataclass(frozen=True)
@@ -51,14 +64,13 @@ class Finding:
 
     def suggested_allowlist_entry(self) -> dict[str, Any]:
         """Generate a suggested allowlist entry for this finding."""
+        today = date.today()
         return {
             "key": self.canonical_key,
             "owner": "<your-name>",
             "reason": "<explain why this is at a trust boundary>",
             "safety": "<explain how failures are handled>",
-            "expires": (date.today().replace(month=date.today().month + 1)).isoformat()
-            if date.today().month < 12
-            else (date.today().replace(year=date.today().year + 1, month=1)).isoformat(),
+            "expires": _add_one_month(today).isoformat(),
         }
 
 

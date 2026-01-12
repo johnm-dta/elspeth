@@ -384,3 +384,77 @@ class CoalesceProtocol(Protocol):
     def on_complete(self, ctx: "PluginContext") -> None:
         """Called at end of run."""
         ...
+
+
+@runtime_checkable
+class SinkProtocol(Protocol):
+    """Protocol for sink plugins.
+
+    Sinks output data to external destinations.
+    There can be multiple sinks per run.
+
+    Idempotency:
+    - Sinks receive idempotency keys: {run_id}:{row_id}:{sink_name}
+    - Sinks that cannot guarantee idempotency should set idempotent=False
+
+    Example:
+        class CSVSink:
+            name = "csv"
+            input_schema = RowSchema
+            idempotent = False  # Appends are not idempotent
+
+            def write(self, row: dict, ctx: PluginContext) -> None:
+                self._writer.writerow(row)
+
+            def flush(self) -> None:
+                self._file.flush()
+    """
+
+    name: str
+    input_schema: type["PluginSchema"]
+    idempotent: bool  # Can this sink handle retries safely?
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        """Initialize with configuration."""
+        ...
+
+    def write(
+        self,
+        row: dict[str, Any],
+        ctx: "PluginContext",
+    ) -> None:
+        """Write a row to the sink.
+
+        Args:
+            row: Row data to write
+            ctx: Plugin context
+        """
+        ...
+
+    def flush(self) -> None:
+        """Flush any buffered data.
+
+        Called periodically and at end of run.
+        """
+        ...
+
+    def close(self) -> None:
+        """Close the sink and release resources.
+
+        Called at end of run or on error.
+        """
+        ...
+
+    # === Optional Lifecycle Hooks ===
+
+    def on_register(self, ctx: "PluginContext") -> None:
+        """Called when plugin is registered."""
+        ...
+
+    def on_start(self, ctx: "PluginContext") -> None:
+        """Called at start of run."""
+        ...
+
+    def on_complete(self, ctx: "PluginContext") -> None:
+        """Called at end of run (before close)."""
+        ...

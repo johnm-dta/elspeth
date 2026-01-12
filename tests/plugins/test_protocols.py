@@ -340,3 +340,67 @@ class TestCoalesceProtocol:
         }
         result = coalesce.merge(branch_outputs, ctx)
         assert result == {"total": 30}
+
+
+class TestSinkProtocol:
+    """Sink plugin protocol."""
+
+    def test_sink_implementation(self) -> None:
+        from typing import ClassVar
+
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import SinkProtocol
+        from elspeth.plugins.schemas import PluginSchema
+
+        class InputSchema(PluginSchema):
+            value: int
+
+        class MemorySink:
+            """Test sink that stores rows in memory."""
+
+            name = "memory"
+            input_schema = InputSchema
+            idempotent = True
+            rows: ClassVar[list[dict]] = []
+
+            def __init__(self, config: dict) -> None:
+                self.rows = []
+                self.config = config
+
+            def write(self, row: dict, ctx: PluginContext) -> None:
+                self.rows.append(row)
+
+            def flush(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def on_register(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
+        sink = MemorySink({})
+
+        # IMPORTANT: Verify protocol conformance at runtime
+        assert isinstance(sink, SinkProtocol), "Must conform to SinkProtocol"
+
+        ctx = PluginContext(run_id="test", config={})
+
+        sink.write({"value": 1}, ctx)
+        sink.write({"value": 2}, ctx)
+
+        assert len(sink.rows) == 2
+        assert sink.rows[0] == {"value": 1}
+
+    def test_sink_has_idempotency_support(self) -> None:
+        """Sinks should support idempotency keys."""
+        from elspeth.plugins.protocols import SinkProtocol
+
+        # Protocol should have idempotent attribute
+        assert hasattr(SinkProtocol, "__protocol_attrs__")

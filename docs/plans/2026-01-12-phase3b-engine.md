@@ -3320,6 +3320,259 @@ class TestEngineIntegration:
         # Verify artifact was recorded
         artifacts = recorder.get_artifacts(result.run_id)
         assert len(artifacts) >= 1, "Should have at least one artifact from sink"
+
+    def test_audit_spine_intact(self) -> None:
+        """THE audit spine test: proves the chassis doesn't wobble.
+
+        A simple run must produce:
+        - runs: 1 record, status=completed
+        - nodes: source + transform + sink (3 minimum)
+        - tokens: at least the initial tokens
+        - node_states: at least one per node type exercised
+        - artifacts: 1 record for the sink
+
+        If this test fails, something fundamental is broken.
+        """
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+
+        class SimpleSource:
+            name = "simple_source"
+            def load(self, ctx):
+                yield {"x": 1}
+                yield {"x": 2}
+            def close(self):
+                pass
+
+        class PassThrough:
+            name = "passthrough"
+            def process(self, row, ctx):
+                return TransformResult.success(row)
+
+        class RecordingSink:
+            name = "recorder"
+            def write(self, rows, ctx):
+                return {"path": "memory://", "size_bytes": 0, "content_hash": "none"}
+
+        config = PipelineConfig(
+            source=SimpleSource(),
+            transforms=[PassThrough()],
+            sinks={"default": RecordingSink()},
+        )
+
+        result = Orchestrator(db).run(config)
+        recorder = LandscapeRecorder(db)
+
+        # === AUDIT SPINE ASSERTIONS ===
+
+        # 1. runs: exactly 1, status=completed
+        run = recorder.get_run(result.run_id)
+        assert run is not None, "Run must exist"
+        assert run.status == "completed", "Run must be completed"
+
+        # 2. nodes: source + transform + sink = 3
+        nodes = recorder.get_nodes(result.run_id)
+        node_types = {n.node_type for n in nodes}
+        assert "source" in node_types, "Must have source node"
+        assert "transform" in node_types, "Must have transform node"
+        assert "sink" in node_types, "Must have sink node"
+        assert len(nodes) == 3, f"Expected 3 nodes, got {len(nodes)}"
+
+        # 3. tokens: at least 2 (one per source row)
+        rows = recorder.get_rows(result.run_id)
+        assert len(rows) == 2, f"Expected 2 rows, got {len(rows)}"
+        token_count = sum(len(recorder.get_tokens(r.row_id)) for r in rows)
+        assert token_count >= 2, f"Expected at least 2 tokens, got {token_count}"
+
+        # 4. node_states: each token must have states at transform AND sink
+        for row in rows:
+            for token in recorder.get_tokens(row.row_id):
+                states = recorder.get_node_states(token.token_id)
+                state_node_types = {
+                    next(n.node_type for n in nodes if n.node_id == s.node_id)
+                    for s in states
+                }
+                assert "transform" in state_node_types, (
+                    f"Token {token.token_id} missing transform state"
+                )
+                assert "sink" in state_node_types, (
+                    f"Token {token.token_id} missing sink state"
+                )
+                # All states must be completed (not open, not failed)
+                for state in states:
+                    assert state.status == "completed", (
+                        f"State {state.state_id} should be completed, got {state.status}"
+                    )
+
+        # 5. artifacts: exactly 1 from sink
+        artifacts = recorder.get_artifacts(result.run_id)
+        assert len(artifacts) == 1, f"Expected 1 artifact, got {len(artifacts)}"
+
+    def test_audit_spine_with_routing(self) -> None:
+        """Audit spine with routing: proves routed tokens are tracked.
+
+        When a gate routes to a non-default sink:
+        - routing_events must exist
+        - node_states at the routed sink must be completed
+        """
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import GateResult, RoutingAction
+
+        db = LandscapeDB.in_memory()
+
+        class MixedSource:
+            name = "mixed"
+            def load(self, ctx):
+                yield {"val": 10}   # below threshold -> default
+                yield {"val": 100}  # above threshold -> high
+                yield {"val": 20}   # below threshold -> default
+            def close(self):
+                pass
+
+        class ThresholdGate:
+            name = "threshold"
+            def evaluate(self, row, ctx):
+                if row["val"] >= 50:
+                    return GateResult(row=row, action=RoutingAction.route_to_sink("high"))
+                return GateResult(row=row, action=RoutingAction.continue_())
+
+        class Collector:
+            name = "collector"
+            items = []
+            def write(self, rows, ctx):
+                self.items.extend(rows)
+                return {"path": "mem://", "size_bytes": 0, "content_hash": "x"}
+
+        default_sink = Collector()
+        high_sink = Collector()
+
+        config = PipelineConfig(
+            source=MixedSource(),
+            transforms=[ThresholdGate()],
+            sinks={"default": default_sink, "high": high_sink},
+        )
+
+        result = Orchestrator(db).run(config)
+        recorder = LandscapeRecorder(db)
+
+        # Verify routing happened correctly
+        assert len(default_sink.items) == 2, "2 rows should go to default"
+        assert len(high_sink.items) == 1, "1 row should go to high"
+
+        # === ROUTING AUDIT ASSERTIONS ===
+
+        # Get the gate node
+        nodes = recorder.get_nodes(result.run_id)
+        gate_node = next(n for n in nodes if n.node_type == "gate")
+
+        # Find the routed token (val=100)
+        rows = recorder.get_rows(result.run_id)
+        routed_row = next(r for r in rows if recorder.get_row_data(r.row_id)["val"] == 100)
+        routed_token = recorder.get_tokens(routed_row.row_id)[0]
+
+        # The routed token must have a routing_event at the gate
+        gate_state = next(
+            s for s in recorder.get_node_states(routed_token.token_id)
+            if s.node_id == gate_node.node_id
+        )
+        routing_events = recorder.get_routing_events(gate_state.state_id)
+        assert len(routing_events) >= 1, "Routed token must have routing_event"
+
+        # The routed token must reach the high sink
+        high_sink_node = next(n for n in nodes if n.plugin_name == "collector" and n != next(n2 for n2 in nodes if n2.plugin_name == "collector"))
+        # Simpler: just verify token has state at some sink node
+        token_states = recorder.get_node_states(routed_token.token_id)
+        sink_states = [s for s in token_states if any(n.node_id == s.node_id and n.node_type == "sink" for n in nodes)]
+        assert len(sink_states) == 1, "Routed token must reach exactly one sink"
+        assert sink_states[0].status == "completed"
+
+
+class TestNoSilentAuditLoss:
+    """Lock down the 'no silent audit loss' principle.
+
+    These tests exist to prevent a whole class of future incidents
+    where evidence is silently discarded.
+    """
+
+    def test_missing_edge_raises_not_skips(self) -> None:
+        """GateExecutor MUST raise when edge is missing, not skip recording.
+
+        This is the critical test that prevents silent audit loss.
+        If someone changes GateExecutor to silently skip missing edges,
+        this test will catch it.
+        """
+        import pytest
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import GateExecutor, MissingEdgeError
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenInfo
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import GateResult, RoutingAction
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        gate_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="router",
+            node_type="gate",
+            plugin_version="1.0",
+            config={},
+        )
+
+        class RouterGate:
+            name = "router"
+            node_id = gate_node.node_id
+
+            def evaluate(self, row, ctx):
+                return GateResult(
+                    row=row,
+                    action=RoutingAction.route_to_sink("unregistered_sink"),
+                )
+
+        gate = RouterGate()
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # CRITICAL: empty edge_map means NO edges registered
+        executor = GateExecutor(recorder, SpanFactory(), edge_map={})
+
+        token = TokenInfo(row_id="r1", token_id="t1", row_data={"x": 1})
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=gate_node.node_id,
+            row_index=0,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+
+        # THE CRITICAL ASSERTION: Must raise, not silently skip
+        with pytest.raises(MissingEdgeError) as exc:
+            executor.execute_gate(gate=gate, token=token, ctx=ctx, step_in_pipeline=0)
+
+        # Verify the error is informative
+        assert "unregistered_sink" in str(exc.value)
+        assert gate_node.node_id in str(exc.value)
+
+    def test_missing_edge_error_is_not_catchable_silently(self) -> None:
+        """MissingEdgeError should NOT be a subclass of common ignored exceptions.
+
+        Ensures that no one can accidentally catch and suppress this error
+        with a broad except clause like `except ValueError`.
+        """
+        from elspeth.engine.executors import MissingEdgeError
+
+        # MissingEdgeError inherits from Exception, not ValueError/KeyError/etc
+        assert issubclass(MissingEdgeError, Exception)
+        assert not issubclass(MissingEdgeError, (ValueError, KeyError, TypeError))
+
+        # The error must be explicitly named to catch
+        error = MissingEdgeError(node_id="n1", label="sink_x")
+        assert "Audit trail would be incomplete" in str(error)
 ```
 
 ### Step 2: Run test to verify it fails
@@ -3359,6 +3612,7 @@ Example:
 from elspeth.engine.executors import (
     AggregationExecutor,
     GateExecutor,
+    MissingEdgeError,
     SinkExecutor,
     TransformExecutor,
 )
@@ -3384,6 +3638,7 @@ __all__ = [
     "GateExecutor",
     "AggregationExecutor",
     "SinkExecutor",
+    "MissingEdgeError",
     # Retry
     "RetryManager",
     "RetryConfig",

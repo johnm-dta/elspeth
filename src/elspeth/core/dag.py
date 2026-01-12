@@ -13,6 +13,12 @@ from typing import Any
 import networkx as nx
 
 
+class GraphValidationError(Exception):
+    """Raised when graph validation fails."""
+
+    pass
+
+
 @dataclass
 class NodeInfo:
     """Information about a node in the execution graph."""
@@ -80,3 +86,37 @@ class ExecutionGraph:
             mode: Routing mode ("move" or "copy")
         """
         self._graph.add_edge(from_node, to_node, label=label, mode=mode)
+
+    def is_acyclic(self) -> bool:
+        """Check if the graph is acyclic (a valid DAG)."""
+        return nx.is_directed_acyclic_graph(self._graph)
+
+    def validate(self) -> None:
+        """Validate the execution graph.
+
+        Raises:
+            GraphValidationError: If validation fails
+        """
+        if not self.is_acyclic():
+            # Find the cycle for error message
+            try:
+                cycle = nx.find_cycle(self._graph)
+                cycle_str = " -> ".join(f"{u}" for u, v in cycle)
+                raise GraphValidationError(f"Graph contains a cycle: {cycle_str}")
+            except nx.NetworkXNoCycle:
+                # Shouldn't happen if is_acyclic() returned False
+                raise GraphValidationError("Graph contains a cycle")
+
+    def topological_order(self) -> list[str]:
+        """Return nodes in topological order.
+
+        Returns:
+            List of node IDs in execution order
+
+        Raises:
+            GraphValidationError: If graph has cycles
+        """
+        try:
+            return list(nx.topological_sort(self._graph))
+        except nx.NetworkXUnfeasible as e:
+            raise GraphValidationError(f"Cannot sort graph: {e}") from e

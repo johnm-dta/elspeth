@@ -9,8 +9,6 @@ class TestPluginSchema:
     """Base class for plugin schemas."""
 
     def test_schema_validates_fields(self) -> None:
-        from pydantic import BaseModel
-
         from elspeth.plugins.schemas import PluginSchema
 
         class MySchema(PluginSchema):

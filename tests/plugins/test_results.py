@@ -180,6 +180,9 @@ class TestPluginsPublicAPI:
             TransformResult,
         )
 
+        assert AcceptResult is not None
+        assert GateResult is not None
+        assert RoutingAction is not None
         assert RowOutcome is not None
         assert TransformResult is not None
 
@@ -192,6 +195,7 @@ class TestPluginsPublicAPI:
         from elspeth.plugins import PluginSchema, check_compatibility
 
         assert PluginSchema is not None
+        assert check_compatibility is not None
 
     def test_protocols_importable(self) -> None:
         from elspeth.plugins import (
@@ -204,7 +208,13 @@ class TestPluginsPublicAPI:
             TransformProtocol,
         )
 
+        assert AggregationProtocol is not None
+        assert CoalescePolicy is not None
+        assert CoalesceProtocol is not None
+        assert GateProtocol is not None
+        assert SinkProtocol is not None
         assert SourceProtocol is not None
+        assert TransformProtocol is not None
 
     def test_base_classes_importable(self) -> None:
         from elspeth.plugins import (
@@ -215,6 +225,10 @@ class TestPluginsPublicAPI:
             BaseTransform,
         )
 
+        assert BaseAggregation is not None
+        assert BaseGate is not None
+        assert BaseSink is not None
+        assert BaseSource is not None
         assert BaseTransform is not None
 
     def test_manager_importable(self) -> None:

@@ -11,17 +11,17 @@ Tests cover:
 from __future__ import annotations
 
 import ast
+import sys
 import tempfile
-from datetime import date, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
 
-# Import the module under test
-import sys
-
+# Import the module under test - must be after sys.path modification
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "scripts" / "cicd"))
+
 from no_bug_hiding import (
     Allowlist,
     AllowlistEntry,
@@ -30,7 +30,6 @@ from no_bug_hiding import (
     load_allowlist,
     scan_file,
 )
-
 
 # =============================================================================
 # Fixtures
@@ -463,7 +462,7 @@ class TestExpiryDetection:
 
     def test_expired_entry_detected(self):
         """Entry with past expiry date should be detected."""
-        yesterday = date.today() - timedelta(days=1)
+        yesterday = datetime.now(UTC).date() - timedelta(days=1)
         entry = AllowlistEntry(
             key="src/module.py:R1:process:line=10",
             owner="test",
@@ -479,7 +478,7 @@ class TestExpiryDetection:
 
     def test_future_entry_not_expired(self):
         """Entry with future expiry date should not be detected."""
-        tomorrow = date.today() + timedelta(days=1)
+        tomorrow = datetime.now(UTC).date() + timedelta(days=1)
         entry = AllowlistEntry(
             key="src/module.py:R1:process:line=10",
             owner="test",
@@ -542,7 +541,7 @@ allow_hits:
         allowlist = load_allowlist(allowlist_path)
         assert len(allowlist.entries) == 1
         assert allowlist.entries[0].owner == "john"
-        assert allowlist.entries[0].expires == date(2026, 6, 1)
+        assert allowlist.entries[0].expires == datetime(2026, 6, 1, tzinfo=UTC).date()
         assert allowlist.fail_on_stale is True
         assert allowlist.fail_on_expired is False
 

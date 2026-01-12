@@ -197,8 +197,7 @@ class TestBaseSource:
                 self._data = config["data"]
 
             def load(self, ctx: PluginContext) -> Iterator[dict]:
-                for item in self._data:
-                    yield item
+                yield from self._data
 
             def close(self) -> None:
                 pass

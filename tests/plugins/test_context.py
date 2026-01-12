@@ -3,8 +3,6 @@
 
 from contextlib import nullcontext
 
-import pytest
-
 
 class TestPluginContext:
     """Context passed to all plugin operations."""

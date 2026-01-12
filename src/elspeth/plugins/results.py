@@ -132,3 +132,34 @@ class TransformResult:
             reason=reason,
             retryable=retryable,
         )
+
+
+@dataclass
+class GateResult:
+    """Result from a gate transform.
+
+    Gates evaluate rows and decide routing, possibly modifying the row.
+    """
+
+    row: dict[str, Any]
+    action: RoutingAction
+
+    # === Phase 3 Audit Fields ===
+    input_hash: str | None = field(default=None, repr=False)
+    output_hash: str | None = field(default=None, repr=False)
+    duration_ms: float | None = field(default=None, repr=False)
+
+
+@dataclass
+class AcceptResult:
+    """Result from aggregation accept().
+
+    Indicates whether the row was accepted and if batch should trigger.
+    """
+
+    accepted: bool
+    trigger: bool  # Should flush now?
+
+    # === Phase 3 Audit Fields ===
+    # batch_id is set by engine when creating/updating Landscape batch
+    batch_id: str | None = field(default=None, repr=False)

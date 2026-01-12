@@ -105,3 +105,64 @@ class TestTransformResult:
         assert hasattr(result, "output_hash")
         assert hasattr(result, "duration_ms")
         assert result.input_hash is None  # Not set yet
+
+
+class TestGateResult:
+    """Results from gate transforms."""
+
+    def test_gate_result_with_continue(self) -> None:
+        from elspeth.plugins.results import GateResult, RoutingAction
+
+        result = GateResult(
+            row={"value": 42},
+            action=RoutingAction.continue_(),
+        )
+        assert result.row == {"value": 42}
+        assert result.action.kind == "continue"
+
+    def test_gate_result_with_route(self) -> None:
+        from elspeth.plugins.results import GateResult, RoutingAction
+
+        result = GateResult(
+            row={"value": 42, "flagged": True},
+            action=RoutingAction.route_to_sink("review", reason={"score": 0.9}),
+        )
+        assert result.action.kind == "route_to_sink"
+        assert result.action.destinations == ("review",)
+
+    def test_has_audit_fields(self) -> None:
+        """Phase 3 integration: audit fields must exist."""
+        from elspeth.plugins.results import GateResult, RoutingAction
+
+        result = GateResult(
+            row={"x": 1},
+            action=RoutingAction.continue_(),
+        )
+        assert hasattr(result, "input_hash")
+        assert hasattr(result, "output_hash")
+        assert hasattr(result, "duration_ms")
+
+
+class TestAcceptResult:
+    """Results from aggregation accept()."""
+
+    def test_accepted_no_trigger(self) -> None:
+        from elspeth.plugins.results import AcceptResult
+
+        result = AcceptResult(accepted=True, trigger=False)
+        assert result.accepted is True
+        assert result.trigger is False
+
+    def test_accepted_with_trigger(self) -> None:
+        from elspeth.plugins.results import AcceptResult
+
+        result = AcceptResult(accepted=True, trigger=True)
+        assert result.trigger is True
+
+    def test_has_batch_id_field(self) -> None:
+        """Phase 3 integration: batch_id for Landscape."""
+        from elspeth.plugins.results import AcceptResult
+
+        result = AcceptResult(accepted=True, trigger=False)
+        assert hasattr(result, "batch_id")
+        assert result.batch_id is None  # Set by engine in Phase 3

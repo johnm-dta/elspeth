@@ -1,5 +1,5 @@
 # src/elspeth/core/__init__.py
-"""Core infrastructure: Landscape, Canonical, Configuration, DAG."""
+"""Core infrastructure: Landscape, Canonical, Configuration, DAG, Logging."""
 
 from elspeth.core.canonical import (
     CANONICAL_VERSION,
@@ -18,6 +18,10 @@ from elspeth.core.dag import (
     GraphValidationError,
     NodeInfo,
 )
+from elspeth.core.logging import (
+    configure_logging,
+    get_logger,
+)
 from elspeth.core.payload_store import (
     FilesystemPayloadStore,
     PayloadStore,
@@ -35,6 +39,8 @@ __all__ = [
     "PayloadStoreSettings",
     "RetrySettings",
     "canonical_json",
+    "configure_logging",
+    "get_logger",
     "load_settings",
     "stable_hash",
 ]

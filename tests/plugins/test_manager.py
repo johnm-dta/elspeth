@@ -156,3 +156,56 @@ class TestPluginSpec:
 
         assert spec.determinism == Determinism.DETERMINISTIC
         assert spec.version == "0.0.0"
+
+
+class TestDuplicateNameValidation:
+    """Prevent duplicate plugin names."""
+
+    def test_duplicate_transform_raises(self) -> None:
+        import pytest
+
+        from elspeth.plugins import PluginManager, hookimpl
+
+        class Plugin1:
+            @hookimpl
+            def elspeth_get_transforms(self) -> list:
+                class T1:
+                    name = "duplicate_name"
+
+                return [T1]
+
+        class Plugin2:
+            @hookimpl
+            def elspeth_get_transforms(self) -> list:
+                class T2:
+                    name = "duplicate_name"
+
+                return [T2]
+
+        manager = PluginManager()
+        manager.register(Plugin1())
+
+        with pytest.raises(ValueError, match="duplicate_name"):
+            manager.register(Plugin2())
+
+    def test_same_name_different_types_ok(self) -> None:
+        """Same name in different plugin types is allowed."""
+        from elspeth.plugins import PluginManager, hookimpl
+
+        class Plugin:
+            @hookimpl
+            def elspeth_get_transforms(self) -> list:
+                class T:
+                    name = "processor"
+
+                return [T]
+
+            @hookimpl
+            def elspeth_get_sinks(self) -> list:
+                class S:
+                    name = "processor"  # Same name, different type
+
+                return [S]
+
+        manager = PluginManager()
+        manager.register(Plugin())  # Should not raise

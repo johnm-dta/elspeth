@@ -867,7 +867,7 @@ class TestTransformExecutor:
             transform=transform,
             token=token,
             ctx=ctx,
-            step_in_pipeline=0,
+            step_in_pipeline=1,  # First transform is at step 1 (source=0)
         )
 
         assert result.status == "success"
@@ -925,7 +925,7 @@ class TestTransformExecutor:
             transform=transform,
             token=token,
             ctx=ctx,
-            step_in_pipeline=0,
+            step_in_pipeline=1,  # First transform is at step 1 (source=0)
         )
 
         assert result.status == "error"
@@ -2024,7 +2024,7 @@ class TestSinkExecutor:
             sink=sink,
             tokens=[token],
             ctx=ctx,
-            step_in_pipeline=0,
+            step_in_pipeline=1,  # First transform is at step 1 (source=0)
         )
 
         assert artifact is not None
@@ -3604,7 +3604,7 @@ class TestNoSilentAuditLoss:
 
         # THE CRITICAL ASSERTION: Must raise, not silently skip
         with pytest.raises(MissingEdgeError) as exc:
-            executor.execute_gate(gate=gate, token=token, ctx=ctx, step_in_pipeline=0)
+            executor.execute_gate(gate=gate, token=token, ctx=ctx, step_in_pipeline=1)
 
         # Verify the error is informative
         assert "unregistered_sink" in str(exc.value)

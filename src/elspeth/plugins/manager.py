@@ -79,13 +79,13 @@ class PluginManager:
         self._pm.add_hookspecs(ElspethTransformSpec)
         self._pm.add_hookspecs(ElspethSinkSpec)
 
-        # Caches
-        self._sources: list[type[SourceProtocol]] = []
-        self._transforms: list[type[TransformProtocol]] = []
-        self._gates: list[type[GateProtocol]] = []
-        self._aggregations: list[type[AggregationProtocol]] = []
-        self._coalesces: list[type[CoalesceProtocol]] = []
-        self._sinks: list[type[SinkProtocol]] = []
+        # Caches - map name to plugin class for duplicate detection
+        self._sources: dict[str, type[SourceProtocol]] = {}
+        self._transforms: dict[str, type[TransformProtocol]] = {}
+        self._gates: dict[str, type[GateProtocol]] = {}
+        self._aggregations: dict[str, type[AggregationProtocol]] = {}
+        self._coalesces: dict[str, type[CoalesceProtocol]] = {}
+        self._sinks: dict[str, type[SinkProtocol]] = {}
 
     def register(self, plugin: Any) -> None:
         """Register a plugin.
@@ -97,99 +97,136 @@ class PluginManager:
         self._refresh_caches()
 
     def _refresh_caches(self) -> None:
-        """Refresh plugin caches from hooks."""
-        self._sources = []
-        self._transforms = []
-        self._gates = []
-        self._aggregations = []
-        self._coalesces = []
-        self._sinks = []
+        """Refresh plugin caches from hooks.
 
-        # Collect from all registered plugins
+        Raises:
+            ValueError: If a plugin with the same name and type is already registered
+        """
+        # Collect all plugins first, then check for duplicates
+        new_sources: dict[str, type[SourceProtocol]] = {}
+        new_transforms: dict[str, type[TransformProtocol]] = {}
+        new_gates: dict[str, type[GateProtocol]] = {}
+        new_aggregations: dict[str, type[AggregationProtocol]] = {}
+        new_coalesces: dict[str, type[CoalesceProtocol]] = {}
+        new_sinks: dict[str, type[SinkProtocol]] = {}
+
+        # Collect from all registered plugins with duplicate detection
         for sources in self._pm.hook.elspeth_get_source():
-            self._sources.extend(sources)
+            for cls in sources:
+                name = getattr(cls, "name", cls.__name__)
+                if name in new_sources:
+                    raise ValueError(
+                        f"Duplicate source plugin name: '{name}'. "
+                        f"Already registered by {new_sources[name].__name__}"
+                    )
+                new_sources[name] = cls
 
         for transforms in self._pm.hook.elspeth_get_transforms():
-            self._transforms.extend(transforms)
+            for cls in transforms:
+                name = getattr(cls, "name", cls.__name__)
+                if name in new_transforms:
+                    raise ValueError(
+                        f"Duplicate transform plugin name: '{name}'. "
+                        f"Already registered by {new_transforms[name].__name__}"
+                    )
+                new_transforms[name] = cls
 
         for gates in self._pm.hook.elspeth_get_gates():
-            self._gates.extend(gates)
+            for cls in gates:
+                name = getattr(cls, "name", cls.__name__)
+                if name in new_gates:
+                    raise ValueError(
+                        f"Duplicate gate plugin name: '{name}'. "
+                        f"Already registered by {new_gates[name].__name__}"
+                    )
+                new_gates[name] = cls
 
         for aggs in self._pm.hook.elspeth_get_aggregations():
-            self._aggregations.extend(aggs)
+            for cls in aggs:
+                name = getattr(cls, "name", cls.__name__)
+                if name in new_aggregations:
+                    raise ValueError(
+                        f"Duplicate aggregation plugin name: '{name}'. "
+                        f"Already registered by {new_aggregations[name].__name__}"
+                    )
+                new_aggregations[name] = cls
 
         for coalesces in self._pm.hook.elspeth_get_coalesces():
-            self._coalesces.extend(coalesces)
+            for cls in coalesces:
+                name = getattr(cls, "name", cls.__name__)
+                if name in new_coalesces:
+                    raise ValueError(
+                        f"Duplicate coalesce plugin name: '{name}'. "
+                        f"Already registered by {new_coalesces[name].__name__}"
+                    )
+                new_coalesces[name] = cls
 
         for sinks in self._pm.hook.elspeth_get_sinks():
-            self._sinks.extend(sinks)
+            for cls in sinks:
+                name = getattr(cls, "name", cls.__name__)
+                if name in new_sinks:
+                    raise ValueError(
+                        f"Duplicate sink plugin name: '{name}'. "
+                        f"Already registered by {new_sinks[name].__name__}"
+                    )
+                new_sinks[name] = cls
+
+        # All validated, update caches
+        self._sources = new_sources
+        self._transforms = new_transforms
+        self._gates = new_gates
+        self._aggregations = new_aggregations
+        self._coalesces = new_coalesces
+        self._sinks = new_sinks
 
     # === Getters ===
 
     def get_sources(self) -> list[type[SourceProtocol]]:
         """Get all registered source plugins."""
-        return self._sources.copy()
+        return list(self._sources.values())
 
     def get_transforms(self) -> list[type[TransformProtocol]]:
         """Get all registered transform plugins."""
-        return self._transforms.copy()
+        return list(self._transforms.values())
 
     def get_gates(self) -> list[type[GateProtocol]]:
         """Get all registered gate plugins."""
-        return self._gates.copy()
+        return list(self._gates.values())
 
     def get_aggregations(self) -> list[type[AggregationProtocol]]:
         """Get all registered aggregation plugins."""
-        return self._aggregations.copy()
+        return list(self._aggregations.values())
 
     def get_coalesces(self) -> list[type[CoalesceProtocol]]:
         """Get all registered coalesce plugins."""
-        return self._coalesces.copy()
+        return list(self._coalesces.values())
 
     def get_sinks(self) -> list[type[SinkProtocol]]:
         """Get all registered sink plugins."""
-        return self._sinks.copy()
+        return list(self._sinks.values())
 
     # === Lookup by name ===
 
     def get_source_by_name(self, name: str) -> type[SourceProtocol] | None:
         """Get source plugin by name."""
-        for source in self._sources:
-            if source.name == name:
-                return source
-        return None
+        return self._sources.get(name)
 
     def get_transform_by_name(self, name: str) -> type[TransformProtocol] | None:
         """Get transform plugin by name."""
-        for transform in self._transforms:
-            if transform.name == name:
-                return transform
-        return None
+        return self._transforms.get(name)
 
     def get_gate_by_name(self, name: str) -> type[GateProtocol] | None:
         """Get gate plugin by name."""
-        for gate in self._gates:
-            if gate.name == name:
-                return gate
-        return None
+        return self._gates.get(name)
 
     def get_aggregation_by_name(self, name: str) -> type[AggregationProtocol] | None:
         """Get aggregation plugin by name."""
-        for agg in self._aggregations:
-            if agg.name == name:
-                return agg
-        return None
+        return self._aggregations.get(name)
 
     def get_coalesce_by_name(self, name: str) -> type[CoalesceProtocol] | None:
         """Get coalesce plugin by name."""
-        for coalesce in self._coalesces:
-            if coalesce.name == name:
-                return coalesce
-        return None
+        return self._coalesces.get(name)
 
     def get_sink_by_name(self, name: str) -> type[SinkProtocol] | None:
         """Get sink plugin by name."""
-        for sink in self._sinks:
-            if sink.name == name:
-                return sink
-        return None
+        return self._sinks.get(name)

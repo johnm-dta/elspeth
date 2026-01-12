@@ -186,6 +186,8 @@ class TestPluginSystemIntegration:
                 return len(self._values) >= self.config["batch_size"]
 
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+                if not self._values:
+                    return []
                 result = {
                     "total": sum(self._values),
                     "count": len(self._values),
@@ -205,9 +207,8 @@ class TestPluginSystemIntegration:
             if result.trigger:
                 outputs.extend(agg.flush(ctx))
 
-        # Force final flush
-        if agg.should_trigger() or len(agg._values) > 0:
-            outputs.extend(agg.flush(ctx))
+        # Force final flush for any remaining items
+        outputs.extend(agg.flush(ctx))
 
         # First batch: 10+20+30=60, Second batch: 40+50=90
         assert len(outputs) == 2

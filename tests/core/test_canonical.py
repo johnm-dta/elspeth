@@ -62,3 +62,51 @@ class TestNanInfinityRejection:
         assert _normalize_value(0.0) == 0.0
         assert _normalize_value(-0.0) == -0.0
         assert _normalize_value(1e308) == 1e308
+
+
+import numpy as np
+
+
+class TestNumpyTypeConversion:
+    """NumPy types must be converted to Python primitives."""
+
+    def test_numpy_int64_converts_to_int(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        result = _normalize_value(np.int64(42))
+        assert result == 42
+        assert type(result) is int
+
+    def test_numpy_float64_converts_to_float(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        result = _normalize_value(np.float64(3.14))
+        assert result == 3.14
+        assert type(result) is float
+
+    def test_numpy_float64_nan_raises(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        with pytest.raises(ValueError, match="non-finite"):
+            _normalize_value(np.float64("nan"))
+
+    def test_numpy_float64_inf_raises(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        with pytest.raises(ValueError, match="non-finite"):
+            _normalize_value(np.float64("inf"))
+
+    def test_numpy_bool_converts_to_bool(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        result = _normalize_value(np.bool_(True))
+        assert result is True
+        assert type(result) is bool
+
+    def test_numpy_array_converts_to_list(self) -> None:
+        from elspeth.core.canonical import _normalize_value
+
+        result = _normalize_value(np.array([1, 2, 3]))
+        assert result == [1, 2, 3]
+        assert type(result) is list
+        assert all(type(x) is int for x in result)

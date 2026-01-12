@@ -4,8 +4,9 @@
 Loads rows from CSV files using pandas for robust parsing.
 """
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import pandas as pd
 
@@ -17,7 +18,7 @@ from elspeth.plugins.schemas import PluginSchema
 class CSVOutputSchema(PluginSchema):
     """Dynamic schema - CSV columns are determined at runtime."""
 
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic pattern
 
 
 class CSVSource(BaseSource):
@@ -62,8 +63,9 @@ class CSVSource(BaseSource):
             keep_default_na=False,  # Don't convert empty strings to NaN
         )
 
-        for _, row in self._dataframe.iterrows():
-            yield row.to_dict()
+        # DataFrame columns are strings from CSV headers
+        for record in self._dataframe.to_dict(orient="records"):
+            yield {str(k): v for k, v in record.items()}
 
     def close(self) -> None:
         """Release resources."""

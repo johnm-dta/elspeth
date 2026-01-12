@@ -121,6 +121,19 @@ class TestJSONSource:
         with pytest.raises(FileNotFoundError):
             list(source.load(ctx))
 
+    def test_non_array_json_raises(
+        self, tmp_path: Path, ctx: PluginContext
+    ) -> None:
+        """Non-array JSON raises ValueError."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "object.json"
+        json_file.write_text('{"not": "an_array"}')
+
+        source = JSONSource({"path": str(json_file)})
+        with pytest.raises(ValueError, match="Expected JSON array"):
+            list(source.load(ctx))
+
     def test_close_is_idempotent(self, tmp_path: Path, ctx: PluginContext) -> None:
         """close() can be called multiple times."""
         from elspeth.plugins.sources.json_source import JSONSource

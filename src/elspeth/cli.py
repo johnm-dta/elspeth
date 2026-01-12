@@ -4,8 +4,6 @@
 Entry point for the elspeth CLI tool.
 """
 
-from typing import Optional
-
 import typer
 
 from elspeth import __version__
@@ -26,7 +24,7 @@ def version_callback(value: bool) -> None:
 
 @app.callback()
 def main(
-    version: Optional[bool] = typer.Option(
+    version: bool | None = typer.Option(
         None,
         "--version",
         "-V",
@@ -64,12 +62,12 @@ def explain(
         "-r",
         help="Run ID to explain (or 'latest').",
     ),
-    row: Optional[str] = typer.Option(
+    row: str | None = typer.Option(
         None,
         "--row",
         help="Row ID or index to explain.",
     ),
-    token: Optional[str] = typer.Option(
+    token: str | None = typer.Option(
         None,
         "--token",
         "-t",

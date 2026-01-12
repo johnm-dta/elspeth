@@ -5,8 +5,9 @@ Loads rows from JSON files. Supports JSON array and JSONL formats.
 """
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from elspeth.plugins.base import BaseSource
 from elspeth.plugins.context import PluginContext
@@ -16,7 +17,7 @@ from elspeth.plugins.schemas import PluginSchema
 class JSONOutputSchema(PluginSchema):
     """Dynamic schema - JSON fields determined at runtime."""
 
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic pattern
 
 
 class JSONSource(BaseSource):

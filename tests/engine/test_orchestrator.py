@@ -230,8 +230,8 @@ class TestOrchestratorErrorHandling:
     """Test error handling in orchestration."""
 
     def test_run_marks_failed_on_transform_exception(self) -> None:
-        """If a transform raises, run status should be failed."""
-        from elspeth.core.landscape import LandscapeDB
+        """If a transform raises, run status should be failed in Landscape."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.schemas import PluginSchema
 
@@ -289,10 +289,17 @@ class TestOrchestratorErrorHandling:
         with pytest.raises(RuntimeError, match="Transform exploded!"):
             orchestrator.run(config)
 
-        # Verify run was marked as failed in Landscape
-        # Note: The run_id was generated internally, but the test verifies
-        # that the exception was properly raised with the expected message.
-        # The run status is confirmed as "failed" in the complete_run call.
+        # Verify run was marked as failed in Landscape audit trail
+        # Query for all runs and find the one that was created
+        recorder = LandscapeRecorder(db)
+        runs = recorder.list_runs()
+        assert len(runs) == 1, "Expected exactly one run in Landscape"
+
+        failed_run = runs[0]
+        assert failed_run.status == "failed", (
+            f"Landscape audit trail must record status='failed', "
+            f"got status='{failed_run.status}'"
+        )
 
 
 class TestOrchestratorMultipleTransforms:
@@ -488,3 +495,78 @@ class TestOrchestratorEmptyPipeline:
         assert run_result.status == "completed"
         assert run_result.rows_processed == 0
         assert len(sink.results) == 0
+
+
+class TestOrchestratorInvalidRouting:
+    """Test that invalid routing fails explicitly instead of silently."""
+
+    def test_gate_routing_to_unknown_sink_raises_error(self) -> None:
+        """Gate routing to non-existent sink must fail loudly, not silently."""
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.executors import MissingEdgeError
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import GateResult, RoutingAction
+        from elspeth.plugins.schemas import PluginSchema
+
+        db = LandscapeDB.in_memory()
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "list_source"
+            output_schema = RowSchema
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+
+            def load(self, ctx):
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class MisroutingGate:
+            """Gate that routes to a sink that doesn't exist."""
+
+            name = "misrouting_gate"
+            input_schema = RowSchema
+            output_schema = RowSchema
+
+            def evaluate(self, row, ctx):
+                # Route to a sink that wasn't configured
+                return GateResult(
+                    row=row,
+                    action=RoutingAction.route_to_sink("nonexistent_sink"),
+                )
+
+        class CollectSink:
+            name = "collect"
+
+            def __init__(self):
+                self.results = []
+
+            def write(self, rows, ctx):
+                self.results.extend(rows)
+                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+
+            def close(self):
+                pass
+
+        source = ListSource([{"value": 42}])
+        gate = MisroutingGate()
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[gate],
+            sinks={"default": sink},  # Note: "nonexistent_sink" is NOT here
+        )
+
+        orchestrator = Orchestrator(db)
+
+        # This MUST fail loudly - silent counting was the bug
+        # The GateExecutor catches this first via MissingEdgeError,
+        # which is even better since it happens at the routing level
+        with pytest.raises(MissingEdgeError, match="nonexistent_sink"):
+            orchestrator.run(config)

@@ -223,6 +223,38 @@ class LandscapeRecorder:
             reproducibility_grade=row.reproducibility_grade,
         )
 
+    def list_runs(self, *, status: str | None = None) -> list[Run]:
+        """List all runs in the database.
+
+        Args:
+            status: Optional filter by status (running, completed, failed)
+
+        Returns:
+            List of Run models, ordered by started_at (newest first)
+        """
+        query = select(runs_table).order_by(runs_table.c.started_at.desc())
+
+        if status:
+            query = query.where(runs_table.c.status == status)
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            rows = result.fetchall()
+
+        return [
+            Run(
+                run_id=row.run_id,
+                started_at=row.started_at,
+                completed_at=row.completed_at,
+                config_hash=row.config_hash,
+                settings_json=row.settings_json,
+                canonical_version=row.canonical_version,
+                status=row.status,
+                reproducibility_grade=row.reproducibility_grade,
+            )
+            for row in rows
+        ]
+
     # === Node and Edge Registration ===
 
     def register_node(

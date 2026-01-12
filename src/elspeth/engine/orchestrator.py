@@ -230,8 +230,18 @@ class Orchestrator:
                         rows_routed += 1
                         if result.sink_name and result.sink_name in config.sinks:
                             pending_tokens[result.sink_name].append(result.token)
+                        elif result.sink_name:
+                            # Gate routed to non-existent sink - configuration error
+                            raise ValueError(
+                                f"Gate routed to unknown sink '{result.sink_name}'. "
+                                f"Available sinks: {list(config.sinks.keys())}"
+                            )
                         else:
-                            rows_failed += 1
+                            # sink_name is None but outcome is "routed" - should not happen
+                            raise RuntimeError(
+                                f"Row outcome is 'routed' but sink_name is None "
+                                f"for token {result.token.token_id}"
+                            )
                     elif result.outcome == "failed":
                         rows_failed += 1
 

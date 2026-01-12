@@ -264,3 +264,88 @@ class TestTokenManagerEdgeCases:
 
         assert token1.row_id != token2.row_id
         assert token1.token_id != token2.token_id
+
+
+class TestTokenManagerStepInPipeline:
+    """Test that step_in_pipeline flows through to audit trail."""
+
+    def test_fork_stores_step_in_pipeline(self) -> None:
+        """TokenManager.fork_token passes step_in_pipeline to recorder."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+
+        manager = TokenManager(recorder)
+        initial = manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            row_data={"value": 42},
+        )
+
+        # Fork with step_in_pipeline=2
+        children = manager.fork_token(
+            parent_token=initial,
+            branches=["a", "b"],
+            step_in_pipeline=2,
+        )
+
+        # Verify step_in_pipeline is stored in audit trail
+        token_a = recorder.get_token(children[0].token_id)
+        token_b = recorder.get_token(children[1].token_id)
+        assert token_a is not None
+        assert token_b is not None
+        assert token_a.step_in_pipeline == 2
+        assert token_b.step_in_pipeline == 2
+
+    def test_coalesce_stores_step_in_pipeline(self) -> None:
+        """TokenManager.coalesce_tokens passes step_in_pipeline to recorder."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+
+        manager = TokenManager(recorder)
+        initial = manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            row_data={"value": 42},
+        )
+
+        # Fork and then coalesce
+        children = manager.fork_token(
+            parent_token=initial,
+            branches=["a", "b"],
+            step_in_pipeline=1,
+        )
+
+        merged = manager.coalesce_tokens(
+            parents=children,
+            merged_data={"value": 42, "merged": True},
+            step_in_pipeline=3,
+        )
+
+        # Verify step_in_pipeline is stored in audit trail
+        merged_token = recorder.get_token(merged.token_id)
+        assert merged_token is not None
+        assert merged_token.step_in_pipeline == 3

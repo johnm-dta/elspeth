@@ -112,14 +112,12 @@ class TokenManager:
         """Fork a token to multiple branches.
 
         The step_in_pipeline is required because the Orchestrator/RowProcessor
-        owns step position - TokenManager doesn't track it. Note: The current
-        LandscapeRecorder.fork_token() does not use step_in_pipeline, but we
-        accept it here for interface consistency with the engine.
+        owns step position - TokenManager doesn't track it.
 
         Args:
             parent_token: Parent token to fork
             branches: List of branch names
-            step_in_pipeline: Current step position in the DAG (for engine use)
+            step_in_pipeline: Current step position in the DAG (stored in audit trail)
             row_data: Optional row data (defaults to parent's data)
 
         Returns:
@@ -131,6 +129,7 @@ class TokenManager:
             parent_token_id=parent_token.token_id,
             row_id=parent_token.row_id,
             branches=branches,
+            step_in_pipeline=step_in_pipeline,
         )
 
         return [
@@ -152,14 +151,12 @@ class TokenManager:
         """Coalesce multiple tokens into one.
 
         The step_in_pipeline is required because the Orchestrator/RowProcessor
-        owns step position - TokenManager doesn't track it. Note: The current
-        LandscapeRecorder.coalesce_tokens() does not use step_in_pipeline, but
-        we accept it here for interface consistency with the engine.
+        owns step position - TokenManager doesn't track it.
 
         Args:
             parents: Parent tokens to merge
             merged_data: Merged row data
-            step_in_pipeline: Current step position in the DAG (for engine use)
+            step_in_pipeline: Current step position in the DAG (stored in audit trail)
 
         Returns:
             Merged TokenInfo
@@ -170,6 +167,7 @@ class TokenManager:
         merged = self._recorder.coalesce_tokens(
             parent_token_ids=[p.token_id for p in parents],
             row_id=row_id,
+            step_in_pipeline=step_in_pipeline,
         )
 
         return TokenInfo(

@@ -322,6 +322,91 @@ class TestLandscapeRecorderTokens:
         assert merged.token_id is not None
         assert merged.join_group_id is not None
 
+    def test_fork_token_with_step_in_pipeline(self) -> None:
+        """Fork stores step_in_pipeline in tokens table."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={},
+        )
+        parent_token = recorder.create_token(row_id=row.row_id)
+
+        # Fork with step_in_pipeline
+        child_tokens = recorder.fork_token(
+            parent_token_id=parent_token.token_id,
+            row_id=row.row_id,
+            branches=["stats", "classifier"],
+            step_in_pipeline=2,
+        )
+
+        # Verify step_in_pipeline is stored
+        assert len(child_tokens) == 2
+        assert child_tokens[0].step_in_pipeline == 2
+        assert child_tokens[1].step_in_pipeline == 2
+
+        # Verify retrieval via get_token
+        retrieved = recorder.get_token(child_tokens[0].token_id)
+        assert retrieved is not None
+        assert retrieved.step_in_pipeline == 2
+
+    def test_coalesce_tokens_with_step_in_pipeline(self) -> None:
+        """Coalesce stores step_in_pipeline in tokens table."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={},
+        )
+        parent = recorder.create_token(row_id=row.row_id)
+        children = recorder.fork_token(
+            parent_token_id=parent.token_id,
+            row_id=row.row_id,
+            branches=["a", "b"],
+            step_in_pipeline=1,
+        )
+
+        # Coalesce with step_in_pipeline
+        merged = recorder.coalesce_tokens(
+            parent_token_ids=[c.token_id for c in children],
+            row_id=row.row_id,
+            step_in_pipeline=3,
+        )
+
+        # Verify step_in_pipeline is stored
+        assert merged.step_in_pipeline == 3
+
+        # Verify retrieval via get_token
+        retrieved = recorder.get_token(merged.token_id)
+        assert retrieved is not None
+        assert retrieved.step_in_pipeline == 3
+
 
 class TestLandscapeRecorderNodeStates:
     """Node state recording (what happened at each node)."""

@@ -522,6 +522,8 @@ class LandscapeRecorder:
         parent_token_id: str,
         row_id: str,
         branches: list[str],
+        *,
+        step_in_pipeline: int | None = None,
     ) -> list[Token]:
         """Fork a token to multiple branches.
 
@@ -532,6 +534,7 @@ class LandscapeRecorder:
             parent_token_id: Token being forked
             row_id: Row ID (same for all children)
             branches: List of branch names
+            step_in_pipeline: Step in the DAG where the fork occurs
 
         Returns:
             List of child Token models
@@ -551,6 +554,7 @@ class LandscapeRecorder:
                         row_id=row_id,
                         fork_group_id=fork_group_id,
                         branch_name=branch_name,
+                        step_in_pipeline=step_in_pipeline,
                         created_at=now,
                     )
                 )
@@ -570,6 +574,7 @@ class LandscapeRecorder:
                         row_id=row_id,
                         fork_group_id=fork_group_id,
                         branch_name=branch_name,
+                        step_in_pipeline=step_in_pipeline,
                         created_at=now,
                     )
                 )
@@ -580,6 +585,8 @@ class LandscapeRecorder:
         self,
         parent_token_ids: list[str],
         row_id: str,
+        *,
+        step_in_pipeline: int | None = None,
     ) -> Token:
         """Coalesce multiple tokens into one (join operation).
 
@@ -589,6 +596,7 @@ class LandscapeRecorder:
         Args:
             parent_token_ids: Tokens being merged
             row_id: Row ID for the merged token
+            step_in_pipeline: Step in the DAG where the coalesce occurs
 
         Returns:
             Merged Token model
@@ -604,6 +612,7 @@ class LandscapeRecorder:
                     token_id=token_id,
                     row_id=row_id,
                     join_group_id=join_group_id,
+                    step_in_pipeline=step_in_pipeline,
                     created_at=now,
                 )
             )
@@ -622,6 +631,7 @@ class LandscapeRecorder:
             token_id=token_id,
             row_id=row_id,
             join_group_id=join_group_id,
+            step_in_pipeline=step_in_pipeline,
             created_at=now,
         )
 
@@ -1288,6 +1298,7 @@ class LandscapeRecorder:
                 fork_group_id=r.fork_group_id,
                 join_group_id=r.join_group_id,
                 branch_name=r.branch_name,
+                step_in_pipeline=r.step_in_pipeline,
                 created_at=r.created_at,
             )
             for r in db_rows
@@ -1411,6 +1422,7 @@ class LandscapeRecorder:
             fork_group_id=r.fork_group_id,
             join_group_id=r.join_group_id,
             branch_name=r.branch_name,
+            step_in_pipeline=r.step_in_pipeline,
             created_at=r.created_at,
         )
 

@@ -94,6 +94,7 @@ tokens_table = Table(
     Column("fork_group_id", String(64)),
     Column("join_group_id", String(64)),
     Column("branch_name", String(64)),
+    Column("step_in_pipeline", Integer),  # Step where this token was created (fork/coalesce)
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 

@@ -897,7 +897,7 @@ This is a **high-reliability** system, not a high-security system. The threat mo
 
 Not in scope:
 
-- TOP SECRET data handling
+- PROTECTED + data handling
 - Supply chain verification
 - Container signing
 

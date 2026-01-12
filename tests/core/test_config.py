@@ -90,3 +90,64 @@ class TestElspethSettings:
 
         settings = ElspethSettings(database={"url": "sqlite:///audit.db"})
         assert settings.run_id_prefix == "run"
+
+
+from pathlib import Path
+
+
+class TestLoadSettings:
+    """Test Dynaconf-based settings loading."""
+
+    def test_load_from_yaml_file(self, tmp_path: Path) -> None:
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+database:
+  url: "sqlite:///test.db"
+  pool_size: 10
+retry:
+  max_attempts: 5
+""")
+        settings = load_settings(config_file)
+        assert settings.database.url == "sqlite:///test.db"
+        assert settings.database.pool_size == 10
+        assert settings.retry.max_attempts == 5
+
+    def test_load_with_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+database:
+  url: "sqlite:///original.db"
+""")
+        # Environment variable should override YAML
+        monkeypatch.setenv("ELSPETH_DATABASE__URL", "sqlite:///from_env.db")
+
+        settings = load_settings(config_file)
+        assert settings.database.url == "sqlite:///from_env.db"
+
+    def test_load_validates_schema(self, tmp_path: Path) -> None:
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+database:
+  url: "sqlite:///test.db"
+  pool_size: -1
+""")
+        with pytest.raises(ValidationError):
+            load_settings(config_file)
+
+    def test_load_missing_required_field(self, tmp_path: Path) -> None:
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+retry:
+  max_attempts: 5
+""")
+        # database.url is required
+        with pytest.raises(ValidationError):
+            load_settings(config_file)

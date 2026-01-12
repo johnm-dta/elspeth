@@ -69,3 +69,45 @@ class ElspethSettings(BaseModel):
         if not v.isidentifier():
             raise ValueError("run_id_prefix must be a valid identifier")
         return v
+
+
+def load_settings(config_path: Path) -> ElspethSettings:
+    """Load settings from YAML file with environment variable overrides.
+
+    Uses Dynaconf for multi-source loading with precedence:
+    1. Environment variables (ELSPETH_*) - highest priority
+    2. Config file (settings.yaml)
+    3. Defaults from Pydantic schema - lowest priority
+
+    Environment variable format: ELSPETH_DATABASE__URL for nested keys.
+
+    Args:
+        config_path: Path to YAML configuration file
+
+    Returns:
+        Validated ElspethSettings instance
+
+    Raises:
+        ValidationError: If configuration fails Pydantic validation
+        FileNotFoundError: If config file doesn't exist
+    """
+    from dynaconf import Dynaconf
+
+    # Load from file + environment
+    dynaconf_settings = Dynaconf(
+        envvar_prefix="ELSPETH",
+        settings_files=[str(config_path)],
+        environments=False,  # No [default]/[production] sections
+        load_dotenv=False,   # Don't auto-load .env
+        merge_enabled=True,  # Deep merge nested dicts
+    )
+
+    # Dynaconf returns uppercase keys; convert to lowercase for Pydantic
+    # Also filter out internal Dynaconf settings
+    internal_keys = {"LOAD_DOTENV", "ENVIRONMENTS", "SETTINGS_FILES"}
+    raw_config = {
+        k.lower(): v
+        for k, v in dynaconf_settings.as_dict().items()
+        if k not in internal_keys
+    }
+    return ElspethSettings(**raw_config)

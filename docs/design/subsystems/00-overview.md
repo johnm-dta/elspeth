@@ -1,4 +1,4 @@
-# Elspeth-Rapid Subsystems Overview
+# ELSPETH Subsystems Overview
 
 **Version:** 1.0
 **Date:** 2026-01-12
@@ -8,7 +8,7 @@
 
 ## Purpose
 
-This document provides a high-level map of all subsystems in Elspeth-Rapid, their responsibilities, and how they interact. Each subsystem will have its own detailed design document.
+This document provides a high-level map of all subsystems in ELSPETH, their responsibilities, and how they interact. Each subsystem will have its own detailed design document.
 
 ---
 
@@ -74,6 +74,7 @@ This document provides a high-level map of all subsystems in Elspeth-Rapid, thei
 **Intent:** The audit backbone. Records everything that happens so any output can be traced to its source.
 
 **Responsibilities:**
+
 - Track runs with resolved configuration and reproducibility grade
 - Register plugin instances (nodes in the execution graph)
 - **Track tokens** (row instances flowing through the DAG)
@@ -272,6 +273,7 @@ CREATE TABLE artifacts (
 **Intent:** Extensibility without modifying core. All data processing happens through plugins.
 
 **Responsibilities:**
+
 - Define hookspecs for Source, Transform, Sink
 - Plugin discovery and registration
 - Plugin instance lifecycle management
@@ -367,6 +369,7 @@ Each aggregation receives the same input rows, produces one result, and coalesce
 **Aggregation Semantics:**
 
 Aggregation plugins accumulate rows until one of:
+
 1. **Threshold reached** - e.g., 100 rows collected
 2. **Flush signal** - source indicates no more rows coming
 3. **Timeout** - configured max wait time
@@ -394,6 +397,7 @@ Aggregation plugins accumulate rows until one of:
 ```
 
 **Design principle:** Persist membership on every `accept()`, not just at flush. This means:
+
 - No custom checkpointing logic needed
 - Crash recovery is a query, not deserialization
 - "What's pending in this aggregation?" is always answerable
@@ -533,6 +537,7 @@ plugins:
 **Intent:** The execution core. Orchestrates the Sense/Decide/Act flow.
 
 **Responsibilities:**
+
 - Load rows from source
 - Process rows through transform chain
 - Handle routing decisions (continue vs route to sink)
@@ -607,6 +612,7 @@ The engine must track which rows are "in flight" in aggregations for audit purpo
 **Intent:** Unified configuration with clear precedence and validation.
 
 **Responsibilities:**
+
 - Load configuration from multiple sources
 - Apply precedence rules (system < pack < profile < suite < runtime)
 - Interpolate environment variables
@@ -640,6 +646,7 @@ The engine must track which rows are "in flight" in aggregations for audit purpo
 **Intent:** Separate large blobs from audit tables. Enable retention policies.
 
 **Responsibilities:**
+
 - Store large payloads (LLM responses, row data, artifacts)
 - Return stable references for Landscape tables
 - Apply retention and purge policies
@@ -675,6 +682,7 @@ class PayloadStore(Protocol):
 **Intent:** Deterministic serialization for reliable hashing.
 
 **Responsibilities:**
+
 - Normalize pandas/numpy types to JSON primitives
 - Produce deterministic JSON per RFC 8785 (JSON Canonicalization Scheme)
 - Reject non-finite floats (NaN, Infinity)
@@ -705,6 +713,7 @@ NaN → ValueError                - Deterministic number format
 **Intent:** User-facing command interface.
 
 **Responsibilities:**
+
 - `elspeth run` - Execute a pipeline
 - `elspeth explain` - Query lineage for a row/field
 - `elspeth validate` - Check configuration without running
@@ -747,18 +756,22 @@ NaN → ValueError                - Deterministic number format
 ```
 
 **Foundational (no dependencies):**
+
 - Canonical
 - Configuration
 
 **Infrastructure (depend on foundational):**
+
 - Payload Store → Canonical
 - Plugin System → Configuration
 
 **Core (depend on infrastructure):**
+
 - Landscape → Canonical, Payload Store
 - SDA Engine → Plugin System, Landscape, Configuration
 
 **User-facing (depend on core):**
+
 - CLI → Everything
 
 ---

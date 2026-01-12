@@ -1,4 +1,4 @@
-# Elspeth-Rapid Architecture
+# ELSPETH Architecture
 
 **Version:** 1.1
 **Date:** 2026-01-12
@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-Elspeth-Rapid is a **domain-agnostic Sense/Decide/Act (SDA) framework** designed for high-reliability, auditable data processing workflows. While the initial use case involves LLM-powered decision-making, the architecture supports any decision system: machine learning models, rules engines, threshold-based classifiers, or custom algorithms.
+ELSPETH is a **domain-agnostic Sense/Decide/Act (SDA) framework** designed for high-reliability, auditable data processing workflows. While the initial use case involves LLM-powered decision-making, the architecture supports any decision system: machine learning models, rules engines, threshold-based classifiers, or custom algorithms.
 
 The framework is designed for cases requiring **high-level attributability** - every output must be traceable to its source with complete audit trail.
 
@@ -41,6 +41,7 @@ Same framework, different plugins.
 ### 3. Routing as First-Class Citizen
 
 Rows don't just flow through a pipeline - they can be **routed** to different destinations based on classification decisions. A "gate" transform can send a row to:
+
 - The next transform (continue)
 - A named sink (route with reason)
 
@@ -49,6 +50,7 @@ This enables patterns like routing emergency readings to an alert system while c
 ### 4. Reliability Over Performance
 
 This is a high-reliability system, not a high-throughput system. Design choices favor:
+
 - Correctness over speed
 - Auditability over efficiency
 - Explicit over implicit
@@ -184,6 +186,7 @@ output_sink: results                    │ (continue)
 ### Why DAG?
 
 Once you have:
+
 - Multi-destination routing (`route: [A, B, C]`)
 - Parallel paths that merge (coalesce)
 
@@ -255,6 +258,7 @@ The Landscape is the **audit backbone** of Elspeth. It captures:
 ### Mental Model: Distributed Tracing for Data Pipelines
 
 The Landscape is analogous to OpenTelemetry/Jaeger, where:
+
 - **Rows** are like requests
 - **Transform spans** are like spans
 - **External calls** are like child spans
@@ -526,6 +530,7 @@ class PayloadStore(Protocol):
 ```
 
 Landscape tables store:
+
 - `payload_ref` - Reference to payload store
 - `payload_hash` - Hash for integrity verification
 - `payload_size` - Size in bytes
@@ -623,6 +628,7 @@ Precise terminology prevents confusion for implementers and auditors:
 | **Verify** | Non-deterministic calls | Run live AND compare to recorded; flag differences |
 
 **Key distinction:**
+
 - Deterministic transforms don't "replay" - they **recompute**. Same code + same input = same output.
 - Non-deterministic calls **replay** recorded responses or **verify** against them.
 
@@ -678,6 +684,7 @@ This provides forensic detail for the audit trail - not just *that* something ch
 ### Recorded Data
 
 For each external call:
+
 - Provider identifier (e.g., `openai`, `azure`, `weather.gov`)
 - Model/version if available
 - Request hash + payload ref
@@ -730,6 +737,7 @@ config_for_landscape = {
 ```
 
 **Key management:**
+
 - `fingerprint_key` is loaded from environment or secrets manager
 - Rotate like any internal secret
 - Never stored in Landscape (only the fingerprints are)
@@ -882,11 +890,13 @@ landscape:
 ### Classification
 
 This is a **high-reliability** system, not a high-security system. The threat model is:
+
 - Accountability and auditability (high attributability standard)
 - Data integrity verification (HMAC signing)
 - Secret management (environment variables, redaction in logs)
 
 Not in scope:
+
 - TOP SECRET data handling
 - Supply chain verification
 - Container signing

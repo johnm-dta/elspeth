@@ -1,14 +1,14 @@
-# elspeth-rapid
+# ELSPETH
 
 **Auditable Sense/Decide/Act pipelines for high-reliability systems**
 
-elspeth-rapid is a domain-agnostic framework for building data processing workflows where **every decision must be traceable**. Whether you're evaluating tenders with LLMs, monitoring weather sensors, or processing satellite telemetry, elspeth-rapid provides the scaffolding for reliable, auditable pipelines.
+ELSPETH is a domain-agnostic framework for building data processing workflows where **every decision must be traceable**. Whether you're evaluating tenders with LLMs, monitoring weather sensors, or processing satellite telemetry, ELSPETH provides the scaffolding for reliable, auditable pipelines.
 
-## Why elspeth-rapid?
+## Why ELSPETH?
 
 Modern systems increasingly need to make automated decisions on data streams. When those decisions matter - affecting people, resources, or safety - you need to prove how each decision was made.
 
-elspeth-rapid is designed for **high-level attributability**:
+ELSPETH is designed for **high-level attributability**:
 
 > "This evacuation order came from sensor reading X at time T, which triggered threshold Y in rule Z, with full configuration C"
 
@@ -58,7 +58,7 @@ Same framework. Different plugins. Full audit trail.
 ```bash
 # Clone the repository
 git clone https://github.com/your-org/elspeth-rapid.git
-cd elspeth-rapid
+cd ELSPETH
 
 # Create virtual environment
 uv venv
@@ -140,6 +140,7 @@ elspeth explain --run latest --row 42
 ### Full Audit Trail (Landscape)
 
 Every operation is recorded:
+
 - Run configuration (resolved, not just referenced)
 - Every transform applied to every row
 - Every external call (LLM, API, ML inference)
@@ -218,7 +219,7 @@ llm:
 ## Architecture
 
 ```
-elspeth-rapid/
+ELSPETH/
 ├── src/elspeth_rapid/
 │   ├── core/
 │   │   ├── landscape/      # Audit trail storage
@@ -241,7 +242,7 @@ elspeth-rapid/
 
 ## The Audit Promise
 
-For any output, elspeth-rapid can answer:
+For any output, ELSPETH can answer:
 
 1. **What was the input?** - Source data with hash
 2. **What transforms were applied?** - Full chain with configs
@@ -268,15 +269,17 @@ Complete chain of custody from input to output.
 
 - **[Architecture](docs/design/architecture.md)** - Detailed design document
 
-## When to Use elspeth-rapid
+## When to Use ELSPETH
 
 **Good fit:**
+
 - Decisions that need to be explainable
 - Regulatory or compliance requirements
 - Systems where "why did it do that?" matters
 - Workflows mixing automated and human review
 
 **Consider alternatives if:**
+
 - Pure high-throughput ETL (use Spark, dbt)
 - Real-time streaming with sub-second latency (use Flink, Kafka Streams)
 - Simple scripts with no audit requirements

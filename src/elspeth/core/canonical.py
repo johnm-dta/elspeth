@@ -10,6 +10,7 @@ IMPORTANT: NaN and Infinity are strictly REJECTED, not silently converted.
 This is defense-in-depth for audit integrity.
 """
 
+import math
 from typing import Any
 
 # Version string stored with every run for hash verification
@@ -32,7 +33,13 @@ def _normalize_value(obj: Any) -> Any:
     if obj is None or isinstance(obj, (str, int, bool)):
         return obj
 
+    # Floats: check for non-finite values FIRST
     if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            raise ValueError(
+                f"Cannot canonicalize non-finite float: {obj}. "
+                "Use None for missing values, not NaN."
+            )
         return obj
 
     return obj

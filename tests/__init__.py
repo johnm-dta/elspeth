@@ -1,1 +1,1 @@
-"""Tests for elspeth-rapid."""
+"""Tests for ELSPETH."""

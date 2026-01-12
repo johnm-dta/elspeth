@@ -352,3 +352,25 @@ class TestPublicAPI:
         assert callable(canonical_json)
         assert callable(stable_hash)
         assert isinstance(CANONICAL_VERSION, str)
+
+
+class TestCoreIntegration:
+    """Core module integration - all Phase 1 components exportable."""
+
+    def test_dag_importable_from_core(self) -> None:
+        from elspeth.core import ExecutionGraph, GraphValidationError
+
+        assert ExecutionGraph is not None
+        assert GraphValidationError is not None
+
+    def test_config_importable_from_core(self) -> None:
+        from elspeth.core import ElspethSettings, load_settings
+
+        assert ElspethSettings is not None
+        assert callable(load_settings)
+
+    def test_payload_store_importable_from_core(self) -> None:
+        from elspeth.core import FilesystemPayloadStore, PayloadStore
+
+        assert FilesystemPayloadStore is not None
+        assert PayloadStore is not None

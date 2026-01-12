@@ -1825,7 +1825,6 @@ class AggregationExecutor:
             batch = self._recorder.create_batch(
                 run_id=self._run_id,
                 aggregation_node_id=aggregation.node_id,
-                sequence_in_pipeline=step_in_pipeline,  # Track when batch was created
             )
             aggregation._batch_id = batch.batch_id
             self._member_counts[batch.batch_id] = 0
@@ -1914,16 +1913,13 @@ class AggregationExecutor:
         with self._spans.aggregation_span(aggregation.name, batch_id=batch_id):
             try:
                 outputs = aggregation.flush(ctx)
-                duration_ms = (time.perf_counter() - start) * 1000
 
-                # Transition to completed with timing - this IS the audit record
-                # for flush completion. Batch status transitions serve as the
-                # "node_state equivalent" for batch-level operations.
+                # Transition to completed - batch status tracks state machine,
+                # not timing. Timing is captured in the aggregation_state_id's
+                # node_state (set via state_id parameter when flush creates one).
                 self._recorder.update_batch_status(
                     batch_id,
                     "completed",
-                    duration_ms=duration_ms,
-                    output_count=len(outputs),
                 )
 
                 # Reset for next batch
@@ -1934,12 +1930,10 @@ class AggregationExecutor:
                 return outputs
 
             except Exception as e:
-                duration_ms = (time.perf_counter() - start) * 1000
+                # Record failure - error details go in the node_state, not batch
                 self._recorder.update_batch_status(
                     batch_id,
                     "failed",
-                    duration_ms=duration_ms,
-                    error=str(e),
                 )
                 raise
 ```
@@ -2049,13 +2043,27 @@ from elspeth.core.landscape import Artifact
 
 
 class SinkLike(Protocol):
-    """Protocol for sink-like plugins."""
+    """Engine-internal protocol for sink execution.
+
+    NOTE: This is NOT the same as SinkProtocol from Phase 2.
+    SinkProtocol.write() takes a single row and returns None.
+
+    SinkLike is an adapter interface - the SinkAdapter class (Task 8.5
+    in Phase 4) bridges between real SinkProtocol plugins and this
+    interface by:
+    1. Looping over rows to call sink.write(row, ctx) individually
+    2. Calling sink.flush() after all rows
+    3. Computing and returning artifact metadata (hash, path, etc.)
+
+    This separation allows the engine to think in terms of batches
+    while plugins remain simple single-row writers.
+    """
 
     name: str
     node_id: str
 
     def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> dict[str, Any]:
-        """Write rows and return artifact info."""
+        """Write rows and return artifact info (hash, path, size)."""
         ...
 
 
@@ -2989,11 +2997,21 @@ class Orchestrator:
 
     Manages the complete lifecycle:
     1. Begin run in Landscape
-    2. Register all nodes
+    2. Register all nodes (and set node_id on each plugin instance)
     3. Load rows from source
     4. Process rows through transforms
     5. Write to sinks
     6. Complete run
+
+    NOTE on node_id: Plugin protocols (TransformProtocol, etc.) don't
+    define node_id as an attribute. The Orchestrator sets node_id on
+    each plugin instance AFTER registering it with Landscape:
+
+        node = recorder.register_node(...)
+        transform.node_id = node.node_id  # Set by Orchestrator
+
+    This allows executors to access node_id without requiring plugins
+    to know their node_id at construction time.
 
     Example:
         orchestrator = Orchestrator(db)
@@ -3087,6 +3105,7 @@ class Orchestrator:
                 config={},
                 sequence=i + 1,
             )
+            # Set node_id on plugin (see class docstring for why this is needed)
             transform.node_id = node.node_id
 
             # Track gates - they may route to any sink
@@ -3166,49 +3185,53 @@ class Orchestrator:
         rows_routed = 0
         pending_tokens: dict[str, list[TokenInfo]] = {name: [] for name in config.sinks}
 
-        with self._span_factory.source_span(config.source.name):
-            for row_index, row_data in enumerate(config.source.load(ctx)):
-                rows_processed += 1
+        try:
+            with self._span_factory.source_span(config.source.name):
+                for row_index, row_data in enumerate(config.source.load(ctx)):
+                    rows_processed += 1
 
-                result = processor.process_row(
-                    row_index=row_index,
-                    row_data=row_data,
-                    transforms=config.transforms,
-                    ctx=ctx,
-                )
+                    result = processor.process_row(
+                        row_index=row_index,
+                        row_data=row_data,
+                        transforms=config.transforms,
+                        ctx=ctx,
+                    )
 
-                if result.outcome == "completed":
-                    rows_succeeded += 1
-                    # Preserve full TokenInfo, not just dict
-                    pending_tokens["default"].append(result.token)
-                elif result.outcome == "routed":
-                    rows_routed += 1
-                    # Use the actual sink_name from RowResult (not guessing!)
-                    if result.sink_name and result.sink_name in config.sinks:
-                        pending_tokens[result.sink_name].append(result.token)
-                    else:
-                        # Routed to unknown sink - this is a configuration error
+                    if result.outcome == "completed":
+                        rows_succeeded += 1
+                        # Preserve full TokenInfo, not just dict
+                        pending_tokens["default"].append(result.token)
+                    elif result.outcome == "routed":
+                        rows_routed += 1
+                        # Use the actual sink_name from RowResult (not guessing!)
+                        if result.sink_name and result.sink_name in config.sinks:
+                            pending_tokens[result.sink_name].append(result.token)
+                        else:
+                            # Routed to unknown sink - this is a configuration error
+                            rows_failed += 1
+                    elif result.outcome == "failed":
                         rows_failed += 1
-                elif result.outcome == "failed":
-                    rows_failed += 1
 
-        # Write to sinks using SinkExecutor with proper audit
-        sink_executor = SinkExecutor(recorder, self._span_factory, run_id)
-        step = len(config.transforms) + 1  # Sinks are after all transforms
+            # Write to sinks using SinkExecutor with proper audit
+            sink_executor = SinkExecutor(recorder, self._span_factory, run_id)
+            step = len(config.transforms) + 1  # Sinks are after all transforms
 
-        for sink_name, tokens in pending_tokens.items():
-            if tokens and sink_name in config.sinks:
-                sink = config.sinks[sink_name]
-                # CRITICAL: Pass TokenInfo list, not dicts, for proper node_states
-                sink_executor.write(
-                    sink=sink,
-                    tokens=tokens,
-                    ctx=ctx,
-                    step_in_pipeline=step,
-                )
+            for sink_name, tokens in pending_tokens.items():
+                if tokens and sink_name in config.sinks:
+                    sink = config.sinks[sink_name]
+                    # CRITICAL: Pass TokenInfo list, not dicts, for proper node_states
+                    sink_executor.write(
+                        sink=sink,
+                        tokens=tokens,
+                        ctx=ctx,
+                        step_in_pipeline=step,
+                    )
 
-        # Close source
-        config.source.close()
+        finally:
+            # Close source and all sinks - ALWAYS, even on exception
+            config.source.close()
+            for sink in config.sinks.values():
+                sink.close()
 
         return RunResult(
             run_id=run_id,

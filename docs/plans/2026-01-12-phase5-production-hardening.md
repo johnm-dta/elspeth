@@ -73,6 +73,32 @@ The `runs.reproducibility_grade` column tracks what level of reproducibility is 
 
 ---
 
+## Schema Pre-requisite: Add determinism Column to nodes_table
+
+**Context:** The reproducibility grade computation (Task 14) requires scanning `nodes.determinism` to determine if a run used any non-deterministic transforms. This column must be added to the Landscape schema.
+
+**Files:**
+- Modify: `src/elspeth/core/landscape/schema.py`
+- Modify: `src/elspeth/core/landscape/models.py`
+
+**Implementation:**
+
+Add to `nodes_table` in `schema.py` (after `plugin_version` column):
+
+```python
+Column("determinism", String(32), nullable=False),  # pure, io_dependent, external_call, non_deterministic
+```
+
+Add to `Node` dataclass in `models.py`:
+
+```python
+determinism: str  # From Determinism enum: pure, io_dependent, external_call, non_deterministic
+```
+
+**Note:** This column captures the plugin's declared determinism level (from `elspeth.plugins.enums.Determinism`). The engine sets this when registering nodes based on the plugin's `determinism` attribute.
+
+---
+
 ## Task 1: Checkpoint Schema and Models
 
 **Context:** Add checkpoint table to Landscape schema. Checkpoints capture run progress at row boundaries, enabling resume after crash.
@@ -200,7 +226,7 @@ class TestCheckpointManager:
     @pytest.fixture
     def manager(self, tmp_path):
         """Create CheckpointManager with test database."""
-        from elspeth.core.landscape.db import LandscapeDB
+        from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.checkpoint.manager import CheckpointManager
 
         db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
@@ -210,13 +236,15 @@ class TestCheckpointManager:
     @pytest.fixture
     def setup_run(self, manager):
         """Create a run with some tokens for checkpoint tests."""
-        from elspeth.core.landscape.db import LandscapeDB
+        from elspeth.core.landscape.schema import (
+            runs_table, nodes_table, rows_table, tokens_table
+        )
 
-        # Insert test run, node, row, token via raw SQL
+        # Insert test run, node, row, token via schema tables
         db = manager._db
         with db.engine.connect() as conn:
             conn.execute(
-                db._runs_table.insert().values(
+                runs_table.insert().values(
                     run_id="run-001",
                     started_at=datetime.now(timezone.utc),
                     config_hash="abc123",
@@ -226,7 +254,7 @@ class TestCheckpointManager:
                 )
             )
             conn.execute(
-                db._nodes_table.insert().values(
+                nodes_table.insert().values(
                     node_id="node-001",
                     run_id="run-001",
                     plugin_name="test_transform",
@@ -239,7 +267,7 @@ class TestCheckpointManager:
                 )
             )
             conn.execute(
-                db._rows_table.insert().values(
+                rows_table.insert().values(
                     row_id="row-001",
                     run_id="run-001",
                     source_node_id="node-001",
@@ -249,7 +277,7 @@ class TestCheckpointManager:
                 )
             )
             conn.execute(
-                db._tokens_table.insert().values(
+                tokens_table.insert().values(
                     token_id="tok-001",
                     row_id="row-001",
                     created_at=datetime.now(timezone.utc),
@@ -336,7 +364,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from elspeth.core.landscape.db import LandscapeDB
+from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.models import Checkpoint
 from elspeth.core.landscape.schema import checkpoints_table
 
@@ -563,6 +591,8 @@ Add to `src/elspeth/core/config.py`:
 ```python
 from typing import Literal
 
+from pydantic import model_validator
+
 
 class CheckpointSettings(BaseSettings):
     """Configuration for crash recovery checkpointing.
@@ -613,14 +643,56 @@ Expected: PASS
 ```python
 # Add to tests/engine/test_orchestrator.py
 
+import pytest
+from datetime import datetime, timezone
+
+
 class TestOrchestratorCheckpointing:
     """Tests for checkpoint integration in Orchestrator."""
+
+    @pytest.fixture
+    def landscape_db(self, tmp_path):
+        """Create test database."""
+        from elspeth.core.landscape.database import LandscapeDB
+
+        db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
+        db.create_tables()
+        return db
 
     @pytest.fixture
     def checkpoint_manager(self, landscape_db):
         """Create CheckpointManager for tests."""
         from elspeth.core.checkpoint import CheckpointManager
         return CheckpointManager(landscape_db)
+
+    @pytest.fixture
+    def orchestrator(self, landscape_db):
+        """Create Orchestrator with test database."""
+        from elspeth.engine.orchestrator import Orchestrator
+        from elspeth.core.config import ElspethSettings
+
+        settings = ElspethSettings()
+        return Orchestrator(db=landscape_db, settings=settings)
+
+    @pytest.fixture
+    def simple_pipeline(self):
+        """Pipeline that processes 3 rows successfully."""
+        # Returns a Pipeline config with a source yielding 3 rows
+        # and a passthrough transform
+        return {
+            "source": {"type": "memory", "rows": [{"x": 1}, {"x": 2}, {"x": 3}]},
+            "transforms": [{"type": "passthrough"}],
+            "sinks": [{"type": "memory", "name": "output"}],
+        }
+
+    @pytest.fixture
+    def failing_pipeline(self):
+        """Pipeline that fails partway through."""
+        return {
+            "source": {"type": "memory", "rows": [{"x": 1}, {"x": 2}, {"x": 3}]},
+            "transforms": [{"type": "fail_on_third"}],  # Fails on row 3
+            "sinks": [{"type": "memory", "name": "output"}],
+        }
 
     def test_orchestrator_creates_checkpoints(
         self, orchestrator, checkpoint_manager, simple_pipeline
@@ -679,9 +751,45 @@ The Orchestrator integration should:
 3. **On successful completion:** Delete all checkpoints for the run
 4. **On failure:** Leave checkpoints for recovery
 
-```python
-# In Orchestrator._process_row() or similar:
+**Integration Points in Orchestrator:**
 
+```python
+# In Orchestrator.__init__():
+from elspeth.core.checkpoint import CheckpointManager
+from elspeth.core.config import CheckpointSettings
+
+class Orchestrator:
+    def __init__(
+        self,
+        db: LandscapeDB,
+        settings: ElspethSettings,
+        checkpoint_manager: CheckpointManager | None = None,
+    ) -> None:
+        self._db = db
+        self._settings = settings
+        self._checkpoint_settings = settings.checkpoint
+        self._checkpoint_manager = checkpoint_manager or CheckpointManager(db)
+        self._sequence_number = 0
+
+# In Orchestrator.run() - call _maybe_checkpoint after each row completes:
+def run(self, pipeline: PipelineConfig) -> RunResult:
+    run_id = self._begin_run(pipeline)
+    try:
+        for token in self._process_pipeline(pipeline):
+            # After each row/token completes a node:
+            self._maybe_checkpoint(run_id, token.token_id, token.current_node_id)
+
+        self._complete_run(run_id, status="completed")
+        # Clean up checkpoints on success
+        self._checkpoint_manager.delete_checkpoints(run_id)
+        return RunResult(run_id=run_id, status="completed")
+
+    except Exception as e:
+        self._complete_run(run_id, status="failed", error=str(e))
+        # Leave checkpoints for recovery - don't delete them
+        return RunResult(run_id=run_id, status="failed", error=str(e))
+
+# The checkpoint decision logic:
 def _maybe_checkpoint(self, run_id: str, token_id: str, node_id: str) -> None:
     """Create checkpoint if configured."""
     if not self._checkpoint_settings.enabled:
@@ -708,6 +816,21 @@ def _maybe_checkpoint(self, run_id: str, token_id: str, node_id: str) -> None:
             node_id=node_id,
             sequence_number=self._sequence_number,
         )
+
+# For aggregation transforms, always checkpoint at flush:
+def _flush_aggregation(self, run_id: str, aggregation: BaseAggregation, ...) -> None:
+    # ... flush logic ...
+
+    # Always checkpoint at aggregation boundaries regardless of frequency setting
+    if self._checkpoint_settings.aggregation_boundaries:
+        self._sequence_number += 1
+        self._checkpoint_manager.create_checkpoint(
+            run_id=run_id,
+            token_id=batch_token_id,
+            node_id=aggregation_node_id,
+            sequence_number=self._sequence_number,
+            aggregation_state=aggregation.get_state(),  # Capture buffer state
+        )
 ```
 
 ### Step 3: Run tests
@@ -732,10 +855,98 @@ Expected: PASS
 """Tests for checkpoint recovery protocol."""
 
 import pytest
+from datetime import datetime, timezone
 
 
 class TestRecoveryProtocol:
     """Tests for resuming runs from checkpoints."""
+
+    @pytest.fixture
+    def landscape_db(self, tmp_path):
+        """Create test database."""
+        from elspeth.core.landscape.database import LandscapeDB
+
+        db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
+        db.create_tables()
+        return db
+
+    @pytest.fixture
+    def checkpoint_manager(self, landscape_db):
+        """Create CheckpointManager."""
+        from elspeth.core.checkpoint import CheckpointManager
+        return CheckpointManager(landscape_db)
+
+    @pytest.fixture
+    def recovery_manager(self, landscape_db, checkpoint_manager):
+        """Create RecoveryManager."""
+        from elspeth.core.checkpoint import RecoveryManager
+        return RecoveryManager(landscape_db, checkpoint_manager)
+
+    @pytest.fixture
+    def failed_run_with_checkpoint(self, landscape_db, checkpoint_manager):
+        """Create a failed run that has checkpoints."""
+        from elspeth.core.landscape.schema import (
+            runs_table, nodes_table, rows_table, tokens_table
+        )
+
+        run_id = "failed-run-001"
+        now = datetime.now(timezone.utc)
+
+        with landscape_db.engine.connect() as conn:
+            conn.execute(runs_table.insert().values(
+                run_id=run_id, started_at=now, config_hash="abc",
+                settings_json="{}", canonical_version="v1", status="failed"
+            ))
+            conn.execute(nodes_table.insert().values(
+                node_id="node-001", run_id=run_id, plugin_name="test",
+                node_type="transform", plugin_version="1.0", determinism="pure",
+                config_hash="xyz", config_json="{}", registered_at=now
+            ))
+            conn.execute(rows_table.insert().values(
+                row_id="row-001", run_id=run_id, source_node_id="node-001",
+                row_index=0, source_data_hash="hash1", created_at=now
+            ))
+            conn.execute(tokens_table.insert().values(
+                token_id="tok-001", row_id="row-001", created_at=now
+            ))
+            conn.commit()
+
+        # Create a checkpoint
+        checkpoint_manager.create_checkpoint(run_id, "tok-001", "node-001", 1)
+        return run_id
+
+    @pytest.fixture
+    def completed_run(self, landscape_db):
+        """Create a completed run (cannot be resumed)."""
+        from elspeth.core.landscape.schema import runs_table
+
+        run_id = "completed-run-001"
+        now = datetime.now(timezone.utc)
+
+        with landscape_db.engine.connect() as conn:
+            conn.execute(runs_table.insert().values(
+                run_id=run_id, started_at=now, completed_at=now,
+                config_hash="abc", settings_json="{}",
+                canonical_version="v1", status="completed"
+            ))
+            conn.commit()
+        return run_id
+
+    @pytest.fixture
+    def failed_run_no_checkpoint(self, landscape_db):
+        """Create a failed run without checkpoints."""
+        from elspeth.core.landscape.schema import runs_table
+
+        run_id = "failed-no-cp-001"
+        now = datetime.now(timezone.utc)
+
+        with landscape_db.engine.connect() as conn:
+            conn.execute(runs_table.insert().values(
+                run_id=run_id, started_at=now, config_hash="abc",
+                settings_json="{}", canonical_version="v1", status="failed"
+            ))
+            conn.commit()
+        return run_id
 
     def test_can_resume_returns_true_for_failed_run_with_checkpoint(
         self, recovery_manager, failed_run_with_checkpoint
@@ -801,7 +1012,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from elspeth.core.checkpoint.manager import CheckpointManager
-from elspeth.core.landscape.db import LandscapeDB
+from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.models import Checkpoint
 
 
@@ -1184,10 +1395,12 @@ class RateLimiter:
         Returns:
             True if acquired, False if rate limited
         """
+        from pyrate_limiter import BucketFullException
+
         try:
             self._limiter.try_acquire(self.name, weight=weight, block=False)
             return True
-        except Exception:
+        except BucketFullException:
             return False
 
     def reset(self) -> None:
@@ -1523,10 +1736,87 @@ class TestPurgeManager:
     """Tests for identifying and purging old payloads."""
 
     @pytest.fixture
+    def landscape_db(self, tmp_path):
+        """Create test database."""
+        from elspeth.core.landscape.database import LandscapeDB
+
+        db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
+        db.create_tables()
+        return db
+
+    @pytest.fixture
+    def payload_store(self, tmp_path):
+        """Create test payload store."""
+        from elspeth.core.payload_store import FilesystemPayloadStore
+        return FilesystemPayloadStore(tmp_path / "payloads")
+
+    @pytest.fixture
     def purge_manager(self, landscape_db, payload_store):
         """Create PurgeManager for tests."""
         from elspeth.core.retention import PurgeManager
         return PurgeManager(landscape_db, payload_store)
+
+    @pytest.fixture
+    def old_run(self, landscape_db, payload_store):
+        """Create a completed run from 100 days ago with payloads."""
+        from elspeth.core.landscape.schema import runs_table, rows_table, nodes_table
+
+        run_id = "old-run-001"
+        old_time = datetime.now(timezone.utc) - timedelta(days=100)
+
+        # Store a payload
+        payload_data = b'{"old": "data"}'
+        ref = payload_store.store(payload_data)
+
+        with landscape_db.engine.connect() as conn:
+            conn.execute(runs_table.insert().values(
+                run_id=run_id, started_at=old_time, completed_at=old_time,
+                config_hash="abc", settings_json="{}",
+                canonical_version="v1", status="completed"
+            ))
+            conn.execute(nodes_table.insert().values(
+                node_id="old-node-001", run_id=run_id, plugin_name="source",
+                node_type="source", plugin_version="1.0", determinism="pure",
+                config_hash="xyz", config_json="{}", registered_at=old_time
+            ))
+            conn.execute(rows_table.insert().values(
+                row_id="old-row-001", run_id=run_id, source_node_id="old-node-001",
+                row_index=0, source_data_hash="hash1", source_data_ref=ref,
+                created_at=old_time
+            ))
+            conn.commit()
+        return run_id
+
+    @pytest.fixture
+    def recent_run(self, landscape_db, payload_store):
+        """Create a completed run from 10 days ago."""
+        from elspeth.core.landscape.schema import runs_table, rows_table, nodes_table
+
+        run_id = "recent-run-001"
+        recent_time = datetime.now(timezone.utc) - timedelta(days=10)
+
+        # Store a payload
+        payload_data = b'{"recent": "data"}'
+        ref = payload_store.store(payload_data)
+
+        with landscape_db.engine.connect() as conn:
+            conn.execute(runs_table.insert().values(
+                run_id=run_id, started_at=recent_time, completed_at=recent_time,
+                config_hash="abc", settings_json="{}",
+                canonical_version="v1", status="completed"
+            ))
+            conn.execute(nodes_table.insert().values(
+                node_id="recent-node-001", run_id=run_id, plugin_name="source",
+                node_type="source", plugin_version="1.0", determinism="pure",
+                config_hash="xyz", config_json="{}", registered_at=recent_time
+            ))
+            conn.execute(rows_table.insert().values(
+                row_id="recent-row-001", run_id=run_id, source_node_id="recent-node-001",
+                row_index=0, source_data_hash="hash2", source_data_ref=ref,
+                created_at=recent_time
+            ))
+            conn.commit()
+        return run_id
 
     def test_find_expired_row_payloads(
         self, purge_manager, landscape_db, old_run
@@ -1774,7 +2064,9 @@ class PurgeManager:
                     # Note: Real implementation would track size before delete
                     if self._payload_store.delete(ref):
                         deleted += 1
-            except Exception:
+            except OSError as e:
+                # Log the specific error for debugging, but continue purging
+                # This handles file-not-found, permission denied, etc.
                 failed.append(ref)
 
         elapsed = time.monotonic() - start
@@ -1951,16 +2243,22 @@ def purge(
         # Delete payloads older than 30 days
         elspeth purge --retention-days 30 --yes
     """
-    from elspeth.core.config import load_config
-    from elspeth.core.landscape.db import LandscapeDB
+    from pathlib import Path
+
+    from elspeth.core.config import load_settings, ElspethSettings
+    from elspeth.core.landscape.database import LandscapeDB
     from elspeth.core.payload_store import FilesystemPayloadStore
     from elspeth.core.retention import PurgeManager
 
-    # Load config or use defaults
-    config = load_config()
+    # Load settings from default path or use defaults
+    settings_path = Path("settings.yaml")
+    if settings_path.exists():
+        settings = load_settings(settings_path)
+    else:
+        settings = ElspethSettings()
 
-    db_path = database or config.landscape.database_path
-    payload_path = config.payload_store.base_path
+    db_path = database or settings.database.url.replace("sqlite:///", "")
+    payload_path = settings.payload_store.base_path
 
     db = LandscapeDB(f"sqlite:///{db_path}")
     payload_store = FilesystemPayloadStore(payload_path)
@@ -2018,8 +2316,92 @@ Expected: PASS
 ```python
 # Add to tests/core/landscape/test_recorder.py
 
+import pytest
+from datetime import datetime, timezone
+
+
 class TestExplainGracefulDegradation:
     """Tests for explain() when payloads are unavailable."""
+
+    @pytest.fixture
+    def landscape_db(self, tmp_path):
+        """Create test database."""
+        from elspeth.core.landscape.database import LandscapeDB
+
+        db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
+        db.create_tables()
+        return db
+
+    @pytest.fixture
+    def payload_store(self, tmp_path):
+        """Create test payload store."""
+        from elspeth.core.payload_store import FilesystemPayloadStore
+        return FilesystemPayloadStore(tmp_path / "payloads")
+
+    @pytest.fixture
+    def recorder(self, landscape_db, payload_store):
+        """Create LandscapeRecorder with payload store."""
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        return LandscapeRecorder(landscape_db, payload_store=payload_store)
+
+    @pytest.fixture
+    def run_with_purged_payloads(self, landscape_db):
+        """Create a run where payloads have been purged (ref exists but file gone)."""
+        from elspeth.core.landscape.schema import runs_table, rows_table, nodes_table
+
+        run_id = "purged-run-001"
+        now = datetime.now(timezone.utc)
+
+        with landscape_db.engine.connect() as conn:
+            conn.execute(runs_table.insert().values(
+                run_id=run_id, started_at=now, completed_at=now,
+                config_hash="abc", settings_json="{}",
+                canonical_version="v1", status="completed"
+            ))
+            conn.execute(nodes_table.insert().values(
+                node_id="purged-node-001", run_id=run_id, plugin_name="source",
+                node_type="source", plugin_version="1.0", determinism="pure",
+                config_hash="xyz", config_json="{}", registered_at=now
+            ))
+            # Note: source_data_ref points to a non-existent payload (simulating purge)
+            conn.execute(rows_table.insert().values(
+                row_id="row-001", run_id=run_id, source_node_id="purged-node-001",
+                row_index=0, source_data_hash="hash-still-here",
+                source_data_ref="nonexistent-ref", created_at=now
+            ))
+            conn.commit()
+        return run_id
+
+    @pytest.fixture
+    def recent_run(self, landscape_db, payload_store):
+        """Create a run with available payloads."""
+        from elspeth.core.landscape.schema import runs_table, rows_table, nodes_table
+
+        run_id = "recent-run-001"
+        now = datetime.now(timezone.utc)
+
+        # Store actual payload
+        payload_data = b'{"field": "value"}'
+        ref = payload_store.store(payload_data)
+
+        with landscape_db.engine.connect() as conn:
+            conn.execute(runs_table.insert().values(
+                run_id=run_id, started_at=now, completed_at=now,
+                config_hash="abc", settings_json="{}",
+                canonical_version="v1", status="completed"
+            ))
+            conn.execute(nodes_table.insert().values(
+                node_id="recent-node-001", run_id=run_id, plugin_name="source",
+                node_type="source", plugin_version="1.0", determinism="pure",
+                config_hash="xyz", config_json="{}", registered_at=now
+            ))
+            conn.execute(rows_table.insert().values(
+                row_id="row-001", run_id=run_id, source_node_id="recent-node-001",
+                row_index=0, source_data_hash="hash1", source_data_ref=ref,
+                created_at=now
+            ))
+            conn.commit()
+        return run_id
 
     def test_explain_with_missing_row_payload(
         self, recorder, run_with_purged_payloads
@@ -2099,8 +2481,10 @@ def explain_row(self, run_id: str, row_id: str) -> RowLineage | None:
             if payload_bytes:
                 source_data = json.loads(payload_bytes)
                 payload_available = True
-        except Exception:
-            pass  # Payload unavailable
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            # Payload has been purged or is corrupted - this is expected
+            # after retention period expires. Hash remains for verification.
+            pass
 
     return RowLineage(
         row_id=row_id,
@@ -2192,12 +2576,20 @@ def resume(
         # Resume a specific run
         elspeth resume run-abc123
     """
-    from elspeth.core.config import load_config
-    from elspeth.core.landscape.db import LandscapeDB
+    from pathlib import Path
+
+    from elspeth.core.config import load_settings, ElspethSettings
+    from elspeth.core.landscape.database import LandscapeDB
     from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
 
-    config = load_config()
-    db_path = database or config.landscape.database_path
+    # Load settings from default path or use defaults
+    settings_path = Path("settings.yaml")
+    if settings_path.exists():
+        settings = load_settings(settings_path)
+    else:
+        settings = ElspethSettings()
+
+    db_path = database or settings.database.url.replace("sqlite:///", "")
 
     db = LandscapeDB(f"sqlite:///{db_path}")
     checkpoint_mgr = CheckpointManager(db)
@@ -2261,7 +2653,7 @@ class TestCheckpointRecoveryIntegration:
     @pytest.fixture
     def test_env(self, tmp_path):
         """Set up test environment with database and payload store."""
-        from elspeth.core.landscape.db import LandscapeDB
+        from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.payload_store import FilesystemPayloadStore
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import CheckpointSettings

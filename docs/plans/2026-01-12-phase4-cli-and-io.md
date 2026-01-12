@@ -30,8 +30,10 @@ Phase 4 sinks implement the Phase 2 row-wise protocol (simpler for plugin author
 1. Implements `SinkLike` (bulk interface expected by SinkExecutor)
 2. Wraps a Phase 2 sink
 3. Loops calling `sink.write(row, ctx)` for each row
-4. Calls `sink.flush()` and `sink.close()`
-5. Generates artifact info from the resulting file
+4. Calls `sink.flush()` after writing
+5. Generates artifact info based on artifact descriptor kind
+
+**Lifecycle:** Phase 3B's Orchestrator calls `sink.close()` for all sinks in its finally block. The adapter's `close()` method delegates to the wrapped sink.
 
 **This means:** Phase 4 sinks are correct for plugin authors. The CLI `run` command wraps them in `SinkAdapter` before passing to Orchestrator.
 
@@ -1267,7 +1269,7 @@ __all__ = ["CSVSink", "JSONSink"]
 ### Step 4: Run test to verify it passes
 
 Run: `pytest tests/plugins/sinks/test_json_sink.py -v`
-Expected: PASS (7 tests)
+Expected: PASS (8 tests)
 
 ### Step 5: Commit
 
@@ -1991,7 +1993,12 @@ class TestSinkAdapter:
         from elspeth.engine.adapters import SinkAdapter
 
         mock_sink = MockRowWiseSink({"path": "/tmp/test.csv"})
-        adapter = SinkAdapter(mock_sink, name="test", artifact_path="/tmp/test.csv")
+        adapter = SinkAdapter(
+            mock_sink,
+            plugin_name="csv",
+            sink_name="output",
+            artifact_descriptor={"kind": "file", "path": "/tmp/test.csv"},
+        )
 
         rows = [{"id": 1}, {"id": 2}, {"id": 3}]
         result = adapter.write(rows, ctx=None)
@@ -2003,14 +2010,19 @@ class TestSinkAdapter:
         # Should NOT close in write() - lifecycle managed separately
         assert mock_sink.closed is False
         # Should return artifact info
-        assert "path" in result
+        assert "kind" in result
 
     def test_adapter_close_calls_sink_close(self) -> None:
         """Adapter.close() closes the wrapped sink."""
         from elspeth.engine.adapters import SinkAdapter
 
         mock_sink = MockRowWiseSink({"path": "/tmp/test.csv"})
-        adapter = SinkAdapter(mock_sink, name="test", artifact_path="/tmp/test.csv")
+        adapter = SinkAdapter(
+            mock_sink,
+            plugin_name="csv",
+            sink_name="output",
+            artifact_descriptor={"kind": "file", "path": "/tmp/test.csv"},
+        )
 
         adapter.close()
         assert mock_sink.closed is True
@@ -2019,27 +2031,80 @@ class TestSinkAdapter:
         """Adapter computes content hash from artifact file."""
         from elspeth.engine.adapters import SinkAdapter
 
-        # Create a test file
+        # Create a test file with known content
         test_file = tmp_path / "output.csv"
         test_content = b"id,name\n1,alice\n2,bob\n"
         test_file.write_bytes(test_content)
         expected_hash = hashlib.sha256(test_content).hexdigest()
 
         mock_sink = MockRowWiseSink({"path": str(test_file)})
-        adapter = SinkAdapter(mock_sink, name="test", artifact_path=str(test_file))
+        adapter = SinkAdapter(
+            mock_sink,
+            plugin_name="csv",
+            sink_name="test",
+            artifact_descriptor={"kind": "file", "path": str(test_file)},
+        )
 
-        result = adapter.write([{"id": 1}], ctx=None)
+        # Test _compute_artifact_info directly to avoid write() side effects
+        # (In production, write() modifies the file, changing the hash)
+        result = adapter._compute_artifact_info()
 
         assert result["path"] == str(test_file)
         assert result["size_bytes"] == len(test_content)
         assert result["content_hash"] == expected_hash
+
+    def test_adapter_write_then_hash(self, tmp_path: Path) -> None:
+        """Adapter hashes file AFTER writes complete."""
+        from elspeth.engine.adapters import SinkAdapter
+
+        # Use a sink that actually writes to the file
+        test_file = tmp_path / "output.csv"
+
+        class RealWritingSink:
+            def __init__(self, path: Path) -> None:
+                self.config = {"path": str(path)}
+                self._file = open(path, "w")
+                self._file.write("id\n")  # Header
+
+            def write(self, row: dict, ctx: Any) -> None:
+                self._file.write(f"{row['id']}\n")
+
+            def flush(self) -> None:
+                self._file.flush()
+
+            def close(self) -> None:
+                self._file.close()
+
+        real_sink = RealWritingSink(test_file)
+        adapter = SinkAdapter(
+            real_sink,
+            plugin_name="csv",
+            sink_name="output",
+            artifact_descriptor={"kind": "file", "path": str(test_file)},
+        )
+
+        # Write rows - this modifies the file
+        result = adapter.write([{"id": 1}, {"id": 2}], ctx=None)
+        adapter.close()
+
+        # Hash should reflect FINAL file contents (header + 2 rows)
+        expected_content = b"id\n1\n2\n"
+        expected_hash = hashlib.sha256(expected_content).hexdigest()
+
+        assert result["content_hash"] == expected_hash
+        assert result["size_bytes"] == len(expected_content)
 
     def test_adapter_handles_missing_file(self) -> None:
         """Adapter handles non-existent artifact file gracefully."""
         from elspeth.engine.adapters import SinkAdapter
 
         mock_sink = MockRowWiseSink({"path": "/nonexistent/file.csv"})
-        adapter = SinkAdapter(mock_sink, name="test", artifact_path="/nonexistent/file.csv")
+        adapter = SinkAdapter(
+            mock_sink,
+            plugin_name="csv",
+            sink_name="output",
+            artifact_descriptor={"kind": "file", "path": "/nonexistent/file.csv"},
+        )
 
         result = adapter.write([{"id": 1}], ctx=None)
 
@@ -2047,13 +2112,47 @@ class TestSinkAdapter:
         assert result["size_bytes"] == 0
         assert result["content_hash"] == ""
 
-    def test_adapter_has_node_id_attribute(self) -> None:
-        """Adapter has node_id for SinkLike protocol compliance."""
+    def test_adapter_database_artifact(self) -> None:
+        """Adapter handles database sinks with table-based artifact descriptors."""
+        from elspeth.engine.adapters import SinkAdapter
+
+        mock_sink = MockRowWiseSink({"url": "sqlite:///test.db", "table": "results"})
+        adapter = SinkAdapter(
+            mock_sink,
+            plugin_name="database",
+            sink_name="db_output",
+            artifact_descriptor={
+                "kind": "database",
+                "url": "sqlite:///test.db",
+                "table": "results",
+            },
+        )
+
+        result = adapter.write([{"id": 1}], ctx=None)
+
+        # Database artifacts don't have file hashes - descriptor is the identity
+        assert result["kind"] == "database"
+        assert result["table"] == "results"
+        assert "content_hash" not in result or result["content_hash"] == ""
+
+    def test_adapter_has_node_id_and_names(self) -> None:
+        """Adapter exposes plugin_name, sink_name, and node_id for registration."""
         from elspeth.engine.adapters import SinkAdapter
 
         mock_sink = MockRowWiseSink({"path": "/tmp/test.csv"})
-        adapter = SinkAdapter(mock_sink, name="test", artifact_path="/tmp/test.csv")
+        adapter = SinkAdapter(
+            mock_sink,
+            plugin_name="csv",
+            sink_name="flagged_output",
+            artifact_descriptor={"kind": "file", "path": "/tmp/test.csv"},
+        )
 
+        # plugin_name is the type (csv, json, database)
+        assert adapter.plugin_name == "csv"
+        # sink_name is the instance key from config
+        assert adapter.sink_name == "flagged_output"
+        # name property returns sink_name for SinkLike compatibility
+        assert adapter.name == "flagged_output"
         # node_id starts empty, set by Orchestrator during registration
         assert hasattr(adapter, "node_id")
         adapter.node_id = "sink-001"
@@ -2097,9 +2196,20 @@ class SinkAdapter:
     Phase 2 SinkProtocol: write(row: dict, ctx) -> None (row-wise)
     Phase 3B SinkLike: write(rows: list[dict], ctx) -> dict (bulk, artifact info)
 
+    Artifact Descriptors:
+        Different sink types produce different artifact identities:
+        - File sinks: {"kind": "file", "path": "output.csv"}
+        - Database sinks: {"kind": "database", "url": "...", "table": "results"}
+        - Webhook sinks: {"kind": "webhook", "url": "..."}
+
     Usage:
         raw_sink = CSVSink({"path": "output.csv"})
-        adapter = SinkAdapter(raw_sink, name="output", artifact_path="output.csv")
+        adapter = SinkAdapter(
+            raw_sink,
+            plugin_name="csv",
+            sink_name="output",
+            artifact_descriptor={"kind": "file", "path": "output.csv"},
+        )
 
         # Pass adapter to PipelineConfig (implements SinkLike)
         config = PipelineConfig(source=src, transforms=[], sinks={"output": adapter})
@@ -2111,20 +2221,28 @@ class SinkAdapter:
     def __init__(
         self,
         sink: RowWiseSinkProtocol,
-        name: str,
-        artifact_path: str,
+        plugin_name: str,
+        sink_name: str,
+        artifact_descriptor: dict[str, Any],
     ) -> None:
         """Wrap a Phase 2 row-wise sink.
 
         Args:
             sink: Phase 2 sink implementing write(row, ctx) -> None
-            name: Sink name for identification
-            artifact_path: Path to the output artifact (for hash computation)
+            plugin_name: Type of sink plugin (csv, json, database)
+            sink_name: Instance name from config (output, flagged, etc.)
+            artifact_descriptor: Describes the artifact identity by kind
         """
         self._sink = sink
-        self.name = name
+        self.plugin_name = plugin_name
+        self.sink_name = sink_name
         self.node_id: str = ""  # Set by Orchestrator during registration
-        self._artifact_path = artifact_path
+        self._artifact_descriptor = artifact_descriptor
+
+    @property
+    def name(self) -> str:
+        """Return sink_name for SinkLike protocol compatibility."""
+        return self.sink_name
 
     def write(self, rows: list[dict[str, Any]], ctx: Any) -> dict[str, Any]:
         """Write rows using the wrapped sink's row-wise interface.
@@ -2137,7 +2255,7 @@ class SinkAdapter:
             ctx: Plugin context
 
         Returns:
-            Artifact info dict with path, size_bytes, content_hash
+            Artifact info dict (structure depends on artifact kind)
         """
         # Loop over rows, calling Phase 2 row-wise write
         for row in rows:
@@ -2146,7 +2264,7 @@ class SinkAdapter:
         # Flush buffered data (but don't close - lifecycle managed separately)
         self._sink.flush()
 
-        # Compute artifact metadata
+        # Compute artifact metadata based on descriptor kind
         return self._compute_artifact_info()
 
     def close(self) -> None:
@@ -2158,14 +2276,30 @@ class SinkAdapter:
         self._sink.close()
 
     def _compute_artifact_info(self) -> dict[str, Any]:
-        """Compute artifact metadata from the output file.
-
-        Uses chunked hashing to avoid loading large files into memory.
+        """Compute artifact metadata based on descriptor kind.
 
         Returns:
-            Dict with path, size_bytes, content_hash
+            Dict with artifact identity and optional content hash.
+            Structure depends on kind:
+            - file: {kind, path, size_bytes, content_hash}
+            - database: {kind, url, table} (no content hash)
+            - webhook: {kind, url} (no content hash)
         """
-        path = self._artifact_path
+        kind = self._artifact_descriptor.get("kind", "unknown")
+
+        if kind == "file":
+            return self._compute_file_artifact()
+        elif kind == "database":
+            return self._compute_database_artifact()
+        elif kind == "webhook":
+            return self._compute_webhook_artifact()
+        else:
+            # Unknown kind - return descriptor as-is
+            return dict(self._artifact_descriptor)
+
+    def _compute_file_artifact(self) -> dict[str, Any]:
+        """Compute artifact info for file-based sinks."""
+        path = self._artifact_descriptor.get("path", "")
         size_bytes = 0
         content_hash = ""
 
@@ -2174,9 +2308,31 @@ class SinkAdapter:
             content_hash = self._hash_file_chunked(path)
 
         return {
+            "kind": "file",
             "path": path,
             "size_bytes": size_bytes,
             "content_hash": content_hash,
+        }
+
+    def _compute_database_artifact(self) -> dict[str, Any]:
+        """Compute artifact info for database sinks.
+
+        Database artifacts use the table identity, not content hashes.
+        The audit trail links to the table; row-level integrity is the DB's job.
+        """
+        return {
+            "kind": "database",
+            "url": self._artifact_descriptor.get("url", ""),
+            "table": self._artifact_descriptor.get("table", ""),
+            # No content_hash - database is the source of truth
+        }
+
+    def _compute_webhook_artifact(self) -> dict[str, Any]:
+        """Compute artifact info for webhook sinks."""
+        return {
+            "kind": "webhook",
+            "url": self._artifact_descriptor.get("url", ""),
+            # No content_hash - webhook response should be in calls table
         }
 
     @staticmethod
@@ -2415,18 +2571,27 @@ def _execute_pipeline(config: dict, verbose: bool = False) -> dict:
 
         if sink_plugin == "csv":
             raw_sink = CSVSink(sink_options)
+            artifact_descriptor = {"kind": "file", "path": sink_options.get("path", "")}
         elif sink_plugin == "json":
             raw_sink = JSONSink(sink_options)
+            artifact_descriptor = {"kind": "file", "path": sink_options.get("path", "")}
         elif sink_plugin == "database":
             raw_sink = DatabaseSink(sink_options)
+            artifact_descriptor = {
+                "kind": "database",
+                "url": sink_options.get("url", ""),
+                "table": sink_options.get("table", ""),
+            }
         else:
             raise ValueError(f"Unknown sink plugin: {sink_plugin}")
 
-        # Get artifact path from config (database sinks use table name instead)
-        artifact_path = sink_options.get("path", "")
-
         # Wrap Phase 2 sink in adapter for Phase 3B SinkLike interface
-        sinks[sink_name] = SinkAdapter(raw_sink, name=sink_name, artifact_path=artifact_path)
+        sinks[sink_name] = SinkAdapter(
+            raw_sink,
+            plugin_name=sink_plugin,
+            sink_name=sink_name,
+            artifact_descriptor=artifact_descriptor,
+        )
 
     # Get database URL from settings or use default
     db_url = config.get("landscape", {}).get("url", "sqlite:///elspeth_runs.db")
@@ -2444,12 +2609,9 @@ def _execute_pipeline(config: dict, verbose: bool = False) -> dict:
 
     # Execute via Orchestrator (creates full audit trail)
     # NOTE: Orchestrator takes LandscapeDB, not LandscapeRecorder - it creates its own recorder
+    # NOTE: Orchestrator closes source and sinks in its finally block - no cleanup needed here
     orchestrator = Orchestrator(db)
     result = orchestrator.run(pipeline_config)
-
-    # Close all sinks (fills Phase 3B lifecycle gap - Orchestrator doesn't close sinks)
-    for adapter in sinks.values():
-        adapter.close()
 
     return {
         "run_id": result.run_id,
@@ -2704,10 +2866,9 @@ def explain(
         token_id = tokens[0].token_id
 
     # Get the token
-    tokens = recorder.get_tokens_by_id(token_id)
-    if not tokens:
+    token = recorder.get_token(token_id)
+    if token is None:
         return None
-    token = tokens[0]
 
     # Get source row
     row = recorder.get_row(token.row_id)
@@ -2715,7 +2876,7 @@ def explain(
         return None
 
     # Get node states for this token
-    node_states = recorder.get_node_states(token_id)
+    node_states = recorder.get_node_states_for_token(token_id)
     node_states.sort(key=lambda s: s.step_index)
 
     # Get routing events for each state

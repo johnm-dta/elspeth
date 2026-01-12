@@ -18,6 +18,7 @@ Model Classes:
 """
 
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.lineage import LineageResult, explain
 from elspeth.core.landscape.models import (
     Artifact,
     Batch,
@@ -60,6 +61,7 @@ __all__ = [
     "Edge",
     "LandscapeDB",
     "LandscapeRecorder",
+    "LineageResult",
     "Node",
     "NodeState",
     "RoutingEvent",
@@ -67,6 +69,7 @@ __all__ = [
     "Run",
     "Token",
     "TokenParent",
+    "explain",
     "artifacts_table",
     "batch_members_table",
     "batch_outputs_table",

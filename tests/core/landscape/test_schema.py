@@ -1,6 +1,8 @@
 # tests/core/landscape/test_schema.py
 """Tests for Landscape SQLAlchemy schema."""
 
+from pathlib import Path
+
 from sqlalchemy import inspect
 
 
@@ -39,7 +41,7 @@ class TestSchemaDefinition:
 class TestSchemaCreation:
     """Creating tables in a database."""
 
-    def test_create_all_tables(self, tmp_path) -> None:
+    def test_create_all_tables(self, tmp_path: Path) -> None:
         from sqlalchemy import create_engine
 
         from elspeth.core.landscape.schema import metadata

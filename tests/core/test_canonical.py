@@ -1,6 +1,13 @@
 # tests/core/test_canonical.py
 """Tests for canonical JSON serialization and hashing."""
 
+import base64
+import hashlib
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import numpy as np
+import pandas as pd
 import pytest
 
 
@@ -64,9 +71,6 @@ class TestNanInfinityRejection:
         assert _normalize_value(1e308) == 1e308
 
 
-import numpy as np
-
-
 class TestNumpyTypeConversion:
     """NumPy types must be converted to Python primitives."""
 
@@ -112,9 +116,6 @@ class TestNumpyTypeConversion:
         assert all(type(x) is int for x in result)
 
 
-import pandas as pd
-
-
 class TestPandasTypeConversion:
     """Pandas types must be converted to JSON-safe primitives."""
 
@@ -148,18 +149,13 @@ class TestPandasTypeConversion:
         assert result is None
 
 
-import base64
-from datetime import UTC, datetime
-from decimal import Decimal
-
-
 class TestSpecialTypeConversion:
     """Special Python types must be converted consistently."""
 
     def test_datetime_naive_to_utc_iso(self) -> None:
         from elspeth.core.canonical import _normalize_value
 
-        dt = datetime(2026, 1, 12, 10, 30, 0)
+        dt = datetime(2026, 1, 12, 10, 30, 0)  # noqa: DTZ001 - intentionally naive
         result = _normalize_value(dt)
         assert result == "2026-01-12T10:30:00+00:00"
 
@@ -234,9 +230,6 @@ class TestRecursiveNormalization:
         data = {"values": [1.0, float("nan"), 3.0]}
         with pytest.raises(ValueError, match="non-finite"):
             _normalize_for_canonical(data)
-
-
-import hashlib
 
 
 class TestCanonicalJsonSerialization:

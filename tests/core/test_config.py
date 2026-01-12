@@ -1,6 +1,8 @@
 # tests/core/test_config.py
 """Tests for configuration schema and loading."""
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -35,7 +37,7 @@ class TestDatabaseSettings:
 
         settings = DatabaseSettings(url="sqlite:///test.db")
         with pytest.raises(ValidationError):
-            settings.url = "sqlite:///other.db"
+            settings.url = "sqlite:///other.db"  # type: ignore[misc]
 
 
 class TestRetrySettings:
@@ -90,9 +92,6 @@ class TestElspethSettings:
 
         settings = ElspethSettings(database={"url": "sqlite:///audit.db"})
         assert settings.run_id_prefix == "run"
-
-
-from pathlib import Path
 
 
 class TestLoadSettings:

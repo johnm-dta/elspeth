@@ -145,10 +145,52 @@ def explain(
         "-t",
         help="Token ID for precise lineage.",
     ),
+    no_tui: bool = typer.Option(
+        False,
+        "--no-tui",
+        help="Output text instead of interactive TUI.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output as JSON.",
+    ),
 ) -> None:
-    """Explain lineage for a row or token."""
-    typer.echo(f"Explain command not yet implemented. Run: {run_id}")
-    raise typer.Exit(1)
+    """Explain lineage for a row or token.
+
+    Use --no-tui for text output or --json for JSON output.
+    Without these flags, launches an interactive TUI.
+    """
+    import json as json_module
+
+    from elspeth.tui.explain_app import ExplainApp
+
+    # For now, we need a database connection to query
+    # This will be integrated with actual runs once Phase 3 is complete
+
+    if json_output:
+        # JSON output mode
+        result = {
+            "run_id": run_id,
+            "status": "error",
+            "message": "No runs found. Execute 'elspeth run --execute' first.",
+        }
+        typer.echo(json_module.dumps(result, indent=2))
+        raise typer.Exit(1)
+
+    if no_tui:
+        # Text output mode
+        typer.echo(f"Error: Run '{run_id}' not found.")
+        typer.echo("Execute 'elspeth run --execute' to create a run first.")
+        raise typer.Exit(1)
+
+    # TUI mode
+    tui_app = ExplainApp(
+        run_id=run_id if run_id != "latest" else None,
+        token_id=token,
+        row_id=row,
+    )
+    tui_app.run()
 
 
 # Known plugins for validation

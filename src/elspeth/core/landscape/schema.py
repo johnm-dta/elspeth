@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     MetaData,
     String,
@@ -134,7 +135,7 @@ node_states_table = Table(
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True)),
     UniqueConstraint("token_id", "node_id", "attempt"),
-    UniqueConstraint("token_id", "step_index"),
+    UniqueConstraint("token_id", "step_index", "attempt"),
 )
 
 # === External Calls ===
@@ -179,3 +180,75 @@ artifacts_table = Table(
     Column("size_bytes", Integer, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
+
+# === Routing Events ===
+
+routing_events_table = Table(
+    "routing_events",
+    metadata,
+    Column("event_id", String(64), primary_key=True),
+    Column("state_id", String(64), ForeignKey("node_states.state_id"), nullable=False),
+    Column("edge_id", String(64), ForeignKey("edges.edge_id"), nullable=False),
+    Column("routing_group_id", String(64), nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("mode", String(16), nullable=False),  # move, copy
+    Column("reason_hash", String(64)),
+    Column("reason_ref", String(256)),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("routing_group_id", "ordinal"),
+)
+
+# === Batches (Aggregation) ===
+
+batches_table = Table(
+    "batches",
+    metadata,
+    Column("batch_id", String(64), primary_key=True),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("aggregation_node_id", String(64), ForeignKey("nodes.node_id"), nullable=False),
+    Column("aggregation_state_id", String(64), ForeignKey("node_states.state_id")),
+    Column("trigger_reason", String(128)),
+    Column("attempt", Integer, nullable=False, default=0),
+    Column("status", String(32), nullable=False),  # draft, executing, completed, failed
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True)),
+)
+
+batch_members_table = Table(
+    "batch_members",
+    metadata,
+    Column("batch_id", String(64), ForeignKey("batches.batch_id"), nullable=False),
+    Column("token_id", String(64), ForeignKey("tokens.token_id"), nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    UniqueConstraint("batch_id", "ordinal"),
+    UniqueConstraint("batch_id", "token_id"),  # Prevent duplicate token in same batch
+)
+
+batch_outputs_table = Table(
+    "batch_outputs",
+    metadata,
+    Column("batch_output_id", String(64), primary_key=True),  # Surrogate PK
+    Column("batch_id", String(64), ForeignKey("batches.batch_id"), nullable=False),
+    Column("output_type", String(32), nullable=False),  # token, artifact
+    Column("output_id", String(64), nullable=False),
+    UniqueConstraint("batch_id", "output_type", "output_id"),  # Prevent duplicates
+)
+
+# === Indexes for Query Performance ===
+
+Index("ix_routing_events_state", routing_events_table.c.state_id)
+Index("ix_routing_events_group", routing_events_table.c.routing_group_id)
+Index("ix_batches_run_status", batches_table.c.run_id, batches_table.c.status)
+Index("ix_batch_members_batch", batch_members_table.c.batch_id)
+Index("ix_batch_outputs_batch", batch_outputs_table.c.batch_id)
+
+# Indexes for existing Phase 1 tables
+Index("ix_nodes_run_id", nodes_table.c.run_id)
+Index("ix_edges_run_id", edges_table.c.run_id)
+Index("ix_rows_run_id", rows_table.c.run_id)
+Index("ix_tokens_row_id", tokens_table.c.row_id)
+Index("ix_token_parents_parent", token_parents_table.c.parent_token_id)
+Index("ix_node_states_token", node_states_table.c.token_id)
+Index("ix_node_states_node", node_states_table.c.node_id)
+Index("ix_calls_state", calls_table.c.state_id)
+Index("ix_artifacts_run", artifacts_table.c.run_id)

@@ -5,9 +5,11 @@ Handles SQLite (development) and PostgreSQL (production) backends
 with appropriate settings for each.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Self
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import Connection, create_engine, event
 from sqlalchemy.engine import Engine
 
 from elspeth.core.landscape.schema import metadata
@@ -74,3 +76,55 @@ class LandscapeDB:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[no-untyped-def]
         self.close()
+
+    @classmethod
+    def in_memory(cls) -> Self:
+        """Create an in-memory SQLite database for testing.
+
+        Tables are created automatically.
+
+        Returns:
+            LandscapeDB instance with in-memory SQLite
+        """
+        engine = create_engine("sqlite:///:memory:", echo=False)
+        metadata.create_all(engine)
+        instance = cls.__new__(cls)
+        instance.connection_string = "sqlite:///:memory:"
+        instance._engine = engine
+        return instance
+
+    @classmethod
+    def from_url(cls, url: str, *, create_tables: bool = True) -> Self:
+        """Create database from connection URL.
+
+        Args:
+            url: SQLAlchemy connection URL
+            create_tables: Whether to create tables if they don't exist.
+                           Set to False when connecting to an existing database.
+
+        Returns:
+            LandscapeDB instance
+        """
+        engine = create_engine(url, echo=False)
+        if create_tables:
+            metadata.create_all(engine)
+        instance = cls.__new__(cls)
+        instance.connection_string = url
+        instance._engine = engine
+        return instance
+
+    @contextmanager
+    def connection(self) -> Iterator[Connection]:
+        """Get a database connection with automatic transaction handling.
+
+        Uses engine.begin() for proper transaction semantics:
+        - Auto-commits on successful block exit
+        - Auto-rolls back on exception
+
+        Usage:
+            with db.connection() as conn:
+                conn.execute(runs_table.insert().values(...))
+            # Committed automatically if no exception raised
+        """
+        with self.engine.begin() as conn:
+            yield conn

@@ -143,3 +143,51 @@ class Artifact:
     content_hash: str
     size_bytes: int
     created_at: datetime
+
+
+@dataclass
+class RoutingEvent:
+    """A routing decision at a gate node."""
+
+    event_id: str
+    state_id: str
+    edge_id: str
+    routing_group_id: str
+    ordinal: int
+    mode: str  # move, copy
+    created_at: datetime
+    reason_hash: str | None = None
+    reason_ref: str | None = None
+
+
+@dataclass
+class Batch:
+    """An aggregation batch collecting tokens."""
+
+    batch_id: str
+    run_id: str
+    aggregation_node_id: str
+    attempt: int
+    status: str  # draft, executing, completed, failed
+    created_at: datetime
+    aggregation_state_id: str | None = None
+    trigger_reason: str | None = None
+    completed_at: datetime | None = None
+
+
+@dataclass
+class BatchMember:
+    """A token belonging to a batch."""
+
+    batch_id: str
+    token_id: str
+    ordinal: int
+
+
+@dataclass
+class BatchOutput:
+    """An output produced by a batch."""
+
+    batch_id: str
+    output_type: str  # token, artifact
+    output_id: str

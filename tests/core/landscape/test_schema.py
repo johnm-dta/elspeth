@@ -60,3 +60,78 @@ class TestSchemaCreation:
         assert "rows" in tables
         assert "tokens" in tables
         assert "node_states" in tables
+
+
+class TestPhase3ASchemaAdditions:
+    """Tests for tables added in Phase 3A."""
+
+    def test_routing_events_table_exists(self) -> None:
+        from elspeth.core.landscape.schema import routing_events_table
+
+        assert routing_events_table.name == "routing_events"
+        columns = {c.name for c in routing_events_table.columns}
+        assert "event_id" in columns
+        assert "state_id" in columns
+        assert "edge_id" in columns
+        assert "routing_group_id" in columns
+
+    def test_batches_table_exists(self) -> None:
+        from elspeth.core.landscape.schema import batches_table
+
+        assert batches_table.name == "batches"
+        columns = {c.name for c in batches_table.columns}
+        assert "batch_id" in columns
+        assert "aggregation_node_id" in columns
+        assert "status" in columns
+
+    def test_batch_members_table_exists(self) -> None:
+        from elspeth.core.landscape.schema import batch_members_table
+
+        assert batch_members_table.name == "batch_members"
+
+    def test_batch_outputs_table_exists(self) -> None:
+        from elspeth.core.landscape.schema import batch_outputs_table
+
+        assert batch_outputs_table.name == "batch_outputs"
+
+    def test_all_13_tables_exist(self) -> None:
+        from elspeth.core.landscape.schema import metadata
+
+        table_names = set(metadata.tables.keys())
+        expected = {
+            "runs", "nodes", "edges", "rows", "tokens", "token_parents",
+            "node_states", "routing_events", "calls", "batches",
+            "batch_members", "batch_outputs", "artifacts",
+        }
+        assert expected.issubset(table_names), f"Missing: {expected - table_names}"
+
+
+class TestPhase3AModels:
+    """Tests for model classes added in Phase 3A."""
+
+    def test_routing_event_model(self) -> None:
+        from elspeth.core.landscape.models import RoutingEvent
+
+        event = RoutingEvent(
+            event_id="evt1",
+            state_id="state1",
+            edge_id="edge1",
+            routing_group_id="grp1",
+            ordinal=0,
+            mode="move",
+            created_at=None,  # type: ignore[arg-type]  # Will be set in real use
+        )
+        assert event.event_id == "evt1"
+
+    def test_batch_model(self) -> None:
+        from elspeth.core.landscape.models import Batch
+
+        batch = Batch(
+            batch_id="batch1",
+            run_id="run1",
+            aggregation_node_id="node1",
+            attempt=0,
+            status="draft",
+            created_at=None,  # type: ignore[arg-type]
+        )
+        assert batch.status == "draft"

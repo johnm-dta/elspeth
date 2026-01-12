@@ -86,3 +86,79 @@ class TestSchemaValidation:
         errors = validate_row({}, MySchema)
         assert len(errors) > 0
         assert "required" in str(errors[0])
+
+
+class TestSchemaCompatibility:
+    """Check if output schema is compatible with input schema."""
+
+    def test_compatible_schemas(self) -> None:
+        from elspeth.plugins.schemas import PluginSchema, check_compatibility
+
+        class ProducerOutput(PluginSchema):
+            x: int
+            y: int
+            z: str
+
+        class ConsumerInput(PluginSchema):
+            x: int
+            y: int
+
+        # Producer outputs all fields consumer needs
+        result = check_compatibility(ProducerOutput, ConsumerInput)
+        assert result.compatible is True
+        assert result.missing_fields == []
+
+    def test_incompatible_schemas_missing_field(self) -> None:
+        from elspeth.plugins.schemas import PluginSchema, check_compatibility
+
+        class ProducerOutput(PluginSchema):
+            x: int
+
+        class ConsumerInput(PluginSchema):
+            x: int
+            y: int  # Not provided by producer
+
+        result = check_compatibility(ProducerOutput, ConsumerInput)
+        assert result.compatible is False
+        assert "y" in result.missing_fields
+
+    def test_incompatible_schemas_type_mismatch(self) -> None:
+        from elspeth.plugins.schemas import PluginSchema, check_compatibility
+
+        class ProducerOutput(PluginSchema):
+            value: str  # String
+
+        class ConsumerInput(PluginSchema):
+            value: int  # Expects int
+
+        result = check_compatibility(ProducerOutput, ConsumerInput)
+        assert result.compatible is False
+        assert len(result.type_mismatches) > 0
+
+    def test_optional_fields_not_required(self) -> None:
+        """Optional fields with defaults should not cause incompatibility."""
+        from elspeth.plugins.schemas import PluginSchema, check_compatibility
+
+        class ProducerOutput(PluginSchema):
+            x: int
+
+        class ConsumerInput(PluginSchema):
+            x: int
+            y: int = 0  # Has default, so optional
+
+        # Producer doesn't provide y, but y has a default
+        result = check_compatibility(ProducerOutput, ConsumerInput)
+        assert result.compatible is True
+
+    def test_optional_union_compatible(self) -> None:
+        """Producer can send X when consumer expects Optional[X]."""
+        from elspeth.plugins.schemas import PluginSchema, check_compatibility
+
+        class ProducerOutput(PluginSchema):
+            value: int  # Always provides int
+
+        class ConsumerInput(PluginSchema):
+            value: int | None  # Accepts int or None
+
+        result = check_compatibility(ProducerOutput, ConsumerInput)
+        assert result.compatible is True

@@ -9,7 +9,9 @@ This enables:
 - Landscape context recording
 """
 
-from typing import Any, TypeVar
+from dataclasses import dataclass, field as dataclass_field
+from types import UnionType
+from typing import Any, TypeVar, Union, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -96,3 +98,128 @@ def validate_row(
                 value=error.get("input"),
             ))
         return errors
+
+
+@dataclass
+class CompatibilityResult:
+    """Result of schema compatibility check."""
+
+    compatible: bool
+    missing_fields: list[str] = dataclass_field(default_factory=list)
+    type_mismatches: list[tuple[str, str, str]] = dataclass_field(default_factory=list)
+
+    @property
+    def error_message(self) -> str | None:
+        """Human-readable error message if incompatible."""
+        if self.compatible:
+            return None
+
+        parts = []
+        if self.missing_fields:
+            parts.append(f"Missing fields: {', '.join(self.missing_fields)}")
+        if self.type_mismatches:
+            mismatches = [
+                f"{name} (expected {expected}, got {actual})"
+                for name, expected, actual in self.type_mismatches
+            ]
+            parts.append(f"Type mismatches: {', '.join(mismatches)}")
+
+        return "; ".join(parts)
+
+
+def check_compatibility(
+    producer_schema: type[PluginSchema],
+    consumer_schema: type[PluginSchema],
+) -> CompatibilityResult:
+    """Check if producer output is compatible with consumer input.
+
+    Uses Pydantic model_fields metadata for accurate compatibility checking.
+    This handles optional fields, unions, constrained types, and defaults.
+
+    Compatibility means:
+    - All REQUIRED fields in consumer are provided by producer
+    - Fields with defaults in consumer are optional
+    - Field types are compatible (exact match or coercible)
+
+    Args:
+        producer_schema: Output schema of upstream plugin
+        consumer_schema: Input schema of downstream plugin
+
+    Returns:
+        CompatibilityResult indicating compatibility and any issues
+    """
+    # Use Pydantic v2 model_fields for accurate field introspection
+    producer_fields = producer_schema.model_fields
+    consumer_fields = consumer_schema.model_fields
+
+    missing: list[str] = []
+    mismatches: list[tuple[str, str, str]] = []
+
+    for field_name, consumer_field in consumer_fields.items():
+        # Check if field is required (no default value)
+        is_required = consumer_field.is_required()
+
+        if field_name not in producer_fields:
+            # Missing field - only a problem if required
+            if is_required:
+                missing.append(field_name)
+        else:
+            producer_field = producer_fields[field_name]
+            if not _types_compatible(producer_field.annotation, consumer_field.annotation):
+                mismatches.append((
+                    field_name,
+                    _type_name(consumer_field.annotation),
+                    _type_name(producer_field.annotation),
+                ))
+
+    compatible = len(missing) == 0 and len(mismatches) == 0
+
+    return CompatibilityResult(
+        compatible=compatible,
+        missing_fields=missing,
+        type_mismatches=mismatches,
+    )
+
+
+def _type_name(t: Any) -> str:
+    """Get readable name for a type annotation."""
+    if hasattr(t, "__name__"):
+        return t.__name__
+    return str(t)
+
+
+def _is_union_type(t: Any) -> bool:
+    """Check if type is a Union (typing.Union or types.UnionType)."""
+    origin = get_origin(t)
+    return origin is Union or isinstance(t, UnionType)
+
+
+def _types_compatible(actual: Any, expected: Any) -> bool:
+    """Check if actual type is compatible with expected type.
+
+    Handles:
+    - Exact matches
+    - Numeric compatibility (int -> float)
+    - Optional[X] on consumer side (producer can send X or X | None)
+    - Union types (both typing.Union and X | Y syntax)
+    """
+    # Exact match
+    if actual == expected:
+        return True
+
+    # Numeric compatibility (int -> float is OK)
+    if expected is float and actual is int:
+        return True
+
+    # Handle Optional/Union types (both typing.Union and types.UnionType)
+    if _is_union_type(expected):
+        expected_args = get_args(expected)
+        # Check if actual type matches any of the union members
+        if actual in expected_args:
+            return True
+        # Check if actual is a Union that's a subset
+        if _is_union_type(actual):
+            actual_args = get_args(actual)
+            return all(a in expected_args for a in actual_args)
+
+    return False

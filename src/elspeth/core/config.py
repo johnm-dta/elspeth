@@ -92,6 +92,10 @@ def load_settings(config_path: Path) -> ElspethSettings:
     """
     from dynaconf import Dynaconf
 
+    # Explicit check for file existence (Dynaconf silently accepts missing files)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
     # Load from file + environment
     dynaconf_settings = Dynaconf(
         envvar_prefix="ELSPETH",

@@ -151,3 +151,10 @@ retry:
         # database.url is required
         with pytest.raises(ValidationError):
             load_settings(config_file)
+
+    def test_load_missing_file_raises_file_not_found(self, tmp_path: Path) -> None:
+        from elspeth.core.config import load_settings
+
+        missing_file = tmp_path / "nonexistent.yaml"
+        with pytest.raises(FileNotFoundError, match="Config file not found"):
+            load_settings(missing_file)

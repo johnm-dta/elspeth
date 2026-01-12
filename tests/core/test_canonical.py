@@ -339,3 +339,16 @@ class TestCrossProcessStability:
         from elspeth.core.canonical import CANONICAL_VERSION
 
         assert CANONICAL_VERSION == "sha256-rfc8785-v1"
+
+
+class TestPublicAPI:
+    """Public API must be importable from elspeth.core."""
+
+    def test_import_from_core_module(self) -> None:
+        """canonical_json and stable_hash importable from elspeth.core."""
+        from elspeth.core import CANONICAL_VERSION, canonical_json, stable_hash
+
+        # Verify they work
+        assert callable(canonical_json)
+        assert callable(stable_hash)
+        assert isinstance(CANONICAL_VERSION, str)

@@ -121,3 +121,38 @@ class TestPluginManager:
 
         missing = manager.get_transform_by_name("nonexistent")
         assert missing is None
+
+
+class TestPluginSpec:
+    """PluginSpec registration record."""
+
+    def test_spec_from_transform(self) -> None:
+        from elspeth.plugins.enums import Determinism, NodeType
+        from elspeth.plugins.manager import PluginSpec
+
+        class MyTransform:
+            name = "my_transform"
+            input_schema = None
+            output_schema = None
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.2.3"
+
+        spec = PluginSpec.from_plugin(MyTransform, NodeType.TRANSFORM)
+
+        assert spec.name == "my_transform"
+        assert spec.node_type == NodeType.TRANSFORM
+        assert spec.version == "1.2.3"
+        assert spec.determinism == Determinism.DETERMINISTIC
+
+    def test_spec_defaults(self) -> None:
+        from elspeth.plugins.enums import Determinism, NodeType
+        from elspeth.plugins.manager import PluginSpec
+
+        class MinimalTransform:
+            name = "minimal"
+            # No determinism or version attributes
+
+        spec = PluginSpec.from_plugin(MinimalTransform, NodeType.TRANSFORM)
+
+        assert spec.determinism == Determinism.DETERMINISTIC
+        assert spec.version == "0.0.0"

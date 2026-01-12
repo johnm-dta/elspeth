@@ -4,10 +4,12 @@
 Uses pluggy for hook-based plugin registration.
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 import pluggy
 
+from elspeth.plugins.enums import Determinism, NodeType
 from elspeth.plugins.hookspecs import (
     PROJECT_NAME,
     ElspethSinkSpec,
@@ -22,6 +24,40 @@ from elspeth.plugins.protocols import (
     SourceProtocol,
     TransformProtocol,
 )
+
+
+@dataclass(frozen=True)
+class PluginSpec:
+    """Registration record for a plugin.
+
+    Captures metadata that Phase 3 stores in Landscape nodes table.
+    Frozen for immutability - plugin specs shouldn't change after creation.
+    """
+
+    name: str
+    node_type: NodeType
+    version: str
+    determinism: Determinism
+    input_schema_hash: str | None = None
+    output_schema_hash: str | None = None
+
+    @classmethod
+    def from_plugin(cls, plugin_cls: type, node_type: NodeType) -> "PluginSpec":
+        """Create spec from plugin class.
+
+        Args:
+            plugin_cls: Plugin class to extract metadata from
+            node_type: Type of node this plugin represents
+
+        Returns:
+            PluginSpec with extracted metadata
+        """
+        return cls(
+            name=getattr(plugin_cls, "name", plugin_cls.__name__),
+            node_type=node_type,
+            version=getattr(plugin_cls, "plugin_version", "0.0.0"),
+            determinism=getattr(plugin_cls, "determinism", Determinism.DETERMINISTIC),
+        )
 
 
 class PluginManager:

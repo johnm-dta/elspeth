@@ -1722,7 +1722,9 @@ class TestAggregationExecutor:
             )
 
         # Flush
-        outputs = executor.flush(aggregation=agg, ctx=ctx, trigger_reason="threshold")
+        outputs = executor.flush(
+            aggregation=agg, ctx=ctx, trigger_reason="threshold", step_in_pipeline=0
+        )
 
         assert len(outputs) == 1
         assert outputs[0] == {"sum": 100}
@@ -1774,9 +1776,9 @@ class AggregationExecutor:
         executor = AggregationExecutor(recorder, span_factory, run_id)
 
         # Accept rows
-        result = executor.accept(aggregation, token, ctx)
+        result = executor.accept(aggregation, token, ctx, step)
         if result.trigger:
-            outputs = executor.flush(aggregation, ctx, "threshold")
+            outputs = executor.flush(aggregation, ctx, "threshold", step)
     """
 
     def __init__(
@@ -2733,6 +2735,7 @@ class RowProcessor:
                             aggregation=transform,
                             ctx=ctx,
                             trigger_reason="threshold",
+                            step_in_pipeline=step,
                         )
 
                     return RowResult(
@@ -2956,6 +2959,7 @@ from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 from elspeth.engine.processor import RowProcessor
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.context import PluginContext
+from elspeth.plugins.enums import NodeType
 
 
 @dataclass
@@ -3061,7 +3065,7 @@ class Orchestrator:
         source_node = recorder.register_node(
             run_id=run_id,
             plugin_name=config.source.name,
-            node_type="source",
+            node_type=NodeType.SOURCE,
             plugin_version="1.0.0",
             config={},
             sequence=0,
@@ -3074,7 +3078,7 @@ class Orchestrator:
 
         for i, transform in enumerate(config.transforms):
             is_gate = hasattr(transform, "evaluate")
-            node_type = "gate" if is_gate else "transform"
+            node_type = NodeType.GATE if is_gate else NodeType.TRANSFORM
             node = recorder.register_node(
                 run_id=run_id,
                 plugin_name=transform.name,
@@ -3106,7 +3110,7 @@ class Orchestrator:
             node = recorder.register_node(
                 run_id=run_id,
                 plugin_name=sink.name,
-                node_type="sink",
+                node_type=NodeType.SINK,
                 plugin_version="1.0.0",
                 config={},
             )

@@ -58,7 +58,7 @@ from elspeth.plugins.base import (
 )
 
 # Manager
-from elspeth.plugins.manager import PluginManager
+from elspeth.plugins.manager import PluginManager, PluginSpec
 
 # Hookspecs
 from elspeth.plugins.hookspecs import hookimpl, hookspec
@@ -102,6 +102,7 @@ __all__ = [
     "BaseTransform",
     # Manager
     "PluginManager",
+    "PluginSpec",
     # Hookspecs
     "hookimpl",
     "hookspec",

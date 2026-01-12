@@ -985,3 +985,204 @@ class TestLandscapeRecorderArtifacts:
         assert len(states) == 2
         assert states[0].step_index == 0
         assert states[1].step_index == 1
+
+
+class TestLandscapeRecorderQueryMethods:
+    """Additional query methods added in Task 9."""
+
+    def test_get_row(self) -> None:
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={"name": "test"},
+        )
+
+        # Retrieve by ID
+        retrieved = recorder.get_row(row.row_id)
+        assert retrieved is not None
+        assert retrieved.row_id == row.row_id
+        assert retrieved.row_index == 0
+
+    def test_get_row_not_found(self) -> None:
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        result = recorder.get_row("nonexistent")
+        assert result is None
+
+    def test_get_token(self) -> None:
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={},
+        )
+        token = recorder.create_token(row_id=row.row_id)
+
+        # Retrieve by ID
+        retrieved = recorder.get_token(token.token_id)
+        assert retrieved is not None
+        assert retrieved.token_id == token.token_id
+
+    def test_get_token_not_found(self) -> None:
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        result = recorder.get_token("nonexistent")
+        assert result is None
+
+    def test_get_token_parents_for_coalesced(self) -> None:
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={},
+        )
+
+        # Create parent token and fork
+        parent = recorder.create_token(row_id=row.row_id)
+        children = recorder.fork_token(
+            parent_token_id=parent.token_id,
+            row_id=row.row_id,
+            branches=["a", "b"],
+        )
+
+        # Coalesce the children
+        coalesced = recorder.coalesce_tokens(
+            parent_token_ids=[c.token_id for c in children],
+            row_id=row.row_id,
+        )
+
+        # Get parents of coalesced token
+        parents = recorder.get_token_parents(coalesced.token_id)
+        assert len(parents) == 2
+        assert parents[0].ordinal == 0
+        assert parents[1].ordinal == 1
+
+    def test_get_routing_events(self) -> None:
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        gate = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="gate",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+        )
+        sink = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+        )
+        edge = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate.node_id,
+            to_node_id=sink.node_id,
+            label="output",
+            mode="move",
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=gate.node_id,
+            row_index=0,
+            data={},
+        )
+        token = recorder.create_token(row_id=row.row_id)
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=gate.node_id,
+            step_index=0,
+            input_data={},
+        )
+
+        # Record routing event
+        recorder.record_routing_event(
+            state_id=state.state_id,
+            edge_id=edge.edge_id,
+            routing_group_id="group1",
+            ordinal=0,
+            mode="move",
+        )
+
+        # Query routing events
+        events = recorder.get_routing_events(state.state_id)
+        assert len(events) == 1
+        assert events[0].mode == "move"
+        assert events[0].edge_id == edge.edge_id
+
+    def test_get_row_data_without_payload_store(self) -> None:
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)  # No payload store
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={"name": "test"},
+        )
+
+        # Without payload store, should return None
+        result = recorder.get_row_data(row.row_id)
+        assert result is None

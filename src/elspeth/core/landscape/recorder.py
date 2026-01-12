@@ -18,6 +18,7 @@ from elspeth.core.landscape.models import (
     Artifact,
     Batch,
     BatchMember,
+    Call,
     Edge,
     Node,
     NodeState,
@@ -25,11 +26,13 @@ from elspeth.core.landscape.models import (
     Row,
     Run,
     Token,
+    TokenParent,
 )
 from elspeth.core.landscape.schema import (
     artifacts_table,
     batch_members_table,
     batches_table,
+    calls_table,
     edges_table,
     node_states_table,
     nodes_table,
@@ -98,9 +101,15 @@ class LandscapeRecorder:
         recorder.complete_run(run.run_id, status="completed")
     """
 
-    def __init__(self, db: LandscapeDB) -> None:
-        """Initialize recorder with database connection."""
+    def __init__(self, db: LandscapeDB, *, payload_store: Any | None = None) -> None:
+        """Initialize recorder with database connection.
+
+        Args:
+            db: LandscapeDB instance for audit storage
+            payload_store: Optional payload store for retrieving row data
+        """
         self._db = db
+        self._payload_store = payload_store
 
     # === Run Management ===
 
@@ -1150,6 +1159,185 @@ class LandscapeRecorder:
                 context_before_json=r.context_before_json,
                 context_after_json=r.context_after_json,
                 error_json=r.error_json,
+            )
+            for r in db_rows
+        ]
+
+    def get_row(self, row_id: str) -> Row | None:
+        """Get a row by ID.
+
+        Args:
+            row_id: Row ID
+
+        Returns:
+            Row model or None if not found
+        """
+        query = select(rows_table).where(rows_table.c.row_id == row_id)
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            r = result.fetchone()
+
+        if r is None:
+            return None
+
+        return Row(
+            row_id=r.row_id,
+            run_id=r.run_id,
+            source_node_id=r.source_node_id,
+            row_index=r.row_index,
+            source_data_hash=r.source_data_hash,
+            source_data_ref=r.source_data_ref,
+            created_at=r.created_at,
+        )
+
+    def get_row_data(self, row_id: str) -> dict[str, Any] | None:
+        """Get the payload data for a row.
+
+        Retrieves the actual row content from payload store if available.
+
+        Args:
+            row_id: Row ID
+
+        Returns:
+            Row data dict, or None if row not found or payload purged
+        """
+        row = self.get_row(row_id)
+        if row is None:
+            return None
+
+        if row.source_data_ref and self._payload_store:
+            # Retrieve from payload store
+            import json
+            from typing import cast
+
+            payload_bytes = self._payload_store.retrieve(row.source_data_ref)
+            data: dict[str, Any] = cast(dict[str, Any], json.loads(payload_bytes.decode("utf-8")))
+            return data
+
+        # No payload store or no ref - data not available
+        return None
+
+    def get_token(self, token_id: str) -> Token | None:
+        """Get a token by ID.
+
+        Args:
+            token_id: Token ID
+
+        Returns:
+            Token model or None if not found
+        """
+        query = select(tokens_table).where(tokens_table.c.token_id == token_id)
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            r = result.fetchone()
+
+        if r is None:
+            return None
+
+        return Token(
+            token_id=r.token_id,
+            row_id=r.row_id,
+            fork_group_id=r.fork_group_id,
+            join_group_id=r.join_group_id,
+            branch_name=r.branch_name,
+            created_at=r.created_at,
+        )
+
+    def get_token_parents(self, token_id: str) -> list[TokenParent]:
+        """Get parent relationships for a token.
+
+        Args:
+            token_id: Token ID
+
+        Returns:
+            List of TokenParent models (ordered by ordinal)
+        """
+        query = (
+            select(token_parents_table)
+            .where(token_parents_table.c.token_id == token_id)
+            .order_by(token_parents_table.c.ordinal)
+        )
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            db_rows = result.fetchall()
+
+        return [
+            TokenParent(
+                token_id=r.token_id,
+                parent_token_id=r.parent_token_id,
+                ordinal=r.ordinal,
+            )
+            for r in db_rows
+        ]
+
+    def get_routing_events(self, state_id: str) -> list[RoutingEvent]:
+        """Get routing events for a node state.
+
+        Args:
+            state_id: State ID
+
+        Returns:
+            List of RoutingEvent models
+        """
+        query = select(routing_events_table).where(
+            routing_events_table.c.state_id == state_id
+        )
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            db_rows = result.fetchall()
+
+        return [
+            RoutingEvent(
+                event_id=r.event_id,
+                state_id=r.state_id,
+                edge_id=r.edge_id,
+                routing_group_id=r.routing_group_id,
+                ordinal=r.ordinal,
+                mode=r.mode,
+                reason_hash=r.reason_hash,
+                reason_ref=r.reason_ref,
+                created_at=r.created_at,
+            )
+            for r in db_rows
+        ]
+
+    def get_calls(self, state_id: str) -> list[Call]:
+        """Get external calls for a node state.
+
+        Args:
+            state_id: State ID
+
+        Returns:
+            List of Call models, ordered by call_index
+        """
+        query = (
+            select(calls_table)
+            .where(calls_table.c.state_id == state_id)
+            .order_by(calls_table.c.call_index)
+        )
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            db_rows = result.fetchall()
+
+        return [
+            Call(
+                call_id=r.call_id,
+                state_id=r.state_id,
+                call_index=r.call_index,
+                call_type=r.call_type,
+                status=r.status,
+                request_hash=r.request_hash,
+                request_ref=r.request_ref,
+                response_hash=r.response_hash,
+                response_ref=r.response_ref,
+                error_json=r.error_json,
+                latency_ms=r.latency_ms,
+                created_at=r.created_at,
             )
             for r in db_rows
         ]

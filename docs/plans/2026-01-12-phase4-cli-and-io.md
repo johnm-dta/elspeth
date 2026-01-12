@@ -3656,8 +3656,10 @@ After Phase 4, ELSPETH has:
 - Structured logging with structlog
 
 **Not Yet Complete:**
-- Full TUI lineage visualization (tree widget, detail panels)
-- Integration with Phase 3 Orchestrator (currently using simple loop)
-- Transforms/Gates (no built-in transforms yet)
 - Rate limiting, checkpointing (Phase 5)
 - LLM integration (Phase 6)
+
+**Addressed in Phase 4B:**
+- ~~Full TUI lineage visualization (tree widget, detail panels)~~ - Done in Phase 4B Tasks 7-9
+- ~~Integration with Phase 3 Orchestrator (currently using simple loop)~~ - This was incorrect; Phase 4 Task 9 already uses full Orchestrator. Phase 4B clarified.
+- ~~Transforms/Gates (no built-in transforms yet)~~ - Done in Phase 4B Tasks 1-5 (PassThrough, FieldMapper, Filter, ThresholdGate, FieldMatchGate)

@@ -124,6 +124,8 @@ Expected: FAIL (ImportError - routing_events_table not found)
 Add the following to `src/elspeth/core/landscape/schema.py` after `calls_table`:
 
 ```python
+from sqlalchemy import Index  # Add to imports if not present
+
 # === Routing Events ===
 
 routing_events_table = Table(
@@ -164,15 +166,38 @@ batch_members_table = Table(
     Column("token_id", String(64), ForeignKey("tokens.token_id"), nullable=False),
     Column("ordinal", Integer, nullable=False),
     UniqueConstraint("batch_id", "ordinal"),
+    UniqueConstraint("batch_id", "token_id"),  # Prevent duplicate token in same batch
 )
 
 batch_outputs_table = Table(
     "batch_outputs",
     metadata,
+    Column("batch_output_id", String(64), primary_key=True),  # Surrogate PK
     Column("batch_id", String(64), ForeignKey("batches.batch_id"), nullable=False),
     Column("output_type", String(32), nullable=False),  # token, artifact
     Column("output_id", String(64), nullable=False),
+    UniqueConstraint("batch_id", "output_type", "output_id"),  # Prevent duplicates
 )
+
+# === Indexes for Query Performance ===
+# Add these after all table definitions
+
+Index("ix_routing_events_state", routing_events_table.c.state_id)
+Index("ix_routing_events_group", routing_events_table.c.routing_group_id)
+Index("ix_batches_run_status", batches_table.c.run_id, batches_table.c.status)
+Index("ix_batch_members_batch", batch_members_table.c.batch_id)
+Index("ix_batch_outputs_batch", batch_outputs_table.c.batch_id)
+
+# Also add indexes to existing Phase 1 tables (in same file):
+Index("ix_nodes_run_id", nodes_table.c.run_id)
+Index("ix_edges_run_id", edges_table.c.run_id)
+Index("ix_rows_run_id", rows_table.c.run_id)
+Index("ix_tokens_row_id", tokens_table.c.row_id)
+Index("ix_token_parents_parent", token_parents_table.c.parent_token_id)
+Index("ix_node_states_token", node_states_table.c.token_id)
+Index("ix_node_states_node", node_states_table.c.node_id)
+Index("ix_calls_state", calls_table.c.state_id)
+Index("ix_artifacts_run", artifacts_table.c.run_id)
 ```
 
 ### Step 4: Add missing model classes to models.py
@@ -308,6 +333,20 @@ class TestPhase3ADBMethods:
         assert db_path.exists()
         inspector = inspect(db.engine)
         assert "runs" in inspector.get_table_names()
+
+    def test_from_url_skip_table_creation(self, tmp_path) -> None:
+        """Test that create_tables=False doesn't create tables."""
+        from elspeth.core.landscape.database import LandscapeDB
+
+        db_path = tmp_path / "empty.db"
+        # First create an empty database file (no tables)
+        empty_engine = create_engine(f"sqlite:///{db_path}")
+        empty_engine.dispose()
+
+        # Connect with create_tables=False - should NOT create tables
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
+        inspector = inspect(db.engine)
+        assert "runs" not in inspector.get_table_names()  # No tables!
 ```
 
 ### Step 2: Run test to verify it fails
@@ -350,28 +389,38 @@ from sqlalchemy import Connection, text
 
         Args:
             url: SQLAlchemy connection URL
-            create_tables: Whether to create tables if they don't exist
+            create_tables: Whether to create tables if they don't exist.
+                           Set to False when connecting to an existing database.
 
         Returns:
             LandscapeDB instance
         """
-        instance = cls(url)
-        if not create_tables:
-            # Skip table creation (for connecting to existing DB)
-            pass  # Tables already created in __init__
+        # Bypass __init__ to avoid automatic table creation
+        # (same pattern as in_memory())
+        engine = create_engine(url, echo=False)
+        if create_tables:
+            metadata.create_all(engine)
+        instance = cls.__new__(cls)
+        instance.connection_string = url
+        instance._engine = engine
         return instance
 
     @contextmanager
     def connection(self) -> Iterator[Connection]:
-        """Get a database connection with automatic commit.
+        """Get a database connection with automatic transaction handling.
+
+        Uses engine.begin() for proper transaction semantics:
+        - Auto-commits on successful block exit
+        - Auto-rolls back on exception
 
         Usage:
             with db.connection() as conn:
                 conn.execute(runs_table.insert().values(...))
+            # Committed automatically if no exception raised
         """
-        with self.engine.connect() as conn:
+        with self.engine.begin() as conn:
             yield conn
-            conn.commit()
+        # No explicit commit needed - begin() handles it
 ```
 
 ### Step 4: Run tests to verify they pass
@@ -480,7 +529,8 @@ pipeline execution. It wraps the low-level database operations.
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from enum import Enum
+from typing import Any, TypeVar
 
 from sqlalchemy import select
 
@@ -488,6 +538,9 @@ from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.models import Run
 from elspeth.core.landscape.schema import runs_table
+from elspeth.plugins.enums import Determinism, NodeType
+
+E = TypeVar("E", bound=Enum)
 
 
 def _now() -> datetime:
@@ -498,6 +551,31 @@ def _now() -> datetime:
 def _generate_id() -> str:
     """Generate a unique ID."""
     return uuid.uuid4().hex
+
+
+def _coerce_enum(value: str | E, enum_type: type[E]) -> E:
+    """Coerce a string or enum value to the target enum type.
+
+    Args:
+        value: String value or enum instance
+        enum_type: Target enum class
+
+    Returns:
+        Enum instance
+
+    Raises:
+        ValueError: If string doesn't match any enum value
+
+    Example:
+        >>> _coerce_enum("transform", NodeType)
+        <NodeType.TRANSFORM: 'transform'>
+        >>> _coerce_enum(NodeType.TRANSFORM, NodeType)
+        <NodeType.TRANSFORM: 'transform'>
+    """
+    if isinstance(value, enum_type):
+        return value
+    # str-based enums use value lookup
+    return enum_type(value)
 
 
 class LandscapeRecorder:
@@ -685,6 +763,55 @@ class TestLandscapeRecorderNodes:
         assert node.plugin_name == "csv_source"
         assert node.node_type == "source"
 
+    def test_register_node_with_enum(self) -> None:
+        """Test that NodeType enum is accepted and coerced."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.plugins.enums import NodeType
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Both enum and string should work
+        node_from_enum = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="transform1",
+            node_type=NodeType.TRANSFORM,  # Enum
+            plugin_version="1.0.0",
+            config={},
+        )
+        node_from_str = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="transform2",
+            node_type="transform",  # String
+            plugin_version="1.0.0",
+            config={},
+        )
+
+        # Both should store the same string value
+        assert node_from_enum.node_type == "transform"
+        assert node_from_str.node_type == "transform"
+
+    def test_register_node_invalid_type_raises(self) -> None:
+        """Test that invalid node_type string raises ValueError."""
+        import pytest
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        with pytest.raises(ValueError, match="transfom"):  # Note typo
+            recorder.register_node(
+                run_id=run.run_id,
+                plugin_name="bad",
+                node_type="transfom",  # Typo! Should fail fast
+                plugin_version="1.0.0",
+                config={},
+            )
+
     def test_register_edge(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
@@ -767,13 +894,14 @@ from elspeth.core.landscape.schema import edges_table, nodes_table
         self,
         run_id: str,
         plugin_name: str,
-        node_type: str,
+        node_type: NodeType | str,
         plugin_version: str,
         config: dict[str, Any],
         *,
         node_id: str | None = None,
         sequence: int | None = None,
         schema_hash: str | None = None,
+        determinism: Determinism | str = Determinism.PURE,
     ) -> Node:
         """Register a plugin instance (node) in the execution graph.
 
@@ -781,15 +909,24 @@ from elspeth.core.landscape.schema import edges_table, nodes_table
             run_id: Run this node belongs to
             plugin_name: Name of the plugin
             node_type: Type (source, transform, gate, aggregation, coalesce, sink)
+                       Accepts NodeType enum or string (will be validated)
             plugin_version: Version of the plugin
             config: Plugin configuration
             node_id: Optional node ID (generated if not provided)
             sequence: Position in pipeline
             schema_hash: Optional input/output schema hash
+            determinism: Reproducibility grade (Determinism enum or string)
 
         Returns:
             Node model
+
+        Raises:
+            ValueError: If node_type or determinism string is not a valid enum value
         """
+        # Validate and coerce enums early - fail fast on typos
+        node_type_enum = _coerce_enum(node_type, NodeType)
+        determinism_enum = _coerce_enum(determinism, Determinism)
+
         node_id = node_id or _generate_id()
         config_json = canonical_json(config)
         config_hash = stable_hash(config)
@@ -799,7 +936,7 @@ from elspeth.core.landscape.schema import edges_table, nodes_table
             node_id=node_id,
             run_id=run_id,
             plugin_name=plugin_name,
-            node_type=node_type,
+            node_type=node_type_enum.value,  # Store string in DB
             plugin_version=plugin_version,
             config_hash=config_hash,
             config_json=config_json,
@@ -884,13 +1021,15 @@ from elspeth.core.landscape.schema import edges_table, nodes_table
             run_id: Run ID
 
         Returns:
-            List of Node models
+            List of Node models, ordered by sequence (NULL sequences last)
         """
         with self._db.connection() as conn:
             result = conn.execute(
                 select(nodes_table)
                 .where(nodes_table.c.run_id == run_id)
-                .order_by(nodes_table.c.sequence_in_pipeline)
+                # Use nullslast() for consistent NULL handling across databases
+                # Nodes without sequence (e.g., dynamically added) sort last
+                .order_by(nodes_table.c.sequence_in_pipeline.nullslast())
             )
             rows = result.fetchall()
 
@@ -1794,25 +1933,8 @@ Expected: FAIL
 ```python
 # Add to src/elspeth/core/landscape/recorder.py
 
-from dataclasses import dataclass
-
-
-@dataclass
-class RoutingEvent:
-    """A routing decision recorded in Landscape."""
-
-    event_id: str
-    state_id: str
-    edge_id: str
-    routing_group_id: str
-    ordinal: int
-    mode: str
-    reason_hash: str | None
-    reason_ref: str | None
-    created_at: datetime
-
-
-# Add import
+# Add imports (RoutingEvent already defined in models.py - DO NOT REDEFINE)
+from elspeth.core.landscape.models import RoutingEvent
 from elspeth.core.landscape.schema import routing_events_table
 
 # Add to LandscapeRecorder class:
@@ -2096,31 +2218,8 @@ Expected: FAIL
 ```python
 # Add to src/elspeth/core/landscape/recorder.py
 
-@dataclass
-class Batch:
-    """An aggregation batch."""
-
-    batch_id: str
-    run_id: str
-    aggregation_node_id: str
-    status: str  # draft, executing, completed, failed
-    created_at: datetime
-    aggregation_state_id: str | None = None
-    trigger_reason: str | None = None
-    attempt: int = 0
-    completed_at: datetime | None = None
-
-
-@dataclass
-class BatchMember:
-    """A token belonging to a batch."""
-
-    batch_id: str
-    token_id: str
-    ordinal: int
-
-
-# Add imports
+# Add imports (Batch and BatchMember already defined in models.py - DO NOT REDEFINE)
+from elspeth.core.landscape.models import Batch, BatchMember
 from elspeth.core.landscape.schema import batch_members_table, batches_table
 
 # Add to LandscapeRecorder class:

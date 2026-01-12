@@ -19,6 +19,23 @@
 - `PluginSpec.from_plugin()`: For plugin registration metadata
 - Note: `TransformResult.status` is now `"success" | "error"` only (no "route")
 
+**Status Vocabulary Mapping:**
+Phase 3B executors must use status strings consistent with CLAUDE.md terminal states and Phase 3A recorder:
+
+| CLAUDE.md Terminal State | Recorder Usage | Context |
+|--------------------------|----------------|---------|
+| `COMPLETED` | `node_states.status = "completed"` | Row reached output sink |
+| `ROUTED` | `node_states.status = "routed"` | Gate sent row to named sink |
+| `FORKED` | `node_states.status = "forked"` | Parent token split to paths |
+| `CONSUMED_IN_BATCH` | `node_states.status = "consumed"` | Row aggregated into batch |
+| `COALESCED` | `node_states.status = "coalesced"` | Row merged in join |
+| `QUARANTINED` | `node_states.status = "quarantined"` | Failed, stored for investigation |
+| `FAILED` | `node_states.status = "failed"` | Failed, not recoverable |
+
+Additionally:
+- `runs.status`: `"running"`, `"completed"`, `"failed"`
+- `batches.status`: `"draft"`, `"executing"`, `"completed"`, `"failed"`
+
 ---
 
 ## Task 11: SpanFactory - OpenTelemetry Integration

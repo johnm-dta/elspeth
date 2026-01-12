@@ -1,6 +1,8 @@
 # tests/plugins/test_results.py
 """Tests for plugin result types."""
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 
@@ -25,3 +27,81 @@ class TestRowOutcome:
         from elspeth.plugins.results import RowOutcome
 
         assert issubclass(RowOutcome, Enum)
+
+
+class TestRoutingAction:
+    """Routing decisions from gates."""
+
+    def test_continue_action(self) -> None:
+        from elspeth.plugins.results import RoutingAction
+
+        action = RoutingAction.continue_()
+        assert action.kind == "continue"
+        assert action.destinations == ()  # Tuple, not list
+        assert action.mode == "move"
+
+    def test_route_to_sink(self) -> None:
+        from elspeth.plugins.results import RoutingAction
+
+        action = RoutingAction.route_to_sink("flagged", reason={"confidence": 0.95})
+        assert action.kind == "route_to_sink"
+        assert action.destinations == ("flagged",)  # Tuple, not list
+        assert action.reason["confidence"] == 0.95  # Access via mapping
+
+    def test_fork_to_paths(self) -> None:
+        from elspeth.plugins.results import RoutingAction
+
+        action = RoutingAction.fork_to_paths(["stats", "classifier", "archive"])
+        assert action.kind == "fork_to_paths"
+        assert action.destinations == ("stats", "classifier", "archive")  # Tuple
+        assert action.mode == "copy"
+
+    def test_immutable(self) -> None:
+        from elspeth.plugins.results import RoutingAction
+
+        action = RoutingAction.continue_()
+        with pytest.raises(FrozenInstanceError):
+            action.kind = "route_to_sink"
+
+    def test_reason_is_immutable(self) -> None:
+        """Reason dict should be wrapped as immutable mapping."""
+        from elspeth.plugins.results import RoutingAction
+
+        action = RoutingAction.route_to_sink("flagged", reason={"score": 0.9})
+        # Should not be able to modify reason
+        with pytest.raises(TypeError):
+            action.reason["score"] = 0.5
+
+
+class TestTransformResult:
+    """Results from transform operations."""
+
+    def test_success_result(self) -> None:
+        from elspeth.plugins.results import TransformResult
+
+        result = TransformResult.success({"value": 42})
+        assert result.status == "success"
+        assert result.row == {"value": 42}
+        assert result.retryable is False
+
+    def test_error_result(self) -> None:
+        from elspeth.plugins.results import TransformResult
+
+        result = TransformResult.error(
+            reason={"error": "validation failed"},
+            retryable=True,
+        )
+        assert result.status == "error"
+        assert result.row is None
+        assert result.retryable is True
+
+    def test_has_audit_fields(self) -> None:
+        """Phase 3 integration: audit fields must exist."""
+        from elspeth.plugins.results import TransformResult
+
+        result = TransformResult.success({"x": 1})
+        # These fields are set by the engine in Phase 3
+        assert hasattr(result, "input_hash")
+        assert hasattr(result, "output_hash")
+        assert hasattr(result, "duration_ms")
+        assert result.input_hash is None  # Not set yet

@@ -1,15 +1,57 @@
-"""SDA Engine: Orchestrator, RowProcessor, RetryManager, ArtifactPipeline."""
+# src/elspeth/engine/__init__.py
+"""SDA Engine: Orchestration with complete audit trails.
 
+This module provides the execution engine for ELSPETH pipelines:
+- Orchestrator: Full run lifecycle management
+- RowProcessor: Row-by-row processing through transforms
+- TokenManager: Token identity through forks/joins
+- SpanFactory: OpenTelemetry integration
+- RetryManager: Retry logic with tenacity
+
+Example:
+    from elspeth.core.landscape import LandscapeDB
+    from elspeth.engine import Orchestrator, PipelineConfig
+
+    db = LandscapeDB.from_url("sqlite:///audit.db")
+
+    config = PipelineConfig(
+        source=csv_source,
+        transforms=[transform1, gate1],
+        sinks={"default": output_sink},
+    )
+
+    orchestrator = Orchestrator(db)
+    result = orchestrator.run(config)
+"""
+
+from elspeth.engine.executors import (
+    AggregationExecutor,
+    GateExecutor,
+    MissingEdgeError,
+    SinkExecutor,
+    TransformExecutor,
+)
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig, RunResult
-from elspeth.engine.spans import NoOpSpan, SpanFactory
+from elspeth.engine.processor import RowProcessor, RowResult
+from elspeth.engine.retry import MaxRetriesExceeded, RetryConfig, RetryManager
+from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenInfo, TokenManager
 
 __all__ = [
-    "NoOpSpan",
+    "AggregationExecutor",
+    "GateExecutor",
+    "MaxRetriesExceeded",
+    "MissingEdgeError",
     "Orchestrator",
     "PipelineConfig",
+    "RetryConfig",
+    "RetryManager",
+    "RowProcessor",
+    "RowResult",
     "RunResult",
+    "SinkExecutor",
     "SpanFactory",
     "TokenInfo",
     "TokenManager",
+    "TransformExecutor",
 ]

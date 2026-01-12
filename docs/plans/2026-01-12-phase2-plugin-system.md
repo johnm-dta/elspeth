@@ -1496,7 +1496,34 @@ class TestCoalesceProtocol:
 
         # All policies should exist
         assert CoalescePolicy.REQUIRE_ALL.value == "require_all"
+        assert CoalescePolicy.QUORUM.value == "quorum"
         assert CoalescePolicy.BEST_EFFORT.value == "best_effort"
+
+    def test_quorum_requires_threshold(self) -> None:
+        """QUORUM policy needs a quorum_threshold."""
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import CoalescePolicy
+        from elspeth.plugins.schemas import PluginSchema
+
+        class OutputSchema(PluginSchema):
+            combined: str
+
+        class QuorumCoalesce:
+            name = "quorum_merge"
+            policy = CoalescePolicy.QUORUM
+            quorum_threshold = 2  # At least 2 branches must arrive
+            expected_branches = ["branch_a", "branch_b", "branch_c"]
+            output_schema = OutputSchema
+
+            def __init__(self, config: dict) -> None:
+                pass
+
+            def merge(self, branch_outputs: dict, ctx: PluginContext) -> dict:
+                return {"combined": "+".join(branch_outputs.keys())}
+
+        coalesce = QuorumCoalesce({})
+        assert coalesce.quorum_threshold == 2
+        assert len(coalesce.expected_branches) == 3
 ```
 
 ### Step 2: Run test to verify it fails
@@ -1636,23 +1663,31 @@ class CoalesceProtocol(Protocol):
 
     Configuration:
     - policy: How to handle partial arrivals
+    - quorum_threshold: Minimum branches for QUORUM policy (None otherwise)
     - inputs: Which branches to expect
-    - key: How to correlate branch outputs
+    - key: How to correlate branch outputs (Phase 3 engine concern)
 
     Example:
         class SimpleCoalesce:
             name = "merge"
             policy = CoalescePolicy.REQUIRE_ALL
+            quorum_threshold = None  # Only used for QUORUM policy
 
             def merge(self, branch_outputs, ctx) -> dict:
                 merged = {}
                 for branch_name, output in branch_outputs.items():
                     merged.update(output)
                 return merged
+
+        class QuorumCoalesce:
+            name = "quorum_merge"
+            policy = CoalescePolicy.QUORUM
+            quorum_threshold = 2  # Proceed if >= 2 branches arrive
     """
 
     name: str
     policy: CoalescePolicy
+    quorum_threshold: int | None  # Required if policy == QUORUM
     expected_branches: list[str]
     output_schema: type["PluginSchema"]
 

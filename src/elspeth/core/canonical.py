@@ -11,6 +11,7 @@ This is defense-in-depth for audit integrity.
 """
 
 import base64
+import hashlib
 import math
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -18,6 +19,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import rfc8785
 
 # Version string stored with every run for hash verification
 CANONICAL_VERSION = "sha256-rfc8785-v1"
@@ -110,3 +112,39 @@ def _normalize_for_canonical(data: Any) -> Any:
     if isinstance(data, (list, tuple)):
         return [_normalize_for_canonical(v) for v in data]
     return _normalize_value(data)
+
+
+def canonical_json(obj: Any) -> str:
+    """Produce canonical JSON for hashing.
+
+    Two-phase approach:
+    1. Normalize pandas/numpy types to JSON-safe primitives (our code)
+    2. Serialize per RFC 8785/JCS standard (rfc8785 package)
+
+    Args:
+        obj: Data structure to serialize
+
+    Returns:
+        Canonical JSON string (no whitespace, sorted keys)
+
+    Raises:
+        ValueError: If data contains NaN, Infinity, or other non-finite values
+        TypeError: If data contains types that cannot be serialized
+    """
+    normalized = _normalize_for_canonical(obj)
+    # rfc8785.dumps returns bytes, decode to string
+    return rfc8785.dumps(normalized).decode("utf-8")
+
+
+def stable_hash(obj: Any, version: str = CANONICAL_VERSION) -> str:
+    """Compute stable hash of object.
+
+    Args:
+        obj: Data structure to hash
+        version: Hash algorithm version (stored with runs for verification)
+
+    Returns:
+        SHA-256 hex digest of canonical JSON
+    """
+    canonical = canonical_json(obj)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

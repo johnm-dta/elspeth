@@ -48,16 +48,38 @@ Pipelines compile to DAGs. Linear pipelines are degenerate DAGs (single `continu
 | **Aggregation** | Collect N rows until trigger → emit result (stateful) |
 | **Coalesce** | Merge results from parallel paths |
 
-## Development Commands
+## Package Management: uv Required
 
-*Note: Source code implementation pending. Planned commands:*
+**STRICT REQUIREMENT:** Use `uv` for ALL package management. Never use `pip` directly.
 
 ```bash
 # Environment setup
 uv venv
 source .venv/bin/activate
-uv pip install -e ".[llm]"
+uv pip install -e ".[dev]"      # Development with test tools
+uv pip install -e ".[llm]"      # With LLM support
+uv pip install -e ".[all]"      # Everything
 
+# Adding dependencies
+uv pip install <package>        # Install package
+uv pip freeze                   # Show installed packages
+
+# Running tests (always use venv python)
+.venv/bin/python -m pytest tests/
+.venv/bin/python -m mypy src/
+.venv/bin/python -m ruff check src/
+```
+
+**Why uv:**
+
+- 10-100x faster than pip
+- Deterministic resolution
+- Better conflict detection
+- Drop-in pip replacement
+
+## Development Commands
+
+```bash
 # CLI (planned)
 elspeth --settings settings.yaml
 elspeth explain --run latest --row 42

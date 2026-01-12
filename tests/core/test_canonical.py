@@ -234,3 +234,70 @@ class TestRecursiveNormalization:
         data = {"values": [1.0, float("nan"), 3.0]}
         with pytest.raises(ValueError, match="non-finite"):
             _normalize_for_canonical(data)
+
+
+import hashlib
+
+
+class TestCanonicalJsonSerialization:
+    """RFC 8785 canonical JSON serialization."""
+
+    def test_canonical_json_sorts_keys(self) -> None:
+        from elspeth.core.canonical import canonical_json
+
+        # Keys should be sorted alphabetically
+        data = {"z": 1, "a": 2, "m": 3}
+        result = canonical_json(data)
+        assert result == '{"a":2,"m":3,"z":1}'
+
+    def test_canonical_json_no_whitespace(self) -> None:
+        from elspeth.core.canonical import canonical_json
+
+        data = {"key": "value", "list": [1, 2, 3]}
+        result = canonical_json(data)
+        assert " " not in result
+        assert "\n" not in result
+
+    def test_canonical_json_handles_numpy(self) -> None:
+        from elspeth.core.canonical import canonical_json
+
+        data = {"count": np.int64(42)}
+        result = canonical_json(data)
+        assert result == '{"count":42}'
+
+
+class TestStableHash:
+    """Stable hashing with versioned algorithm."""
+
+    def test_stable_hash_returns_hex_string(self) -> None:
+        from elspeth.core.canonical import stable_hash
+
+        result = stable_hash({"key": "value"})
+        assert isinstance(result, str)
+        assert len(result) == 64  # SHA-256 hex
+
+    def test_stable_hash_deterministic(self) -> None:
+        from elspeth.core.canonical import stable_hash
+
+        data = {"a": 1, "b": [2, 3]}
+        hash1 = stable_hash(data)
+        hash2 = stable_hash(data)
+        assert hash1 == hash2
+
+    def test_stable_hash_key_order_independent(self) -> None:
+        from elspeth.core.canonical import stable_hash
+
+        # Different key order should produce same hash
+        hash1 = stable_hash({"a": 1, "b": 2})
+        hash2 = stable_hash({"b": 2, "a": 1})
+        assert hash1 == hash2
+
+    def test_stable_hash_verifiable(self) -> None:
+        from elspeth.core.canonical import canonical_json, stable_hash
+
+        data = {"test": "data"}
+        hash_result = stable_hash(data)
+        # Should match manual computation
+        canonical = canonical_json(data)
+        expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        assert hash_result == expected

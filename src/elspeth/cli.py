@@ -5,9 +5,10 @@ Entry point for the elspeth CLI tool.
 """
 
 from pathlib import Path
+from typing import Any
 
 import typer
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 from elspeth import __version__
 
@@ -51,10 +52,58 @@ def run(
         "-s",
         help="Path to settings YAML file.",
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        "-n",
+        help="Validate and show what would run without executing.",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show detailed output.",
+    ),
 ) -> None:
     """Execute a pipeline run."""
-    typer.echo(f"Run command not yet implemented. Settings: {settings}")
-    raise typer.Exit(1)
+    settings_path = Path(settings)
+
+    # Check file exists
+    if not settings_path.exists():
+        typer.echo(f"Error: Settings file not found: {settings}", err=True)
+        raise typer.Exit(1)
+
+    # Load config
+    try:
+        with open(settings_path) as f:
+            config = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        typer.echo(f"Error: Invalid YAML: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    # Validate config
+    errors = _validate_config(config)
+    if errors:
+        typer.echo("Configuration errors:", err=True)
+        for error in errors:
+            typer.echo(f"  - {error}", err=True)
+        raise typer.Exit(1)
+
+    if dry_run:
+        typer.echo("Dry run mode - would execute:")
+        typer.echo(f"  Source: {config['source']['plugin']}")
+        typer.echo(f"  Sinks: {', '.join(config['sinks'].keys())}")
+        return
+
+    # Execute pipeline
+    try:
+        result = _execute_pipeline(config, verbose=verbose)
+        typer.echo(f"\nRun completed: {result['status']}")
+        typer.echo(f"  Rows processed: {result['rows_processed']}")
+        typer.echo(f"  Run ID: {result['run_id']}")
+    except Exception as e:
+        typer.echo(f"Error during pipeline execution: {e}", err=True)
+        raise typer.Exit(1) from None
 
 
 @app.command()
@@ -87,7 +136,7 @@ KNOWN_SOURCES = {"csv", "json"}
 KNOWN_SINKS = {"csv", "json", "database"}
 
 
-def _validate_config(config: dict) -> list[str]:
+def _validate_config(config: dict[str, Any]) -> list[str]:
     """Validate pipeline configuration structure.
 
     Returns:
@@ -120,6 +169,92 @@ def _validate_config(config: dict) -> list[str]:
     return errors
 
 
+def _execute_pipeline(config: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
+    """Execute a pipeline from configuration.
+
+    Returns:
+        Dict with run_id, status, rows_processed.
+    """
+    from elspeth.core.landscape import LandscapeDB
+    from elspeth.engine import Orchestrator, PipelineConfig
+    from elspeth.engine.adapters import SinkAdapter
+    from elspeth.plugins.base import BaseSink, BaseSource
+    from elspeth.plugins.sinks.csv_sink import CSVSink
+    from elspeth.plugins.sinks.database_sink import DatabaseSink
+    from elspeth.plugins.sinks.json_sink import JSONSink
+    from elspeth.plugins.sources.csv_source import CSVSource
+    from elspeth.plugins.sources.json_source import JSONSource
+
+    # Instantiate source
+    source_config = config["source"]
+    source_plugin = source_config["plugin"]
+    source_options = {k: v for k, v in source_config.items() if k != "plugin"}
+
+    source: BaseSource
+    if source_plugin == "csv":
+        source = CSVSource(source_options)
+    elif source_plugin == "json":
+        source = JSONSource(source_options)
+    else:
+        raise ValueError(f"Unknown source plugin: {source_plugin}")
+
+    # Instantiate sinks and wrap in SinkAdapter for Phase 3B compatibility
+    sinks: dict[str, SinkAdapter] = {}
+    for sink_name, sink_config in config["sinks"].items():
+        sink_plugin = sink_config["plugin"]
+        sink_options = {k: v for k, v in sink_config.items() if k != "plugin"}
+
+        raw_sink: BaseSink
+        artifact_descriptor: dict[str, Any]
+        if sink_plugin == "csv":
+            raw_sink = CSVSink(sink_options)
+            artifact_descriptor = {"kind": "file", "path": sink_options.get("path", "")}
+        elif sink_plugin == "json":
+            raw_sink = JSONSink(sink_options)
+            artifact_descriptor = {"kind": "file", "path": sink_options.get("path", "")}
+        elif sink_plugin == "database":
+            raw_sink = DatabaseSink(sink_options)
+            artifact_descriptor = {
+                "kind": "database",
+                "url": sink_options.get("url", ""),
+                "table": sink_options.get("table", ""),
+            }
+        else:
+            raise ValueError(f"Unknown sink plugin: {sink_plugin}")
+
+        # Wrap Phase 2 sink in adapter for Phase 3B SinkLike interface
+        sinks[sink_name] = SinkAdapter(
+            raw_sink,
+            plugin_name=sink_plugin,
+            sink_name=sink_name,
+            artifact_descriptor=artifact_descriptor,
+        )
+
+    # Get database URL from settings or use default
+    db_url = config.get("landscape", {}).get("url", "sqlite:///elspeth_runs.db")
+    db = LandscapeDB.from_url(db_url)
+
+    # Build PipelineConfig
+    pipeline_config = PipelineConfig(
+        source=source,
+        transforms=[],  # No transforms in basic Phase 4
+        sinks=sinks,
+    )
+
+    if verbose:
+        typer.echo("Starting pipeline execution...")
+
+    # Execute via Orchestrator (creates full audit trail)
+    orchestrator = Orchestrator(db)
+    result = orchestrator.run(pipeline_config)
+
+    return {
+        "run_id": result.run_id,
+        "status": result.status,
+        "rows_processed": result.rows_processed,
+    }
+
+
 @app.command()
 def validate(
     settings: str = typer.Option(
@@ -143,7 +278,7 @@ def validate(
             config = yaml.safe_load(f)
     except yaml.YAMLError as e:
         typer.echo(f"Error: Invalid YAML: {e}", err=True)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     # Validate structure
     errors = _validate_config(config)

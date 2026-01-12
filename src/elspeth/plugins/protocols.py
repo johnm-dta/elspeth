@@ -13,8 +13,9 @@ Plugin Types:
 - Sink: Outputs data (one or more per run)
 """
 
+from collections.abc import Iterator
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Iterator, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from elspeth.plugins.context import PluginContext
@@ -374,4 +375,12 @@ class CoalesceProtocol(Protocol):
 
     def on_register(self, ctx: "PluginContext") -> None:
         """Called when plugin is registered."""
+        ...
+
+    def on_start(self, ctx: "PluginContext") -> None:
+        """Called at start of run."""
+        ...
+
+    def on_complete(self, ctx: "PluginContext") -> None:
+        """Called at end of run."""
         ...

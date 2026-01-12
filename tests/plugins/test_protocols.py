@@ -1,20 +1,16 @@
 # tests/plugins/test_protocols.py
 """Tests for plugin protocols."""
 
-from typing import Iterator
-
-import pytest
+from collections.abc import Iterator
 
 
 class TestSourceProtocol:
     """Source plugin protocol."""
 
     def test_source_protocol_definition(self) -> None:
-        from typing import runtime_checkable
-
         from elspeth.plugins.protocols import SourceProtocol
 
-        # Should be a Protocol
+        # Should be a Protocol (runtime_checkable protocols have this attribute)
         assert hasattr(SourceProtocol, "__protocol_attrs__")
 
     def test_source_implementation(self) -> None:
@@ -133,7 +129,7 @@ class TestGateProtocol:
             output_schema = RowSchema
 
             def __init__(self, config: dict) -> None:
-                self.threshold = config.get("threshold", 10)
+                self.threshold = config["threshold"]
 
             def evaluate(self, row: dict, ctx: PluginContext) -> GateResult:
                 if row["value"] > self.threshold:
@@ -194,7 +190,7 @@ class TestAggregationProtocol:
             output_schema = OutputSchema
 
             def __init__(self, config: dict) -> None:
-                self.batch_size = config.get("batch_size", 3)
+                self.batch_size = config["batch_size"]
                 self._values: list[int] = []
 
             def accept(self, row: dict, ctx: PluginContext) -> AcceptResult:
@@ -226,6 +222,10 @@ class TestAggregationProtocol:
                 pass
 
         agg = SumAggregation({"batch_size": 2})
+
+        # IMPORTANT: Verify protocol conformance at runtime
+        assert isinstance(agg, AggregationProtocol), "Must conform to AggregationProtocol"
+
         ctx = PluginContext(run_id="test", config={})
 
         # First row - no trigger
@@ -256,8 +256,10 @@ class TestCoalesceProtocol:
 
     def test_quorum_requires_threshold(self) -> None:
         """QUORUM policy needs a quorum_threshold."""
+        from typing import ClassVar
+
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.protocols import CoalescePolicy
+        from elspeth.plugins.protocols import CoalescePolicy, CoalesceProtocol
         from elspeth.plugins.schemas import PluginSchema
 
         class OutputSchema(PluginSchema):
@@ -267,7 +269,7 @@ class TestCoalesceProtocol:
             name = "quorum_merge"
             policy = CoalescePolicy.QUORUM
             quorum_threshold = 2  # At least 2 branches must arrive
-            expected_branches = ["branch_a", "branch_b", "branch_c"]
+            expected_branches: ClassVar[list[str]] = ["branch_a", "branch_b", "branch_c"]
             output_schema = OutputSchema
 
             def __init__(self, config: dict) -> None:
@@ -279,6 +281,62 @@ class TestCoalesceProtocol:
             def on_register(self, ctx: PluginContext) -> None:
                 pass
 
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
         coalesce = QuorumCoalesce({})
+
+        # IMPORTANT: Verify protocol conformance at runtime
+        assert isinstance(coalesce, CoalesceProtocol), "Must conform to CoalesceProtocol"
+
         assert coalesce.quorum_threshold == 2
         assert len(coalesce.expected_branches) == 3
+
+    def test_coalesce_merge_behavior(self) -> None:
+        """Test merge() combines branch outputs correctly."""
+        from typing import ClassVar
+
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import CoalescePolicy, CoalesceProtocol
+        from elspeth.plugins.schemas import PluginSchema
+
+        class OutputSchema(PluginSchema):
+            total: int
+
+        class SumCoalesce:
+            name = "sum_merge"
+            policy = CoalescePolicy.REQUIRE_ALL
+            quorum_threshold = None
+            expected_branches: ClassVar[list[str]] = ["branch_a", "branch_b"]
+            output_schema = OutputSchema
+
+            def __init__(self, config: dict) -> None:
+                pass
+
+            def merge(self, branch_outputs: dict, ctx: PluginContext) -> dict:
+                total = sum(out["value"] for out in branch_outputs.values())
+                return {"total": total}
+
+            def on_register(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
+        coalesce = SumCoalesce({})
+        assert isinstance(coalesce, CoalesceProtocol)
+
+        ctx = PluginContext(run_id="test", config={})
+
+        branch_outputs = {
+            "branch_a": {"value": 10},
+            "branch_b": {"value": 20},
+        }
+        result = coalesce.merge(branch_outputs, ctx)
+        assert result == {"total": 30}

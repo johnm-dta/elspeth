@@ -2252,6 +2252,26 @@ class TestRetryManager:
 
         assert len(attempts) == 1
         assert attempts[0][0] == 1
+
+    def test_from_policy_none_returns_no_retry(self) -> None:
+        """Missing policy defaults to no-retry for safety."""
+        from elspeth.engine.retry import RetryConfig
+
+        config = RetryConfig.from_policy(None)
+
+        assert config.max_attempts == 1
+
+    def test_from_policy_handles_malformed(self) -> None:
+        """Malformed policy values are clamped to safe minimums."""
+        from elspeth.engine.retry import RetryConfig
+
+        config = RetryConfig.from_policy({
+            "max_attempts": -5,  # Invalid, should clamp to 1
+            "base_delay": -1,   # Invalid, should clamp to 0.01
+        })
+
+        assert config.max_attempts == 1
+        assert config.base_delay >= 0.01
 ```
 
 ### Step 2: Run test to verify it fails
@@ -2297,7 +2317,11 @@ class MaxRetriesExceeded(Exception):
 
 @dataclass
 class RetryConfig:
-    """Configuration for retry behavior."""
+    """Configuration for retry behavior.
+
+    max_attempts is the TOTAL number of tries, not the number of retries.
+    So max_attempts=3 means: try, retry, retry (3 total).
+    """
 
     max_attempts: int = 3
     base_delay: float = 1.0  # seconds
@@ -2307,6 +2331,27 @@ class RetryConfig:
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
+
+    @classmethod
+    def no_retry(cls) -> "RetryConfig":
+        """Factory for no-retry configuration (single attempt)."""
+        return cls(max_attempts=1)
+
+    @classmethod
+    def from_policy(cls, policy: dict[str, Any] | None) -> "RetryConfig":
+        """Factory from plugin policy dict with safe defaults.
+
+        Handles missing/malformed policy gracefully.
+        """
+        if policy is None:
+            return cls.no_retry()
+
+        return cls(
+            max_attempts=max(1, policy.get("max_attempts", 3)),
+            base_delay=max(0.01, policy.get("base_delay", 1.0)),
+            max_delay=max(0.1, policy.get("max_delay", 60.0)),
+            jitter=max(0.0, policy.get("jitter", 1.0)),
+        )
 
 
 class RetryManager:
@@ -2522,10 +2567,18 @@ from elspeth.plugins.context import PluginContext
 class RowResult:
     """Result of processing a row through the pipeline."""
 
-    token_id: str
-    row_id: str
+    token: TokenInfo  # Preserve full token identity, not just IDs
     final_data: dict[str, Any]
     outcome: str  # completed, routed, forked, consumed, failed
+    sink_name: str | None = None  # Set when outcome is "routed"
+
+    @property
+    def token_id(self) -> str:
+        return self.token.token_id
+
+    @property
+    def row_id(self) -> str:
+        return self.token.row_id
 
 
 class RowProcessor:
@@ -2588,6 +2641,10 @@ class RowProcessor:
     ) -> RowResult:
         """Process a row through all transforms.
 
+        NOTE: This implementation handles LINEAR pipelines only. For DAG support
+        (fork/join), this needs a work queue that processes child tokens from forks.
+        Currently fork_to_paths returns "forked" and the caller must handle the children.
+
         Args:
             row_index: Position in source
             row_data: Initial row data
@@ -2607,28 +2664,35 @@ class RowProcessor:
 
         with self._spans.row_span(token.row_id, token.token_id):
             current_token = token
+            step = 0  # Track position in pipeline - RowProcessor is the authority
 
             for transform in transforms:
+                step += 1  # Advance step before each transform
+
                 # Check transform type and execute accordingly
                 if hasattr(transform, "evaluate"):
                     # Gate transform
-                    result, current_token = self._gate_executor.execute_gate(
+                    outcome = self._gate_executor.execute_gate(
                         gate=transform,
                         token=current_token,
                         ctx=ctx,
+                        step_in_pipeline=step,
+                        token_manager=self._token_manager,
                     )
+                    current_token = outcome.updated_token
 
-                    if result.action.kind == "route_to_sink":
+                    if outcome.result.action.kind == "route_to_sink":
                         return RowResult(
-                            token_id=current_token.token_id,
-                            row_id=current_token.row_id,
+                            token=current_token,
                             final_data=current_token.row_data,
                             outcome="routed",
+                            sink_name=outcome.sink_name,  # GateOutcome provides this!
                         )
-                    elif result.action.kind == "fork_to_paths":
+                    elif outcome.result.action.kind == "fork_to_paths":
+                        # NOTE: For full DAG support, we'd push child_tokens to a work queue
+                        # and continue processing them. For now, return "forked".
                         return RowResult(
-                            token_id=current_token.token_id,
-                            row_id=current_token.row_id,
+                            token=current_token,
                             final_data=current_token.row_data,
                             outcome="forked",
                         )
@@ -2639,6 +2703,7 @@ class RowProcessor:
                         aggregation=transform,
                         token=current_token,
                         ctx=ctx,
+                        step_in_pipeline=step,
                     )
 
                     if accept_result.trigger:
@@ -2649,8 +2714,7 @@ class RowProcessor:
                         )
 
                     return RowResult(
-                        token_id=current_token.token_id,
-                        row_id=current_token.row_id,
+                        token=current_token,
                         final_data=current_token.row_data,
                         outcome="consumed",
                     )
@@ -2661,19 +2725,18 @@ class RowProcessor:
                         transform=transform,
                         token=current_token,
                         ctx=ctx,
+                        step_in_pipeline=step,
                     )
 
                     if result.status == "error":
                         return RowResult(
-                            token_id=current_token.token_id,
-                            row_id=current_token.row_id,
+                            token=current_token,
                             final_data=current_token.row_data,
                             outcome="failed",
                         )
 
             return RowResult(
-                token_id=current_token.token_id,
-                row_id=current_token.row_id,
+                token=current_token,
                 final_data=current_token.row_data,
                 outcome="completed",
             )
@@ -3044,12 +3107,15 @@ class Orchestrator:
             edge_map=edge_map,
         )
 
-        # Process rows
+        # Process rows - CRITICAL: Buffer TOKENS, not dicts, to preserve identity
+        from elspeth.engine.executors import SinkExecutor
+        from elspeth.engine.tokens import TokenInfo
+
         rows_processed = 0
         rows_succeeded = 0
         rows_failed = 0
         rows_routed = 0
-        pending_rows: dict[str, list[dict]] = {name: [] for name in config.sinks}
+        pending_tokens: dict[str, list[TokenInfo]] = {name: [] for name in config.sinks}
 
         with self._span_factory.source_span(config.source.name):
             for row_index, row_data in enumerate(config.source.load(ctx)):
@@ -3064,25 +3130,33 @@ class Orchestrator:
 
                 if result.outcome == "completed":
                     rows_succeeded += 1
-                    pending_rows["default"].append(result.final_data)
+                    # Preserve full TokenInfo, not just dict
+                    pending_tokens["default"].append(result.token)
                 elif result.outcome == "routed":
                     rows_routed += 1
-                    # Find which sink was routed to (simplified)
-                    for sink_name in config.sinks:
-                        if sink_name != "default":
-                            pending_rows[sink_name].append(result.final_data)
-                            break
+                    # Use the actual sink_name from RowResult (not guessing!)
+                    if result.sink_name and result.sink_name in config.sinks:
+                        pending_tokens[result.sink_name].append(result.token)
+                    else:
+                        # Routed to unknown sink - this is a configuration error
+                        rows_failed += 1
                 elif result.outcome == "failed":
                     rows_failed += 1
 
-        # Write to sinks
-        from elspeth.engine.executors import SinkExecutor
+        # Write to sinks using SinkExecutor with proper audit
         sink_executor = SinkExecutor(recorder, self._span_factory, run_id)
+        step = len(config.transforms) + 1  # Sinks are after all transforms
 
-        for sink_name, rows in pending_rows.items():
-            if rows and sink_name in config.sinks:
+        for sink_name, tokens in pending_tokens.items():
+            if tokens and sink_name in config.sinks:
                 sink = config.sinks[sink_name]
-                sink.write(rows, ctx)
+                # CRITICAL: Pass TokenInfo list, not dicts, for proper node_states
+                sink_executor.write(
+                    sink=sink,
+                    tokens=tokens,
+                    ctx=ctx,
+                    step_in_pipeline=step,
+                )
 
         # Close source
         config.source.close()
@@ -3216,6 +3290,36 @@ class TestEngineIntegration:
 
         nodes = recorder.get_nodes(result.run_id)
         assert len(nodes) >= 3  # source, transform, sink
+
+        # CRITICAL AUDIT VERIFICATION: Every token must reach a terminal state
+        # This is the Attributability Test - no silent drops allowed!
+        rows = recorder.get_rows(result.run_id)
+        assert len(rows) == 5, "Should have 5 rows in audit trail"
+
+        # Each row should have a token
+        for row in rows:
+            tokens = recorder.get_tokens(row.row_id)
+            assert len(tokens) >= 1, f"Row {row.row_id} should have at least one token"
+
+            # Each token should have reached the sink (completed node_state at sink)
+            for token in tokens:
+                states = recorder.get_node_states(token.token_id)
+                assert len(states) >= 2, (
+                    f"Token {token.token_id} should have states at transform AND sink"
+                )
+
+                # Find sink node and verify token reached it
+                sink_states = [s for s in states if s.node_id == sink.node_id]
+                assert len(sink_states) == 1, (
+                    f"Token {token.token_id} should have exactly one state at sink"
+                )
+                assert sink_states[0].status == "completed", (
+                    f"Token {token.token_id} state at sink should be 'completed'"
+                )
+
+        # Verify artifact was recorded
+        artifacts = recorder.get_artifacts(result.run_id)
+        assert len(artifacts) >= 1, "Should have at least one artifact from sink"
 ```
 
 ### Step 2: Run test to verify it fails

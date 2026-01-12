@@ -2,7 +2,7 @@
 """Integration tests for the plugin system."""
 
 from collections.abc import Iterator
-from typing import ClassVar
+from typing import Any, ClassVar
 
 
 class TestPluginSystemIntegration:
@@ -37,7 +37,7 @@ class TestPluginSystemIntegration:
             name = "list"
             output_schema = InputSchema
 
-            def load(self, ctx: PluginContext) -> Iterator[dict]:
+            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
                 for v in self.config["values"]:
                     yield {"value": v}
 
@@ -49,7 +49,7 @@ class TestPluginSystemIntegration:
             input_schema = InputSchema
             output_schema = EnrichedSchema
 
-            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({
                     "value": row["value"],
                     "doubled": row["value"] * 2,
@@ -60,7 +60,7 @@ class TestPluginSystemIntegration:
             input_schema = EnrichedSchema
             output_schema = EnrichedSchema
 
-            def evaluate(self, row: dict, ctx: PluginContext) -> GateResult:
+            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
                 if row["doubled"] > self.config["threshold"]:
                     return GateResult(
                         row=row,
@@ -71,9 +71,9 @@ class TestPluginSystemIntegration:
         class MemorySink(BaseSink):
             name = "memory"
             input_schema = EnrichedSchema
-            collected: ClassVar[list[dict]] = []
+            collected: ClassVar[list[dict[str, Any]]] = []
 
-            def write(self, row: dict, ctx: PluginContext) -> None:
+            def write(self, row: dict[str, Any], ctx: PluginContext) -> None:
                 MemorySink.collected.append(row)
 
             def flush(self) -> None:
@@ -85,19 +85,19 @@ class TestPluginSystemIntegration:
         # Register plugins
         class TestPlugin:
             @hookimpl
-            def elspeth_get_source(self) -> list:
+            def elspeth_get_source(self) -> list[type[BaseSource]]:
                 return [ListSource]
 
             @hookimpl
-            def elspeth_get_transforms(self) -> list:
+            def elspeth_get_transforms(self) -> list[type[BaseTransform]]:
                 return [DoubleTransform]
 
             @hookimpl
-            def elspeth_get_gates(self) -> list:
+            def elspeth_get_gates(self) -> list[type[BaseGate]]:
                 return [ThresholdGate]
 
             @hookimpl
-            def elspeth_get_sinks(self) -> list:
+            def elspeth_get_sinks(self) -> list[type[BaseSink]]:
                 return [MemorySink]
 
         manager = PluginManager()
@@ -155,10 +155,10 @@ class TestPluginSystemIntegration:
     def test_aggregation_workflow(self) -> None:
         """Test aggregation batching behavior."""
         from elspeth.plugins import (
+            AcceptResult,
             BaseAggregation,
             PluginContext,
             PluginSchema,
-            AcceptResult,
         )
 
         class InputSchema(PluginSchema):
@@ -173,11 +173,11 @@ class TestPluginSystemIntegration:
             input_schema = InputSchema
             output_schema = OutputSchema
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 super().__init__(config)
                 self._values: list[int] = []
 
-            def accept(self, row: dict, ctx: PluginContext) -> AcceptResult:
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._values.append(row["value"])
                 trigger = len(self._values) >= self.config["batch_size"]
                 return AcceptResult(accepted=True, trigger=trigger)
@@ -185,7 +185,7 @@ class TestPluginSystemIntegration:
             def should_trigger(self) -> bool:
                 return len(self._values) >= self.config["batch_size"]
 
-            def flush(self, ctx: PluginContext) -> list[dict]:
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 result = {
                     "total": sum(self._values),
                     "count": len(self._values),

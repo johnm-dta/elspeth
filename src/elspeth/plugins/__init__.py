@@ -63,6 +63,14 @@ from elspeth.plugins.manager import PluginManager
 # Hookspecs
 from elspeth.plugins.hookspecs import hookimpl, hookspec
 
+# Enums
+from elspeth.plugins.enums import (
+    Determinism,
+    NodeType,
+    RoutingKind,
+    RoutingMode,
+)
+
 __all__ = [
     # Results
     "AcceptResult",
@@ -97,4 +105,9 @@ __all__ = [
     # Hookspecs
     "hookimpl",
     "hookspec",
+    # Enums
+    "Determinism",
+    "NodeType",
+    "RoutingKind",
+    "RoutingMode",
 ]

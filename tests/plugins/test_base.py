@@ -173,3 +173,39 @@ class TestBaseSink:
 
         assert len(sink.rows) == 2
         assert sink.rows[0] == {"value": 1}
+
+
+class TestBaseSource:
+    """Base class for sources."""
+
+    def test_base_source_implementation(self) -> None:
+        from collections.abc import Iterator
+
+        from elspeth.plugins.base import BaseSource
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.schemas import PluginSchema
+
+        class OutputSchema(PluginSchema):
+            value: int
+
+        class ListSource(BaseSource):
+            name = "list"
+            output_schema = OutputSchema
+
+            def __init__(self, config: dict) -> None:
+                super().__init__(config)
+                self._data = config["data"]
+
+            def load(self, ctx: PluginContext) -> Iterator[dict]:
+                for item in self._data:
+                    yield item
+
+            def close(self) -> None:
+                pass
+
+        source = ListSource({"data": [{"value": 1}, {"value": 2}]})
+        ctx = PluginContext(run_id="test", config={})
+
+        rows = list(source.load(ctx))
+        assert len(rows) == 2
+        assert rows[0] == {"value": 1}

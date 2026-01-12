@@ -128,7 +128,7 @@ class TestRoutingAction:
 
         action = RoutingAction.continue_()
         assert action.kind == "continue"
-        assert action.destinations == []
+        assert action.destinations == ()  # Tuple, not list
         assert action.mode == "move"
 
     def test_route_to_sink(self) -> None:
@@ -136,15 +136,15 @@ class TestRoutingAction:
 
         action = RoutingAction.route_to_sink("flagged", reason={"confidence": 0.95})
         assert action.kind == "route_to_sink"
-        assert action.destinations == ["flagged"]
-        assert action.reason == {"confidence": 0.95}
+        assert action.destinations == ("flagged",)  # Tuple, not list
+        assert action.reason["confidence"] == 0.95  # Access via mapping
 
     def test_fork_to_paths(self) -> None:
         from elspeth.plugins.results import RoutingAction
 
         action = RoutingAction.fork_to_paths(["stats", "classifier", "archive"])
         assert action.kind == "fork_to_paths"
-        assert action.destinations == ["stats", "classifier", "archive"]
+        assert action.destinations == ("stats", "classifier", "archive")  # Tuple
         assert action.mode == "copy"
 
     def test_immutable(self) -> None:
@@ -153,6 +153,15 @@ class TestRoutingAction:
         action = RoutingAction.continue_()
         with pytest.raises(FrozenInstanceError):
             action.kind = "route_to_sink"
+
+    def test_reason_is_immutable(self) -> None:
+        """Reason dict should be wrapped as immutable mapping."""
+        from elspeth.plugins.results import RoutingAction
+
+        action = RoutingAction.route_to_sink("flagged", reason={"score": 0.9})
+        # Should not be able to modify reason
+        with pytest.raises(TypeError):
+            action.reason["score"] = 0.5
 
 
 class TestTransformResult:
@@ -200,20 +209,27 @@ Expected: FAIL
 # Add to src/elspeth/plugins/results.py
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from types import MappingProxyType
+from typing import Any, Literal, Mapping
+
+
+def _freeze_dict(d: dict[str, Any] | None) -> Mapping[str, Any]:
+    """Wrap dict in MappingProxyType for immutability."""
+    return MappingProxyType(d) if d else MappingProxyType({})
 
 
 @dataclass(frozen=True)
 class RoutingAction:
     """What a gate decided to do with a row.
 
-    Immutable to prevent accidental modification after decision.
+    Fully immutable: frozen dataclass with tuple destinations and
+    MappingProxyType-wrapped reason.
     """
 
     kind: Literal["continue", "route_to_sink", "fork_to_paths"]
     destinations: tuple[str, ...]  # Immutable sequence
     mode: Literal["move", "copy"]
-    reason: dict[str, Any]
+    reason: Mapping[str, Any]  # Immutable mapping (MappingProxyType)
 
     @classmethod
     def continue_(cls, reason: dict[str, Any] | None = None) -> "RoutingAction":
@@ -222,7 +238,7 @@ class RoutingAction:
             kind="continue",
             destinations=(),
             mode="move",
-            reason=reason or {},
+            reason=_freeze_dict(reason),
         )
 
     @classmethod
@@ -238,7 +254,7 @@ class RoutingAction:
             kind="route_to_sink",
             destinations=(sink_name,),
             mode=mode,
-            reason=reason or {},
+            reason=_freeze_dict(reason),
         )
 
     @classmethod
@@ -253,7 +269,7 @@ class RoutingAction:
             kind="fork_to_paths",
             destinations=tuple(paths),
             mode="copy",
-            reason=reason or {},
+            reason=_freeze_dict(reason),
         )
 
 
@@ -261,11 +277,17 @@ class RoutingAction:
 class TransformResult:
     """Result from any transform operation.
 
+    Note: Routing comes from GateResult, not TransformResult.
+    TransformResult is for row transforms that either succeed or error.
+
     Includes all fields needed for Phase 3 Landscape audit.
     The engine populates audit fields; plugins set status/row/reason.
+
+    Audit hashes are SHA-256 over RFC 8785 canonical JSON
+    (computed by elspeth.core.canonical.stable_hash).
     """
 
-    status: Literal["success", "route", "error"]
+    status: Literal["success", "error"]  # No "route" - use GateResult for routing
     row: dict[str, Any] | None
     reason: dict[str, Any] | None
     retryable: bool = False
@@ -895,6 +917,34 @@ class TestSchemaCompatibility:
         result = check_compatibility(ProducerOutput, ConsumerInput)
         assert result.compatible is False
         assert len(result.type_mismatches) > 0
+
+    def test_optional_fields_not_required(self) -> None:
+        """Optional fields with defaults should not cause incompatibility."""
+        from elspeth.plugins.schemas import PluginSchema, check_compatibility
+
+        class ProducerOutput(PluginSchema):
+            x: int
+
+        class ConsumerInput(PluginSchema):
+            x: int
+            y: int = 0  # Has default, so optional
+
+        # Producer doesn't provide y, but y has a default
+        result = check_compatibility(ProducerOutput, ConsumerInput)
+        assert result.compatible is True
+
+    def test_optional_union_compatible(self) -> None:
+        """Producer can send X when consumer expects Optional[X]."""
+        from elspeth.plugins.schemas import PluginSchema, check_compatibility
+
+        class ProducerOutput(PluginSchema):
+            value: int  # Always provides int
+
+        class ConsumerInput(PluginSchema):
+            value: int | None  # Accepts int or None
+
+        result = check_compatibility(ProducerOutput, ConsumerInput)
+        assert result.compatible is True
 ```
 
 ### Step 2: Run test to verify it fails
@@ -908,7 +958,7 @@ Expected: FAIL
 # Add to src/elspeth/plugins/schemas.py
 
 from dataclasses import dataclass, field as dataclass_field
-from typing import get_type_hints
+from typing import Any, Union, get_args, get_origin
 
 
 @dataclass
@@ -917,7 +967,7 @@ class CompatibilityResult:
 
     compatible: bool
     missing_fields: list[str] = dataclass_field(default_factory=list)
-    type_mismatches: list[tuple[str, type, type]] = dataclass_field(default_factory=list)
+    type_mismatches: list[tuple[str, str, str]] = dataclass_field(default_factory=list)
 
     @property
     def error_message(self) -> str | None:
@@ -930,7 +980,7 @@ class CompatibilityResult:
             parts.append(f"Missing fields: {', '.join(self.missing_fields)}")
         if self.type_mismatches:
             mismatches = [
-                f"{name} (expected {expected.__name__}, got {actual.__name__})"
+                f"{name} (expected {expected}, got {actual})"
                 for name, expected, actual in self.type_mismatches
             ]
             parts.append(f"Type mismatches: {', '.join(mismatches)}")
@@ -944,8 +994,12 @@ def check_compatibility(
 ) -> CompatibilityResult:
     """Check if producer output is compatible with consumer input.
 
+    Uses Pydantic model_fields metadata for accurate compatibility checking.
+    This handles optional fields, unions, constrained types, and defaults.
+
     Compatibility means:
-    - All required fields in consumer are provided by producer
+    - All REQUIRED fields in consumer are provided by producer
+    - Fields with defaults in consumer are optional
     - Field types are compatible (exact match or coercible)
 
     Args:
@@ -955,19 +1009,29 @@ def check_compatibility(
     Returns:
         CompatibilityResult indicating compatibility and any issues
     """
-    producer_hints = get_type_hints(producer_schema)
-    consumer_hints = get_type_hints(consumer_schema)
+    # Use Pydantic v2 model_fields for accurate field introspection
+    producer_fields = producer_schema.model_fields
+    consumer_fields = consumer_schema.model_fields
 
     missing: list[str] = []
-    mismatches: list[tuple[str, type, type]] = []
+    mismatches: list[tuple[str, str, str]] = []
 
-    for field_name, expected_type in consumer_hints.items():
-        if field_name not in producer_hints:
-            missing.append(field_name)
+    for field_name, consumer_field in consumer_fields.items():
+        # Check if field is required (no default value)
+        is_required = consumer_field.is_required()
+
+        if field_name not in producer_fields:
+            # Missing field - only a problem if required
+            if is_required:
+                missing.append(field_name)
         else:
-            actual_type = producer_hints[field_name]
-            if not _types_compatible(actual_type, expected_type):
-                mismatches.append((field_name, expected_type, actual_type))
+            producer_field = producer_fields[field_name]
+            if not _types_compatible(producer_field.annotation, consumer_field.annotation):
+                mismatches.append((
+                    field_name,
+                    _type_name(consumer_field.annotation),
+                    _type_name(producer_field.annotation),
+                ))
 
     compatible = len(missing) == 0 and len(mismatches) == 0
 
@@ -978,10 +1042,21 @@ def check_compatibility(
     )
 
 
-def _types_compatible(actual: type, expected: type) -> bool:
+def _type_name(t: Any) -> str:
+    """Get readable name for a type annotation."""
+    if hasattr(t, "__name__"):
+        return t.__name__
+    return str(t)
+
+
+def _types_compatible(actual: Any, expected: Any) -> bool:
     """Check if actual type is compatible with expected type.
 
-    Currently checks for exact match or numeric compatibility.
+    Handles:
+    - Exact matches
+    - Numeric compatibility (int -> float)
+    - Optional[X] on consumer side (producer can send X or X | None)
+    - Union types
     """
     # Exact match
     if actual == expected:
@@ -991,7 +1066,20 @@ def _types_compatible(actual: type, expected: type) -> bool:
     if expected is float and actual is int:
         return True
 
-    # Optional handling could be added here
+    # Handle Optional/Union types
+    expected_origin = get_origin(expected)
+    actual_origin = get_origin(actual)
+
+    # If consumer expects Optional[X], producer can provide X or Optional[X]
+    if expected_origin is Union:
+        expected_args = get_args(expected)
+        # Check if actual type matches any of the union members
+        if actual in expected_args:
+            return True
+        # Check if actual is a Union that's a subset
+        if actual_origin is Union:
+            actual_args = get_args(actual)
+            return all(a in expected_args for a in actual_args)
 
     return False
 ```
@@ -1063,6 +1151,11 @@ class TestSourceProtocol:
                 pass
 
         source = MySource({"path": "test.csv"})
+
+        # IMPORTANT: Verify protocol conformance at runtime
+        # This is why we use @runtime_checkable
+        assert isinstance(source, SourceProtocol), "Source must conform to SourceProtocol"
+
         ctx = PluginContext(run_id="test", config={})
 
         rows = list(source.load(ctx))
@@ -1220,6 +1313,10 @@ class TestTransformProtocol:
                 })
 
         transform = DoubleTransform({})
+
+        # IMPORTANT: Verify protocol conformance at runtime
+        assert isinstance(transform, TransformProtocol), "Must conform to TransformProtocol"
+
         ctx = PluginContext(run_id="test", config={})
 
         result = transform.process({"value": 21}, ctx)
@@ -1259,6 +1356,10 @@ class TestGateProtocol:
                 return GateResult(row=row, action=RoutingAction.continue_())
 
         gate = ThresholdGate({"threshold": 50})
+
+        # IMPORTANT: Verify protocol conformance at runtime
+        assert isinstance(gate, GateProtocol), "Must conform to GateProtocol"
+
         ctx = PluginContext(run_id="test", config={})
 
         # Below threshold - continue
@@ -1946,14 +2047,16 @@ Expected: FAIL (ImportError)
 Plugins implement these hooks to register themselves with the framework.
 The plugin manager calls these hooks during discovery.
 
-Usage:
-    import pluggy
-    from elspeth.plugins.hookspecs import hookspec
+Usage (implementing a plugin):
+    from elspeth.plugins.hookspecs import hookimpl
 
     class MyPlugin:
-        @hookspec.implementation
+        @hookimpl  # NOT @hookspec - that's for defining specs
         def elspeth_get_transforms(self):
             return [MyTransform]
+
+Note: @hookspec defines the hook interface (done here).
+      @hookimpl marks plugin implementations of those hooks.
 """
 
 from typing import TYPE_CHECKING
@@ -3082,6 +3185,27 @@ This document describes how Phase 3 (SDA Engine) will integrate with the
 Phase 2 plugin system. These integration points are built into the Phase 2
 design to ensure clean integration.
 
+## Canonical Hashing Standard
+
+**IMPORTANT:** All audit hashes (`input_hash`, `output_hash`, `config_hash`, etc.)
+use SHA-256 over RFC 8785 canonical JSON via `elspeth.core.canonical.stable_hash`.
+
+```python
+from elspeth.core.canonical import stable_hash
+
+# Phase 1 provides:
+# - canonical_json(obj) -> str  # RFC 8785 deterministic JSON
+# - stable_hash(obj) -> str     # SHA-256 hex digest of canonical JSON
+
+input_hash = stable_hash(row)
+config_hash = stable_hash(config)
+```
+
+This ensures:
+- Cross-process determinism (same data → same hash everywhere)
+- NaN and Infinity are rejected (not silently coerced)
+- Pandas/NumPy types are normalized to JSON primitives
+
 ## PluginContext Integration
 
 Phase 3 creates PluginContext with full integration:
@@ -3427,7 +3551,465 @@ git commit -m "test(plugins): add integration tests for plugin workflow"
 
 ---
 
-## Task 18: Final Verification
+## Task 18: NodeType and Routing Enums
+
+**Context:** String-based node types and routing kinds lead to typos and inconsistency. Explicit enums prevent "transform" vs "transforms" drift.
+
+**Files:**
+- Create: `src/elspeth/plugins/enums.py`
+- Create: `tests/plugins/test_enums.py`
+- Modify: `src/elspeth/plugins/__init__.py` (export enums)
+
+### Step 1: Write the failing tests
+
+```python
+# tests/plugins/test_enums.py
+"""Tests for plugin type enums."""
+
+import pytest
+
+
+class TestNodeType:
+    """Node type enumeration."""
+
+    def test_all_node_types_defined(self) -> None:
+        from elspeth.plugins.enums import NodeType
+
+        assert NodeType.SOURCE.value == "source"
+        assert NodeType.TRANSFORM.value == "transform"
+        assert NodeType.GATE.value == "gate"
+        assert NodeType.AGGREGATION.value == "aggregation"
+        assert NodeType.COALESCE.value == "coalesce"
+        assert NodeType.SINK.value == "sink"
+
+
+class TestRoutingKind:
+    """Routing decision kinds."""
+
+    def test_all_routing_kinds_defined(self) -> None:
+        from elspeth.plugins.enums import RoutingKind
+
+        assert RoutingKind.CONTINUE.value == "continue"
+        assert RoutingKind.ROUTE_TO_SINK.value == "route_to_sink"
+        assert RoutingKind.FORK_TO_PATHS.value == "fork_to_paths"
+
+
+class TestRoutingMode:
+    """Token routing modes."""
+
+    def test_routing_modes_defined(self) -> None:
+        from elspeth.plugins.enums import RoutingMode
+
+        assert RoutingMode.MOVE.value == "move"
+        assert RoutingMode.COPY.value == "copy"
+```
+
+### Step 2: Run test to verify it fails
+
+Run: `pytest tests/plugins/test_enums.py -v`
+Expected: FAIL (ImportError)
+
+### Step 3: Create enums module
+
+```python
+# src/elspeth/plugins/enums.py
+"""Enumerations for plugin and DAG concepts.
+
+Using explicit enums prevents string typos and provides IDE support.
+These are the canonical definitions - use them everywhere.
+"""
+
+from enum import Enum
+
+
+class NodeType(str, Enum):
+    """Types of nodes in the execution DAG.
+
+    Using str as base allows direct JSON serialization and comparison.
+    """
+
+    SOURCE = "source"
+    TRANSFORM = "transform"
+    GATE = "gate"
+    AGGREGATION = "aggregation"
+    COALESCE = "coalesce"
+    SINK = "sink"
+
+
+class RoutingKind(str, Enum):
+    """Kinds of routing decisions made by gates.
+
+    CONTINUE: Row proceeds to next node in linear path
+    ROUTE_TO_SINK: Row diverts to a named sink
+    FORK_TO_PATHS: Row copies to multiple parallel paths
+    """
+
+    CONTINUE = "continue"
+    ROUTE_TO_SINK = "route_to_sink"
+    FORK_TO_PATHS = "fork_to_paths"
+
+
+class RoutingMode(str, Enum):
+    """How tokens are handled during routing.
+
+    MOVE: Token transfers to destination (original disappears)
+    COPY: Token clones to destination (original continues)
+    """
+
+    MOVE = "move"
+    COPY = "copy"
+
+
+class Determinism(str, Enum):
+    """Plugin determinism classification for reproducibility.
+
+    DETERMINISTIC: Same input always produces same output
+    SEEDED: Reproducible with seed (e.g., random sampling)
+    NONDETERMINISTIC: May vary (e.g., external API calls, LLMs)
+    """
+
+    DETERMINISTIC = "deterministic"
+    SEEDED = "seeded"
+    NONDETERMINISTIC = "nondeterministic"
+```
+
+### Step 4: Run tests to verify they pass
+
+Run: `pytest tests/plugins/test_enums.py -v`
+Expected: PASS
+
+### Step 5: Update exports
+
+Add to `src/elspeth/plugins/__init__.py`:
+
+```python
+from elspeth.plugins.enums import (
+    Determinism,
+    NodeType,
+    RoutingKind,
+    RoutingMode,
+)
+```
+
+### Step 6: Commit
+
+```bash
+git add -u
+git commit -m "feat(plugins): add NodeType, RoutingKind, RoutingMode enums"
+```
+
+---
+
+## Task 19: Protocol Metadata - Determinism and Version
+
+**Context:** For reproducibility tracking, plugins should declare whether they're deterministic. Phase 3 needs this for Landscape grading.
+
+**Files:**
+- Modify: `src/elspeth/plugins/protocols.py` (add metadata attributes)
+- Modify: `tests/plugins/test_protocols.py`
+
+### Step 1: Write the failing tests
+
+```python
+# Add to tests/plugins/test_protocols.py
+
+class TestProtocolMetadata:
+    """Test that protocols include metadata attributes."""
+
+    def test_transform_has_determinism_attribute(self) -> None:
+        from elspeth.plugins.enums import Determinism
+        from elspeth.plugins.protocols import TransformProtocol
+
+        # Protocol should define optional determinism attribute
+        assert hasattr(TransformProtocol, "determinism")
+
+    def test_transform_has_version_attribute(self) -> None:
+        from elspeth.plugins.protocols import TransformProtocol
+
+        assert hasattr(TransformProtocol, "plugin_version")
+
+    def test_deterministic_transform(self) -> None:
+        from elspeth.plugins.enums import Determinism
+        from elspeth.plugins.protocols import TransformProtocol
+
+        class MyTransform:
+            name = "my_transform"
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+
+            def process(self, row, ctx):
+                pass
+
+        t = MyTransform()
+        assert t.determinism == Determinism.DETERMINISTIC
+
+    def test_nondeterministic_transform(self) -> None:
+        from elspeth.plugins.enums import Determinism
+
+        class LLMTransform:
+            name = "llm_classifier"
+            determinism = Determinism.NONDETERMINISTIC
+            plugin_version = "0.1.0"
+
+            def process(self, row, ctx):
+                pass
+
+        t = LLMTransform()
+        assert t.determinism == Determinism.NONDETERMINISTIC
+```
+
+### Step 2: Run test to verify it fails
+
+Run: `pytest tests/plugins/test_protocols.py::TestProtocolMetadata -v`
+Expected: FAIL
+
+### Step 3: Add metadata to protocols
+
+Add to each protocol in `src/elspeth/plugins/protocols.py`:
+
+```python
+from elspeth.plugins.enums import Determinism
+
+@runtime_checkable
+class TransformProtocol(Protocol):
+    """Protocol for stateless row transforms."""
+
+    name: str
+    input_schema: type["PluginSchema"]
+    output_schema: type["PluginSchema"]
+
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism = Determinism.DETERMINISTIC
+    plugin_version: str = "0.0.0"
+
+    def process(self, row: dict[str, Any], ctx: "PluginContext") -> "TransformResult":
+        ...
+```
+
+Apply same pattern to GateProtocol, AggregationProtocol, CoalesceProtocol, SinkProtocol.
+
+### Step 4: Run tests to verify they pass
+
+Run: `pytest tests/plugins/test_protocols.py -v`
+Expected: PASS
+
+### Step 5: Commit
+
+```bash
+git add -u
+git commit -m "feat(plugins): add determinism and version metadata to protocols"
+```
+
+---
+
+## Task 20: PluginSpec Registration Record
+
+**Context:** Normalizing plugin metadata into a PluginSpec dataclass makes it easy for Phase 3 to record in Landscape.
+
+**Files:**
+- Modify: `src/elspeth/plugins/manager.py`
+- Modify: `tests/plugins/test_manager.py`
+
+### Step 1: Write the failing tests
+
+```python
+# Add to tests/plugins/test_manager.py
+
+class TestPluginSpec:
+    """PluginSpec registration record."""
+
+    def test_spec_from_transform(self) -> None:
+        from elspeth.plugins.enums import Determinism, NodeType
+        from elspeth.plugins.manager import PluginSpec
+
+        class MyTransform:
+            name = "my_transform"
+            input_schema = None
+            output_schema = None
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.2.3"
+
+        spec = PluginSpec.from_plugin(MyTransform, NodeType.TRANSFORM)
+
+        assert spec.name == "my_transform"
+        assert spec.node_type == NodeType.TRANSFORM
+        assert spec.version == "1.2.3"
+        assert spec.determinism == Determinism.DETERMINISTIC
+
+    def test_spec_defaults(self) -> None:
+        from elspeth.plugins.enums import Determinism, NodeType
+        from elspeth.plugins.manager import PluginSpec
+
+        class MinimalTransform:
+            name = "minimal"
+            # No determinism or version attributes
+
+        spec = PluginSpec.from_plugin(MinimalTransform, NodeType.TRANSFORM)
+
+        assert spec.determinism == Determinism.DETERMINISTIC
+        assert spec.version == "0.0.0"
+```
+
+### Step 2: Run test to verify it fails
+
+Run: `pytest tests/plugins/test_manager.py::TestPluginSpec -v`
+Expected: FAIL
+
+### Step 3: Add PluginSpec
+
+Add to `src/elspeth/plugins/manager.py`:
+
+```python
+from dataclasses import dataclass
+from elspeth.plugins.enums import Determinism, NodeType
+
+
+@dataclass(frozen=True)
+class PluginSpec:
+    """Registration record for a plugin.
+
+    Captures metadata that Phase 3 stores in Landscape nodes table.
+    """
+
+    name: str
+    node_type: NodeType
+    version: str
+    determinism: Determinism
+    input_schema_hash: str | None = None
+    output_schema_hash: str | None = None
+
+    @classmethod
+    def from_plugin(cls, plugin_cls: type, node_type: NodeType) -> "PluginSpec":
+        """Create spec from plugin class."""
+        return cls(
+            name=getattr(plugin_cls, "name", plugin_cls.__name__),
+            node_type=node_type,
+            version=getattr(plugin_cls, "plugin_version", "0.0.0"),
+            determinism=getattr(plugin_cls, "determinism", Determinism.DETERMINISTIC),
+        )
+```
+
+### Step 4: Run tests to verify they pass
+
+Run: `pytest tests/plugins/test_manager.py -v`
+Expected: PASS
+
+### Step 5: Commit
+
+```bash
+git add -u
+git commit -m "feat(plugins): add PluginSpec registration record"
+```
+
+---
+
+## Task 21: PluginManager Duplicate Name Validation
+
+**Context:** If two plugins register the same name, silent shadowing is a nightmare. Raise early.
+
+**Files:**
+- Modify: `src/elspeth/plugins/manager.py`
+- Modify: `tests/plugins/test_manager.py`
+
+### Step 1: Write the failing tests
+
+```python
+# Add to tests/plugins/test_manager.py
+
+class TestDuplicateNameValidation:
+    """Prevent duplicate plugin names."""
+
+    def test_duplicate_transform_raises(self) -> None:
+        from elspeth.plugins import PluginManager, hookimpl
+
+        class Plugin1:
+            @hookimpl
+            def elspeth_get_transforms(self):
+                class T1:
+                    name = "duplicate_name"
+                return [T1]
+
+        class Plugin2:
+            @hookimpl
+            def elspeth_get_transforms(self):
+                class T2:
+                    name = "duplicate_name"
+                return [T2]
+
+        manager = PluginManager()
+        manager.register(Plugin1())
+
+        with pytest.raises(ValueError, match="duplicate_name"):
+            manager.register(Plugin2())
+
+    def test_same_name_different_types_ok(self) -> None:
+        """Same name in different plugin types is allowed."""
+        from elspeth.plugins import PluginManager, hookimpl
+
+        class Plugin:
+            @hookimpl
+            def elspeth_get_transforms(self):
+                class T:
+                    name = "processor"
+                return [T]
+
+            @hookimpl
+            def elspeth_get_sinks(self):
+                class S:
+                    name = "processor"  # Same name, different type
+                return [S]
+
+        manager = PluginManager()
+        manager.register(Plugin())  # Should not raise
+```
+
+### Step 2: Run test to verify it fails
+
+Run: `pytest tests/plugins/test_manager.py::TestDuplicateNameValidation -v`
+Expected: FAIL
+
+### Step 3: Add duplicate detection
+
+Modify `PluginManager.register()` in `src/elspeth/plugins/manager.py`:
+
+```python
+def register(self, plugin: Any) -> None:
+    """Register a plugin and collect its plugins.
+
+    Raises:
+        ValueError: If a plugin with the same name and type is already registered
+    """
+    self._pm.register(plugin)
+
+    # Collect and validate transforms
+    for transform_cls in self._pm.hook.elspeth_get_transforms():
+        for cls in transform_cls:
+            name = getattr(cls, "name", cls.__name__)
+            if name in self._transforms:
+                raise ValueError(
+                    f"Duplicate transform plugin name: '{name}'. "
+                    f"Already registered by {self._transforms[name].__name__}"
+                )
+            self._transforms[name] = cls
+
+    # Similar for sources, gates, sinks, etc.
+```
+
+### Step 4: Run tests to verify they pass
+
+Run: `pytest tests/plugins/test_manager.py -v`
+Expected: PASS
+
+### Step 5: Commit
+
+```bash
+git add -u
+git commit -m "feat(plugins): validate unique plugin names, raise on duplicates"
+```
+
+---
+
+## Task 22: Final Verification
 
 ### Step 1: Run all tests with coverage
 

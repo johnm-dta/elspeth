@@ -149,7 +149,7 @@ class TestPandasTypeConversion:
 
 
 import base64
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 
@@ -166,7 +166,7 @@ class TestSpecialTypeConversion:
     def test_datetime_aware_to_utc_iso(self) -> None:
         from elspeth.core.canonical import _normalize_value
 
-        dt = datetime(2026, 1, 12, 10, 30, 0, tzinfo=timezone.utc)
+        dt = datetime(2026, 1, 12, 10, 30, 0, tzinfo=UTC)
         result = _normalize_value(dt)
         assert result == "2026-01-12T10:30:00+00:00"
 

@@ -7,7 +7,6 @@ Settings are frozen (immutable) after construction.
 """
 
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -111,3 +110,4 @@ def load_settings(config_path: Path) -> ElspethSettings:
         if k not in internal_keys
     }
     return ElspethSettings(**raw_config)
+

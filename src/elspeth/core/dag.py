@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import networkx as nx
+from networkx import DiGraph
 
 
 class GraphValidationError(Exception):
@@ -36,7 +37,7 @@ class ExecutionGraph:
     """
 
     def __init__(self) -> None:
-        self._graph: nx.DiGraph = nx.DiGraph()
+        self._graph: DiGraph[str] = nx.DiGraph()
 
     @property
     def node_count(self) -> int:
@@ -109,7 +110,7 @@ class ExecutionGraph:
                 cycle_str = " -> ".join(f"{u}" for u, v in cycle)
                 raise GraphValidationError(f"Graph contains a cycle: {cycle_str}")
             except nx.NetworkXNoCycle:
-                raise GraphValidationError("Graph contains a cycle")
+                raise GraphValidationError("Graph contains a cycle") from None
 
         # Check for exactly one source
         sources = [

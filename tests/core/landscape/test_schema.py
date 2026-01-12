@@ -1,7 +1,6 @@
 # tests/core/landscape/test_schema.py
 """Tests for Landscape SQLAlchemy schema."""
 
-import pytest
 from sqlalchemy import inspect
 
 
@@ -9,7 +8,7 @@ class TestSchemaDefinition:
     """SQLAlchemy table definitions."""
 
     def test_runs_table_exists(self) -> None:
-        from elspeth.core.landscape.schema import metadata, runs_table
+        from elspeth.core.landscape.schema import runs_table
 
         assert runs_table.name == "runs"
         assert "run_id" in [c.name for c in runs_table.columns]

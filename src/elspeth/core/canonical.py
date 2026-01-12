@@ -13,7 +13,7 @@ This is defense-in-depth for audit integrity.
 import base64
 import hashlib
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -81,8 +81,8 @@ def _normalize_value(obj: Any) -> Any:
     # Standard library types
     if isinstance(obj, datetime):
         if obj.tzinfo is None:
-            obj = obj.replace(tzinfo=timezone.utc)
-        return obj.astimezone(timezone.utc).isoformat()
+            obj = obj.replace(tzinfo=UTC)
+        return obj.astimezone(UTC).isoformat()
 
     if isinstance(obj, bytes):
         return {"__bytes__": base64.b64encode(obj).decode("ascii")}

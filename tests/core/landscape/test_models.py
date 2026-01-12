@@ -1,9 +1,7 @@
 # tests/core/landscape/test_models.py
 """Tests for Landscape database models."""
 
-from datetime import datetime, timezone
-
-import pytest
+from datetime import UTC, datetime
 
 
 class TestRunModel:
@@ -14,7 +12,7 @@ class TestRunModel:
 
         run = Run(
             run_id="run-001",
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
             config_hash="abc123",
             settings_json="{}",
             canonical_version="sha256-rfc8785-v1",
@@ -38,7 +36,7 @@ class TestNodeModel:
             plugin_version="1.0.0",
             config_hash="def456",
             config_json="{}",
-            registered_at=datetime.now(timezone.utc),
+            registered_at=datetime.now(UTC),
         )
         assert node.node_type == "source"
 
@@ -55,7 +53,7 @@ class TestRowModel:
             source_node_id="source-001",
             row_index=0,
             source_data_hash="ghi789",
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         assert row.row_index == 0
 
@@ -69,6 +67,6 @@ class TestTokenModel:
         token = Token(
             token_id="token-001",
             row_id="row-001",
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         assert token.token_id == "token-001"

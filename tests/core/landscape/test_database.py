@@ -3,8 +3,6 @@
 
 from pathlib import Path
 
-import pytest
-
 
 class TestDatabaseConnection:
     """Database connection and initialization."""

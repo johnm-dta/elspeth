@@ -24,21 +24,17 @@ from elspeth.core.payload_store import (
 )
 
 __all__ = [
-    # Canonical
     "CANONICAL_VERSION",
-    "canonical_json",
-    "stable_hash",
-    # Config
     "DatabaseSettings",
     "ElspethSettings",
-    "PayloadStoreSettings",
-    "RetrySettings",
-    "load_settings",
-    # DAG
     "ExecutionGraph",
+    "FilesystemPayloadStore",
     "GraphValidationError",
     "NodeInfo",
-    # Payload Store
-    "FilesystemPayloadStore",
     "PayloadStore",
+    "PayloadStoreSettings",
+    "RetrySettings",
+    "canonical_json",
+    "load_settings",
+    "stable_hash",
 ]

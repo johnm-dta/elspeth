@@ -16,17 +16,15 @@ from elspeth.core.landscape.models import (
 from elspeth.core.landscape.schema import metadata
 
 __all__ = [
-    # Database
-    "LandscapeDB",
-    "metadata",
-    # Models
     "Artifact",
     "Call",
     "Edge",
+    "LandscapeDB",
     "Node",
     "NodeState",
     "Row",
     "Run",
     "Token",
     "TokenParent",
+    "metadata",
 ]

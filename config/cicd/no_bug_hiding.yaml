@@ -1,0 +1,33 @@
+# No Bug-Hiding Enforcement Configuration
+#
+# This file configures the no_bug_hiding static analysis tool.
+# It detects defensive programming patterns that hide bugs instead of fixing them.
+#
+# Philosophy:
+#   - Inside the tent: fail fast, no patterns that mask bugs
+#   - At boundaries: explicit validation allowed, but must be intentional and documented
+#
+# Key format: <file_path>:<rule_id>:<symbol_context>:line=<lineno>
+#
+# Rules:
+#   R1: dict.get() usage - hides missing key bugs
+#   R2: getattr() with default - hides missing attribute bugs
+#   R3: hasattr() usage - branches around missing attributes
+#   R4: broad exception handling without re-raise - suppresses bugs
+
+version: 1
+
+defaults:
+  # Fail CI if an allowlist entry doesn't match any code (stale entry)
+  fail_on_stale: true
+  # Fail CI if an allowlist entry has expired
+  fail_on_expired: true
+
+# Allowlisted patterns - KEEP THIS LIST MINIMAL
+# Each entry must have:
+#   - key: exact match for the violation
+#   - owner: who is responsible for this exception
+#   - reason: why this is at a trust boundary (not internal code)
+#   - safety: how failures are handled (logged, quarantined, recorded)
+#   - expires: when this exception should be reviewed/removed
+allow_hits: []

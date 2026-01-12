@@ -1,0 +1,66 @@
+# No Bug-Hiding Enforcement
+#
+# Runs AST-based static analysis to detect defensive programming patterns
+# that hide bugs instead of fixing them. Fails on:
+#   - Unallowlisted bug-hiding patterns
+#   - Stale allowlist entries (entries that don't match any code)
+#   - Expired allowlist entries
+
+name: No Bug-Hiding Check
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'src/**/*.py'
+      - 'scripts/cicd/no_bug_hiding.py'
+      - 'config/cicd/no_bug_hiding.yaml'
+  pull_request:
+    paths:
+      - 'src/**/*.py'
+      - 'scripts/cicd/no_bug_hiding.py'
+      - 'config/cicd/no_bug_hiding.yaml'
+
+jobs:
+  check:
+    name: Check for bug-hiding patterns
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: Run no-bug-hiding check
+        run: |
+          python scripts/cicd/no_bug_hiding.py check \
+            --root src \
+            --allowlist config/cicd/no_bug_hiding.yaml \
+            --exclude "**/__pycache__/*" \
+            --format text
+
+      - name: Upload JSON report (on failure)
+        if: failure()
+        run: |
+          python scripts/cicd/no_bug_hiding.py check \
+            --root src \
+            --allowlist config/cicd/no_bug_hiding.yaml \
+            --exclude "**/__pycache__/*" \
+            --format json > no-bug-hiding-report.json || true
+
+      - name: Upload report artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: no-bug-hiding-report
+          path: no-bug-hiding-report.json
+          retention-days: 7

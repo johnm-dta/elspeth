@@ -233,3 +233,51 @@ class TestExecutionGraphAccessors:
         edges = list(graph.get_edges())
 
         assert edges == []
+
+
+class TestExecutionGraphFromConfig:
+    """Build ExecutionGraph from ElspethSettings."""
+
+    def test_from_config_minimal(self) -> None:
+        """Build graph from minimal config (source -> sink only)."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        config = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={"output": SinkSettings(plugin="csv")},
+            output_sink="output",
+        )
+
+        graph = ExecutionGraph.from_config(config)
+
+        # Should have: source -> output_sink
+        assert graph.node_count == 2
+        assert graph.edge_count == 1
+        assert graph.get_source() is not None
+        assert len(graph.get_sinks()) == 1
+
+    def test_from_config_is_valid(self) -> None:
+        """Graph from valid config passes validation."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        config = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={"output": SinkSettings(plugin="csv")},
+            output_sink="output",
+        )
+
+        graph = ExecutionGraph.from_config(config)
+
+        # Should not raise
+        graph.validate()
+        assert graph.is_acyclic()

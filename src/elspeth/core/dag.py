@@ -7,11 +7,16 @@ Uses NetworkX for graph operations including:
 - Path finding for lineage queries
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import networkx as nx
 from networkx import DiGraph
+
+if TYPE_CHECKING:
+    from elspeth.core.config import ElspethSettings
 
 
 class GraphValidationError(Exception):
@@ -193,3 +198,59 @@ class ExecutionGraph:
             (u, v, dict(data))
             for u, v, data in self._graph.edges(data=True)
         ]
+
+    @classmethod
+    def from_config(cls, config: ElspethSettings) -> ExecutionGraph:
+        """Build an ExecutionGraph from validated settings.
+
+        Creates nodes for:
+        - Source (from config.datasource)
+        - Sinks (from config.sinks)
+
+        Creates edges for:
+        - Linear flow: source -> output_sink
+
+        Args:
+            config: Validated ElspethSettings
+
+        Returns:
+            ExecutionGraph ready for validation and execution
+        """
+        import uuid
+
+        graph = cls()
+
+        # Generate unique node IDs
+        def node_id(prefix: str, name: str) -> str:
+            return f"{prefix}_{name}_{uuid.uuid4().hex[:8]}"
+
+        # Add source node
+        source_id = node_id("source", config.datasource.plugin)
+        graph.add_node(
+            source_id,
+            node_type="source",
+            plugin_name=config.datasource.plugin,
+            config=config.datasource.options,
+        )
+
+        # Add sink nodes
+        sink_ids: dict[str, str] = {}
+        for sink_name, sink_config in config.sinks.items():
+            sid = node_id("sink", sink_name)
+            sink_ids[sink_name] = sid
+            graph.add_node(
+                sid,
+                node_type="sink",
+                plugin_name=sink_config.plugin,
+                config=sink_config.options,
+            )
+
+        # Edge from source to output sink (minimal case - no transforms)
+        graph.add_edge(
+            source_id,
+            sink_ids[config.output_sink],
+            label="continue",
+            mode="move",
+        )
+
+        return graph

@@ -9,7 +9,7 @@ Settings are frozen (immutable) after construction.
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class DatasourceSettings(BaseModel):
@@ -128,20 +128,65 @@ class PayloadStoreSettings(BaseModel):
 
 
 class ElspethSettings(BaseModel):
-    """Top-level Elspeth configuration."""
+    """Top-level Elspeth configuration matching architecture specification.
+
+    This is the single source of truth for pipeline configuration.
+    All settings are validated and frozen after construction.
+    """
 
     model_config = {"frozen": True}
 
-    database: DatabaseSettings
-    retry: RetrySettings = Field(default_factory=RetrySettings)
-    payload_store: PayloadStoreSettings = Field(default_factory=PayloadStoreSettings)
-    run_id_prefix: str = Field(default="run", description="Prefix for run IDs")
+    # Required - core pipeline definition
+    datasource: DatasourceSettings = Field(
+        description="Source plugin configuration (exactly one per run)",
+    )
+    sinks: dict[str, SinkSettings] = Field(
+        description="Named sink configurations (one or more required)",
+    )
+    output_sink: str = Field(
+        description="Default sink for rows that complete the pipeline",
+    )
 
-    @field_validator("run_id_prefix")
+    # Optional - transform chain
+    row_plugins: list[RowPluginSettings] = Field(
+        default_factory=list,
+        description="Ordered list of transforms/gates to apply",
+    )
+
+    # Optional - subsystem configuration with defaults
+    landscape: LandscapeSettings = Field(
+        default_factory=LandscapeSettings,
+        description="Audit trail configuration",
+    )
+    concurrency: ConcurrencySettings = Field(
+        default_factory=ConcurrencySettings,
+        description="Parallel processing configuration",
+    )
+    retry: RetrySettings = Field(
+        default_factory=RetrySettings,
+        description="Retry behavior configuration",
+    )
+    payload_store: PayloadStoreSettings = Field(
+        default_factory=PayloadStoreSettings,
+        description="Large payload storage configuration",
+    )
+
+    @model_validator(mode="after")
+    def validate_output_sink_exists(self) -> "ElspethSettings":
+        """Ensure output_sink references a defined sink."""
+        if self.output_sink not in self.sinks:
+            raise ValueError(
+                f"output_sink '{self.output_sink}' not found in sinks. "
+                f"Available sinks: {list(self.sinks.keys())}"
+            )
+        return self
+
+    @field_validator("sinks")
     @classmethod
-    def validate_run_id_prefix(cls, v: str) -> str:
-        if not v.isidentifier():
-            raise ValueError("run_id_prefix must be a valid identifier")
+    def validate_sinks_not_empty(cls, v: dict[str, SinkSettings]) -> dict[str, SinkSettings]:
+        """At least one sink is required."""
+        if not v:
+            raise ValueError("At least one sink is required")
         return v
 
 

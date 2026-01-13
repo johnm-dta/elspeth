@@ -72,26 +72,34 @@ class TestElspethSettings:
         from elspeth.core.config import ElspethSettings
 
         settings = ElspethSettings(
-            database={"url": "sqlite:///audit.db"},
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
         )
-        assert settings.database.url == "sqlite:///audit.db"
+        assert settings.datasource.plugin == "csv"
         assert settings.retry.max_attempts == 3  # default
 
     def test_nested_config(self) -> None:
         from elspeth.core.config import ElspethSettings
 
         settings = ElspethSettings(
-            database={"url": "sqlite:///audit.db", "pool_size": 10},
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
             retry={"max_attempts": 5},
         )
-        assert settings.database.pool_size == 10
         assert settings.retry.max_attempts == 5
 
-    def test_run_id_prefix_default(self) -> None:
+    def test_settings_are_frozen(self) -> None:
         from elspeth.core.config import ElspethSettings
 
-        settings = ElspethSettings(database={"url": "sqlite:///audit.db"})
-        assert settings.run_id_prefix == "run"
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+        )
+        with pytest.raises(ValidationError):
+            settings.output_sink = "other"  # type: ignore[misc]
 
 
 class TestLoadSettings:
@@ -102,15 +110,22 @@ class TestLoadSettings:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-database:
-  url: "sqlite:///test.db"
-  pool_size: 10
+datasource:
+  plugin: "csv"
+  options:
+    path: "input.csv"
+sinks:
+  output:
+    plugin: "csv"
+    options:
+      path: "output.csv"
+output_sink: "output"
 retry:
   max_attempts: 5
 """)
         settings = load_settings(config_file)
-        assert settings.database.url == "sqlite:///test.db"
-        assert settings.database.pool_size == 10
+        assert settings.datasource.plugin == "csv"
+        assert settings.datasource.options == {"path": "input.csv"}
         assert settings.retry.max_attempts == 5
 
     def test_load_with_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -118,23 +133,32 @@ retry:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-database:
-  url: "sqlite:///original.db"
+datasource:
+  plugin: "csv"
+sinks:
+  output:
+    plugin: "csv"
+output_sink: "output"
 """)
         # Environment variable should override YAML
-        monkeypatch.setenv("ELSPETH_DATABASE__URL", "sqlite:///from_env.db")
+        monkeypatch.setenv("ELSPETH_DATASOURCE__PLUGIN", "json")
 
         settings = load_settings(config_file)
-        assert settings.database.url == "sqlite:///from_env.db"
+        assert settings.datasource.plugin == "json"
 
     def test_load_validates_schema(self, tmp_path: Path) -> None:
         from elspeth.core.config import load_settings
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-database:
-  url: "sqlite:///test.db"
-  pool_size: -1
+datasource:
+  plugin: "csv"
+sinks:
+  output:
+    plugin: "csv"
+output_sink: "output"
+concurrency:
+  max_workers: -1
 """)
         with pytest.raises(ValidationError):
             load_settings(config_file)
@@ -147,7 +171,7 @@ database:
 retry:
   max_attempts: 5
 """)
-        # database.url is required
+        # datasource, sinks, output_sink are required
         with pytest.raises(ValidationError):
             load_settings(config_file)
 
@@ -303,3 +327,73 @@ class TestConcurrencySettings:
             ConcurrencySettings(max_workers=0)
         with pytest.raises(ValidationError):
             ConcurrencySettings(max_workers=-1)
+
+
+class TestElspethSettingsArchitecture:
+    """Top-level settings matches architecture specification."""
+
+    def test_elspeth_settings_required_fields(self) -> None:
+        """ElspethSettings requires datasource, sinks, output_sink."""
+        from elspeth.core.config import ElspethSettings
+
+        # Missing required fields
+        with pytest.raises(ValidationError) as exc_info:
+            ElspethSettings()
+
+        errors = exc_info.value.errors()
+        missing_fields = {e["loc"][0] for e in errors if e["type"] == "missing"}
+        assert "datasource" in missing_fields
+        assert "sinks" in missing_fields
+        assert "output_sink" in missing_fields
+
+    def test_elspeth_settings_minimal_valid(self) -> None:
+        """Minimal valid configuration."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv", options={"path": "in.csv"}),
+            sinks={"results": SinkSettings(plugin="csv", options={"path": "out.csv"})},
+            output_sink="results",
+        )
+
+        assert settings.datasource.plugin == "csv"
+        assert "results" in settings.sinks
+        assert settings.output_sink == "results"
+        # Defaults applied
+        assert settings.row_plugins == []
+        assert settings.landscape.enabled is True
+        assert settings.concurrency.max_workers == 4
+
+    def test_elspeth_settings_output_sink_must_exist(self) -> None:
+        """output_sink must reference a defined sink."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            ElspethSettings(
+                datasource=DatasourceSettings(plugin="csv"),
+                sinks={"results": SinkSettings(plugin="csv")},
+                output_sink="nonexistent",  # Not in sinks!
+            )
+
+        assert "output_sink" in str(exc_info.value)
+
+    def test_elspeth_settings_at_least_one_sink(self) -> None:
+        """At least one sink is required."""
+        from elspeth.core.config import DatasourceSettings, ElspethSettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            ElspethSettings(
+                datasource=DatasourceSettings(plugin="csv"),
+                sinks={},  # Empty!
+                output_sink="results",
+            )
+
+        assert "sink" in str(exc_info.value).lower()

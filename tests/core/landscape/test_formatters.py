@@ -1,6 +1,9 @@
 # tests/core/landscape/test_formatters.py
 """Tests for export formatters."""
 
+import json
+from datetime import UTC, datetime
+
 from elspeth.core.landscape.formatters import CSVFormatter, JSONFormatter
 
 
@@ -123,8 +126,6 @@ class TestJSONFormatter:
 
         output = formatter.format(record)
 
-        import json
-
         parsed = json.loads(output)
         assert parsed["metadata"]["attempt"] == 1
 
@@ -140,17 +141,13 @@ class TestJSONFormatter:
 
     def test_json_formatter_handles_datetime_via_default(self) -> None:
         """JSON formatter should handle datetime via default=str."""
-        from datetime import datetime
-
         formatter = JSONFormatter()
 
         record = {
-            "timestamp": datetime(2024, 1, 15, 10, 30, 0),
+            "timestamp": datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC),
         }
 
         output = formatter.format(record)
-
-        import json
 
         parsed = json.loads(output)
         assert "2024-01-15" in parsed["timestamp"]
@@ -164,8 +161,6 @@ class TestJSONFormatter:
         }
 
         output = formatter.format(record)
-
-        import json
 
         parsed = json.loads(output)
         assert parsed["items"] == [1, 2, 3]
@@ -182,8 +177,6 @@ class TestJSONFormatter:
         }
 
         output = formatter.format(record)
-
-        import json
 
         parsed = json.loads(output)
         assert len(parsed["events"]) == 2

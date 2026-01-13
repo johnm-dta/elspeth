@@ -173,3 +173,36 @@ class TestSourceSinkValidation:
 
         sinks = graph.get_sinks()
         assert set(sinks) == {"sink1", "sink2"}
+
+
+class TestExecutionGraphAccessors:
+    """Access node info and edges from graph."""
+
+    def test_get_node_info(self) -> None:
+        """Get NodeInfo for a node."""
+        from elspeth.core.dag import ExecutionGraph, NodeInfo
+
+        graph = ExecutionGraph()
+        graph.add_node(
+            "node_1",
+            node_type="transform",
+            plugin_name="my_plugin",
+            config={"key": "value"},
+        )
+
+        info = graph.get_node_info("node_1")
+
+        assert isinstance(info, NodeInfo)
+        assert info.node_id == "node_1"
+        assert info.node_type == "transform"
+        assert info.plugin_name == "my_plugin"
+        assert info.config == {"key": "value"}
+
+    def test_get_node_info_missing(self) -> None:
+        """Get NodeInfo for missing node raises."""
+        from elspeth.core.dag import ExecutionGraph
+
+        graph = ExecutionGraph()
+
+        with pytest.raises(KeyError):
+            graph.get_node_info("nonexistent")

@@ -8,7 +8,7 @@ Uses NetworkX for graph operations including:
 """
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import networkx as nx
 from networkx import DiGraph
@@ -166,3 +166,19 @@ class ExecutionGraph:
             for node_id, data in self._graph.nodes(data=True)
             if data.get("info") and data["info"].node_type == "sink"
         ]
+
+    def get_node_info(self, node_id: str) -> NodeInfo:
+        """Get NodeInfo for a node.
+
+        Args:
+            node_id: The node ID
+
+        Returns:
+            NodeInfo for the node
+
+        Raises:
+            KeyError: If node doesn't exist
+        """
+        if not self._graph.has_node(node_id):
+            raise KeyError(f"Node not found: {node_id}")
+        return cast(NodeInfo, self._graph.nodes[node_id]["info"])

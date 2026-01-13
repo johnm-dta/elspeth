@@ -163,6 +163,7 @@ class Orchestrator:
             raise ValueError("Graph has no source node")
         sink_id_map = graph.get_sink_id_map()
         transform_id_map = graph.get_transform_id_map()
+        output_sink_name = graph.get_output_sink()
 
         # Set node_id on source plugin
         config.source.node_id = source_id
@@ -227,7 +228,7 @@ class Orchestrator:
 
                     if result.outcome == "completed":
                         rows_succeeded += 1
-                        pending_tokens["default"].append(result.token)
+                        pending_tokens[output_sink_name].append(result.token)
                     elif result.outcome == "routed":
                         rows_routed += 1
                         if result.sink_name and result.sink_name in config.sinks:

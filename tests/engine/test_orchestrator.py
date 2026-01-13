@@ -60,6 +60,12 @@ def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
     graph._sink_id_map = sink_ids
     graph._transform_id_map = transform_ids
 
+    # Set output_sink - use "default" if present, otherwise first sink
+    if "default" in sink_ids:
+        graph._output_sink = "default"
+    elif sink_ids:
+        graph._output_sink = next(iter(sink_ids))
+
     return graph
 
 
@@ -750,3 +756,69 @@ class TestOrchestratorAcceptsGraph:
         # graph=None should raise ValueError
         with pytest.raises(ValueError, match="ExecutionGraph is required"):
             orchestrator.run(config, graph=None)
+
+
+class TestOrchestratorOutputSinkRouting:
+    """Verify completed rows go to the configured output_sink, not hardcoded 'default'."""
+
+    def test_completed_rows_go_to_output_sink(self) -> None:
+        """Rows that complete the pipeline go to the output_sink from config."""
+        from unittest.mock import MagicMock
+
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        # Config with output_sink="results" (NOT "default")
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "results": SinkSettings(plugin="csv"),
+                "errors": SinkSettings(plugin="csv"),
+            },
+            output_sink="results",
+        )
+        graph = ExecutionGraph.from_config(settings)
+
+        # Mock source that yields one row
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([{"id": 1, "value": "test"}])
+
+        # Mock sinks - track what gets written
+        mock_results_sink = MagicMock()
+        mock_results_sink.name = "csv"
+        mock_results_sink.write = MagicMock(
+            return_value={"path": "memory", "size_bytes": 0, "content_hash": "abc123"}
+        )
+
+        mock_errors_sink = MagicMock()
+        mock_errors_sink.name = "csv"
+        mock_errors_sink.write = MagicMock(
+            return_value={"path": "memory", "size_bytes": 0, "content_hash": "abc123"}
+        )
+
+        pipeline_config = PipelineConfig(
+            source=mock_source,
+            transforms=[],
+            sinks={
+                "results": mock_results_sink,
+                "errors": mock_errors_sink,
+            },
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(pipeline_config, graph=graph)
+
+        # Row should go to "results" sink, not "default"
+        assert result.rows_processed == 1
+        assert result.rows_succeeded == 1
+        assert mock_results_sink.write.called, "results sink should receive completed rows"
+        assert not mock_errors_sink.write.called, "errors sink should not receive completed rows"

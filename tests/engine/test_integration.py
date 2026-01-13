@@ -67,6 +67,12 @@ def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
     graph._sink_id_map = sink_ids
     graph._transform_id_map = transform_ids
 
+    # Set output_sink - use "default" if present, otherwise first sink
+    if "default" in sink_ids:
+        graph._output_sink = "default"
+    elif sink_ids:
+        graph._output_sink = next(iter(sink_ids))
+
     return graph
 
 

@@ -436,3 +436,25 @@ class TestExecutionGraphFromConfig:
         assert 0 in transform_map  # transform_a
         assert 1 in transform_map  # transform_b
         assert transform_map[0] != transform_map[1]
+
+    def test_get_output_sink(self) -> None:
+        """Get the output sink name."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        config = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "results": SinkSettings(plugin="csv"),
+                "flagged": SinkSettings(plugin="csv"),
+            },
+            output_sink="results",
+        )
+
+        graph = ExecutionGraph.from_config(config)
+
+        assert graph.get_output_sink() == "results"

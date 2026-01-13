@@ -28,17 +28,18 @@ class TestCLIIntegration:
         """Create pipeline configuration.
 
         Note: Uses "default" as primary sink - the Orchestrator routes
-        all completed rows to the "default" sink.
+        all completed rows to the "default" sink via output_sink.
         """
         config = {
-            "source": {"plugin": "csv", "path": str(sample_csv)},
+            "datasource": {"plugin": "csv", "options": {"path": str(sample_csv)}},
             "sinks": {
                 # "default" is required - Orchestrator routes completed rows here
                 "default": {
                     "plugin": "json",
-                    "path": str(tmp_path / "output.json"),
+                    "options": {"path": str(tmp_path / "output.json")},
                 },
             },
+            "output_sink": "default",
             # Use temp-path DB to avoid polluting CWD during tests
             "landscape": {"url": f"sqlite:///{tmp_path / 'landscape.db'}"},
         }

@@ -1108,6 +1108,142 @@ class TestLandscapeRecorderArtifacts:
         assert states[1].step_index == 1
 
 
+class TestLandscapeRecorderEdges:
+    """Edge query methods."""
+
+    def test_get_edges_returns_all_edges_for_run(self) -> None:
+        """get_edges should return all edges registered for a run."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register nodes
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="source_1",
+            plugin_name="csv",
+            node_type="source",
+            plugin_version="1.0.0",
+            config={},
+        )
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="sink_1",
+            plugin_name="csv",
+            node_type="sink",
+            plugin_version="1.0.0",
+            config={},
+        )
+
+        # Register edge
+        edge = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id="source_1",
+            to_node_id="sink_1",
+            label="continue",
+            mode="move",
+        )
+
+        # Query edges
+        edges = recorder.get_edges(run.run_id)
+
+        assert len(edges) == 1
+        assert edges[0].edge_id == edge.edge_id
+        assert edges[0].from_node_id == "source_1"
+        assert edges[0].to_node_id == "sink_1"
+        assert edges[0].default_mode == "move"
+
+    def test_get_edges_returns_empty_list_for_run_with_no_edges(self) -> None:
+        """get_edges should return empty list when no edges exist."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        edges = recorder.get_edges(run.run_id)
+
+        assert edges == []
+
+    def test_get_edges_returns_multiple_edges(self) -> None:
+        """get_edges should return all edges when multiple exist."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register nodes
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="source",
+            plugin_name="csv",
+            node_type="source",
+            plugin_version="1.0.0",
+            config={},
+        )
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="gate",
+            plugin_name="threshold",
+            node_type="gate",
+            plugin_version="1.0.0",
+            config={},
+        )
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="sink_high",
+            plugin_name="csv",
+            node_type="sink",
+            plugin_version="1.0.0",
+            config={},
+        )
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="sink_low",
+            plugin_name="csv",
+            node_type="sink",
+            plugin_version="1.0.0",
+            config={},
+        )
+
+        # Register edges
+        recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id="source",
+            to_node_id="gate",
+            label="continue",
+            mode="move",
+        )
+        recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id="gate",
+            to_node_id="sink_high",
+            label="high",
+            mode="move",
+        )
+        recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id="gate",
+            to_node_id="sink_low",
+            label="low",
+            mode="move",
+        )
+
+        # Query edges
+        edges = recorder.get_edges(run.run_id)
+
+        assert len(edges) == 3
+
+
 class TestLandscapeRecorderQueryMethods:
     """Additional query methods added in Task 9."""
 

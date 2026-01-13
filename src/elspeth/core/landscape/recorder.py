@@ -416,6 +416,34 @@ class LandscapeRecorder:
             for row in rows
         ]
 
+    def get_edges(self, run_id: str) -> list[Edge]:
+        """Get all edges for a run.
+
+        Args:
+            run_id: Run ID
+
+        Returns:
+            List of Edge models for this run
+        """
+        query = select(edges_table).where(edges_table.c.run_id == run_id)
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            rows = result.fetchall()
+
+        return [
+            Edge(
+                edge_id=r.edge_id,
+                run_id=r.run_id,
+                from_node_id=r.from_node_id,
+                to_node_id=r.to_node_id,
+                label=r.label,
+                default_mode=r.default_mode,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
+
     # === Row and Token Management ===
 
     def create_row(

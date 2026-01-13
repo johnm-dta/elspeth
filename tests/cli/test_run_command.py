@@ -6,11 +6,13 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+from elspeth.cli import app
+
 runner = CliRunner()
 
 
 class TestRunCommand:
-    """Tests for run command."""
+    """Tests for run command with new config format."""
 
     @pytest.fixture
     def sample_data(self, tmp_path: Path) -> Path:
@@ -21,14 +23,21 @@ class TestRunCommand:
 
     @pytest.fixture
     def pipeline_settings(self, tmp_path: Path, sample_data: Path) -> Path:
-        """Create a complete pipeline configuration."""
+        """Create a complete pipeline configuration using new schema."""
         output_file = tmp_path / "output.json"
         landscape_db = tmp_path / "landscape.db"
         settings = {
-            "source": {"plugin": "csv", "path": str(sample_data)},
-            # Use "default" sink name - Orchestrator routes completed rows to "default"
-            "sinks": {"default": {"plugin": "json", "path": str(output_file)}},
-            # Use temp-path DB to avoid polluting CWD during tests
+            "datasource": {
+                "plugin": "csv",
+                "options": {"path": str(sample_data)},
+            },
+            "sinks": {
+                "default": {
+                    "plugin": "json",
+                    "options": {"path": str(output_file)},
+                },
+            },
+            "output_sink": "default",
             "landscape": {"url": f"sqlite:///{landscape_db}"},
         }
         settings_file = tmp_path / "settings.yaml"
@@ -39,8 +48,6 @@ class TestRunCommand:
         self, pipeline_settings: Path, tmp_path: Path
     ) -> None:
         """run --execute executes pipeline and creates output."""
-        from elspeth.cli import app
-
         result = runner.invoke(
             app, ["run", "--settings", str(pipeline_settings), "--execute"]
         )
@@ -52,8 +59,6 @@ class TestRunCommand:
 
     def test_run_shows_summary(self, pipeline_settings: Path) -> None:
         """run --execute shows execution summary."""
-        from elspeth.cli import app
-
         result = runner.invoke(
             app, ["run", "--settings", str(pipeline_settings), "--execute"]
         )
@@ -63,25 +68,107 @@ class TestRunCommand:
 
     def test_run_without_execute_shows_warning(self, pipeline_settings: Path) -> None:
         """run without --execute shows warning and exits non-zero."""
-        from elspeth.cli import app
-
         result = runner.invoke(app, ["run", "--settings", str(pipeline_settings)])
         assert result.exit_code != 0
         assert "--execute" in result.output
 
     def test_run_missing_settings(self) -> None:
         """run exits non-zero for missing settings file."""
-        from elspeth.cli import app
-
         result = runner.invoke(app, ["run", "--settings", "/nonexistent.yaml"])
         assert result.exit_code != 0
 
     def test_run_dry_run_mode(self, pipeline_settings: Path) -> None:
         """run --dry-run validates without executing."""
-        from elspeth.cli import app
-
         result = runner.invoke(
             app, ["run", "--settings", str(pipeline_settings), "--dry-run"]
         )
         assert result.exit_code == 0
         assert "dry" in result.output.lower() or "would" in result.output.lower()
+
+
+class TestRunCommandWithNewConfig:
+    """Run command uses load_settings() for config."""
+
+    def test_run_with_readme_config(self, tmp_path: Path) -> None:
+        """Run command accepts README-style config."""
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+  options:
+    path: input.csv
+
+sinks:
+  results:
+    plugin: csv
+    options:
+      path: output.csv
+
+output_sink: results
+""")
+
+        result = runner.invoke(app, ["run", "-s", str(config_file), "--dry-run"])
+
+        assert result.exit_code == 0
+        assert "csv" in result.stdout.lower()
+
+    def test_run_rejects_old_config_format(self, tmp_path: Path) -> None:
+        """Run command rejects old 'source' format."""
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+source:
+  plugin: csv
+  path: input.csv
+""")
+
+        result = runner.invoke(app, ["run", "-s", str(config_file), "--dry-run"])
+
+        # Should fail - 'source' is not valid, must be 'datasource'
+        assert result.exit_code != 0
+
+    def test_run_shows_pydantic_errors(self, tmp_path: Path) -> None:
+        """Run shows Pydantic validation errors clearly."""
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+output_sink: nonexistent
+
+concurrency:
+  max_workers: -5
+""")
+
+        result = runner.invoke(app, ["run", "-s", str(config_file), "--dry-run"])
+
+        assert result.exit_code != 0
+        # Should show helpful error messages with field path
+        output = result.stdout + (result.stderr or "")
+        # Pydantic validates fields before model validators, so max_workers error shows first
+        assert "configuration errors" in output.lower()
+        assert "concurrency.max_workers" in output or "max_workers" in output
+
+    def test_run_shows_output_sink_error(self, tmp_path: Path) -> None:
+        """Run shows output_sink validation error when it references nonexistent sink."""
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+output_sink: nonexistent
+""")
+
+        result = runner.invoke(app, ["run", "-s", str(config_file), "--dry-run"])
+
+        assert result.exit_code != 0
+        # Should show helpful error about output_sink
+        output = result.stdout + (result.stderr or "")
+        assert "nonexistent" in output.lower() or "output_sink" in output.lower()

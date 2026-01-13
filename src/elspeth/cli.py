@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import typer
-import yaml  # type: ignore[import-untyped]
+from pydantic import ValidationError
 
 from elspeth import __version__
+from elspeth.core.config import ElspethSettings, load_settings
 
 app = typer.Typer(
     name="elspeth",
@@ -78,44 +79,41 @@ def run(
     """
     settings_path = Path(settings)
 
-    # Check file exists
-    if not settings_path.exists():
-        typer.echo(f"Error: Settings file not found: {settings}", err=True)
-        raise typer.Exit(1)
-
-    # Load config
+    # Load and validate config via Pydantic
     try:
-        with open(settings_path) as f:
-            config = yaml.safe_load(f)
-    except yaml.YAMLError as e:
-        typer.echo(f"Error: Invalid YAML: {e}", err=True)
+        config = load_settings(settings_path)
+    except FileNotFoundError:
+        typer.echo(f"Error: Settings file not found: {settings}", err=True)
         raise typer.Exit(1) from None
-
-    # Validate config
-    errors = _validate_config(config)
-    if errors:
+    except ValidationError as e:
         typer.echo("Configuration errors:", err=True)
-        for error in errors:
-            typer.echo(f"  - {error}", err=True)
-        raise typer.Exit(1)
+        for error in e.errors():
+            loc = ".".join(str(x) for x in error["loc"])
+            typer.echo(f"  - {loc}: {error['msg']}", err=True)
+        raise typer.Exit(1) from None
 
     if dry_run:
         typer.echo("Dry run mode - would execute:")
-        typer.echo(f"  Source: {config['source']['plugin']}")
-        typer.echo(f"  Sinks: {', '.join(config['sinks'].keys())}")
+        typer.echo(f"  Source: {config.datasource.plugin}")
+        typer.echo(f"  Transforms: {len(config.row_plugins)}")
+        typer.echo(f"  Sinks: {', '.join(config.sinks.keys())}")
+        typer.echo(f"  Output sink: {config.output_sink}")
+        if verbose:
+            typer.echo(f"  Concurrency: {config.concurrency.max_workers} workers")
+            typer.echo(f"  Landscape: {config.landscape.url}")
         return
 
     # Safety check: require explicit --execute flag
     if not execute:
         typer.echo("Pipeline configuration valid.")
-        typer.echo(f"  Source: {config['source']['plugin']}")
-        typer.echo(f"  Sinks: {', '.join(config['sinks'].keys())}")
+        typer.echo(f"  Source: {config.datasource.plugin}")
+        typer.echo(f"  Sinks: {', '.join(config.sinks.keys())}")
         typer.echo("")
         typer.echo("To execute, add --execute (or -x) flag:", err=True)
         typer.echo(f"  elspeth run -s {settings} --execute", err=True)
         raise typer.Exit(1)
 
-    # Execute pipeline
+    # Execute pipeline with validated config
     try:
         result = _execute_pipeline(config, verbose=verbose)
         typer.echo(f"\nRun completed: {result['status']}")
@@ -193,46 +191,12 @@ def explain(
     tui_app.run()
 
 
-# Known plugins for validation
-KNOWN_SOURCES = {"csv", "json"}
-KNOWN_SINKS = {"csv", "json", "database"}
-
-
-def _validate_config(config: dict[str, Any]) -> list[str]:
-    """Validate pipeline configuration structure.
-
-    Returns:
-        List of error messages (empty if valid).
-    """
-    errors: list[str] = []
-
-    # Check source
-    if "source" not in config:
-        errors.append("Missing required 'source' section")
-    else:
-        source = config["source"]
-        if "plugin" not in source:
-            errors.append("Source missing 'plugin' field")
-        elif source["plugin"] not in KNOWN_SOURCES:
-            errors.append(f"Unknown source plugin: {source['plugin']}")
-
-    # Check sinks
-    if "sinks" not in config:
-        errors.append("Missing required 'sinks' section")
-    elif not config["sinks"]:
-        errors.append("At least one sink is required")
-    else:
-        for sink_name, sink_config in config["sinks"].items():
-            if "plugin" not in sink_config:
-                errors.append(f"Sink '{sink_name}' missing 'plugin' field")
-            elif sink_config["plugin"] not in KNOWN_SINKS:
-                errors.append(f"Unknown sink plugin: {sink_config['plugin']}")
-
-    return errors
-
-
-def _execute_pipeline(config: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
+def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> dict[str, Any]:
     """Execute a pipeline from configuration.
+
+    Args:
+        config: Validated ElspethSettings instance.
+        verbose: Show detailed output.
 
     Returns:
         Dict with run_id, status, rows_processed.
@@ -247,10 +211,9 @@ def _execute_pipeline(config: dict[str, Any], verbose: bool = False) -> dict[str
     from elspeth.plugins.sources.csv_source import CSVSource
     from elspeth.plugins.sources.json_source import JSONSource
 
-    # Instantiate source
-    source_config = config["source"]
-    source_plugin = source_config["plugin"]
-    source_options = {k: v for k, v in source_config.items() if k != "plugin"}
+    # Instantiate source from new schema
+    source_plugin = config.datasource.plugin
+    source_options = dict(config.datasource.options)
 
     source: BaseSource
     if source_plugin == "csv":
@@ -262,9 +225,9 @@ def _execute_pipeline(config: dict[str, Any], verbose: bool = False) -> dict[str
 
     # Instantiate sinks and wrap in SinkAdapter for Phase 3B compatibility
     sinks: dict[str, SinkAdapter] = {}
-    for sink_name, sink_config in config["sinks"].items():
-        sink_plugin = sink_config["plugin"]
-        sink_options = {k: v for k, v in sink_config.items() if k != "plugin"}
+    for sink_name, sink_settings in config.sinks.items():
+        sink_plugin = sink_settings.plugin
+        sink_options = dict(sink_settings.options)
 
         raw_sink: BaseSink
         artifact_descriptor: dict[str, Any]
@@ -292,8 +255,8 @@ def _execute_pipeline(config: dict[str, Any], verbose: bool = False) -> dict[str
             artifact_descriptor=artifact_descriptor,
         )
 
-    # Get database URL from settings or use default
-    db_url = config.get("landscape", {}).get("url", "sqlite:///elspeth_runs.db")
+    # Get database URL from settings
+    db_url = config.landscape.url
     db = LandscapeDB.from_url(db_url)
 
     # Build PipelineConfig
@@ -329,30 +292,23 @@ def validate(
     """Validate pipeline configuration without running."""
     settings_path = Path(settings)
 
-    # Check file exists
-    if not settings_path.exists():
-        typer.echo(f"Error: Settings file not found: {settings}", err=True)
-        raise typer.Exit(1)
-
-    # Parse YAML
+    # Load and validate config via Pydantic
     try:
-        with open(settings_path) as f:
-            config = yaml.safe_load(f)
-    except yaml.YAMLError as e:
-        typer.echo(f"Error: Invalid YAML: {e}", err=True)
+        config = load_settings(settings_path)
+    except FileNotFoundError:
+        typer.echo(f"Error: Settings file not found: {settings}", err=True)
+        raise typer.Exit(1) from None
+    except ValidationError as e:
+        typer.echo("Configuration errors:", err=True)
+        for error in e.errors():
+            loc = ".".join(str(x) for x in error["loc"])
+            typer.echo(f"  - {loc}: {error['msg']}", err=True)
         raise typer.Exit(1) from None
 
-    # Validate structure
-    errors = _validate_config(config)
-    if errors:
-        typer.echo("Configuration errors:", err=True)
-        for error in errors:
-            typer.echo(f"  - {error}", err=True)
-        raise typer.Exit(1)
-
     typer.echo(f"Configuration valid: {settings_path.name}")
-    typer.echo(f"  Source: {config['source']['plugin']}")
-    typer.echo(f"  Sinks: {', '.join(config['sinks'].keys())}")
+    typer.echo(f"  Source: {config.datasource.plugin}")
+    typer.echo(f"  Sinks: {', '.join(config.sinks.keys())}")
+    typer.echo(f"  Output sink: {config.output_sink}")
 
 
 # Plugins subcommand group

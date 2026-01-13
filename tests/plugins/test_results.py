@@ -168,6 +168,38 @@ class TestAcceptResult:
         assert result.batch_id is None  # Set by engine in Phase 3
 
 
+class TestFreezeDictDefensiveCopy:
+    """_freeze_dict makes defensive copy to prevent mutation."""
+
+    def test_original_dict_mutation_not_visible(self) -> None:
+        """Mutating original dict doesn't affect frozen result."""
+        from elspeth.plugins.results import RoutingAction
+
+        reason = {"key": "original"}
+        action = RoutingAction.continue_(reason=reason)
+
+        # Mutate original
+        reason["key"] = "mutated"
+        reason["new_key"] = "added"
+
+        # Frozen reason should be unchanged
+        assert action.reason["key"] == "original"
+        assert "new_key" not in action.reason
+
+    def test_nested_dict_mutation_not_visible(self) -> None:
+        """Nested dict mutation doesn't affect frozen result."""
+        from elspeth.plugins.results import RoutingAction
+
+        reason = {"nested": {"value": 1}}
+        action = RoutingAction.continue_(reason=reason)
+
+        # Mutate nested original
+        reason["nested"]["value"] = 999
+
+        # Frozen reason should be unchanged
+        assert action.reason["nested"]["value"] == 1
+
+
 class TestPluginsPublicAPI:
     """Public API exports from elspeth.plugins."""
 

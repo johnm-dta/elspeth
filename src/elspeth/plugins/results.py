@@ -6,6 +6,7 @@ All fields needed for Phase 3 Landscape/OpenTelemetry integration are
 included here, even if not used until Phase 3.
 """
 
+import copy
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -30,8 +31,16 @@ class RowOutcome(Enum):
 
 
 def _freeze_dict(d: dict[str, Any] | None) -> Mapping[str, Any]:
-    """Wrap dict in MappingProxyType for immutability."""
-    return MappingProxyType(d) if d else MappingProxyType({})
+    """Create immutable view of dict with defensive deep copy.
+
+    MappingProxyType only prevents mutation through the proxy.
+    We deep copy to prevent mutation via retained references to
+    the original dict or nested objects.
+    """
+    if d is None:
+        return MappingProxyType({})
+    # Deep copy to prevent mutation of original or nested dicts
+    return MappingProxyType(copy.deepcopy(d))
 
 
 @dataclass(frozen=True)

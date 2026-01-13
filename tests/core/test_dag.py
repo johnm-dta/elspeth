@@ -382,3 +382,57 @@ class TestExecutionGraphFromConfig:
             ExecutionGraph.from_config(config)
 
         assert "nonexistent_sink" in str(exc_info.value)
+
+    def test_get_sink_id_map(self) -> None:
+        """Get explicit sink_name -> node_id mapping."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        config = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "results": SinkSettings(plugin="csv"),
+                "flagged": SinkSettings(plugin="csv"),
+            },
+            output_sink="results",
+        )
+
+        graph = ExecutionGraph.from_config(config)
+        sink_map = graph.get_sink_id_map()
+
+        # Explicit mapping - no substring matching
+        assert "results" in sink_map
+        assert "flagged" in sink_map
+        assert sink_map["results"] != sink_map["flagged"]
+
+    def test_get_transform_id_map(self) -> None:
+        """Get explicit sequence -> node_id mapping for transforms."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            RowPluginSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        config = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={"output": SinkSettings(plugin="csv")},
+            row_plugins=[
+                RowPluginSettings(plugin="transform_a"),
+                RowPluginSettings(plugin="transform_b"),
+            ],
+            output_sink="output",
+        )
+
+        graph = ExecutionGraph.from_config(config)
+        transform_map = graph.get_transform_id_map()
+
+        # Explicit mapping by sequence position
+        assert 0 in transform_map  # transform_a
+        assert 1 in transform_map  # transform_b
+        assert transform_map[0] != transform_map[1]

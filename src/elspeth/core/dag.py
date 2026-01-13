@@ -43,6 +43,9 @@ class ExecutionGraph:
 
     def __init__(self) -> None:
         self._graph: DiGraph[str] = nx.DiGraph()
+        self._sink_id_map: dict[str, str] = {}
+        self._transform_id_map: dict[int, str] = {}
+        self._output_sink: str = ""
 
     @property
     def node_count(self) -> int:
@@ -243,12 +246,19 @@ class ExecutionGraph:
                 config=sink_config.options,
             )
 
+        # Store explicit mapping for get_sink_id_map() - NO substring matching
+        graph._sink_id_map = dict(sink_ids)
+
         # Build transform chain
+        transform_ids: dict[int, str] = {}
         prev_node_id = source_id
-        for plugin_config in config.row_plugins:
+        for i, plugin_config in enumerate(config.row_plugins):
             is_gate = plugin_config.type == "gate"
             ntype = "gate" if is_gate else "transform"
             tid = node_id(ntype, plugin_config.plugin)
+
+            # Track sequence -> node_id
+            transform_ids[i] = tid
 
             graph.add_node(
                 tid,
@@ -279,6 +289,12 @@ class ExecutionGraph:
 
             prev_node_id = tid
 
+        # Store explicit mapping for get_transform_id_map()
+        graph._transform_id_map = transform_ids
+
+        # Store output_sink for reference
+        graph._output_sink = config.output_sink
+
         # Edge from last transform (or source) to output sink
         graph.add_edge(
             prev_node_id,
@@ -288,3 +304,24 @@ class ExecutionGraph:
         )
 
         return graph
+
+    def get_sink_id_map(self) -> dict[str, str]:
+        """Get explicit sink_name -> node_id mapping.
+
+        Returns:
+            Dict mapping each sink's logical name to its graph node ID.
+            No substring matching required - use this for direct lookup.
+        """
+        return dict(self._sink_id_map)
+
+    def get_transform_id_map(self) -> dict[int, str]:
+        """Get explicit sequence -> node_id mapping for transforms.
+
+        Returns:
+            Dict mapping transform sequence position (0-indexed) to node ID.
+        """
+        return dict(self._transform_id_map)
+
+    def get_output_sink(self) -> str:
+        """Get the output sink name."""
+        return self._output_sink

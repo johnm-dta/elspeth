@@ -905,3 +905,68 @@ class TestOrchestratorGateRouting:
         assert result.rows_routed == 1
         assert mock_flagged.write.called, "flagged sink should receive routed row"
         assert not mock_results.write.called, "results sink should not receive routed row"
+
+
+class TestLifecycleHooks:
+    """Orchestrator invokes plugin lifecycle hooks."""
+
+    def test_on_start_called_before_processing(self) -> None:
+        """on_start() called before any rows processed."""
+        from unittest.mock import MagicMock
+
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import TransformResult
+
+        call_order: list[str] = []
+
+        class TrackedTransform:
+            name = "tracked"
+            plugin_version = "1.0.0"
+
+            def on_start(self, ctx):
+                call_order.append("on_start")
+
+            def process(self, row, ctx):
+                call_order.append("process")
+                return TransformResult.success(row)
+
+        db = LandscapeDB.in_memory()
+
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([{"id": 1}])
+
+        transform = TrackedTransform()
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+        mock_sink.write.return_value = {
+            "path": "memory",
+            "size_bytes": 0,
+            "content_hash": "abc123",
+        }
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[transform],
+            sinks={"output": mock_sink},
+        )
+
+        # Minimal graph
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("transform", node_type="transform", plugin_name="tracked")
+        graph.add_node("sink", node_type="sink", plugin_name="csv")
+        graph.add_edge("source", "transform", label="continue", mode="move")
+        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph._transform_id_map = {0: "transform"}
+        graph._sink_id_map = {"output": "sink"}
+        graph._output_sink = "output"
+
+        orchestrator = Orchestrator(db)
+        orchestrator.run(config, graph=graph)
+
+        # on_start should be called first
+        assert call_order[0] == "on_start"
+        assert "process" in call_order

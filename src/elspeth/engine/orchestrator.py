@@ -205,6 +205,12 @@ class Orchestrator:
             landscape=recorder,  # type: ignore[arg-type]
         )
 
+        # Call on_start for all plugins BEFORE processing
+        # Lifecycle hooks are optional - plugins may or may not implement them
+        for transform in config.transforms:
+            if hasattr(transform, "on_start"):
+                transform.on_start(ctx)
+
         # Create processor
         processor = RowProcessor(
             recorder=recorder,

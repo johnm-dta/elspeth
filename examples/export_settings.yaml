@@ -1,0 +1,45 @@
+# Example: Pipeline with audit export to JSON
+#
+# This demonstrates ELSPETH's audit trail export feature for compliance
+# and legal inquiry. After a run completes, the full audit trail is
+# exported to a JSON sink for review.
+#
+# Note: Uses JSON format because audit records are heterogeneous (run, node,
+# row, token records have different fields). For CSV export, separate files
+# per record type would be needed.
+#
+# Run with:
+#   uv run elspeth run -s examples/export_settings.yaml --execute
+#
+# For signed exports (legal/compliance use):
+#   export ELSPETH_SIGNING_KEY="your-secret-key"
+#   # Then update sign: true below
+#   uv run elspeth run -s examples/export_settings.yaml --execute
+
+datasource:
+  plugin: csv
+  options:
+    path: examples/input.csv
+
+sinks:
+  output:
+    plugin: csv
+    options:
+      path: examples/output/results.csv
+
+  # Export sink for compliance audit trail (uses JSON for heterogeneous records)
+  audit_export:
+    plugin: json
+    options:
+      path: examples/output/audit_trail.json
+
+output_sink: output
+
+# Audit trail configuration
+landscape:
+  url: sqlite:///examples/runs/audit.db
+  export:
+    enabled: true
+    sink: audit_export
+    format: json  # Use JSON - audit records have varying schemas per record_type
+    sign: false   # Set to true and provide ELSPETH_SIGNING_KEY for legal use

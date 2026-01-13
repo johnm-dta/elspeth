@@ -103,6 +103,13 @@ class SinkAdapter:
         # Compute artifact metadata based on descriptor kind
         return self._compute_artifact_info()
 
+    def flush(self) -> None:
+        """Flush buffered data to disk.
+
+        Delegates to the wrapped sink's flush() method.
+        """
+        self._sink.flush()
+
     def close(self) -> None:
         """Close the wrapped sink.
 

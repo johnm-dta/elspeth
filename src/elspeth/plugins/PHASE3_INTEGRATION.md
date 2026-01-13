@@ -46,28 +46,52 @@ Phase 3 engine wraps transform.process() to add audit:
 
 ```python
 # Phase 3: Engine wraps process() calls
-def process_with_audit(transform, row, ctx):
+def process_with_audit(transform, row, token_id, step_index, ctx):
     input_hash = stable_hash(row)
 
     with ctx.start_span(f"transform:{transform.name}") as span:
         span.set_attribute("input_hash", input_hash)
 
+        # Begin node state before processing
+        node_state = ctx.landscape.begin_node_state(
+            token_id=token_id,
+            node_id=transform.node_id,
+            step_index=step_index,
+            input_data=row,
+        )
+
         start = time.perf_counter()
-        result = transform.process(row, ctx)
-        duration_ms = (time.perf_counter() - start) * 1000
+        try:
+            result = transform.process(row, ctx)
+            duration_ms = (time.perf_counter() - start) * 1000
 
-        # Populate audit fields
-        result.input_hash = input_hash
-        result.output_hash = stable_hash(result.row) if result.row else None
-        result.duration_ms = duration_ms
+            # Populate audit fields
+            result.input_hash = input_hash
+            result.output_hash = stable_hash(result.row) if result.row else None
+            result.duration_ms = duration_ms
 
-        # Record in Landscape
-        ctx.landscape.record_node_state(...)
+            # Complete node state with success
+            ctx.landscape.complete_node_state(
+                state_id=node_state.state_id,
+                status=result.status,
+                output_data=result.row,
+                duration_ms=duration_ms,
+            )
 
-        span.set_attribute("output_hash", result.output_hash)
-        span.set_attribute("status", result.status)
+            span.set_attribute("output_hash", result.output_hash)
+            span.set_attribute("status", result.status)
+            return result
 
-    return result
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start) * 1000
+            # Complete node state with failure
+            ctx.landscape.complete_node_state(
+                state_id=node_state.state_id,
+                status="failed",
+                duration_ms=duration_ms,
+                error={"type": type(e).__name__, "message": str(e)},
+            )
+            raise
 ```
 
 ## Aggregation Batch Management
@@ -76,14 +100,14 @@ Phase 3 engine manages Landscape batches:
 
 ```python
 # Phase 3: Engine wraps accept() for batch tracking
-def accept_with_batch(aggregation, row, token_id, ctx):
+def accept_with_batch(aggregation, row, token_id, run_id, ctx):
     if aggregation._batch_id is None:
-        # Create draft batch in Landscape
-        batch_id = ctx.landscape.create_batch(
-            node_id=aggregation.node_id,
-            status="draft",
+        # Create batch in Landscape
+        batch = ctx.landscape.create_batch(
+            run_id=run_id,
+            aggregation_node_id=aggregation.node_id,
         )
-        aggregation._batch_id = batch_id
+        aggregation._batch_id = batch.batch_id
 
     # Persist membership immediately (crash-safe)
     ctx.landscape.add_batch_member(
@@ -96,21 +120,28 @@ def accept_with_batch(aggregation, row, token_id, ctx):
     result.batch_id = aggregation._batch_id
     return result
 
-def flush_with_audit(aggregation, ctx):
-    ctx.landscape.update_batch_status(aggregation._batch_id, "executing")
+def flush_with_audit(aggregation, trigger_reason, state_id, ctx):
+    ctx.landscape.update_batch_status(
+        aggregation._batch_id,
+        status="executing",
+    )
 
     try:
         outputs = aggregation.flush(ctx)
-        ctx.landscape.update_batch_status(aggregation._batch_id, "completed")
 
-        # Record batch outputs
-        for output in outputs:
-            ctx.landscape.add_batch_output(aggregation._batch_id, output)
+        # Complete batch with success
+        ctx.landscape.complete_batch(
+            batch_id=aggregation._batch_id,
+            status="completed",
+            trigger_reason=trigger_reason,
+            state_id=state_id,
+        )
 
         return outputs
     except Exception as e:
         ctx.landscape.update_batch_status(
-            aggregation._batch_id, "failed", error=str(e)
+            aggregation._batch_id,
+            status="failed",
         )
         raise
 ```
@@ -121,14 +152,15 @@ Phase 3 engine records routing decisions:
 
 ```python
 # Phase 3: Engine wraps evaluate() for routing audit
-def evaluate_with_routing(gate, row, ctx):
+def evaluate_with_routing(gate, row, state_id, edge_id, ctx):
     result = gate.evaluate(row, ctx)
 
     # Record routing event
     ctx.landscape.record_routing_event(
-        node_id=gate.node_id,
-        action=result.action,
-        reason=result.action.reason,
+        state_id=state_id,
+        edge_id=edge_id,
+        mode=result.action.mode,  # e.g., "continue", "route_to_sink", "fork"
+        reason={"action": result.action.reason} if result.action.reason else None,
     )
 
     return result

@@ -205,10 +205,11 @@ class ExecutionGraph:
 
         Creates nodes for:
         - Source (from config.datasource)
+        - Transforms (from config.row_plugins, in order)
         - Sinks (from config.sinks)
 
         Creates edges for:
-        - Linear flow: source -> output_sink
+        - Linear flow: source -> transforms -> output_sink
 
         Args:
             config: Validated ElspethSettings
@@ -220,7 +221,6 @@ class ExecutionGraph:
 
         graph = cls()
 
-        # Generate unique node IDs
         def node_id(prefix: str, name: str) -> str:
             return f"{prefix}_{name}_{uuid.uuid4().hex[:8]}"
 
@@ -245,9 +245,27 @@ class ExecutionGraph:
                 config=sink_config.options,
             )
 
-        # Edge from source to output sink (minimal case - no transforms)
+        # Build transform chain
+        prev_node_id = source_id
+        for plugin_config in config.row_plugins:
+            is_gate = plugin_config.type == "gate"
+            ntype = "gate" if is_gate else "transform"
+            tid = node_id(ntype, plugin_config.plugin)
+
+            graph.add_node(
+                tid,
+                node_type=ntype,
+                plugin_name=plugin_config.plugin,
+                config=plugin_config.options,
+            )
+
+            # Edge from previous node
+            graph.add_edge(prev_node_id, tid, label="continue", mode="move")
+            prev_node_id = tid
+
+        # Edge from last transform (or source) to output sink
         graph.add_edge(
-            source_id,
+            prev_node_id,
             sink_ids[config.output_sink],
             label="continue",
             mode="move",

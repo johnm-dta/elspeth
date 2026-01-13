@@ -281,3 +281,41 @@ class TestExecutionGraphFromConfig:
         # Should not raise
         graph.validate()
         assert graph.is_acyclic()
+
+    def test_from_config_with_transforms(self) -> None:
+        """Build graph with transform chain."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            RowPluginSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        config = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={"output": SinkSettings(plugin="csv")},
+            row_plugins=[
+                RowPluginSettings(plugin="transform_a"),
+                RowPluginSettings(plugin="transform_b"),
+            ],
+            output_sink="output",
+        )
+
+        graph = ExecutionGraph.from_config(config)
+
+        # Should have: source -> transform_a -> transform_b -> output_sink
+        assert graph.node_count == 4
+        assert graph.edge_count == 3
+
+        # Topological order should be correct
+        order = graph.topological_order()
+        assert len(order) == 4
+        # Source should be first (has "source" in node_id)
+        assert "source" in order[0]
+        # Sink should be last (has "sink" in node_id)
+        assert "sink" in order[-1]
+        # Verify transform ordering (transform_a before transform_b)
+        transform_a_idx = next(i for i, n in enumerate(order) if "transform_a" in n)
+        transform_b_idx = next(i for i, n in enumerate(order) if "transform_b" in n)
+        assert transform_a_idx < transform_b_idx

@@ -329,6 +329,105 @@ class TestConcurrencySettings:
             ConcurrencySettings(max_workers=-1)
 
 
+class TestLoadSettingsArchitecture:
+    """load_settings() parses architecture-compliant YAML."""
+
+    def test_load_readme_example(self, tmp_path: Path) -> None:
+        """Load the exact example from README.md."""
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv_local
+  options:
+    path: data/submissions.csv
+
+sinks:
+  results:
+    plugin: csv
+    options:
+      path: output/results.csv
+  flagged:
+    plugin: csv
+    options:
+      path: output/flagged_for_review.csv
+
+row_plugins:
+  - plugin: pattern_gate
+    type: gate
+    options:
+      patterns:
+        - "ignore previous"
+        - "disregard instructions"
+    routes:
+      suspicious: flagged
+      clean: continue
+
+output_sink: results
+
+landscape:
+  enabled: true
+  backend: sqlite
+  url: sqlite:///./runs/audit.db
+""")
+
+        settings = load_settings(config_file)
+
+        assert settings.datasource.plugin == "csv_local"
+        assert settings.datasource.options["path"] == "data/submissions.csv"
+        assert len(settings.sinks) == 2
+        assert len(settings.row_plugins) == 1
+        assert settings.row_plugins[0].type == "gate"
+        assert settings.output_sink == "results"
+        assert settings.landscape.backend == "sqlite"
+
+    def test_load_minimal_config(self, tmp_path: Path) -> None:
+        """Minimal valid configuration."""
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+
+        assert settings.datasource.plugin == "csv"
+        assert settings.landscape.enabled is True  # Default
+        assert settings.concurrency.max_workers == 4  # Default
+
+    def test_load_invalid_output_sink(self, tmp_path: Path) -> None:
+        """Error when output_sink doesn't exist."""
+        from pydantic import ValidationError
+
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  results:
+    plugin: csv
+
+output_sink: nonexistent
+""")
+
+        with pytest.raises(ValidationError) as exc_info:
+            load_settings(config_file)
+
+        assert "output_sink" in str(exc_info.value)
+
+
 class TestElspethSettingsArchitecture:
     """Top-level settings matches architecture specification."""
 

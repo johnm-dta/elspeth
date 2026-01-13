@@ -473,6 +473,84 @@ output_sink: nonexistent
         assert "output_sink" in str(exc_info.value)
 
 
+class TestExportSinkValidation:
+    """Validation that export.sink references a defined sink."""
+
+    def test_export_sink_must_exist_when_enabled(self) -> None:
+        """If export.enabled=True, export.sink must reference a defined sink."""
+        from elspeth.core.config import ElspethSettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            ElspethSettings(
+                datasource={"plugin": "csv", "options": {"path": "input.csv"}},
+                sinks={"output": {"plugin": "csv", "options": {"path": "out.csv"}}},
+                output_sink="output",
+                landscape={
+                    "export": {
+                        "enabled": True,
+                        "sink": "nonexistent_sink",  # Not in sinks
+                    }
+                },
+            )
+
+        assert "export.sink 'nonexistent_sink' not found in sinks" in str(exc_info.value)
+
+    def test_export_sink_not_required_when_disabled(self) -> None:
+        """If export.enabled=False, sink can be None."""
+        from elspeth.core.config import ElspethSettings
+
+        # Should not raise
+        settings = ElspethSettings(
+            datasource={"plugin": "csv", "options": {"path": "input.csv"}},
+            sinks={"output": {"plugin": "csv", "options": {"path": "out.csv"}}},
+            output_sink="output",
+            landscape={
+                "export": {"enabled": False}  # No sink required
+            },
+        )
+        assert settings.landscape.export.sink is None
+
+    def test_export_sink_required_when_enabled(self) -> None:
+        """If export.enabled=True, sink cannot be None."""
+        from elspeth.core.config import ElspethSettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            ElspethSettings(
+                datasource={"plugin": "csv", "options": {"path": "input.csv"}},
+                sinks={"output": {"plugin": "csv", "options": {"path": "out.csv"}}},
+                output_sink="output",
+                landscape={
+                    "export": {
+                        "enabled": True,
+                        # sink is None (not provided)
+                    }
+                },
+            )
+
+        assert "landscape.export.sink is required when export is enabled" in str(exc_info.value)
+
+    def test_export_sink_valid_reference(self) -> None:
+        """If export.sink references a valid sink, no error."""
+        from elspeth.core.config import ElspethSettings
+
+        # Should not raise
+        settings = ElspethSettings(
+            datasource={"plugin": "csv", "options": {"path": "input.csv"}},
+            sinks={
+                "output": {"plugin": "csv", "options": {"path": "out.csv"}},
+                "audit_archive": {"plugin": "csv", "options": {"path": "audit.csv"}},
+            },
+            output_sink="output",
+            landscape={
+                "export": {
+                    "enabled": True,
+                    "sink": "audit_archive",  # Valid sink
+                }
+            },
+        )
+        assert settings.landscape.export.sink == "audit_archive"
+
+
 class TestElspethSettingsArchitecture:
     """Top-level settings matches architecture specification."""
 

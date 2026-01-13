@@ -212,6 +212,21 @@ class ElspethSettings(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def validate_export_sink_exists(self) -> "ElspethSettings":
+        """Ensure export.sink references a defined sink when enabled."""
+        if self.landscape.export.enabled:
+            if self.landscape.export.sink is None:
+                raise ValueError(
+                    "landscape.export.sink is required when export is enabled"
+                )
+            if self.landscape.export.sink not in self.sinks:
+                raise ValueError(
+                    f"landscape.export.sink '{self.landscape.export.sink}' not found in sinks. "
+                    f"Available sinks: {list(self.sinks.keys())}"
+                )
+        return self
+
     @field_validator("sinks")
     @classmethod
     def validate_sinks_not_empty(cls, v: dict[str, SinkSettings]) -> dict[str, SinkSettings]:

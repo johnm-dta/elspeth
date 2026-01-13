@@ -534,6 +534,25 @@
   └────────────────┴────────────────────────────────────┴────────────────────────────────┴──────────────────────────────┘
 
   ---
+
+  1. LANDSCAPE EXPORT REQUIREMENTS
+  ┌────────────────┬──────────────────────────────────────────────────┬────────────────┬────────────────┐
+  │ Requirement ID │                   Requirement                    │     Source     │     Status     │
+  ├────────────────┼──────────────────────────────────────────────────┼────────────────┼────────────────┤
+  │ EXP-001        │ Export audit trail to configured sink            │ This plan      │ ✅ Implemented │
+  ├────────────────┼──────────────────────────────────────────────────┼────────────────┼────────────────┤
+  │ EXP-002        │ Optional HMAC signing per record                 │ This plan      │ ✅ Implemented │
+  ├────────────────┼──────────────────────────────────────────────────┼────────────────┼────────────────┤
+  │ EXP-003        │ Manifest with final hash for tamper detection    │ This plan      │ ✅ Implemented │
+  ├────────────────┼──────────────────────────────────────────────────┼────────────────┼────────────────┤
+  │ EXP-004        │ CSV and JSON format options                      │ This plan      │ ✅ Implemented │
+  ├────────────────┼──────────────────────────────────────────────────┼────────────────┼────────────────┤
+  │ EXP-005        │ Export happens post-run via config, not CLI      │ This plan      │ ✅ Implemented │
+  ├────────────────┼──────────────────────────────────────────────────┼────────────────┼────────────────┤
+  │ EXP-006        │ Include all record types (batches, token_parents)│ Code review    │ ✅ Implemented │
+  └────────────────┴──────────────────────────────────────────────────┴────────────────┴────────────────┘
+
+  ---
   CRITICAL DIVERGENCES SUMMARY
 
 These are requirements that have been actively diverged from in the implementation:

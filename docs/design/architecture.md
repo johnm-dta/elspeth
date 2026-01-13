@@ -346,6 +346,36 @@ def test_can_explain_any_output():
 | `explain(run_id, row_id, sink, field)` | Convenience - disambiguates by target sink |
 | `explain(run_id, row_id, field)` | Only valid when row has single terminal path |
 
+### Audit Trail Export
+
+For compliance and legal inquiry, the Landscape can be exported after a run completes:
+
+```yaml
+landscape:
+  url: sqlite:///./runs/audit.db
+  export:
+    enabled: true
+    sink: audit_archive       # Reference to configured sink
+    format: csv               # csv or json
+    sign: true                # HMAC signature per record
+```
+
+**Export flow:**
+1. Run completes normally
+2. Orchestrator queries all audit data for run
+3. Records formatted and written to export sink
+4. If `sign: true`, each record gets HMAC signature + final manifest
+
+**Signing provides:**
+- Per-record integrity verification
+- Chain-of-custody proof via running hash
+- Manifest with final hash for tamper detection
+
+**Environment:**
+- `ELSPETH_SIGNING_KEY`: Required for signed exports (UTF-8 encoded string)
+
+**Redaction note:** Redaction is the responsibility of plugins BEFORE invoking Landscape recording methods. The Landscape is a faithful recorder - it stores what it's given. The export therefore exports exactly what was recorded.
+
 ---
 
 ## Canonical JSON and Hashing

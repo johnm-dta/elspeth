@@ -7,10 +7,15 @@ from elspeth.core.canonical import (
     stable_hash,
 )
 from elspeth.core.config import (
+    ConcurrencySettings,
     DatabaseSettings,
+    DatasourceSettings,
     ElspethSettings,
+    LandscapeSettings,
     PayloadStoreSettings,
     RetrySettings,
+    RowPluginSettings,
+    SinkSettings,
     load_settings,
 )
 from elspeth.core.dag import (
@@ -29,15 +34,20 @@ from elspeth.core.payload_store import (
 
 __all__ = [
     "CANONICAL_VERSION",
+    "ConcurrencySettings",
     "DatabaseSettings",
+    "DatasourceSettings",
     "ElspethSettings",
     "ExecutionGraph",
     "FilesystemPayloadStore",
     "GraphValidationError",
+    "LandscapeSettings",
     "NodeInfo",
     "PayloadStore",
     "PayloadStoreSettings",
     "RetrySettings",
+    "RowPluginSettings",
+    "SinkSettings",
     "canonical_json",
     "configure_logging",
     "get_logger",

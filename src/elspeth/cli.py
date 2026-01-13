@@ -93,6 +93,17 @@ def run(
             typer.echo(f"  - {loc}: {error['msg']}", err=True)
         raise typer.Exit(1) from None
 
+    # Build and validate execution graph
+    try:
+        graph = ExecutionGraph.from_config(config)
+        graph.validate()
+    except GraphValidationError as e:
+        typer.echo(f"Pipeline graph error: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    if verbose:
+        typer.echo(f"Graph validated: {graph.node_count} nodes, {graph.edge_count} edges")
+
     if dry_run:
         typer.echo("Dry run mode - would execute:")
         typer.echo(f"  Source: {config.datasource.plugin}")
@@ -100,6 +111,8 @@ def run(
         typer.echo(f"  Sinks: {', '.join(config.sinks.keys())}")
         typer.echo(f"  Output sink: {config.output_sink}")
         if verbose:
+            typer.echo(f"  Graph: {graph.node_count} nodes, {graph.edge_count} edges")
+            typer.echo(f"  Execution order: {len(graph.topological_order())} steps")
             typer.echo(f"  Concurrency: {config.concurrency.max_workers} workers")
             typer.echo(f"  Landscape: {config.landscape.url}")
         return

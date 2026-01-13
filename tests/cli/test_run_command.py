@@ -172,3 +172,63 @@ output_sink: nonexistent
         # Should show helpful error about output_sink
         output = result.stdout + (result.stderr or "")
         assert "nonexistent" in output.lower() or "output_sink" in output.lower()
+
+
+class TestRunCommandGraphValidation:
+    """Run command validates graph before execution."""
+
+    def test_run_validates_graph_before_execution(self, tmp_path: Path) -> None:
+        """Run command validates graph before any execution."""
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+row_plugins:
+  - plugin: bad_gate
+    type: gate
+    routes:
+      error: missing_sink
+
+output_sink: output
+""")
+
+        result = runner.invoke(app, ["run", "-s", str(config_file), "--execute"])
+
+        # Should fail at validation, not during execution
+        assert result.exit_code != 0
+        output = result.stdout + (result.stderr or "")
+        assert "missing_sink" in output.lower() or "graph" in output.lower()
+
+    def test_dry_run_shows_graph_info(self, tmp_path: Path) -> None:
+        """Dry run shows graph structure."""
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  results:
+    plugin: csv
+  flagged:
+    plugin: csv
+
+row_plugins:
+  - plugin: classifier
+    type: gate
+    routes:
+      suspicious: flagged
+      clean: continue
+
+output_sink: results
+""")
+
+        result = runner.invoke(app, ["run", "-s", str(config_file), "--dry-run", "-v"])
+
+        assert result.exit_code == 0
+        # Verbose should show graph info
+        assert "node" in result.stdout.lower() or "edge" in result.stdout.lower()

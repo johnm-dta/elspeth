@@ -28,14 +28,9 @@ class PluginSchema(BaseModel):
             temperature: float
             humidity: float
 
-        class MyOutputSchema(PluginSchema):
-            temperature: float
-            humidity: float
-            heat_index: float  # Added by transform
-
     Features:
     - Extra fields ignored (rows may have more fields than schema requires)
-    - Strict type validation
+    - Coercive type validation (int->float allowed, strict=False)
     - Easy conversion to/from row dicts
     """
 

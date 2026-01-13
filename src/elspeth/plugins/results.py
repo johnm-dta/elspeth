@@ -77,17 +77,27 @@ class RoutingAction:
         )
 
     @classmethod
-    def route_to_sink(
+    def route(
         cls,
-        sink_name: str,
+        label: str,
         *,
         mode: RoutingMode = RoutingMode.MOVE,
         reason: dict[str, Any] | None = None,
     ) -> "RoutingAction":
-        """Route row to a named sink."""
+        """Route row to a destination determined by route label.
+
+        Gates return semantic route labels (e.g., "above", "below", "match").
+        The executor resolves these labels via the plugin's `routes` config
+        to determine the actual destination (sink name or "continue").
+
+        Args:
+            label: Route label that will be resolved via routes config
+            mode: MOVE (default) or COPY
+            reason: Audit trail information about why this route was chosen
+        """
         return cls(
-            kind=RoutingKind.ROUTE_TO_SINK,
-            destinations=(sink_name,),
+            kind=RoutingKind.ROUTE,
+            destinations=(label,),
             mode=mode,
             reason=_freeze_dict(reason),
         )

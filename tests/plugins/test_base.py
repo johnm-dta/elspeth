@@ -75,15 +75,15 @@ class TestBaseGate:
                 if row["value"] > threshold:
                     return GateResult(
                         row=row,
-                        action=RoutingAction.route_to_sink("high"),
+                        action=RoutingAction.route("above"),  # Route label, not sink
                     )
-                return GateResult(row=row, action=RoutingAction.continue_())
+                return GateResult(row=row, action=RoutingAction.route("below"))
 
         gate = ThresholdGate({"threshold": 50})
         ctx = PluginContext(run_id="test", config={})
 
         result = gate.evaluate({"value": 100}, ctx)
-        assert result.action.kind == "route_to_sink"
+        assert result.action.kind == "route"
 
 
 class TestBaseAggregation:

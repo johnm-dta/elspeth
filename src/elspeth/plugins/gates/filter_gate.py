@@ -23,13 +23,12 @@ class FilterGate(BaseGate):
     """Route rows based on filter conditions.
 
     Instead of silently dropping rows that don't pass the filter, routes them
-    to a discard sink. This maintains the "no silent drops" invariant required
-    by the architecture.
+    with a "discard" label. This maintains the "no silent drops" invariant
+    required by the architecture.
 
     Config options:
         field: Field to evaluate (supports dot notation for nested fields)
-        discard_sink: Sink name for rows that fail the filter
-        allow_missing: If True, rows with missing field continue (default: False)
+        allow_missing: If True, rows with missing field get "pass" label (default: False)
 
     Comparison operators (exactly one required):
         greater_than: Value must be > threshold
@@ -39,11 +38,19 @@ class FilterGate(BaseGate):
         equals: Value must equal threshold (supports any type)
         not_equals: Value must not equal threshold
 
+    Route labels returned:
+        "pass": Row passes the filter condition
+        "discard": Row fails the filter condition
+
+    The routes config maps these labels to destinations:
+        routes:
+          pass: continue  # or a sink name
+          discard: discard_sink  # or "continue" to not discard
+
     Example:
         FilterGate({
             "field": "score",
             "greater_than": 0.5,
-            "discard_sink": "low_score_rows",
         })
     """
 
@@ -64,7 +71,6 @@ class FilterGate(BaseGate):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self._field: str = config["field"]
-        self._discard_sink: str = config["discard_sink"]
         self._allow_missing: bool = config.get("allow_missing", False)
 
         # Find which operator is specified
@@ -99,9 +105,9 @@ class FilterGate(BaseGate):
             ctx: Plugin context
 
         Returns:
-            GateResult with routing action:
-            - continue: Row passes filter
-            - route_to_sink: Row fails filter (routed to discard_sink)
+            GateResult with route label:
+            - "pass": Row passes filter
+            - "discard": Row fails filter
         """
         value = self._get_nested(row, self._field)
 
@@ -110,20 +116,17 @@ class FilterGate(BaseGate):
             if self._allow_missing:
                 return GateResult(
                     row=row,
-                    action=RoutingAction.continue_(reason={
+                    action=RoutingAction.route("pass", reason={
                         "field": self._field,
                         "result": "missing_field_allowed",
                     }),
                 )
             return GateResult(
                 row=row,
-                action=RoutingAction.route_to_sink(
-                    self._discard_sink,
-                    reason={
-                        "field": self._field,
-                        "result": "filtered_missing_field",
-                    },
-                ),
+                action=RoutingAction.route("discard", reason={
+                    "field": self._field,
+                    "result": "filtered_missing_field",
+                }),
             )
 
         # Evaluate the comparison
@@ -140,13 +143,16 @@ class FilterGate(BaseGate):
         }
 
         if passes:
-            reason["result"] = "passed"
-            return GateResult(row=row, action=RoutingAction.continue_(reason=reason))
+            reason["result"] = "pass"
+            return GateResult(
+                row=row,
+                action=RoutingAction.route("pass", reason=reason),
+            )
 
-        reason["result"] = "filtered"
+        reason["result"] = "discard"
         return GateResult(
             row=row,
-            action=RoutingAction.route_to_sink(self._discard_sink, reason=reason),
+            action=RoutingAction.route("discard", reason=reason),
         )
 
     def _get_nested(self, data: dict[str, Any], path: str) -> Any:

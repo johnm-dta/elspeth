@@ -161,9 +161,9 @@ class GateProtocol(Protocol):
                 if row.get("suspicious"):
                     return GateResult(
                         row=row,
-                        action=RoutingAction.route_to_sink("review_queue"),
+                        action=RoutingAction.route("review"),  # Resolved via routes config
                     )
-                return GateResult(row=row, action=RoutingAction.continue_())
+                return GateResult(row=row, action=RoutingAction.route("normal"))
     """
 
     name: str

@@ -241,6 +241,7 @@ class GateExecutor:
         recorder: LandscapeRecorder,
         span_factory: SpanFactory,
         edge_map: dict[tuple[str, str], str] | None = None,
+        route_resolution_map: dict[tuple[str, str], str] | None = None,
     ) -> None:
         """Initialize executor.
 
@@ -248,10 +249,12 @@ class GateExecutor:
             recorder: Landscape recorder for audit trail
             span_factory: Span factory for tracing
             edge_map: Maps (node_id, label) -> edge_id for routing
+            route_resolution_map: Maps (node_id, label) -> "continue" | sink_name
         """
         self._recorder = recorder
         self._spans = span_factory
         self._edge_map = edge_map or {}
+        self._route_resolution_map = route_resolution_map or {}
 
     def execute_gate(
         self,
@@ -318,14 +321,29 @@ class GateExecutor:
             # No routing event needed - just continue to next transform
             pass
 
-        elif action.kind == "route_to_sink":
-            # Record routing event to sink
-            self._record_routing(
-                state_id=state.state_id,
-                node_id=gate.node_id,
-                action=action,
+        elif action.kind == "route":
+            # Gate returned a route label - resolve via routes config
+            route_label = action.destinations[0]
+            destination = self._route_resolution_map.get(
+                (gate.node_id, route_label)
             )
-            sink_name = action.destinations[0]
+
+            if destination is None:
+                # Label not in routes config - this is a configuration error
+                raise MissingEdgeError(node_id=gate.node_id, label=route_label)
+
+            if destination == "continue":
+                # Route label resolves to "continue" - no routing event
+                pass
+            else:
+                # Route label resolves to a sink name
+                sink_name = destination
+                # Record routing event using the route label to find the edge
+                self._record_routing(
+                    state_id=state.state_id,
+                    node_id=gate.node_id,
+                    action=action,
+                )
 
         elif action.kind == "fork_to_paths":
             if token_manager is None:

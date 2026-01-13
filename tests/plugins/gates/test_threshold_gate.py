@@ -1,4 +1,8 @@
-"""Tests for ThresholdGate."""
+"""Tests for ThresholdGate.
+
+ThresholdGate returns route LABELS ("above"/"below"), not sink names.
+The routes config in settings.yaml maps labels to sinks.
+"""
 
 import pytest
 
@@ -21,8 +25,6 @@ class TestThresholdGate:
         gate = ThresholdGate({
             "field": "score",
             "threshold": 50,
-            "above_sink": "high_scores",
-            "below_sink": "low_scores",
         })
         assert isinstance(gate, GateProtocol)
 
@@ -35,103 +37,62 @@ class TestThresholdGate:
         assert hasattr(ThresholdGate, "output_schema")
 
     def test_route_above_threshold(self, ctx: PluginContext) -> None:
-        """Route to above_sink when value > threshold."""
+        """Route to 'above' label when value > threshold."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
         gate = ThresholdGate({
             "field": "score",
             "threshold": 50,
-            "above_sink": "high_scores",
-            "below_sink": "low_scores",
         })
         row = {"id": 1, "score": 75}
 
         result = gate.evaluate(row, ctx)
 
-        assert result.action.kind == "route_to_sink"
-        assert result.action.destinations == ("high_scores",)
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("above",)  # Label, not sink
         assert result.row == row
 
     def test_route_below_threshold(self, ctx: PluginContext) -> None:
-        """Route to below_sink when value < threshold."""
+        """Route to 'below' label when value < threshold."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
         gate = ThresholdGate({
             "field": "score",
             "threshold": 50,
-            "above_sink": "high_scores",
-            "below_sink": "low_scores",
         })
         row = {"id": 1, "score": 25}
 
         result = gate.evaluate(row, ctx)
 
-        assert result.action.kind == "route_to_sink"
-        assert result.action.destinations == ("low_scores",)
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("below",)  # Label, not sink
 
     def test_equal_routes_to_below(self, ctx: PluginContext) -> None:
-        """Equal value routes to below_sink by default."""
+        """Equal value routes to 'below' label by default."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
         gate = ThresholdGate({
             "field": "score",
             "threshold": 50,
-            "above_sink": "high",
-            "below_sink": "low",
         })
         row = {"id": 1, "score": 50}
 
         result = gate.evaluate(row, ctx)
-        assert result.action.destinations == ("low",)
+        assert result.action.destinations == ("below",)
 
     def test_equal_routes_to_above_when_inclusive(self, ctx: PluginContext) -> None:
-        """Equal value routes to above_sink when inclusive=True."""
+        """Equal value routes to 'above' label when inclusive=True."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
         gate = ThresholdGate({
             "field": "score",
             "threshold": 50,
-            "above_sink": "high",
-            "below_sink": "low",
             "inclusive": True,  # >= routes to above
         })
         row = {"id": 1, "score": 50}
 
         result = gate.evaluate(row, ctx)
-        assert result.action.destinations == ("high",)
-
-    def test_continue_when_no_below_sink(self, ctx: PluginContext) -> None:
-        """Continue to next transform when below_sink not specified."""
-        from elspeth.plugins.gates.threshold_gate import ThresholdGate
-
-        gate = ThresholdGate({
-            "field": "score",
-            "threshold": 50,
-            "above_sink": "high_scores",
-            # No below_sink - continue to next transform
-        })
-        row = {"id": 1, "score": 25}
-
-        result = gate.evaluate(row, ctx)
-
-        assert result.action.kind == "continue"
-        assert result.row == row
-
-    def test_continue_when_no_above_sink(self, ctx: PluginContext) -> None:
-        """Continue to next transform when above_sink not specified."""
-        from elspeth.plugins.gates.threshold_gate import ThresholdGate
-
-        gate = ThresholdGate({
-            "field": "score",
-            "threshold": 50,
-            "below_sink": "low_scores",
-            # No above_sink - continue to next transform
-        })
-        row = {"id": 1, "score": 75}
-
-        result = gate.evaluate(row, ctx)
-
-        assert result.action.kind == "continue"
+        assert result.action.destinations == ("above",)
 
     def test_nested_field_access(self, ctx: PluginContext) -> None:
         """Access nested field with dot notation."""
@@ -140,13 +101,11 @@ class TestThresholdGate:
         gate = ThresholdGate({
             "field": "metrics.score",
             "threshold": 50,
-            "above_sink": "high",
-            "below_sink": "low",
         })
         row = {"id": 1, "metrics": {"score": 75}}
 
         result = gate.evaluate(row, ctx)
-        assert result.action.destinations == ("high",)
+        assert result.action.destinations == ("above",)
 
     def test_missing_field_raises_error(self, ctx: PluginContext) -> None:
         """Error when required field is missing."""
@@ -155,23 +114,38 @@ class TestThresholdGate:
         gate = ThresholdGate({
             "field": "score",
             "threshold": 50,
-            "above_sink": "high",
         })
         row = {"id": 1}  # No score field
 
         with pytest.raises(ValueError, match="score"):
             gate.evaluate(row, ctx)
 
-    def test_non_numeric_field_raises_error(self, ctx: PluginContext) -> None:
-        """Error when field is not numeric."""
+    def test_non_numeric_string_casts_when_enabled(self, ctx: PluginContext) -> None:
+        """String values are cast to float when cast=True (default)."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
         gate = ThresholdGate({
-            "field": "name",
+            "field": "score",
             "threshold": 50,
-            "above_sink": "high",
+            "cast": True,  # Default
         })
-        row = {"id": 1, "name": "alice"}
+        row = {"id": 1, "score": "75"}
+
+        result = gate.evaluate(row, ctx)
+        assert result.action.destinations == ("above",)
+
+    def test_non_numeric_string_raises_when_cast_disabled(
+        self, ctx: PluginContext
+    ) -> None:
+        """Error when field is string and cast=False."""
+        from elspeth.plugins.gates.threshold_gate import ThresholdGate
+
+        gate = ThresholdGate({
+            "field": "score",
+            "threshold": 50,
+            "cast": False,
+        })
+        row = {"id": 1, "score": "75"}
 
         with pytest.raises(TypeError, match="numeric"):
             gate.evaluate(row, ctx)
@@ -183,8 +157,6 @@ class TestThresholdGate:
         gate = ThresholdGate({
             "field": "score",
             "threshold": 50,
-            "above_sink": "high",
-            "below_sink": "low",
         })
         row = {"id": 1, "score": 75}
 

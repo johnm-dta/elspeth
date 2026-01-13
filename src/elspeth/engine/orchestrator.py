@@ -146,10 +146,9 @@ class Orchestrator:
                 config=node_info.config,
             )
 
-        # Register edges from graph - key by (from_node, to_sink_name) for lookup
+        # Register edges from graph - key by (from_node, label) for lookup
+        # Gates return route labels, so edge_map is keyed by label
         edge_map: dict[tuple[str, str], str] = {}
-        sink_id_map = graph.get_sink_id_map()
-        sink_id_to_name = {v: k for k, v in sink_id_map.items()}  # Reverse mapping
 
         for from_id, to_id, edge_data in graph.get_edges():
             edge = recorder.register_edge(
@@ -159,20 +158,17 @@ class Orchestrator:
                 label=edge_data["label"],
                 mode=edge_data["mode"],
             )
-            # Key by sink NAME (what gates return), not route label
-            # to_id might be a sink or a transform - only map sinks
-            if to_id in sink_id_to_name:
-                sink_name = sink_id_to_name[to_id]
-                edge_map[(from_id, sink_name)] = edge.edge_id
-            else:
-                # Non-sink edges (transform chains) - keep label-based key
-                edge_map[(from_id, edge_data["label"])] = edge.edge_id
+            # Key by edge label - gates return route labels, transforms use "continue"
+            edge_map[(from_id, edge_data["label"])] = edge.edge_id
+
+        # Get route resolution map - maps (gate_node, label) -> "continue" | sink_name
+        route_resolution_map = graph.get_route_resolution_map()
 
         # Get explicit node ID mappings from graph
         source_id = graph.get_source()
         if source_id is None:
             raise ValueError("Graph has no source node")
-        # sink_id_map already fetched above for edge_map construction
+        sink_id_map = graph.get_sink_id_map()
         transform_id_map = graph.get_transform_id_map()
         output_sink_name = graph.get_output_sink()
 
@@ -219,6 +215,7 @@ class Orchestrator:
             run_id=run_id,
             source_node_id=source_id,
             edge_map=edge_map,
+            route_resolution_map=route_resolution_map,
         )
 
         # Process rows - Buffer TOKENS, not dicts, to preserve identity

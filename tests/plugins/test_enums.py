@@ -33,7 +33,7 @@ class TestRoutingKind:
         from elspeth.plugins.enums import RoutingKind
 
         assert RoutingKind.CONTINUE.value == "continue"
-        assert RoutingKind.ROUTE_TO_SINK.value == "route_to_sink"
+        assert RoutingKind.ROUTE.value == "route"
         assert RoutingKind.FORK_TO_PATHS.value == "fork_to_paths"
 
 

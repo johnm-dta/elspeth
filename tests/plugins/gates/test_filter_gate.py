@@ -1,4 +1,8 @@
-"""Tests for FilterGate plugin."""
+"""Tests for FilterGate plugin.
+
+FilterGate returns route LABELS ("pass"/"discard"), not sink names.
+The routes config in settings.yaml maps labels to sinks.
+"""
 
 from __future__ import annotations
 
@@ -24,37 +28,35 @@ def ctx() -> "PluginContext":
 
 
 class TestFilterGate:
-    """Test FilterGate routes instead of silent drops."""
+    """Test FilterGate returns route labels."""
 
-    def test_passing_row_continues(self, ctx: "PluginContext") -> None:
-        """Row that passes filter continues to next stage."""
+    def test_passing_row_routes_to_pass_label(self, ctx: "PluginContext") -> None:
+        """Row that passes filter returns 'pass' label."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
         gate = FilterGate({
             "field": "score",
             "greater_than": 0.5,
-            "discard_sink": "filtered_out",
         })
 
         result = gate.evaluate({"id": 1, "score": 0.8}, ctx)
 
-        assert result.action.kind == "continue"
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("pass",)
 
-    def test_failing_row_routes_to_discard(self, ctx: "PluginContext") -> None:
-        """Row that fails filter routes to discard sink."""
+    def test_failing_row_routes_to_discard_label(self, ctx: "PluginContext") -> None:
+        """Row that fails filter returns 'discard' label."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
         gate = FilterGate({
             "field": "score",
             "greater_than": 0.5,
-            "discard_sink": "filtered_out",
         })
 
         result = gate.evaluate({"id": 1, "score": 0.3}, ctx)
 
-        assert result.action.kind == "route_to_sink"
-        assert result.action.destinations == ("filtered_out",)
-        assert "filtered" in result.action.reason.get("result", "")
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("discard",)
 
     def test_reason_includes_filter_details(self, ctx: "PluginContext") -> None:
         """Routing reason includes why the row was filtered."""
@@ -63,7 +65,6 @@ class TestFilterGate:
         gate = FilterGate({
             "field": "score",
             "greater_than": 0.5,
-            "discard_sink": "trash",
         })
 
         result = gate.evaluate({"id": 1, "score": 0.3}, ctx)
@@ -72,37 +73,37 @@ class TestFilterGate:
         assert result.action.reason["value"] == 0.3
         assert result.action.reason["condition"] == "greater_than"
         assert result.action.reason["threshold"] == 0.5
+        assert result.action.reason["result"] == "discard"
 
     def test_missing_field_routes_to_discard(self, ctx: "PluginContext") -> None:
-        """Row with missing field routes to discard sink by default."""
+        """Row with missing field returns 'discard' label by default."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
         gate = FilterGate({
             "field": "score",
             "greater_than": 0.5,
-            "discard_sink": "filtered_out",
         })
 
         result = gate.evaluate({"id": 1}, ctx)  # No "score" field
 
-        assert result.action.kind == "route_to_sink"
-        assert result.action.destinations == ("filtered_out",)
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("discard",)
         assert "missing" in result.action.reason.get("result", "")
 
     def test_missing_field_passes_when_allowed(self, ctx: "PluginContext") -> None:
-        """Row with missing field continues if allow_missing=True."""
+        """Row with missing field returns 'pass' if allow_missing=True."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
         gate = FilterGate({
             "field": "score",
             "greater_than": 0.5,
-            "discard_sink": "filtered_out",
             "allow_missing": True,
         })
 
         result = gate.evaluate({"id": 1}, ctx)  # No "score" field
 
-        assert result.action.kind == "continue"
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("pass",)
 
 
 class TestFilterGateValidation:
@@ -117,7 +118,6 @@ class TestFilterGateValidation:
                 "field": "score",
                 "greater_than": 0.5,
                 "less_than": 0.9,
-                "discard_sink": "filtered_out",
             })
 
     def test_no_operator_raises_error(self) -> None:
@@ -127,7 +127,6 @@ class TestFilterGateValidation:
         with pytest.raises(ValueError, match="No comparison operator specified"):
             FilterGate({
                 "field": "score",
-                "discard_sink": "filtered_out",
             })
 
 
@@ -135,28 +134,28 @@ class TestFilterGateOperators:
     """Test all comparison operators."""
 
     @pytest.mark.parametrize(
-        ("operator", "threshold", "value", "expected_kind"),
+        ("operator", "threshold", "value", "expected_label"),
         [
             # less_than
-            ("less_than", 0.5, 0.3, "continue"),
-            ("less_than", 0.5, 0.5, "route_to_sink"),
-            ("less_than", 0.5, 0.8, "route_to_sink"),
+            ("less_than", 0.5, 0.3, "pass"),
+            ("less_than", 0.5, 0.5, "discard"),
+            ("less_than", 0.5, 0.8, "discard"),
             # equals
-            ("equals", "active", "active", "continue"),
-            ("equals", "active", "inactive", "route_to_sink"),
-            ("equals", 100, 100, "continue"),
-            ("equals", 100, 99, "route_to_sink"),
+            ("equals", "active", "active", "pass"),
+            ("equals", "active", "inactive", "discard"),
+            ("equals", 100, 100, "pass"),
+            ("equals", 100, 99, "discard"),
             # not_equals
-            ("not_equals", "active", "inactive", "continue"),
-            ("not_equals", "active", "active", "route_to_sink"),
+            ("not_equals", "active", "inactive", "pass"),
+            ("not_equals", "active", "active", "discard"),
             # greater_than_or_equal
-            ("greater_than_or_equal", 0.5, 0.5, "continue"),
-            ("greater_than_or_equal", 0.5, 0.6, "continue"),
-            ("greater_than_or_equal", 0.5, 0.4, "route_to_sink"),
+            ("greater_than_or_equal", 0.5, 0.5, "pass"),
+            ("greater_than_or_equal", 0.5, 0.6, "pass"),
+            ("greater_than_or_equal", 0.5, 0.4, "discard"),
             # less_than_or_equal
-            ("less_than_or_equal", 0.5, 0.5, "continue"),
-            ("less_than_or_equal", 0.5, 0.4, "continue"),
-            ("less_than_or_equal", 0.5, 0.6, "route_to_sink"),
+            ("less_than_or_equal", 0.5, 0.5, "pass"),
+            ("less_than_or_equal", 0.5, 0.4, "pass"),
+            ("less_than_or_equal", 0.5, 0.6, "discard"),
         ],
     )
     def test_operator(
@@ -165,7 +164,7 @@ class TestFilterGateOperators:
         operator: str,
         threshold: float | str | int,
         value: float | str | int,
-        expected_kind: str,
+        expected_label: str,
     ) -> None:
         """Parametrized test for all operators."""
         from elspeth.plugins.gates.filter_gate import FilterGate
@@ -173,12 +172,12 @@ class TestFilterGateOperators:
         gate = FilterGate({
             "field": "score",
             operator: threshold,
-            "discard_sink": "filtered_out",
         })
 
         result = gate.evaluate({"id": 1, "score": value}, ctx)
 
-        assert result.action.kind == expected_kind
+        assert result.action.kind == "route"
+        assert result.action.destinations == (expected_label,)
 
 
 class TestFilterGateNestedFields:
@@ -191,7 +190,6 @@ class TestFilterGateNestedFields:
         gate = FilterGate({
             "field": "metrics.score",
             "greater_than": 0.5,
-            "discard_sink": "filtered_out",
         })
 
         result = gate.evaluate(
@@ -199,16 +197,16 @@ class TestFilterGateNestedFields:
             ctx,
         )
 
-        assert result.action.kind == "continue"
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("pass",)
 
     def test_nested_field_routes_when_fails(self, ctx: "PluginContext") -> None:
-        """Nested field that fails condition routes to discard sink."""
+        """Nested field that fails condition routes to 'discard'."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
         gate = FilterGate({
             "field": "metrics.score",
             "greater_than": 0.5,
-            "discard_sink": "filtered_out",
         })
 
         result = gate.evaluate(
@@ -216,24 +214,24 @@ class TestFilterGateNestedFields:
             ctx,
         )
 
-        assert result.action.kind == "route_to_sink"
-        assert result.action.destinations == ("filtered_out",)
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("discard",)
 
     def test_missing_nested_field_routes_to_discard(
         self, ctx: "PluginContext"
     ) -> None:
-        """Missing nested field routes to discard sink."""
+        """Missing nested field routes to 'discard'."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
         gate = FilterGate({
             "field": "metrics.score",
             "greater_than": 0.5,
-            "discard_sink": "filtered_out",
         })
 
         result = gate.evaluate({"id": 1, "metrics": {}}, ctx)
 
-        assert result.action.kind == "route_to_sink"
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("discard",)
         assert "missing" in result.action.reason.get("result", "")
 
     def test_deeply_nested_field(self, ctx: "PluginContext") -> None:
@@ -243,7 +241,6 @@ class TestFilterGateNestedFields:
         gate = FilterGate({
             "field": "data.analysis.metrics.confidence",
             "greater_than_or_equal": 0.9,
-            "discard_sink": "low_confidence",
         })
 
         result = gate.evaluate(
@@ -251,4 +248,5 @@ class TestFilterGateNestedFields:
             ctx,
         )
 
-        assert result.action.kind == "continue"
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("pass",)

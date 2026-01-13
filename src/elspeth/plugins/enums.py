@@ -26,12 +26,12 @@ class RoutingKind(str, Enum):
     """Kinds of routing decisions made by gates.
 
     CONTINUE: Row proceeds to next node in linear path
-    ROUTE_TO_SINK: Row diverts to a named sink
+    ROUTE: Gate returns semantic label, executor resolves via routes config
     FORK_TO_PATHS: Row copies to multiple parallel paths
     """
 
     CONTINUE = "continue"
-    ROUTE_TO_SINK = "route_to_sink"
+    ROUTE = "route"  # Label-based routing via config
     FORK_TO_PATHS = "fork_to_paths"
 
 

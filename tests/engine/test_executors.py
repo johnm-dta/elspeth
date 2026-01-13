@@ -384,7 +384,7 @@ class TestGateExecutor:
         assert len(events) == 0
 
     def test_execute_gate_route(self) -> None:
-        """Gate routes to sink - routing event recorded."""
+        """Gate routes to sink via route label - routing event recorded."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import GateExecutor
         from elspeth.engine.spans import SpanFactory
@@ -412,16 +412,16 @@ class TestGateExecutor:
             config={},
         )
 
-        # Register edge from gate to sink
+        # Register edge from gate to sink using route label
         edge = recorder.register_edge(
             run_id=run.run_id,
             from_node_id=gate_node.node_id,
             to_node_id=sink_node.node_id,
-            label="high_values",
+            label="above",  # Route label, not sink name
             mode="move",
         )
 
-        # Mock gate that routes high values
+        # Mock gate that routes high values using route label
         class ThresholdGate:
             name = "threshold_gate"
             node_id = gate_node.node_id
@@ -430,8 +430,8 @@ class TestGateExecutor:
                 if row.get("value", 0) > 100:
                     return GateResult(
                         row=row,
-                        action=RoutingAction.route_to_sink(
-                            "high_values",
+                        action=RoutingAction.route(
+                            "above",  # Route label
                             reason={"threshold_exceeded": True, "value": row["value"]},
                         ),
                     )
@@ -441,8 +441,10 @@ class TestGateExecutor:
         ctx = PluginContext(run_id=run.run_id, config={})
 
         # Edge map: (node_id, label) -> edge_id
-        edge_map = {(gate_node.node_id, "high_values"): edge.edge_id}
-        executor = GateExecutor(recorder, SpanFactory(), edge_map)
+        edge_map = {(gate_node.node_id, "above"): edge.edge_id}
+        # Route resolution map: (node_id, label) -> sink_name
+        route_resolution_map = {(gate_node.node_id, "above"): "high_values"}
+        executor = GateExecutor(recorder, SpanFactory(), edge_map, route_resolution_map)
 
         token = TokenInfo(
             row_id="row-1",
@@ -466,7 +468,7 @@ class TestGateExecutor:
         )
 
         # Verify outcome
-        assert outcome.result.action.kind == "route_to_sink"
+        assert outcome.result.action.kind == "route"
         assert outcome.sink_name == "high_values"
         assert outcome.child_tokens == []
 
@@ -482,7 +484,7 @@ class TestGateExecutor:
         assert events[0].mode == "move"
 
     def test_missing_edge_raises_error(self) -> None:
-        """Gate routing to unregistered sink raises MissingEdgeError."""
+        """Gate routing to unregistered route label raises MissingEdgeError."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import GateExecutor, MissingEdgeError
         from elspeth.engine.spans import SpanFactory
@@ -501,7 +503,7 @@ class TestGateExecutor:
             config={},
         )
 
-        # Mock gate that routes to a sink that has no edge registered
+        # Mock gate that routes to a label that has no route resolution
         class BrokenGate:
             name = "broken_gate"
             node_id = gate_node.node_id
@@ -509,14 +511,14 @@ class TestGateExecutor:
             def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
                 return GateResult(
                     row=row,
-                    action=RoutingAction.route_to_sink("nonexistent_sink"),
+                    action=RoutingAction.route("nonexistent_label"),
                 )
 
         gate = BrokenGate()
         ctx = PluginContext(run_id=run.run_id, config={})
 
-        # Empty edge map - no edges registered
-        executor = GateExecutor(recorder, SpanFactory(), edge_map={})
+        # Empty route resolution map - label not configured
+        executor = GateExecutor(recorder, SpanFactory(), edge_map={}, route_resolution_map={})
 
         token = TokenInfo(
             row_id="row-1",
@@ -542,7 +544,7 @@ class TestGateExecutor:
 
         # Verify error details
         assert exc_info.value.node_id == gate_node.node_id
-        assert exc_info.value.label == "nonexistent_sink"
+        assert exc_info.value.label == "nonexistent_label"
         assert "Audit trail would be incomplete" in str(exc_info.value)
 
     def test_execute_gate_fork(self) -> None:

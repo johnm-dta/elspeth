@@ -18,6 +18,7 @@ def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
     source -> transforms... -> sinks
 
     For gates, creates additional edges to all sinks (gates can route anywhere).
+    Route labels use sink names for simplicity in tests.
     """
     from elspeth.core.dag import ExecutionGraph
 
@@ -59,6 +60,16 @@ def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
     # Populate internal ID maps so get_sink_id_map() and get_transform_id_map() work
     graph._sink_id_map = sink_ids
     graph._transform_id_map = transform_ids
+
+    # Populate route resolution map: (gate_id, label) -> sink_name
+    # In test graphs, route labels = sink names for simplicity
+    route_resolution_map: dict[tuple[str, str], str] = {}
+    for i, t in enumerate(config.transforms):
+        if hasattr(t, "evaluate"):  # It's a gate
+            gate_id = f"transform_{i}"
+            for sink_name in sink_ids:
+                route_resolution_map[(gate_id, sink_name)] = sink_name
+    graph._route_resolution_map = route_resolution_map
 
     # Set output_sink - use "default" if present, otherwise first sink
     if "default" in sink_ids:
@@ -175,7 +186,7 @@ class TestOrchestrator:
                 if row["value"] > 50:
                     return GateResult(
                         row=row,
-                        action=RoutingAction.route_to_sink("high"),
+                        action=RoutingAction.route("high"),  # Route label (same as sink name in test)
                     )
                 return GateResult(row=row, action=RoutingAction.continue_())
 
@@ -592,17 +603,17 @@ class TestOrchestratorInvalidRouting:
                 pass
 
         class MisroutingGate:
-            """Gate that routes to a sink that doesn't exist."""
+            """Gate that routes to a route label that doesn't exist."""
 
             name = "misrouting_gate"
             input_schema = RowSchema
             output_schema = RowSchema
 
             def evaluate(self, row, ctx):
-                # Route to a sink that wasn't configured
+                # Route to a label that wasn't configured
                 return GateResult(
                     row=row,
-                    action=RoutingAction.route_to_sink("nonexistent_sink"),
+                    action=RoutingAction.route("nonexistent_sink"),
                 )
 
         class CollectSink:
@@ -866,12 +877,12 @@ class TestOrchestratorGateRouting:
         mock_source.name = "csv"
         mock_source.load.return_value = iter([{"id": 1, "score": 0.2}])
 
-        # Mock gate that routes to "flagged"
+        # Mock gate that routes using "suspicious" label (maps to "flagged" sink in routes config)
         mock_gate = MagicMock()
         mock_gate.name = "test_gate"
         mock_gate.evaluate.return_value = GateResult(
             row={"id": 1, "score": 0.2},
-            action=RoutingAction.route_to_sink("flagged", reason={"score": "low"}),
+            action=RoutingAction.route("suspicious", reason={"score": "low"}),  # Uses route label
         )
 
         # Mock sinks - must return proper artifact info from write()

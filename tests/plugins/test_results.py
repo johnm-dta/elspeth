@@ -40,12 +40,12 @@ class TestRoutingAction:
         assert action.destinations == ()  # Tuple, not list
         assert action.mode == "move"
 
-    def test_route_to_sink(self) -> None:
+    def test_route(self) -> None:
         from elspeth.plugins.results import RoutingAction
 
-        action = RoutingAction.route_to_sink("flagged", reason={"confidence": 0.95})
-        assert action.kind == "route_to_sink"
-        assert action.destinations == ("flagged",)  # Tuple, not list
+        action = RoutingAction.route("suspicious", reason={"confidence": 0.95})
+        assert action.kind == "route"
+        assert action.destinations == ("suspicious",)  # Tuple - route label, not sink name
         assert action.reason["confidence"] == 0.95  # Access via mapping
 
     def test_fork_to_paths(self) -> None:
@@ -67,7 +67,7 @@ class TestRoutingAction:
         """Reason dict should be wrapped as immutable mapping."""
         from elspeth.plugins.results import RoutingAction
 
-        action = RoutingAction.route_to_sink("flagged", reason={"score": 0.9})
+        action = RoutingAction.route("suspicious", reason={"score": 0.9})
         # Should not be able to modify reason
         with pytest.raises(TypeError):
             action.reason["score"] = 0.5
@@ -125,10 +125,10 @@ class TestGateResult:
 
         result = GateResult(
             row={"value": 42, "flagged": True},
-            action=RoutingAction.route_to_sink("review", reason={"score": 0.9}),
+            action=RoutingAction.route("suspicious", reason={"score": 0.9}),
         )
-        assert result.action.kind == "route_to_sink"
-        assert result.action.destinations == ("review",)
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("suspicious",)  # Route label, not sink name
 
     def test_has_audit_fields(self) -> None:
         """Phase 3 integration: audit fields must exist."""
@@ -181,14 +181,14 @@ class TestRoutingActionEnums:
         assert action.kind == RoutingKind.CONTINUE
         assert isinstance(action.kind, RoutingKind)
 
-    def test_route_to_sink_uses_enums(self) -> None:
-        """route_to_sink() uses enum types."""
+    def test_route_uses_enums(self) -> None:
+        """route() uses enum types."""
         from elspeth.plugins.enums import RoutingKind, RoutingMode
         from elspeth.plugins.results import RoutingAction
 
-        action = RoutingAction.route_to_sink("output", mode=RoutingMode.COPY)
+        action = RoutingAction.route("suspicious", mode=RoutingMode.COPY)
 
-        assert action.kind == RoutingKind.ROUTE_TO_SINK
+        assert action.kind == RoutingKind.ROUTE
         assert action.mode == RoutingMode.COPY
         assert isinstance(action.kind, RoutingKind)
         assert isinstance(action.mode, RoutingMode)

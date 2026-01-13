@@ -292,7 +292,7 @@ class TestRowProcessorGates:
         assert result.outcome == "completed"
 
     def test_gate_route_to_sink(self) -> None:
-        """Gate routing to sink returns routed outcome with sink name."""
+        """Gate routing via route label returns routed outcome with sink name."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
@@ -325,12 +325,12 @@ class TestRowProcessorGates:
             config={},
         )
 
-        # Register edge for routing
+        # Register edge using route label
         edge = recorder.register_edge(
             run_id=run.run_id,
             from_node_id=gate.node_id,
             to_node_id=sink.node_id,
-            label="high_values",
+            label="above",  # Route label, not sink name
             mode="move",
         )
 
@@ -342,18 +342,21 @@ class TestRowProcessorGates:
                 if row.get("value", 0) > 100:
                     return GateResult(
                         row=row,
-                        action=RoutingAction.route_to_sink("high_values"),
+                        action=RoutingAction.route("above"),  # Route label
                     )
                 return GateResult(row=row, action=RoutingAction.continue_())
 
         ctx = PluginContext(run_id=run.run_id, config={})
-        edge_map = {(gate.node_id, "high_values"): edge.edge_id}
+        edge_map = {(gate.node_id, "above"): edge.edge_id}
+        # Route resolution map: label -> sink_name
+        route_resolution_map = {(gate.node_id, "above"): "high_values"}
         processor = RowProcessor(
             recorder=recorder,
             span_factory=SpanFactory(),
             run_id=run.run_id,
             source_node_id=source.node_id,
             edge_map=edge_map,
+            route_resolution_map=route_resolution_map,
         )
 
         result = processor.process_row(

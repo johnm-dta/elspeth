@@ -64,8 +64,9 @@ class TestPluginSystemIntegration:
                 if row["doubled"] > self.config["threshold"]:
                     return GateResult(
                         row=row,
-                        action=RoutingAction.route_to_sink("high"),
+                        action=RoutingAction.route("above"),  # Route label - sent elsewhere
                     )
+                # Below threshold: continue to next step (sink in this test)
                 return GateResult(row=row, action=RoutingAction.continue_())
 
         class MemorySink(BaseSink):

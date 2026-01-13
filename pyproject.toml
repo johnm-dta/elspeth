@@ -68,6 +68,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.1",
+    "pytest-asyncio>=0.23",
     "hypothesis>=6.98",
     "mypy>=1.8",
     "ruff>=0.3",
@@ -171,6 +172,7 @@ addopts = [
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests requiring external services",
+    "asyncio: marks tests as async (handled by pytest-asyncio)",
 ]
 
 # === Coverage Configuration ===

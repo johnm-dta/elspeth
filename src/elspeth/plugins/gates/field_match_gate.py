@@ -22,19 +22,27 @@ class FieldMatchGate(BaseGate):
     """Route rows based on field value matching.
 
     Supports exact matching, regex patterns, and comma-separated lists.
+    Returns route labels that are resolved by the executor via routes config.
 
     Config options:
         field: Field to match (supports dot notation for nested fields)
-        routes: Dict mapping match values/patterns to sink names
+        matches: Dict mapping match values/patterns to route labels
         mode: "exact" (default) or "regex"
-        default_sink: Sink for non-matching values (optional, else continue)
+        default_label: Route label for non-matching values (optional, else "no_match")
         strict: If True, error on missing field (default: False)
         case_insensitive: If True, match case-insensitively (default: False)
 
-    Route keys can be:
-        - Single value: "active" -> "active_sink"
-        - Comma-separated: "US,CA,MX" -> "north_america_sink"
-        - Regex pattern (when mode="regex"): r".*@example\\.com$" -> "internal_sink"
+    Match keys can be:
+        - Single value: "active" -> "active_label"
+        - Comma-separated: "US,CA,MX" -> "north_america"
+        - Regex pattern (when mode="regex"): r".*@example\\.com$" -> "internal"
+
+    The routes config maps these labels to destinations:
+        routes:
+          active_label: active_sink
+          north_america: na_sink
+          internal: internal_sink
+          no_match: continue  # or a sink name
     """
 
     name = "field_match_gate"
@@ -44,31 +52,31 @@ class FieldMatchGate(BaseGate):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self._field: str = config["field"]
-        self._routes: dict[str, str] = config["routes"]
+        self._matches: dict[str, str] = config["matches"]
         self._mode: str = config.get("mode", "exact")
-        self._default_sink: str | None = config.get("default_sink")
+        self._default_label: str = config.get("default_label", "no_match")
         self._strict: bool = config.get("strict", False)
         self._case_insensitive: bool = config.get("case_insensitive", False)
 
-        # Pre-process routes based on mode
+        # Pre-process matches based on mode
         if self._mode == "regex":
             # Compile regex patterns
             flags = re.IGNORECASE if self._case_insensitive else 0
-            self._regex_routes: list[tuple[re.Pattern[str], str]] = [
-                (re.compile(pattern, flags), sink)
-                for pattern, sink in self._routes.items()
+            self._regex_matches: list[tuple[re.Pattern[str], str]] = [
+                (re.compile(pattern, flags), label)
+                for pattern, label in self._matches.items()
             ]
-            self._expanded_routes: dict[str, str] = {}
+            self._expanded_matches: dict[str, str] = {}
         else:
             # Expand comma-separated keys into individual mappings
-            self._expanded_routes = {}
-            for key, sink in self._routes.items():
+            self._expanded_matches = {}
+            for key, label in self._matches.items():
                 for value in key.split(","):
                     normalized = value.strip()
                     if self._case_insensitive:
                         normalized = normalized.lower()
-                    self._expanded_routes[normalized] = sink
-            self._regex_routes = []
+                    self._expanded_matches[normalized] = label
+            self._regex_matches = []
 
     def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
         """Evaluate field and return routing decision.
@@ -78,7 +86,7 @@ class FieldMatchGate(BaseGate):
             ctx: Plugin context
 
         Returns:
-            GateResult with routing action
+            GateResult with route label
 
         Raises:
             ValueError: If the field is missing and strict mode is enabled
@@ -91,7 +99,7 @@ class FieldMatchGate(BaseGate):
                 raise ValueError(f"Required field '{self._field}' not found in row")
             return GateResult(
                 row=row,
-                action=RoutingAction.continue_(reason={
+                action=RoutingAction.route("missing_field", reason={
                     "field": self._field,
                     "result": "missing_field",
                 }),
@@ -107,45 +115,41 @@ class FieldMatchGate(BaseGate):
             "mode": self._mode,
         }
 
-        # Try to find matching route
-        sink_name = self._find_matching_sink(str_value)
+        # Try to find matching route label
+        route_label = self._find_matching_label(str_value)
 
-        if sink_name:
-            reason["matched_sink"] = sink_name
+        if route_label:
+            reason["matched_label"] = route_label
             return GateResult(
                 row=row,
-                action=RoutingAction.route_to_sink(sink_name, reason=reason),
+                action=RoutingAction.route(route_label, reason=reason),
             )
 
-        # No match - use default or continue
-        if self._default_sink:
-            reason["result"] = "default"
-            reason["matched_sink"] = self._default_sink
-            return GateResult(
-                row=row,
-                action=RoutingAction.route_to_sink(self._default_sink, reason=reason),
-            )
+        # No match - use default label
+        reason["result"] = "default"
+        reason["matched_label"] = self._default_label
+        return GateResult(
+            row=row,
+            action=RoutingAction.route(self._default_label, reason=reason),
+        )
 
-        reason["result"] = "no_match"
-        return GateResult(row=row, action=RoutingAction.continue_(reason=reason))
-
-    def _find_matching_sink(self, value: str) -> str | None:
-        """Find sink for the given value.
+    def _find_matching_label(self, value: str) -> str | None:
+        """Find route label for the given value.
 
         Args:
             value: String value to match
 
         Returns:
-            Sink name if matched, None otherwise
+            Route label if matched, None otherwise
         """
         if self._mode == "regex":
-            for pattern, sink in self._regex_routes:
+            for pattern, label in self._regex_matches:
                 if pattern.search(value):
-                    return sink
+                    return label
             return None
         else:
             lookup_value = value.lower() if self._case_insensitive else value
-            return self._expanded_routes.get(lookup_value)
+            return self._expanded_matches.get(lookup_value)
 
     def _get_nested(self, data: dict[str, Any], path: str) -> Any:
         """Get value from nested dict using dot notation.

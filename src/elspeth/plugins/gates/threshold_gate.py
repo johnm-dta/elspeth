@@ -20,18 +20,23 @@ class ThresholdGateSchema(PluginSchema):
 class ThresholdGate(BaseGate):
     """Route rows based on numeric threshold comparison.
 
-    Compares a numeric field to a threshold and routes to different sinks
-    based on whether the value is above or below.
+    Compares a numeric field to a threshold and returns route labels
+    "above" or "below" based on the comparison result.
 
     Config options:
         field: Field to compare (supports dot notation for nested fields)
         threshold: Numeric threshold value
-        above_sink: Sink name for values above threshold (optional)
-        below_sink: Sink name for values below threshold (optional)
-        inclusive: If True, >= routes to above_sink (default: False, > routes above)
+        inclusive: If True, >= returns "above" (default: False, > returns "above")
+        cast: If True, attempt to cast string values to numbers (default: True)
 
-    If above_sink or below_sink is not specified, rows that would go there
-    continue to the next transform instead.
+    Route labels returned:
+        "above": Value is above (or equal if inclusive) threshold
+        "below": Value is below threshold
+
+    The routes config maps these labels to destinations:
+        routes:
+          above: high_scores  # or "continue"
+          below: low_scores   # or "continue"
     """
 
     name = "threshold_gate"
@@ -42,9 +47,8 @@ class ThresholdGate(BaseGate):
         super().__init__(config)
         self._field: str = config["field"]
         self._threshold: float = config["threshold"]
-        self._above_sink: str | None = config.get("above_sink")
-        self._below_sink: str | None = config.get("below_sink")
         self._inclusive: bool = config.get("inclusive", False)
+        self._cast: bool = config.get("cast", True)  # Cast strings to numbers by default
 
     def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
         """Evaluate threshold and return routing decision.
@@ -66,8 +70,15 @@ class ThresholdGate(BaseGate):
         if value is _MISSING:
             raise ValueError(f"Required field '{self._field}' not found in row")
 
-        # Check for numeric type
-        if not isinstance(value, (int, float)):
+        # Handle type coercion for string values (common with CSV sources)
+        if isinstance(value, str) and self._cast:
+            try:
+                value = float(value)
+            except ValueError:
+                raise TypeError(
+                    f"Field '{self._field}' must be numeric, got non-numeric string: '{value}'"
+                )
+        elif not isinstance(value, (int, float)):
             raise TypeError(
                 f"Field '{self._field}' must be numeric, got {type(value).__name__}"
             )
@@ -78,30 +89,23 @@ class ThresholdGate(BaseGate):
         else:
             is_above = value > self._threshold
 
+        # Determine route label
+        route_label = "above" if is_above else "below"
+
         # Build reason for audit trail
         reason = {
             "field": self._field,
             "value": value,
             "threshold": self._threshold,
             "comparison": ">=" if self._inclusive else ">",
-            "result": "above" if is_above else "below",
+            "result": route_label,
         }
 
-        # Route based on comparison
-        if is_above:
-            if self._above_sink:
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.route_to_sink(self._above_sink, reason=reason),
-                )
-            return GateResult(row=row, action=RoutingAction.continue_(reason=reason))
-        else:
-            if self._below_sink:
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.route_to_sink(self._below_sink, reason=reason),
-                )
-            return GateResult(row=row, action=RoutingAction.continue_(reason=reason))
+        # Return route label - executor resolves via routes config
+        return GateResult(
+            row=row,
+            action=RoutingAction.route(route_label, reason=reason),
+        )
 
     def _get_nested(self, data: dict[str, Any], path: str) -> Any:
         """Get value from nested dict using dot notation.

@@ -104,9 +104,9 @@ class BaseGate(ABC):
                 if self._is_suspicious(row):
                     return GateResult(
                         row=row,
-                        action=RoutingAction.route_to_sink("review"),
+                        action=RoutingAction.route("suspicious"),  # Resolved via routes config
                     )
-                return GateResult(row=row, action=RoutingAction.continue_())
+                return GateResult(row=row, action=RoutingAction.route("normal"))
     """
 
     name: str

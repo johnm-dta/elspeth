@@ -141,12 +141,12 @@ class TestGateProtocol:
                 if row["value"] > self.threshold:
                     return GateResult(
                         row=row,
-                        action=RoutingAction.route_to_sink(
-                            "high_values",
+                        action=RoutingAction.route(
+                            "above",  # Route label, not sink name
                             reason={"value": row["value"], "threshold": self.threshold},
                         ),
                     )
-                return GateResult(row=row, action=RoutingAction.continue_())
+                return GateResult(row=row, action=RoutingAction.route("below"))
 
             def on_register(self, ctx: PluginContext) -> None:
                 pass
@@ -164,14 +164,15 @@ class TestGateProtocol:
 
         ctx = PluginContext(run_id="test", config={})
 
-        # Below threshold - continue
+        # Below threshold - route to "below" label
         result = gate.evaluate({"value": 30}, ctx)
-        assert result.action.kind == "continue"
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("below",)
 
-        # Above threshold - route
+        # Above threshold - route to "above" label
         result = gate.evaluate({"value": 100}, ctx)
-        assert result.action.kind == "route_to_sink"
-        assert result.action.destinations == ("high_values",)
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("above",)
 
 
 class TestAggregationProtocol:

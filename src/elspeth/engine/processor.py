@@ -70,6 +70,7 @@ class RowProcessor:
         source_node_id: str,
         *,
         edge_map: dict[tuple[str, str], str] | None = None,
+        route_resolution_map: dict[tuple[str, str], str] | None = None,
     ) -> None:
         """Initialize processor.
 
@@ -79,6 +80,7 @@ class RowProcessor:
             run_id: Current run ID
             source_node_id: Source node ID
             edge_map: Map of (node_id, label) -> edge_id
+            route_resolution_map: Map of (node_id, label) -> "continue" | sink_name
         """
         self._recorder = recorder
         self._spans = span_factory
@@ -87,7 +89,9 @@ class RowProcessor:
 
         self._token_manager = TokenManager(recorder)
         self._transform_executor = TransformExecutor(recorder, span_factory)
-        self._gate_executor = GateExecutor(recorder, span_factory, edge_map)
+        self._gate_executor = GateExecutor(
+            recorder, span_factory, edge_map, route_resolution_map
+        )
         self._aggregation_executor = AggregationExecutor(
             recorder, span_factory, run_id
         )
@@ -138,12 +142,13 @@ class RowProcessor:
                     )
                     current_token = outcome.updated_token
 
-                    if outcome.result.action.kind == "route_to_sink":
+                    # Check if gate routed to a sink (sink_name set by executor)
+                    if outcome.sink_name is not None:
                         return RowResult(
                             token=current_token,
                             final_data=current_token.row_data,
                             outcome="routed",
-                            sink_name=outcome.sink_name,  # GateOutcome provides this!
+                            sink_name=outcome.sink_name,
                         )
                     elif outcome.result.action.kind == "fork_to_paths":
                         # NOTE: For full DAG support, we'd push child_tokens to a work queue

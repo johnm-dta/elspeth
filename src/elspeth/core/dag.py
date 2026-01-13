@@ -47,6 +47,7 @@ class ExecutionGraph:
         self._transform_id_map: dict[int, str] = {}
         self._output_sink: str = ""
         self._route_label_map: dict[tuple[str, str], str] = {}  # (gate_node, sink_name) -> route_label
+        self._route_resolution_map: dict[tuple[str, str], str] = {}  # (gate_node, label) -> sink_name | "continue"
 
     @property
     def node_count(self) -> int:
@@ -277,8 +278,12 @@ class ExecutionGraph:
             # Creates edge: gate_node -> flagged_node with label="suspicious"
             if is_gate and plugin_config.routes:
                 for route_label, target in plugin_config.routes.items():
+                    # Store route resolution: (gate_node, route_label) -> target
+                    # target is either "continue" or a sink name
+                    graph._route_resolution_map[(tid, route_label)] = target
+
                     if target == "continue":
-                        continue  # Not a sink route
+                        continue  # Not a sink route - no edge to create
                     if target not in sink_ids:
                         raise GraphValidationError(
                             f"Gate '{plugin_config.plugin}' routes '{route_label}' "
@@ -299,12 +304,15 @@ class ExecutionGraph:
         graph._output_sink = config.output_sink
 
         # Edge from last transform (or source) to output sink
-        graph.add_edge(
-            prev_node_id,
-            sink_ids[config.output_sink],
-            label="continue",
-            mode="move",
-        )
+        # Only add if no edge already exists to this sink (gate routes may have created one)
+        output_sink_node = sink_ids[config.output_sink]
+        if not graph._graph.has_edge(prev_node_id, output_sink_node):
+            graph.add_edge(
+                prev_node_id,
+                output_sink_node,
+                label="continue",
+                mode="move",
+            )
 
         return graph
 
@@ -345,3 +353,13 @@ class ExecutionGraph:
 
         # Default path uses "continue" label
         return "continue"
+
+    def get_route_resolution_map(self) -> dict[tuple[str, str], str]:
+        """Get the route resolution map for all gates.
+
+        Returns:
+            Dict mapping (gate_node_id, route_label) -> destination.
+            Destination is either "continue" or a sink name.
+            Used by the executor to resolve route labels from gates.
+        """
+        return dict(self._route_resolution_map)

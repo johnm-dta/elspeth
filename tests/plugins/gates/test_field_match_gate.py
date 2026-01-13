@@ -1,4 +1,9 @@
-"""Tests for FieldMatchGate."""
+"""Tests for FieldMatchGate.
+
+FieldMatchGate returns route LABELS, not sink names.
+Config uses 'matches' (field_value -> route_label) instead of 'routes'.
+The routes config in settings.yaml maps labels to sinks.
+"""
 
 import pytest
 
@@ -20,7 +25,7 @@ class TestFieldMatchGate:
 
         gate = FieldMatchGate({
             "field": "status",
-            "routes": {"active": "active_sink", "deleted": "archive_sink"},
+            "matches": {"active": "active_route", "deleted": "archive_route"},
         })
         assert isinstance(gate, GateProtocol)
 
@@ -38,51 +43,52 @@ class TestFieldMatchGate:
 
         gate = FieldMatchGate({
             "field": "status",
-            "routes": {
-                "active": "active_sink",
-                "pending": "pending_sink",
-                "deleted": "archive_sink",
+            "matches": {
+                "active": "active_route",
+                "pending": "pending_route",
+                "deleted": "archive_route",
             },
         })
 
         active_row = {"id": 1, "status": "active"}
         result = gate.evaluate(active_row, ctx)
-        assert result.action.kind == "route_to_sink"
-        assert result.action.destinations == ("active_sink",)
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("active_route",)  # Route label
 
         pending_row = {"id": 2, "status": "pending"}
         result = gate.evaluate(pending_row, ctx)
-        assert result.action.destinations == ("pending_sink",)
+        assert result.action.destinations == ("pending_route",)
 
-    def test_no_match_continues(self, ctx: PluginContext) -> None:
-        """Continue to next transform when no route matches."""
+    def test_no_match_uses_default_label(self, ctx: PluginContext) -> None:
+        """Use default_label when no match found."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
         gate = FieldMatchGate({
             "field": "status",
-            "routes": {"active": "active_sink"},
+            "matches": {"active": "active_route"},
+            "default_label": "other",
         })
         row = {"id": 1, "status": "unknown"}
 
         result = gate.evaluate(row, ctx)
 
-        assert result.action.kind == "continue"
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("other",)
 
-    def test_default_route_on_no_match(self, ctx: PluginContext) -> None:
-        """Use default_sink when no route matches."""
+    def test_no_match_without_default_uses_no_match(self, ctx: PluginContext) -> None:
+        """Use 'no_match' label when no default_label specified."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
         gate = FieldMatchGate({
             "field": "status",
-            "routes": {"active": "active_sink"},
-            "default_sink": "other_sink",
+            "matches": {"active": "active_route"},
         })
         row = {"id": 1, "status": "unknown"}
 
         result = gate.evaluate(row, ctx)
 
-        assert result.action.kind == "route_to_sink"
-        assert result.action.destinations == ("other_sink",)
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("no_match",)
 
     def test_regex_route_matching(self, ctx: PluginContext) -> None:
         """Route based on regex pattern match."""
@@ -91,39 +97,39 @@ class TestFieldMatchGate:
         gate = FieldMatchGate({
             "field": "email",
             "mode": "regex",
-            "routes": {
-                r".*@example\.com$": "internal_sink",
-                r".*@partner\.org$": "partner_sink",
+            "matches": {
+                r".*@example\.com$": "internal",
+                r".*@partner\.org$": "partner",
             },
         })
 
         internal_row = {"id": 1, "email": "alice@example.com"}
         result = gate.evaluate(internal_row, ctx)
-        assert result.action.destinations == ("internal_sink",)
+        assert result.action.destinations == ("internal",)
 
         partner_row = {"id": 2, "email": "bob@partner.org"}
         result = gate.evaluate(partner_row, ctx)
-        assert result.action.destinations == ("partner_sink",)
+        assert result.action.destinations == ("partner",)
 
-    def test_list_values_in_routes(self, ctx: PluginContext) -> None:
-        """Route multiple values to same sink."""
+    def test_list_values_in_matches(self, ctx: PluginContext) -> None:
+        """Route multiple values to same label."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
         gate = FieldMatchGate({
             "field": "country",
-            "routes": {
-                "US,CA,MX": "north_america_sink",  # Comma-separated
-                "UK,FR,DE": "europe_sink",
+            "matches": {
+                "US,CA,MX": "north_america",  # Comma-separated
+                "UK,FR,DE": "europe",
             },
         })
 
         us_row = {"id": 1, "country": "US"}
         result = gate.evaluate(us_row, ctx)
-        assert result.action.destinations == ("north_america_sink",)
+        assert result.action.destinations == ("north_america",)
 
         uk_row = {"id": 2, "country": "UK"}
         result = gate.evaluate(uk_row, ctx)
-        assert result.action.destinations == ("europe_sink",)
+        assert result.action.destinations == ("europe",)
 
     def test_nested_field_access(self, ctx: PluginContext) -> None:
         """Access nested field with dot notation."""
@@ -131,25 +137,27 @@ class TestFieldMatchGate:
 
         gate = FieldMatchGate({
             "field": "meta.type",
-            "routes": {"internal": "internal_sink"},
+            "matches": {"internal": "internal_route"},
         })
         row = {"id": 1, "meta": {"type": "internal"}}
 
         result = gate.evaluate(row, ctx)
-        assert result.action.destinations == ("internal_sink",)
+        assert result.action.destinations == ("internal_route",)
 
-    def test_missing_field_continues(self, ctx: PluginContext) -> None:
-        """Continue when field is missing (no error by default)."""
+    def test_missing_field_uses_default_label(self, ctx: PluginContext) -> None:
+        """Use default_label when field is missing."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
         gate = FieldMatchGate({
             "field": "status",
-            "routes": {"active": "active_sink"},
+            "matches": {"active": "active_route"},
+            "default_label": "missing_field",
         })
         row = {"id": 1}  # No status field
 
         result = gate.evaluate(row, ctx)
-        assert result.action.kind == "continue"
+        assert result.action.kind == "route"
+        assert result.action.destinations == ("missing_field",)
 
     def test_strict_missing_field_raises_error(self, ctx: PluginContext) -> None:
         """Error when field is missing in strict mode."""
@@ -157,7 +165,7 @@ class TestFieldMatchGate:
 
         gate = FieldMatchGate({
             "field": "status",
-            "routes": {"active": "active_sink"},
+            "matches": {"active": "active_route"},
             "strict": True,
         })
         row = {"id": 1}
@@ -171,17 +179,17 @@ class TestFieldMatchGate:
 
         gate = FieldMatchGate({
             "field": "status",
-            "routes": {"active": "active_sink"},
+            "matches": {"active": "active_route"},
             "case_insensitive": True,
         })
 
         upper_row = {"id": 1, "status": "ACTIVE"}
         result = gate.evaluate(upper_row, ctx)
-        assert result.action.destinations == ("active_sink",)
+        assert result.action.destinations == ("active_route",)
 
         mixed_row = {"id": 2, "status": "Active"}
         result = gate.evaluate(mixed_row, ctx)
-        assert result.action.destinations == ("active_sink",)
+        assert result.action.destinations == ("active_route",)
 
     def test_routing_includes_reason(self, ctx: PluginContext) -> None:
         """RoutingAction includes reason with match details."""
@@ -189,7 +197,7 @@ class TestFieldMatchGate:
 
         gate = FieldMatchGate({
             "field": "status",
-            "routes": {"active": "active_sink"},
+            "matches": {"active": "active_route"},
         })
         row = {"id": 1, "status": "active"}
 

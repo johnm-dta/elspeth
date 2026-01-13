@@ -41,6 +41,11 @@ class TestLandscapeExports:
         assert BatchMember is not None
         assert RoutingEvent is not None
 
+    def test_can_import_exporter(self) -> None:
+        from elspeth.core.landscape import LandscapeExporter
+
+        assert LandscapeExporter is not None
+
     def test_can_import_all_exports(self) -> None:
         """Verify __all__ exports are importable."""
         from elspeth.core.landscape import (
@@ -52,6 +57,7 @@ class TestLandscapeExports:
             Call,
             Edge,
             LandscapeDB,
+            LandscapeExporter,
             LandscapeRecorder,
             Node,
             NodeState,
@@ -82,6 +88,7 @@ class TestLandscapeExports:
             x is not None
             for x in [
                 LandscapeDB,
+                LandscapeExporter,
                 LandscapeRecorder,
                 Artifact,
                 Batch,

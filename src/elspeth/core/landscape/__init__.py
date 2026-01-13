@@ -18,6 +18,7 @@ Model Classes:
 """
 
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.exporter import LandscapeExporter
 from elspeth.core.landscape.lineage import LineageResult, explain
 from elspeth.core.landscape.models import (
     Artifact,
@@ -60,6 +61,7 @@ __all__ = [
     "Call",
     "Edge",
     "LandscapeDB",
+    "LandscapeExporter",
     "LandscapeRecorder",
     "LineageResult",
     "Node",

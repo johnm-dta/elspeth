@@ -5,6 +5,7 @@ with a RoutingAction indicating where the row should go.
 """
 
 from elspeth.plugins.gates.field_match_gate import FieldMatchGate
+from elspeth.plugins.gates.filter_gate import FilterGate
 from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
-__all__ = ["FieldMatchGate", "ThresholdGate"]
+__all__ = ["FieldMatchGate", "FilterGate", "ThresholdGate"]

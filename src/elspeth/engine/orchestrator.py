@@ -145,8 +145,11 @@ class Orchestrator:
                 config=node_info.config,
             )
 
-        # Register edges from graph
+        # Register edges from graph - key by (from_node, to_sink_name) for lookup
         edge_map: dict[tuple[str, str], str] = {}
+        sink_id_map = graph.get_sink_id_map()
+        sink_id_to_name = {v: k for k, v in sink_id_map.items()}  # Reverse mapping
+
         for from_id, to_id, edge_data in graph.get_edges():
             edge = recorder.register_edge(
                 run_id=run_id,
@@ -155,13 +158,20 @@ class Orchestrator:
                 label=edge_data["label"],
                 mode=edge_data["mode"],
             )
-            edge_map[(from_id, edge_data["label"])] = edge.edge_id
+            # Key by sink NAME (what gates return), not route label
+            # to_id might be a sink or a transform - only map sinks
+            if to_id in sink_id_to_name:
+                sink_name = sink_id_to_name[to_id]
+                edge_map[(from_id, sink_name)] = edge.edge_id
+            else:
+                # Non-sink edges (transform chains) - keep label-based key
+                edge_map[(from_id, edge_data["label"])] = edge.edge_id
 
         # Get explicit node ID mappings from graph
         source_id = graph.get_source()
         if source_id is None:
             raise ValueError("Graph has no source node")
-        sink_id_map = graph.get_sink_id_map()
+        # sink_id_map already fetched above for edge_map construction
         transform_id_map = graph.get_transform_id_map()
         output_sink_name = graph.get_output_sink()
 

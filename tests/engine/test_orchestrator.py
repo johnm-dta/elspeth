@@ -822,3 +822,86 @@ class TestOrchestratorOutputSinkRouting:
         assert result.rows_succeeded == 1
         assert mock_results_sink.write.called, "results sink should receive completed rows"
         assert not mock_errors_sink.write.called, "errors sink should not receive completed rows"
+
+
+class TestOrchestratorGateRouting:
+    """Test that gate routing works with route labels."""
+
+    def test_gate_routes_to_named_sink(self) -> None:
+        """Gate can route rows to a named sink using route labels."""
+        from unittest.mock import MagicMock
+
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            RowPluginSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import GateResult, RoutingAction
+
+        db = LandscapeDB.in_memory()
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "results": SinkSettings(plugin="csv"),
+                "flagged": SinkSettings(plugin="csv"),
+            },
+            row_plugins=[
+                RowPluginSettings(
+                    plugin="test_gate",
+                    type="gate",
+                    routes={"suspicious": "flagged", "clean": "continue"},
+                ),
+            ],
+            output_sink="results",
+        )
+        graph = ExecutionGraph.from_config(settings)
+
+        # Mock source
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([{"id": 1, "score": 0.2}])
+
+        # Mock gate that routes to "flagged"
+        mock_gate = MagicMock()
+        mock_gate.name = "test_gate"
+        mock_gate.evaluate.return_value = GateResult(
+            row={"id": 1, "score": 0.2},
+            action=RoutingAction.route_to_sink("flagged", reason={"score": "low"}),
+        )
+
+        # Mock sinks - must return proper artifact info from write()
+        mock_results = MagicMock()
+        mock_results.name = "csv"
+        mock_results.write.return_value = {
+            "path": "memory",
+            "size_bytes": 0,
+            "content_hash": "abc123",
+        }
+
+        mock_flagged = MagicMock()
+        mock_flagged.name = "csv"
+        mock_flagged.write.return_value = {
+            "path": "memory",
+            "size_bytes": 0,
+            "content_hash": "abc123",
+        }
+
+        pipeline_config = PipelineConfig(
+            source=mock_source,
+            transforms=[mock_gate],
+            sinks={"results": mock_results, "flagged": mock_flagged},
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(pipeline_config, graph=graph)
+
+        # Row should be routed, not completed
+        assert result.rows_processed == 1
+        assert result.rows_routed == 1
+        assert mock_flagged.write.called, "flagged sink should receive routed row"
+        assert not mock_results.write.called, "results sink should not receive routed row"

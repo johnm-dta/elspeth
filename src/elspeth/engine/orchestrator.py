@@ -122,91 +122,68 @@ class Orchestrator:
         config: PipelineConfig,
         graph: ExecutionGraph,
     ) -> RunResult:
-        """Execute the run (internal).
+        """Execute the run using the execution graph.
 
-        Note: The graph parameter is accepted but not yet used for execution.
-        Task 10 will wire DAG-driven execution. Currently execution still
-        follows the linear PipelineConfig.
+        The graph provides:
+        - Node IDs and metadata via topological_order() and get_node_info()
+        - Edges via get_edges()
+        - Explicit ID mappings via get_sink_id_map() and get_transform_id_map()
         """
 
-        # Register source node
-        source_node = recorder.register_node(
-            run_id=run_id,
-            plugin_name=config.source.name,
-            node_type=NodeType.SOURCE,
-            plugin_version="1.0.0",
-            config={},
-            sequence=0,
-        )
+        # Get execution order from graph
+        execution_order = graph.topological_order()
 
-        # Register transform nodes and track gates for sink edge registration
+        # Register nodes with Landscape using graph's node IDs
+        for node_id in execution_order:
+            node_info = graph.get_node_info(node_id)
+            recorder.register_node(
+                run_id=run_id,
+                node_id=node_id,  # Use graph's ID
+                plugin_name=node_info.plugin_name,
+                node_type=NodeType(node_info.node_type),  # Already lowercase
+                plugin_version="1.0.0",
+                config=node_info.config,
+            )
+
+        # Register edges from graph
         edge_map: dict[tuple[str, str], str] = {}
-        prev_node_id = source_node.node_id
-        gate_node_ids: list[str] = []  # Track gates that may route to sinks
-
-        for i, transform in enumerate(config.transforms):
-            is_gate = hasattr(transform, "evaluate")
-            node_type = NodeType.GATE if is_gate else NodeType.TRANSFORM
-            node = recorder.register_node(
-                run_id=run_id,
-                plugin_name=transform.name,
-                node_type=node_type,
-                plugin_version="1.0.0",
-                config={},
-                sequence=i + 1,
-            )
-            # Set node_id on plugin (see class docstring)
-            transform.node_id = node.node_id
-
-            # Track gates - they may route to any sink
-            if is_gate:
-                gate_node_ids.append(node.node_id)
-
-            # Register continue edge
+        for from_id, to_id, edge_data in graph.get_edges():
             edge = recorder.register_edge(
                 run_id=run_id,
-                from_node_id=prev_node_id,
-                to_node_id=node.node_id,
-                label="continue",
-                mode="move",
+                from_node_id=from_id,
+                to_node_id=to_id,
+                label=edge_data["label"],
+                mode=edge_data["mode"],
             )
-            edge_map[(prev_node_id, "continue")] = edge.edge_id
-            prev_node_id = node.node_id
+            edge_map[(from_id, edge_data["label"])] = edge.edge_id
 
-        # Register sink nodes
-        sink_nodes: dict[str, Any] = {}
+        # Get explicit node ID mappings from graph
+        source_id = graph.get_source()
+        if source_id is None:
+            raise ValueError("Graph has no source node")
+        sink_id_map = graph.get_sink_id_map()
+        transform_id_map = graph.get_transform_id_map()
+
+        # Set node_id on source plugin
+        config.source.node_id = source_id
+
+        # Set node_id on transforms using graph's transform_id_map
+        for seq, transform in enumerate(config.transforms):
+            if seq not in transform_id_map:
+                raise ValueError(
+                    f"Transform at sequence {seq} not found in graph. "
+                    f"Graph has mappings for sequences: {list(transform_id_map.keys())}"
+                )
+            transform.node_id = transform_id_map[seq]
+
+        # Set node_id on sinks using explicit mapping
         for sink_name, sink in config.sinks.items():
-            node = recorder.register_node(
-                run_id=run_id,
-                plugin_name=sink.name,
-                node_type=NodeType.SINK,
-                plugin_version="1.0.0",
-                config={},
-            )
-            sink.node_id = node.node_id
-            sink_nodes[sink_name] = node
-
-            # Register edge from last transform to sink
-            edge = recorder.register_edge(
-                run_id=run_id,
-                from_node_id=prev_node_id,
-                to_node_id=node.node_id,
-                label=sink_name,
-                mode="move",
-            )
-            edge_map[(prev_node_id, sink_name)] = edge.edge_id
-
-            # CRITICAL: Register edges from ALL gates to this sink
-            for gate_node_id in gate_node_ids:
-                if gate_node_id != prev_node_id:  # Don't duplicate
-                    gate_edge = recorder.register_edge(
-                        run_id=run_id,
-                        from_node_id=gate_node_id,
-                        to_node_id=node.node_id,
-                        label=sink_name,
-                        mode="move",
-                    )
-                    edge_map[(gate_node_id, sink_name)] = gate_edge.edge_id
+            if sink_name not in sink_id_map:
+                raise ValueError(
+                    f"Sink '{sink_name}' not found in graph. "
+                    f"Available sinks: {list(sink_id_map.keys())}"
+                )
+            sink.node_id = sink_id_map[sink_name]
 
         # Create context
         # Note: landscape field uses Any type since PluginContext.LandscapeRecorder
@@ -222,7 +199,7 @@ class Orchestrator:
             recorder=recorder,
             span_factory=self._span_factory,
             run_id=run_id,
-            source_node_id=source_node.node_id,
+            source_node_id=source_id,
             edge_map=edge_map,
         )
 

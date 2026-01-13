@@ -33,10 +33,12 @@ def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
     # Add source
     graph.add_node("source", node_type="source", plugin_name=config.source.name)
 
-    # Add transforms
+    # Add transforms and populate transform_id_map
+    transform_ids: dict[int, str] = {}
     prev = "source"
     for i, t in enumerate(config.transforms):
         node_id = f"transform_{i}"
+        transform_ids[i] = node_id
         is_gate = hasattr(t, "evaluate")
         graph.add_node(
             node_id,
@@ -46,9 +48,11 @@ def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
         graph.add_edge(prev, node_id, label="continue", mode="move")
         prev = node_id
 
-    # Add sinks
+    # Add sinks and populate sink_id_map
+    sink_ids: dict[str, str] = {}
     for sink_name, sink in config.sinks.items():
         node_id = f"sink_{sink_name}"
+        sink_ids[sink_name] = node_id
         graph.add_node(node_id, node_type="sink", plugin_name=sink.name)
         graph.add_edge(prev, node_id, label=sink_name, mode="move")
 
@@ -58,6 +62,10 @@ def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
                 gate_id = f"transform_{i}"
                 if gate_id != prev:  # Don't duplicate edge
                     graph.add_edge(gate_id, node_id, label=sink_name, mode="move")
+
+    # Populate internal ID maps so get_sink_id_map() and get_transform_id_map() work
+    graph._sink_id_map = sink_ids
+    graph._transform_id_map = transform_ids
 
     return graph
 

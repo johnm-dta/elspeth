@@ -26,10 +26,12 @@ def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
     # Add source
     graph.add_node("source", node_type="source", plugin_name=config.source.name)
 
-    # Add transforms
+    # Add transforms and populate transform_id_map
+    transform_ids: dict[int, str] = {}
     prev = "source"
     for i, t in enumerate(config.transforms):
         node_id = f"transform_{i}"
+        transform_ids[i] = node_id
         is_gate = hasattr(t, "evaluate")
         graph.add_node(
             node_id,
@@ -39,9 +41,11 @@ def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
         graph.add_edge(prev, node_id, label="continue", mode="move")
         prev = node_id
 
-    # Add sinks
+    # Add sinks and populate sink_id_map
+    sink_ids: dict[str, str] = {}
     for sink_name, sink in config.sinks.items():
         node_id = f"sink_{sink_name}"
+        sink_ids[sink_name] = node_id
         graph.add_node(node_id, node_type="sink", plugin_name=sink.name)
         graph.add_edge(prev, node_id, label=sink_name, mode="move")
 
@@ -51,6 +55,10 @@ def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
                 gate_id = f"transform_{i}"
                 if gate_id != prev:  # Don't duplicate edge
                     graph.add_edge(gate_id, node_id, label=sink_name, mode="move")
+
+    # Populate internal ID maps so get_sink_id_map() and get_transform_id_map() work
+    graph._sink_id_map = sink_ids
+    graph._transform_id_map = transform_ids
 
     return graph
 
@@ -625,6 +633,55 @@ class TestOrchestratorInvalidRouting:
 
 class TestOrchestratorAcceptsGraph:
     """Orchestrator accepts ExecutionGraph parameter."""
+
+    def test_orchestrator_uses_graph_node_ids(self) -> None:
+        """Orchestrator uses node IDs from graph, not generated IDs."""
+        from unittest.mock import MagicMock
+
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        # Build config and graph from settings
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={"output": SinkSettings(plugin="csv")},
+            output_sink="output",
+        )
+        graph = ExecutionGraph.from_config(settings)
+
+        # Create mock source and sink
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([])  # Empty source
+
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+
+        pipeline_config = PipelineConfig(
+            source=mock_source,
+            transforms=[],
+            sinks={"output": mock_sink},
+        )
+
+        orchestrator = Orchestrator(db)
+        orchestrator.run(pipeline_config, graph=graph)
+
+        # Source should have node_id set from graph
+        assert hasattr(mock_source, "node_id")
+        assert mock_source.node_id == graph.get_source()
+
+        # Sink should have node_id set from graph's sink_id_map
+        sink_id_map = graph.get_sink_id_map()
+        assert hasattr(mock_sink, "node_id")
+        assert mock_sink.node_id == sink_id_map["output"]
 
     def test_orchestrator_run_accepts_graph(self) -> None:
         """Orchestrator.run() accepts graph parameter."""

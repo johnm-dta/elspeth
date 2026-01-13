@@ -218,12 +218,25 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> dict[st
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import Orchestrator, PipelineConfig
     from elspeth.engine.adapters import SinkAdapter
-    from elspeth.plugins.base import BaseSink, BaseSource
+    from elspeth.plugins.base import BaseGate, BaseSink, BaseSource, BaseTransform
+    from elspeth.plugins.gates import FieldMatchGate, FilterGate, ThresholdGate
     from elspeth.plugins.sinks.csv_sink import CSVSink
     from elspeth.plugins.sinks.database_sink import DatabaseSink
     from elspeth.plugins.sinks.json_sink import JSONSink
     from elspeth.plugins.sources.csv_source import CSVSource
     from elspeth.plugins.sources.json_source import JSONSource
+    from elspeth.plugins.transforms import FieldMapper, PassThrough
+
+    # Plugin registries
+    TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
+        "passthrough": PassThrough,
+        "field_mapper": FieldMapper,
+    }
+    GATE_PLUGINS: dict[str, type[BaseGate]] = {
+        "threshold_gate": ThresholdGate,
+        "field_match_gate": FieldMatchGate,
+        "filter_gate": FilterGate,
+    }
 
     # Instantiate source from new schema
     source_plugin = config.datasource.plugin
@@ -273,10 +286,27 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> dict[st
     db_url = config.landscape.url
     db = LandscapeDB.from_url(db_url)
 
+    # Instantiate transforms/gates from row_plugins
+    transforms: list[BaseTransform | BaseGate] = []
+    for plugin_config in config.row_plugins:
+        plugin_name = plugin_config.plugin
+        plugin_options = dict(plugin_config.options)
+
+        if plugin_config.type == "gate":
+            if plugin_name not in GATE_PLUGINS:
+                raise typer.BadParameter(f"Unknown gate plugin: {plugin_name}")
+            gate_class = GATE_PLUGINS[plugin_name]
+            transforms.append(gate_class(plugin_options))
+        else:
+            if plugin_name not in TRANSFORM_PLUGINS:
+                raise typer.BadParameter(f"Unknown transform plugin: {plugin_name}")
+            transform_class = TRANSFORM_PLUGINS[plugin_name]
+            transforms.append(transform_class(plugin_options))
+
     # Build PipelineConfig
     pipeline_config = PipelineConfig(
         source=source,
-        transforms=[],  # No transforms in basic Phase 4
+        transforms=transforms,
         sinks=sinks,
     )
 
@@ -350,7 +380,13 @@ PLUGIN_REGISTRY = {
         ("json", "Load rows from JSON/JSONL files"),
     ],
     "transform": [
-        # No built-in transforms in Phase 4
+        ("passthrough", "Pass rows through unchanged"),
+        ("field_mapper", "Rename, select, and reorganize fields"),
+    ],
+    "gate": [
+        ("threshold_gate", "Route rows based on numeric threshold"),
+        ("field_match_gate", "Route rows based on field value matching"),
+        ("filter_gate", "Filter rows based on field conditions"),
     ],
     "sink": [
         ("csv", "Write rows to CSV files"),

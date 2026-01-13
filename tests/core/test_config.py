@@ -219,3 +219,22 @@ class TestRowPluginSettings:
 
         with pytest.raises(ValidationError):
             RowPluginSettings(plugin="test", type="invalid")
+
+
+class TestSinkSettings:
+    """SinkSettings matches architecture specification."""
+
+    def test_sink_settings_structure(self) -> None:
+        """SinkSettings has plugin and options."""
+        from elspeth.core.config import SinkSettings
+
+        sink = SinkSettings(plugin="csv", options={"path": "output/results.csv"})
+        assert sink.plugin == "csv"
+        assert sink.options == {"path": "output/results.csv"}
+
+    def test_sink_settings_options_default_empty(self) -> None:
+        """Options defaults to empty dict."""
+        from elspeth.core.config import SinkSettings
+
+        sink = SinkSettings(plugin="database")
+        assert sink.options == {}

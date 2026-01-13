@@ -44,6 +44,18 @@ class RowPluginSettings(BaseModel):
     )
 
 
+class SinkSettings(BaseModel):
+    """Sink plugin configuration per architecture."""
+
+    model_config = {"frozen": True}
+
+    plugin: str = Field(description="Plugin name (csv, json, database, webhook, etc.)")
+    options: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Plugin-specific configuration options",
+    )
+
+
 class DatabaseSettings(BaseModel):
     """Database connection configuration."""
 

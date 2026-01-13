@@ -46,6 +46,7 @@ class ExecutionGraph:
         self._sink_id_map: dict[str, str] = {}
         self._transform_id_map: dict[int, str] = {}
         self._output_sink: str = ""
+        self._route_label_map: dict[tuple[str, str], str] = {}  # (gate_node, sink_name) -> route_label
 
     @property
     def node_count(self) -> int:
@@ -286,6 +287,8 @@ class ExecutionGraph:
                         )
                     # Edge label = route_label (e.g., "suspicious")
                     graph.add_edge(tid, sink_ids[target], label=route_label, mode="move")
+                    # Store reverse mapping: (gate_node, sink_name) -> route_label
+                    graph._route_label_map[(tid, target)] = route_label
 
             prev_node_id = tid
 
@@ -325,3 +328,20 @@ class ExecutionGraph:
     def get_output_sink(self) -> str:
         """Get the output sink name."""
         return self._output_sink
+
+    def get_route_label(self, from_node_id: str, sink_name: str) -> str:
+        """Get the route label for an edge from a gate to a sink.
+
+        Args:
+            from_node_id: The gate node ID
+            sink_name: The sink name (not node ID)
+
+        Returns:
+            The route label (e.g., "suspicious") or "continue" for default path
+        """
+        # Check explicit route mapping first
+        if (from_node_id, sink_name) in self._route_label_map:
+            return self._route_label_map[(from_node_id, sink_name)]
+
+        # Default path uses "continue" label
+        return "continue"

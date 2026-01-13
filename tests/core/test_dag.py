@@ -458,3 +458,75 @@ class TestExecutionGraphFromConfig:
         graph = ExecutionGraph.from_config(config)
 
         assert graph.get_output_sink() == "results"
+
+
+class TestExecutionGraphRouteMapping:
+    """Test route label <-> sink name mapping for edge lookup."""
+
+    def test_get_route_label_for_sink(self) -> None:
+        """Get route label that leads to a sink from a gate."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            RowPluginSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        config = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "results": SinkSettings(plugin="csv"),
+                "flagged": SinkSettings(plugin="csv"),
+            },
+            row_plugins=[
+                RowPluginSettings(
+                    plugin="classifier",
+                    type="gate",
+                    routes={"suspicious": "flagged", "clean": "continue"},
+                ),
+            ],
+            output_sink="results",
+        )
+
+        graph = ExecutionGraph.from_config(config)
+
+        # Get the gate's node_id
+        transform_map = graph.get_transform_id_map()
+        gate_node_id = transform_map[0]
+
+        # Given gate node and sink name, get the route label
+        route_label = graph.get_route_label(gate_node_id, "flagged")
+
+        assert route_label == "suspicious"
+
+    def test_get_route_label_for_continue(self) -> None:
+        """Continue routes return 'continue' as label."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            RowPluginSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        config = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={"results": SinkSettings(plugin="csv")},
+            row_plugins=[
+                RowPluginSettings(
+                    plugin="gate",
+                    type="gate",
+                    routes={"pass": "continue"},
+                ),
+            ],
+            output_sink="results",
+        )
+
+        graph = ExecutionGraph.from_config(config)
+        transform_map = graph.get_transform_id_map()
+        gate_node_id = transform_map[0]
+
+        # The edge to output sink uses "continue" label
+        route_label = graph.get_route_label(gate_node_id, "results")
+        assert route_label == "continue"

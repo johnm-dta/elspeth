@@ -1,7 +1,58 @@
 # tests/engine/test_orchestrator.py
 """Tests for Orchestrator."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import pytest
+
+if TYPE_CHECKING:
+    from elspeth.engine.orchestrator import PipelineConfig
+
+
+def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
+    """Build a simple graph for testing (temporary until from_config is wired).
+
+    Creates a linear graph matching the PipelineConfig structure:
+    source -> transforms... -> sinks
+
+    For gates, creates additional edges to all sinks (gates can route anywhere).
+    """
+    from elspeth.core.dag import ExecutionGraph
+
+    graph = ExecutionGraph()
+
+    # Add source
+    graph.add_node("source", node_type="source", plugin_name=config.source.name)
+
+    # Add transforms
+    prev = "source"
+    for i, t in enumerate(config.transforms):
+        node_id = f"transform_{i}"
+        is_gate = hasattr(t, "evaluate")
+        graph.add_node(
+            node_id,
+            node_type="gate" if is_gate else "transform",
+            plugin_name=t.name,
+        )
+        graph.add_edge(prev, node_id, label="continue", mode="move")
+        prev = node_id
+
+    # Add sinks
+    for sink_name, sink in config.sinks.items():
+        node_id = f"sink_{sink_name}"
+        graph.add_node(node_id, node_type="sink", plugin_name=sink.name)
+        graph.add_edge(prev, node_id, label=sink_name, mode="move")
+
+        # Gates can route to any sink, so add edges from all gates
+        for i, t in enumerate(config.transforms):
+            if hasattr(t, "evaluate"):
+                gate_id = f"transform_{i}"
+                if gate_id != prev:  # Don't duplicate edge
+                    graph.add_edge(gate_id, node_id, label=sink_name, mode="move")
+
+    return graph
 
 
 class TestOrchestrator:
@@ -70,7 +121,7 @@ class TestOrchestrator:
         )
 
         orchestrator = Orchestrator(db)
-        run_result = orchestrator.run(config)
+        run_result = orchestrator.run(config, graph=_build_test_graph(config))
 
         assert run_result.status == "completed"
         assert run_result.rows_processed == 3
@@ -139,7 +190,7 @@ class TestOrchestrator:
         )
 
         orchestrator = Orchestrator(db)
-        run_result = orchestrator.run(config)
+        run_result = orchestrator.run(config, graph=_build_test_graph(config))
 
         assert run_result.status == "completed"
         # value=10 and value=30 go to default, value=100 goes to high
@@ -207,7 +258,7 @@ class TestOrchestratorAuditTrail:
         )
 
         orchestrator = Orchestrator(db)
-        run_result = orchestrator.run(config)
+        run_result = orchestrator.run(config, graph=_build_test_graph(config))
 
         # Query Landscape to verify audit trail
         recorder = LandscapeRecorder(db)
@@ -287,7 +338,7 @@ class TestOrchestratorErrorHandling:
         orchestrator = Orchestrator(db)
 
         with pytest.raises(RuntimeError, match="Transform exploded!"):
-            orchestrator.run(config)
+            orchestrator.run(config, graph=_build_test_graph(config))
 
         # Verify run was marked as failed in Landscape audit trail
         # Query for all runs and find the one that was created
@@ -371,7 +422,7 @@ class TestOrchestratorMultipleTransforms:
         )
 
         orchestrator = Orchestrator(db)
-        run_result = orchestrator.run(config)
+        run_result = orchestrator.run(config, graph=_build_test_graph(config))
 
         assert run_result.status == "completed"
         assert len(sink.results) == 1
@@ -429,7 +480,7 @@ class TestOrchestratorEmptyPipeline:
         )
 
         orchestrator = Orchestrator(db)
-        run_result = orchestrator.run(config)
+        run_result = orchestrator.run(config, graph=_build_test_graph(config))
 
         assert run_result.status == "completed"
         assert run_result.rows_processed == 1
@@ -490,7 +541,7 @@ class TestOrchestratorEmptyPipeline:
         )
 
         orchestrator = Orchestrator(db)
-        run_result = orchestrator.run(config)
+        run_result = orchestrator.run(config, graph=_build_test_graph(config))
 
         assert run_result.status == "completed"
         assert run_result.rows_processed == 0
@@ -569,4 +620,76 @@ class TestOrchestratorInvalidRouting:
         # The GateExecutor catches this first via MissingEdgeError,
         # which is even better since it happens at the routing level
         with pytest.raises(MissingEdgeError, match="nonexistent_sink"):
-            orchestrator.run(config)
+            orchestrator.run(config, graph=_build_test_graph(config))
+
+
+class TestOrchestratorAcceptsGraph:
+    """Orchestrator accepts ExecutionGraph parameter."""
+
+    def test_orchestrator_run_accepts_graph(self) -> None:
+        """Orchestrator.run() accepts graph parameter."""
+        import inspect
+
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator
+
+        db = LandscapeDB.in_memory()
+
+        # Build a simple graph
+        graph = ExecutionGraph()
+        graph.add_node("source_1", node_type="source", plugin_name="csv")
+        graph.add_node("sink_1", node_type="sink", plugin_name="csv")
+        graph.add_edge("source_1", "sink_1", label="continue", mode="move")
+
+        orchestrator = Orchestrator(db)
+
+        # Should accept graph parameter (signature check)
+        sig = inspect.signature(orchestrator.run)
+        assert "graph" in sig.parameters
+
+    def test_orchestrator_run_requires_graph(self) -> None:
+        """Orchestrator.run() raises ValueError if graph is None."""
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.schemas import PluginSchema
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class DummySource:
+            name = "dummy"
+            output_schema = ValueSchema
+
+            def load(self, ctx):
+                yield from []
+
+            def close(self):
+                pass
+
+        class DummySink:
+            name = "dummy"
+
+            def __init__(self):
+                self.results = []
+
+            def write(self, rows, ctx):
+                self.results.extend(rows)
+                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+
+            def close(self):
+                pass
+
+        config = PipelineConfig(
+            source=DummySource(),
+            transforms=[],
+            sinks={"default": DummySink()},
+        )
+
+        orchestrator = Orchestrator(db)
+
+        # graph=None should raise ValueError
+        with pytest.raises(ValueError, match="ExecutionGraph is required"):
+            orchestrator.run(config, graph=None)

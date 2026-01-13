@@ -12,6 +12,7 @@ Coordinates:
 from dataclasses import dataclass, field
 from typing import Any
 
+from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 from elspeth.engine.processor import RowProcessor
 from elspeth.engine.spans import SpanFactory
@@ -73,8 +74,26 @@ class Orchestrator:
         self._canonical_version = canonical_version
         self._span_factory = SpanFactory()
 
-    def run(self, config: PipelineConfig) -> RunResult:
-        """Execute a pipeline run."""
+    def run(
+        self,
+        config: PipelineConfig,
+        graph: ExecutionGraph | None = None,
+    ) -> RunResult:
+        """Execute a pipeline run.
+
+        Args:
+            config: Pipeline configuration with plugins
+            graph: Pre-validated execution graph (required)
+
+        Raises:
+            ValueError: If graph is not provided
+        """
+        if graph is None:
+            raise ValueError(
+                "ExecutionGraph is required. "
+                "Build with ExecutionGraph.from_config(settings)"
+            )
+
         recorder = LandscapeRecorder(self._db)
 
         # Begin run
@@ -85,7 +104,7 @@ class Orchestrator:
 
         try:
             with self._span_factory.run_span(run.run_id):
-                result = self._execute_run(recorder, run.run_id, config)
+                result = self._execute_run(recorder, run.run_id, config, graph)
 
             # Complete run
             recorder.complete_run(run.run_id, status="completed")
@@ -101,8 +120,14 @@ class Orchestrator:
         recorder: LandscapeRecorder,
         run_id: str,
         config: PipelineConfig,
+        graph: ExecutionGraph,
     ) -> RunResult:
-        """Execute the run (internal)."""
+        """Execute the run (internal).
+
+        Note: The graph parameter is accepted but not yet used for execution.
+        Task 10 will wire DAG-driven execution. Currently execution still
+        follows the linear PipelineConfig.
+        """
 
         # Register source node
         source_node = recorder.register_node(

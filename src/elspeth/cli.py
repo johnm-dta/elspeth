@@ -280,12 +280,15 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> dict[st
         sinks=sinks,
     )
 
+    # Build execution graph from config
+    graph = ExecutionGraph.from_config(config)
+
     if verbose:
         typer.echo("Starting pipeline execution...")
 
     # Execute via Orchestrator (creates full audit trail)
     orchestrator = Orchestrator(db)
-    result = orchestrator.run(pipeline_config)
+    result = orchestrator.run(pipeline_config, graph=graph)
 
     return {
         "run_id": result.run_id,

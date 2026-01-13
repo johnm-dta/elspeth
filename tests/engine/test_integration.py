@@ -8,7 +8,58 @@ These tests verify:
 4. "No silent audit loss" tests proving errors raise, not skip
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import pytest
+
+if TYPE_CHECKING:
+    from elspeth.engine.orchestrator import PipelineConfig
+
+
+def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
+    """Build a simple graph for testing (temporary until from_config is wired).
+
+    Creates a linear graph matching the PipelineConfig structure:
+    source -> transforms... -> sinks
+
+    For gates, creates additional edges to all sinks (gates can route anywhere).
+    """
+    from elspeth.core.dag import ExecutionGraph
+
+    graph = ExecutionGraph()
+
+    # Add source
+    graph.add_node("source", node_type="source", plugin_name=config.source.name)
+
+    # Add transforms
+    prev = "source"
+    for i, t in enumerate(config.transforms):
+        node_id = f"transform_{i}"
+        is_gate = hasattr(t, "evaluate")
+        graph.add_node(
+            node_id,
+            node_type="gate" if is_gate else "transform",
+            plugin_name=t.name,
+        )
+        graph.add_edge(prev, node_id, label="continue", mode="move")
+        prev = node_id
+
+    # Add sinks
+    for sink_name, sink in config.sinks.items():
+        node_id = f"sink_{sink_name}"
+        graph.add_node(node_id, node_type="sink", plugin_name=sink.name)
+        graph.add_edge(prev, node_id, label=sink_name, mode="move")
+
+        # Gates can route to any sink, so add edges from all gates
+        for i, t in enumerate(config.transforms):
+            if hasattr(t, "evaluate"):
+                gate_id = f"transform_{i}"
+                if gate_id != prev:  # Don't duplicate edge
+                    graph.add_edge(gate_id, node_id, label=sink_name, mode="move")
+
+    return graph
 
 
 class TestEngineIntegration:
@@ -118,7 +169,7 @@ class TestEngineIntegration:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(config)
+        result = orchestrator.run(config, graph=_build_test_graph(config))
 
         # Verify run result
         assert result.status == "completed"
@@ -223,7 +274,7 @@ class TestEngineIntegration:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(config)
+        result = orchestrator.run(config, graph=_build_test_graph(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 5
@@ -347,7 +398,7 @@ class TestEngineIntegration:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(config)
+        result = orchestrator.run(config, graph=_build_test_graph(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 4
@@ -470,7 +521,7 @@ class TestNoSilentAuditLoss:
 
         # This MUST raise MissingEdgeError, not silently fail
         with pytest.raises(MissingEdgeError) as exc_info:
-            orchestrator.run(config)
+            orchestrator.run(config, graph=_build_test_graph(config))
 
         # Verify error message includes the missing edge label
         assert "phantom" in str(exc_info.value)
@@ -557,7 +608,7 @@ class TestNoSilentAuditLoss:
 
         # Exception must propagate
         with pytest.raises(RuntimeError, match="Intentional explosion"):
-            orchestrator.run(config)
+            orchestrator.run(config, graph=_build_test_graph(config))
 
         # Run must be marked as failed in audit trail
         recorder = LandscapeRecorder(db)
@@ -621,7 +672,7 @@ class TestNoSilentAuditLoss:
 
         # Exception must propagate
         with pytest.raises(OSError, match="Sink explosion"):
-            orchestrator.run(config)
+            orchestrator.run(config, graph=_build_test_graph(config))
 
         # Run must be marked as failed in audit trail
         recorder = LandscapeRecorder(db)
@@ -687,7 +738,7 @@ class TestAuditTrailCompleteness:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(config)
+        result = orchestrator.run(config, graph=_build_test_graph(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 0
@@ -766,7 +817,7 @@ class TestAuditTrailCompleteness:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(config)
+        result = orchestrator.run(config, graph=_build_test_graph(config))
 
         assert result.status == "completed"
 

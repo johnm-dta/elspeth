@@ -74,6 +74,18 @@ class LandscapeSettings(BaseModel):
     )
 
 
+class ConcurrencySettings(BaseModel):
+    """Parallel processing configuration per architecture."""
+
+    model_config = {"frozen": True}
+
+    max_workers: int = Field(
+        default=4,
+        gt=0,
+        description="Maximum parallel workers (default 4, production typically 16)",
+    )
+
+
 class DatabaseSettings(BaseModel):
     """Database connection configuration."""
 

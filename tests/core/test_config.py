@@ -276,3 +276,30 @@ class TestLandscapeSettings:
 
         with pytest.raises(ValidationError):
             LandscapeSettings(backend="mysql")
+
+
+class TestConcurrencySettings:
+    """ConcurrencySettings matches architecture specification."""
+
+    def test_concurrency_settings_structure(self) -> None:
+        """ConcurrencySettings has max_workers."""
+        from elspeth.core.config import ConcurrencySettings
+
+        cs = ConcurrencySettings(max_workers=16)
+        assert cs.max_workers == 16
+
+    def test_concurrency_settings_default(self) -> None:
+        """Default max_workers is 4 per architecture."""
+        from elspeth.core.config import ConcurrencySettings
+
+        cs = ConcurrencySettings()
+        assert cs.max_workers == 4
+
+    def test_concurrency_settings_validation(self) -> None:
+        """max_workers must be positive."""
+        from elspeth.core.config import ConcurrencySettings
+
+        with pytest.raises(ValidationError):
+            ConcurrencySettings(max_workers=0)
+        with pytest.raises(ValidationError):
+            ConcurrencySettings(max_workers=-1)

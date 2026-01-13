@@ -56,6 +56,24 @@ class SinkSettings(BaseModel):
     )
 
 
+class LandscapeSettings(BaseModel):
+    """Landscape audit system configuration per architecture."""
+
+    model_config = {"frozen": True}
+
+    enabled: bool = Field(default=True, description="Enable audit trail recording")
+    backend: Literal["sqlite", "postgresql"] = Field(
+        default="sqlite",
+        description="Database backend type",
+    )
+    # NOTE: Using str instead of Path - Path mangles PostgreSQL DSNs like
+    # "postgresql://user:pass@host/db" (pathlib interprets // as UNC path)
+    url: str = Field(
+        default="sqlite:///./runs/audit.db",
+        description="Full SQLAlchemy database URL",
+    )
+
+
 class DatabaseSettings(BaseModel):
     """Database connection configuration."""
 

@@ -238,3 +238,41 @@ class TestSinkSettings:
 
         sink = SinkSettings(plugin="database")
         assert sink.options == {}
+
+
+class TestLandscapeSettings:
+    """LandscapeSettings matches architecture specification."""
+
+    def test_landscape_settings_structure(self) -> None:
+        """LandscapeSettings has enabled, backend, url."""
+        from elspeth.core.config import LandscapeSettings
+
+        ls = LandscapeSettings(enabled=True, backend="sqlite", url="sqlite:///./runs/audit.db")
+        assert ls.enabled is True
+        assert ls.backend == "sqlite"
+        assert ls.url == "sqlite:///./runs/audit.db"
+
+    def test_landscape_settings_defaults(self) -> None:
+        """LandscapeSettings has sensible defaults."""
+        from elspeth.core.config import LandscapeSettings
+
+        ls = LandscapeSettings()
+        assert ls.enabled is True
+        assert ls.backend == "sqlite"
+        assert ls.url == "sqlite:///./runs/audit.db"
+
+    def test_landscape_settings_postgresql_url(self) -> None:
+        """LandscapeSettings accepts PostgreSQL DSNs without mangling."""
+        from elspeth.core.config import LandscapeSettings
+
+        # This would fail with pathlib.Path which mangles // as UNC paths
+        pg_url = "postgresql://user:pass@localhost:5432/elspeth_audit"
+        ls = LandscapeSettings(enabled=True, backend="postgresql", url=pg_url)
+        assert ls.url == pg_url  # Preserved exactly
+
+    def test_landscape_settings_backend_validation(self) -> None:
+        """Backend must be sqlite or postgresql."""
+        from elspeth.core.config import LandscapeSettings
+
+        with pytest.raises(ValidationError):
+            LandscapeSettings(backend="mysql")

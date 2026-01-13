@@ -1,0 +1,40 @@
+# ELSPETH Example Pipeline
+#
+# This pipeline reads a CSV, routes high-value transactions to a separate
+# output, and writes normal transactions to the main output.
+#
+# Run with:
+#   uv run elspeth run -s examples/settings.yaml --execute
+
+datasource:
+  plugin: csv
+  options:
+    path: examples/input.csv
+
+row_plugins:
+  # Route transactions over $1000 to high_values sink
+  - plugin: threshold_gate
+    type: gate
+    options:
+      field: amount
+      threshold: 1000
+      comparison: ">"
+    routes:
+      above: high_values   # amount > 1000 -> high_values sink
+      below: continue      # amount <= 1000 -> continue to output_sink
+
+sinks:
+  output:
+    plugin: csv
+    options:
+      path: examples/output/normal.csv
+  high_values:
+    plugin: csv
+    options:
+      path: examples/output/high_values.csv
+
+output_sink: output
+
+# Audit trail stored in examples/runs/
+landscape:
+  url: sqlite:///examples/runs/audit.db

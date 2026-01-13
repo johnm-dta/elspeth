@@ -1,0 +1,11 @@
+id,message,approved
+1,Request for budget increase,true
+2,Weekly status update,false
+3,Emergency maintenance alert,true
+4,Newsletter subscription,false
+5,Security incident report,true
+6,Coffee machine broken,false
+7,Server migration complete,true
+8,Parking lot full,false
+9,Customer escalation,true
+10,Birthday cake in kitchen,false

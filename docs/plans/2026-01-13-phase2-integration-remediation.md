@@ -2,377 +2,17 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Fix integration gaps between Phase 2 plugin definitions and Phase 3 engine, including a critical bug that causes runtime AssertionError, missing lifecycle hooks, and enum/documentation inconsistencies.
+**Goal:** Fix integration gaps between Phase 2 plugin definitions and Phase 3 engine, including missing lifecycle hooks, mutation leak in `_freeze_dict()`, enum inconsistencies, and documentation gaps.
 
-**Architecture:** Phase 2 defined plugin protocols, result types, and enums. Phase 3 engine was built to use them but has gaps: Filter plugin returns `TransformResult.success(None)` which violates executor's assertion, lifecycle hooks are defined but never called, plugin metadata is hardcoded instead of read from plugins, and enums are defined but not used in result types.
+**Architecture:** Phase 2 defined plugin protocols, result types, and enums. Phase 3 engine was built to use them but has gaps: lifecycle hooks are defined but never called, `_freeze_dict()` doesn't deep copy, and enums are defined but not used in result types.
+
+**Note:** The Filter plugin's `success(None)` issue is addressed separately by the architecture-alignment plan via FilterGate (routing to discard sink per architecture.md:148).
 
 **Tech Stack:** Pydantic v2, dataclasses, pytest
 
 ---
 
-## Task 1: Add TransformResult.filtered() Factory Method
-
-**Priority: CRITICAL** - Filter plugin will cause AssertionError at runtime without this fix.
-
-**Files:**
-- Modify: `src/elspeth/plugins/results.py`
-- Test: `tests/plugins/test_results.py`
-
-**Step 1: Write the failing test**
-
-Add to `tests/plugins/test_results.py`:
-
-```python
-class TestTransformResultFiltered:
-    """TransformResult.filtered() for excluded rows."""
-
-    def test_filtered_has_correct_status(self) -> None:
-        """Filtered result has 'filtered' status."""
-        from elspeth.plugins.results import TransformResult
-
-        result = TransformResult.filtered()
-
-        assert result.status == "filtered"
-        assert result.row is None
-
-    def test_filtered_with_reason(self) -> None:
-        """Filtered result can include reason."""
-        from elspeth.plugins.results import TransformResult
-
-        result = TransformResult.filtered(reason={"field": "status", "cause": "inactive"})
-
-        assert result.status == "filtered"
-        assert result.reason["field"] == "status"
-        assert result.reason["cause"] == "inactive"
-
-    def test_filtered_is_not_success(self) -> None:
-        """Filtered is distinct from success."""
-        from elspeth.plugins.results import TransformResult
-
-        filtered = TransformResult.filtered()
-        success = TransformResult.success({"data": "value"})
-
-        assert filtered.status != success.status
-        assert filtered.row is None
-        assert success.row is not None
-```
-
-**Step 2: Run test to verify it fails**
-
-Run: `.venv/bin/python -m pytest tests/plugins/test_results.py::TestTransformResultFiltered -v`
-Expected: FAIL with `TransformResult has no attribute 'filtered'`
-
-**Step 3: Write minimal implementation**
-
-Update `src/elspeth/plugins/results.py`, add to `TransformResult` class:
-
-```python
-from typing import Literal
-
-
-@dataclass
-class TransformResult:
-    """Result from any transform operation."""
-
-    status: Literal["success", "error", "filtered"]  # Add "filtered"
-    row: dict[str, Any] | None
-    reason: dict[str, Any] | None
-    retryable: bool = False
-
-    # ... existing methods ...
-
-    @classmethod
-    def filtered(cls, reason: dict[str, Any] | None = None) -> "TransformResult":
-        """Row was filtered out (not an error, just excluded).
-
-        Use this when a transform decides to exclude a row from further
-        processing. The row is not passed downstream but this is not
-        an error condition.
-
-        Args:
-            reason: Optional explanation for why row was filtered
-
-        Returns:
-            TransformResult with status="filtered" and row=None
-        """
-        return cls(status="filtered", row=None, reason=reason)
-```
-
-**Step 4: Run test to verify it passes**
-
-Run: `.venv/bin/python -m pytest tests/plugins/test_results.py::TestTransformResultFiltered -v`
-Expected: PASS (3 tests)
-
-**Step 5: Commit**
-
-```bash
-git add src/elspeth/plugins/results.py tests/plugins/test_results.py
-git commit -m "$(cat <<'EOF'
-feat(results): add TransformResult.filtered() factory method
-
-Adds "filtered" status for rows intentionally excluded by transforms.
-This is distinct from error (row failed) and success (row continues).
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
-EOF
-)"
-```
-
----
-
-## Task 2: Update Filter Plugin to Use filtered() Instead of success(None)
-
-**Priority: CRITICAL** - This is the actual bug fix.
-
-**Files:**
-- Modify: `src/elspeth/plugins/transforms/filter.py`
-- Test: `tests/plugins/transforms/test_filter.py`
-
-**Step 1: Write the failing test**
-
-Add to `tests/plugins/transforms/test_filter.py`:
-
-```python
-class TestFilterResultTypes:
-    """Filter uses correct result types."""
-
-    def test_filtered_row_returns_filtered_status(self) -> None:
-        """Rows that don't pass filter return filtered status."""
-        from elspeth.plugins.transforms.filter import Filter
-        from elspeth.plugins.context import PluginContext
-
-        filter_plugin = Filter({
-            "field": "status",
-            "equals": "active",
-        })
-
-        ctx = PluginContext(run_id="test", config={})
-
-        # Row that should be filtered out
-        result = filter_plugin.process({"status": "inactive"}, ctx)
-
-        # Should return filtered status, not success with None
-        assert result.status == "filtered"
-        assert result.row is None
-
-    def test_passing_row_returns_success(self) -> None:
-        """Rows passing filter return success with row data."""
-        from elspeth.plugins.transforms.filter import Filter
-        from elspeth.plugins.context import PluginContext
-
-        filter_plugin = Filter({
-            "field": "status",
-            "equals": "active",
-        })
-
-        ctx = PluginContext(run_id="test", config={})
-
-        result = filter_plugin.process({"status": "active", "id": 1}, ctx)
-
-        assert result.status == "success"
-        assert result.row is not None
-        assert result.row["status"] == "active"
-
-    def test_missing_field_returns_filtered(self) -> None:
-        """Missing field with allow_missing=False returns filtered."""
-        from elspeth.plugins.transforms.filter import Filter
-        from elspeth.plugins.context import PluginContext
-
-        filter_plugin = Filter({
-            "field": "missing_field",
-            "equals": "value",
-            "allow_missing": False,
-        })
-
-        ctx = PluginContext(run_id="test", config={})
-
-        result = filter_plugin.process({"other_field": "data"}, ctx)
-
-        assert result.status == "filtered"
-        assert result.reason is not None
-        assert "missing" in str(result.reason).lower()
-```
-
-**Step 2: Run test to verify it fails**
-
-Run: `.venv/bin/python -m pytest tests/plugins/transforms/test_filter.py::TestFilterResultTypes -v`
-Expected: FAIL (Filter returns success(None) instead of filtered())
-
-**Step 3: Update implementation**
-
-Update `src/elspeth/plugins/transforms/filter.py`:
-
-```python
-from elspeth.plugins.results import TransformResult
-import copy
-
-# In the process() method, replace:
-#   return TransformResult.success(None)
-# with:
-#   return TransformResult.filtered(reason={...})
-
-def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
-    field_value = self._get_nested(row, self._field)
-
-    # Handle missing field
-    if field_value is _MISSING:
-        if self._allow_missing:
-            return TransformResult.success(copy.deepcopy(row))
-        return TransformResult.filtered(reason={
-            "field": self._field,
-            "cause": "missing",
-        })
-
-    # Apply condition
-    passes = self._evaluate_condition(field_value)
-
-    if passes:
-        return TransformResult.success(copy.deepcopy(row))
-
-    return TransformResult.filtered(reason={
-        "field": self._field,
-        "condition": self._condition_type,
-        "value": field_value,
-    })
-```
-
-**Step 4: Run test to verify it passes**
-
-Run: `.venv/bin/python -m pytest tests/plugins/transforms/test_filter.py::TestFilterResultTypes -v`
-Expected: PASS (3 tests)
-
-**Step 5: Commit**
-
-```bash
-git add src/elspeth/plugins/transforms/filter.py tests/plugins/transforms/test_filter.py
-git commit -m "$(cat <<'EOF'
-fix(filter): use filtered() instead of success(None)
-
-CRITICAL: success(None) violated executor's assertion that
-success status requires row data. Now returns proper filtered status.
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
-EOF
-)"
-```
-
----
-
-## Task 3: Update Executor to Handle "filtered" Status
-
-**Files:**
-- Modify: `src/elspeth/engine/executors.py`
-- Test: `tests/engine/test_executors.py`
-
-**Step 1: Write the failing test**
-
-Add to `tests/engine/test_executors.py`:
-
-```python
-class TestExecutorFilteredStatus:
-    """Executor handles filtered status correctly."""
-
-    def test_filtered_completes_without_error(self) -> None:
-        """Filtered rows complete successfully (not failed)."""
-        # This test verifies that a filtered result doesn't raise AssertionError
-        from elspeth.plugins.results import TransformResult
-        from elspeth.engine.executors import TransformExecutor
-        from unittest.mock import MagicMock
-
-        executor = TransformExecutor(recorder=MagicMock())
-
-        # Create a mock transform that returns filtered
-        mock_transform = MagicMock()
-        mock_transform.process.return_value = TransformResult.filtered(
-            reason={"cause": "test"}
-        )
-
-        # Should not raise
-        result = executor.execute(mock_transform, {"data": "test"}, MagicMock())
-
-        assert result.outcome == "filtered"
-
-    def test_filtered_does_not_continue_downstream(self) -> None:
-        """Filtered rows don't continue to next transform."""
-        from elspeth.plugins.results import TransformResult
-        from elspeth.engine.executors import TransformExecutor
-        from unittest.mock import MagicMock
-
-        executor = TransformExecutor(recorder=MagicMock())
-
-        mock_transform = MagicMock()
-        mock_transform.process.return_value = TransformResult.filtered()
-
-        result = executor.execute(mock_transform, {"data": "test"}, MagicMock())
-
-        # Filtered rows should not have output token for downstream
-        assert result.output_token is None or result.outcome == "filtered"
-```
-
-**Step 2: Run test to verify it fails**
-
-Run: `.venv/bin/python -m pytest tests/engine/test_executors.py::TestExecutorFilteredStatus -v`
-Expected: FAIL (executor doesn't handle "filtered" status)
-
-**Step 3: Update implementation**
-
-Update `src/elspeth/engine/executors.py`:
-
-```python
-def execute_transform(self, transform, row, token, ctx) -> TransformExecuteResult:
-    # ... existing code to call transform.process() ...
-
-    if result.status == "success":
-        assert result.row is not None, "success status requires row data"
-        # ... existing success handling ...
-        return TransformExecuteResult(
-            outcome="success",
-            token=updated_token,
-            output_token=output_token,
-        )
-
-    elif result.status == "filtered":
-        # Filtered rows complete successfully but don't continue downstream
-        self._recorder.complete_node_state(
-            state_id=state.state_id,
-            status="completed",  # Not failed - intentional exclusion
-            output_data=None,
-            duration_ms=duration_ms,
-        )
-        return TransformExecuteResult(
-            outcome="filtered",
-            token=token,  # Original token, unchanged
-            output_token=None,  # No downstream processing
-        )
-
-    else:
-        # error status
-        # ... existing error handling ...
-```
-
-**Step 4: Run test to verify it passes**
-
-Run: `.venv/bin/python -m pytest tests/engine/test_executors.py::TestExecutorFilteredStatus -v`
-Expected: PASS (2 tests)
-
-**Step 5: Commit**
-
-```bash
-git add src/elspeth/engine/executors.py tests/engine/test_executors.py
-git commit -m "$(cat <<'EOF'
-feat(executors): handle filtered status in transform execution
-
-Filtered rows complete successfully but don't continue downstream.
-Records "completed" in Landscape (not "failed").
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
-EOF
-)"
-```
-
----
-
-## Task 4: Fix _freeze_dict() Mutation Leak
+## Task 1: Fix _freeze_dict() Mutation Leak
 
 **Files:**
 - Modify: `src/elspeth/plugins/results.py`
@@ -465,129 +105,7 @@ EOF
 
 ---
 
-## Task 5: Orchestrator Uses Plugin Metadata
-
-**Files:**
-- Modify: `src/elspeth/engine/orchestrator.py`
-- Test: `tests/engine/test_orchestrator.py`
-
-**Step 1: Write the failing test**
-
-Add to `tests/engine/test_orchestrator.py`:
-
-```python
-class TestOrchestratorPluginMetadata:
-    """Orchestrator records actual plugin metadata."""
-
-    def test_node_uses_plugin_version(self) -> None:
-        """Node registration uses plugin's declared version."""
-        from elspeth.core.landscape import LandscapeDB
-        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-        from elspeth.plugins.results import TransformResult
-        from elspeth.core.dag import ExecutionGraph
-        from unittest.mock import MagicMock
-
-        class VersionedTransform:
-            name = "versioned"
-            plugin_version = "2.5.0"
-
-            def process(self, row, ctx):
-                return TransformResult.success(row)
-
-        db = LandscapeDB.from_url("sqlite:///:memory:")
-
-        # Build minimal config and graph
-        mock_source = MagicMock()
-        mock_source.name = "csv"
-        mock_source.load.return_value = iter([])
-
-        transform = VersionedTransform()
-
-        mock_sink = MagicMock()
-        mock_sink.name = "csv"
-
-        config = PipelineConfig(
-            source=mock_source,
-            transforms=[transform],
-            sinks={"output": mock_sink},
-        )
-
-        # Build graph
-        graph = ExecutionGraph()
-        graph.add_node("source_1", node_type="source", plugin_name="csv")
-        graph.add_node("transform_1", node_type="transform", plugin_name="versioned")
-        graph.add_node("sink_1", node_type="sink", plugin_name="csv")
-        graph.add_edge("source_1", "transform_1", label="continue", mode="move")
-        graph.add_edge("transform_1", "sink_1", label="continue", mode="move")
-        graph._transform_id_map = {0: "transform_1"}
-        graph._sink_id_map = {"output": "sink_1"}
-
-        orchestrator = Orchestrator(db)
-        result = orchestrator.run(config, graph=graph)
-
-        # Check that plugin_version was recorded
-        # (This requires querying the database or mocking recorder)
-        assert transform.plugin_version == "2.5.0"
-```
-
-**Step 2: Run test to verify it fails**
-
-Run: `.venv/bin/python -m pytest tests/engine/test_orchestrator.py::TestOrchestratorPluginMetadata -v`
-Expected: FAIL or behavior check needed
-
-**Step 3: Update implementation**
-
-Update node registration in `src/elspeth/engine/orchestrator.py`:
-
-```python
-def _execute_run(self, recorder, run_id, config, graph):
-    # ... existing setup ...
-
-    # Register transform nodes with actual metadata
-    for i, transform in enumerate(config.transforms):
-        is_gate = hasattr(transform, "evaluate")
-        node_type = NodeType.GATE if is_gate else NodeType.TRANSFORM
-
-        # Get actual plugin metadata (not hardcoded)
-        plugin_version = getattr(transform, 'plugin_version', '0.0.0')
-        plugin_config = getattr(transform, 'config', {})
-        determinism = getattr(transform, 'determinism', None)
-        determinism_value = determinism.value if determinism else "unknown"
-
-        node = recorder.register_node(
-            run_id=run_id,
-            plugin_name=transform.name,
-            node_type=node_type,
-            plugin_version=plugin_version,  # From plugin, not hardcoded
-            config=plugin_config,  # From plugin, not empty dict
-            determinism=determinism_value,
-            sequence=i + 1,
-        )
-```
-
-**Step 4: Run test to verify it passes**
-
-Run: `.venv/bin/python -m pytest tests/engine/test_orchestrator.py::TestOrchestratorPluginMetadata -v`
-Expected: PASS
-
-**Step 5: Commit**
-
-```bash
-git add src/elspeth/engine/orchestrator.py tests/engine/test_orchestrator.py
-git commit -m "$(cat <<'EOF'
-feat(orchestrator): use actual plugin metadata for node registration
-
-Reads plugin_version, config, and determinism from plugin instances
-instead of hardcoding "1.0.0" and empty config.
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
-EOF
-)"
-```
-
----
-
-## Task 6: Invoke Plugin Lifecycle Hooks - on_start
+## Task 2: Invoke Plugin Lifecycle Hooks - on_start
 
 **Files:**
 - Modify: `src/elspeth/engine/orchestrator.py`
@@ -622,7 +140,7 @@ class TestLifecycleHooks:
                 call_order.append("process")
                 return TransformResult.success(row)
 
-        db = LandscapeDB.from_url("sqlite:///:memory:")
+        db = LandscapeDB.in_memory()
 
         mock_source = MagicMock()
         mock_source.name = "csv"
@@ -647,6 +165,7 @@ class TestLifecycleHooks:
         graph.add_edge("transform", "sink", label="continue", mode="move")
         graph._transform_id_map = {0: "transform"}
         graph._sink_id_map = {"output": "sink"}
+        graph._output_sink = "output"
 
         orchestrator = Orchestrator(db)
         orchestrator.run(config, graph=graph)
@@ -663,21 +182,14 @@ Expected: FAIL (on_start not in call_order)
 
 **Step 3: Update implementation**
 
-Update `_execute_run()` in `src/elspeth/engine/orchestrator.py`:
+Update `_execute_run()` in `src/elspeth/engine/orchestrator.py`. After creating the PluginContext and before row processing, add:
 
 ```python
-def _execute_run(self, recorder, run_id, config, graph):
-    # ... node registration ...
-
-    # Create plugin context
-    ctx = PluginContext(run_id=run_id, config=config.config)
-
-    # Call on_start for all plugins BEFORE processing
-    for transform in config.transforms:
-        if hasattr(transform, 'on_start'):
-            transform.on_start(ctx)
-
-    # ... row processing ...
+        # Call on_start for all plugins BEFORE processing
+        # Lifecycle hooks are optional - plugins may or may not implement them
+        for transform in config.transforms:
+            if hasattr(transform, 'on_start'):
+                transform.on_start(ctx)
 ```
 
 **Step 4: Run test to verify it passes**
@@ -693,6 +205,7 @@ git commit -m "$(cat <<'EOF'
 feat(orchestrator): invoke on_start() lifecycle hook
 
 Calls on_start() on all transforms before any row processing begins.
+Lifecycle hooks are optional - uses hasattr() at plugin boundary.
 
 Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
 EOF
@@ -701,7 +214,7 @@ EOF
 
 ---
 
-## Task 7: Invoke Plugin Lifecycle Hooks - on_complete
+## Task 3: Invoke Plugin Lifecycle Hooks - on_complete
 
 **Files:**
 - Modify: `src/elspeth/engine/orchestrator.py`
@@ -714,6 +227,12 @@ Add to `tests/engine/test_orchestrator.py` in `TestLifecycleHooks`:
 ```python
     def test_on_complete_called_after_all_rows(self) -> None:
         """on_complete() called after all rows processed."""
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import TransformResult
+        from unittest.mock import MagicMock
+
         call_order = []
 
         class TrackedTransform:
@@ -727,14 +246,48 @@ Add to `tests/engine/test_orchestrator.py` in `TestLifecycleHooks`:
             def on_complete(self, ctx):
                 call_order.append("on_complete")
 
-        # ... setup similar to above ...
+        db = LandscapeDB.in_memory()
 
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([{"id": 1}, {"id": 2}])
+
+        transform = TrackedTransform()
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[transform],
+            sinks={"output": mock_sink},
+        )
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("transform", node_type="transform", plugin_name="tracked")
+        graph.add_node("sink", node_type="sink", plugin_name="csv")
+        graph.add_edge("source", "transform", label="continue", mode="move")
+        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph._transform_id_map = {0: "transform"}
+        graph._sink_id_map = {"output": "sink"}
+        graph._output_sink = "output"
+
+        orchestrator = Orchestrator(db)
         orchestrator.run(config, graph=graph)
 
+        # on_complete should be called last
         assert call_order[-1] == "on_complete"
+        # All processing should happen before on_complete
+        assert call_order.count("process") == 2
 
     def test_on_complete_called_on_error(self) -> None:
         """on_complete() called even when run fails."""
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from unittest.mock import MagicMock
+        import pytest
+
         completed = []
 
         class FailingTransform:
@@ -747,7 +300,33 @@ Add to `tests/engine/test_orchestrator.py` in `TestLifecycleHooks`:
             def on_complete(self, ctx):
                 completed.append(True)
 
-        # ... setup ...
+        db = LandscapeDB.in_memory()
+
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([{"id": 1}])
+
+        transform = FailingTransform()
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[transform],
+            sinks={"output": mock_sink},
+        )
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("transform", node_type="transform", plugin_name="failing")
+        graph.add_node("sink", node_type="sink", plugin_name="csv")
+        graph.add_edge("source", "transform", label="continue", mode="move")
+        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph._transform_id_map = {0: "transform"}
+        graph._sink_id_map = {"output": "sink"}
+        graph._output_sink = "output"
+
+        orchestrator = Orchestrator(db)
 
         with pytest.raises(RuntimeError):
             orchestrator.run(config, graph=graph)
@@ -763,24 +342,27 @@ Expected: FAIL (on_complete never called)
 
 **Step 3: Update implementation**
 
-Update `_execute_run()` in `src/elspeth/engine/orchestrator.py`:
+Update `_execute_run()` in `src/elspeth/engine/orchestrator.py`. Wrap the row processing in try/finally:
 
 ```python
-def _execute_run(self, recorder, run_id, config, graph):
-    # ... node registration and on_start calls ...
-
-    try:
-        # ... row processing ...
-        return result
-    finally:
-        # Call on_complete for all plugins (even on error)
+        # Call on_start for all plugins
         for transform in config.transforms:
-            if hasattr(transform, 'on_complete'):
-                try:
-                    transform.on_complete(ctx)
-                except Exception:
-                    # Log but don't fail - cleanup should be best-effort
-                    pass
+            if hasattr(transform, 'on_start'):
+                transform.on_start(ctx)
+
+        try:
+            # ... existing row processing code ...
+            return result
+        finally:
+            # Call on_complete for all plugins (even on error)
+            # Lifecycle hooks are optional - plugins may or may not implement them
+            for transform in config.transforms:
+                if hasattr(transform, 'on_complete'):
+                    try:
+                        transform.on_complete(ctx)
+                    except Exception:
+                        # Log but don't fail - cleanup should be best-effort
+                        pass
 ```
 
 **Step 4: Run test to verify it passes**
@@ -805,7 +387,7 @@ EOF
 
 ---
 
-## Task 8: Use Enums in RoutingAction
+## Task 4: Use Enums in RoutingAction
 
 **Files:**
 - Modify: `src/elspeth/plugins/results.py`
@@ -834,7 +416,7 @@ class TestRoutingActionEnums:
         from elspeth.plugins.results import RoutingAction
         from elspeth.plugins.enums import RoutingKind, RoutingMode
 
-        action = RoutingAction.route_to_sink("output", mode="copy")
+        action = RoutingAction.route_to_sink("output", mode=RoutingMode.COPY)
 
         assert action.kind == RoutingKind.ROUTE_TO_SINK
         assert action.mode == RoutingMode.COPY
@@ -889,12 +471,10 @@ class RoutingAction:
         cls,
         sink_name: str,
         *,
-        mode: RoutingMode | str = RoutingMode.MOVE,
+        mode: RoutingMode = RoutingMode.MOVE,
         reason: dict[str, Any] | None = None,
     ) -> "RoutingAction":
         """Route row to a named sink."""
-        if isinstance(mode, str):
-            mode = RoutingMode(mode)
         return cls(
             kind=RoutingKind.ROUTE_TO_SINK,
             destinations=(sink_name,),
@@ -940,7 +520,7 @@ EOF
 
 ---
 
-## Task 9: Fix PluginSchema Docstring
+## Task 5: Fix PluginSchema Docstring
 
 **Files:**
 - Modify: `src/elspeth/plugins/schemas.py`
@@ -965,7 +545,7 @@ class PluginSchema(BaseModel):
 
     Features:
     - Extra fields ignored (rows may have more fields than schema requires)
-    - Coercive type validation (int→float allowed, strict=False)
+    - Coercive type validation (int->float allowed, strict=False)
     - Easy conversion to/from row dicts
     """
 
@@ -997,7 +577,7 @@ EOF
 
 ---
 
-## Task 10: Clarify RowOutcome Docstring
+## Task 6: Clarify RowOutcome Docstring
 
 **Files:**
 - Modify: `src/elspeth/plugins/results.py`
@@ -1053,7 +633,7 @@ EOF
 
 ---
 
-## Task 11: Populate PluginSpec Schema Hashes
+## Task 7: Populate PluginSpec Schema Hashes
 
 **Files:**
 - Modify: `src/elspeth/plugins/manager.py`
@@ -1099,11 +679,13 @@ class TestPluginSpecSchemaHashes:
 
         class T1:
             name = "t1"
+            plugin_version = "1.0.0"
             input_schema = MySchema
             output_schema = MySchema
 
         class T2:
             name = "t2"
+            plugin_version = "1.0.0"
             input_schema = MySchema
             output_schema = MySchema
 
@@ -1189,7 +771,7 @@ EOF
 
 ---
 
-## Task 12: Update PHASE3_INTEGRATION.md Documentation
+## Task 8: Update PHASE3_INTEGRATION.md Documentation
 
 **Files:**
 - Modify: `src/elspeth/plugins/PHASE3_INTEGRATION.md`
@@ -1214,7 +796,7 @@ print('All documented APIs exist')
 
 **Step 2: Update documentation**
 
-Update `src/elspeth/plugins/PHASE3_INTEGRATION.md` to match actual APIs (see Task 20 in original doc for full content).
+Update `src/elspeth/plugins/PHASE3_INTEGRATION.md` to match actual APIs. Ensure examples use `begin_node_state`/`complete_node_state` (not `record_node_state`).
 
 **Step 3: Commit**
 
@@ -1233,32 +815,14 @@ EOF
 
 ---
 
-## Task 13: Final Verification
+## Task 9: Final Verification
 
 **Step 1: Run all tests**
 
 Run: `.venv/bin/python -m pytest tests/ -v`
 Expected: All tests pass
 
-**Step 2: Verify Filter doesn't cause AssertionError**
-
-```bash
-.venv/bin/python -c "
-from elspeth.plugins.transforms.filter import Filter
-from elspeth.plugins.context import PluginContext
-
-f = Filter({'field': 'status', 'equals': 'active'})
-ctx = PluginContext(run_id='test', config={})
-
-# This should return filtered, not raise AssertionError
-result = f.process({'status': 'inactive'}, ctx)
-assert result.status == 'filtered'
-assert result.row is None
-print('Filter correctly returns filtered status')
-"
-```
-
-**Step 3: Verify lifecycle hooks work**
+**Step 2: Verify lifecycle hooks work**
 
 ```bash
 .venv/bin/python -c "
@@ -1285,6 +849,26 @@ print('Lifecycle hooks are defined')
 "
 ```
 
+**Step 3: Verify _freeze_dict prevents mutation**
+
+```bash
+.venv/bin/python -c "
+from elspeth.plugins.results import RoutingAction
+
+reason = {'key': 'original', 'nested': {'value': 1}}
+action = RoutingAction.continue_(reason=reason)
+
+# Try to mutate
+reason['key'] = 'mutated'
+reason['nested']['value'] = 999
+
+# Verify frozen version unchanged
+assert action.reason['key'] == 'original'
+assert action.reason['nested']['value'] == 1
+print('_freeze_dict correctly prevents mutation')
+"
+```
+
 **Step 4: Run type checking**
 
 Run: `.venv/bin/python -m mypy src/elspeth/plugins/results.py src/elspeth/engine/orchestrator.py`
@@ -1296,18 +880,16 @@ Expected: Success
 
 | Task | Description | Priority | Files Modified |
 |------|-------------|----------|----------------|
-| 1 | Add TransformResult.filtered() | CRITICAL | `results.py`, `test_results.py` |
-| 2 | Update Filter to use filtered() | CRITICAL | `filter.py`, `test_filter.py` |
-| 3 | Executor handles filtered status | CRITICAL | `executors.py`, `test_executors.py` |
-| 4 | Fix _freeze_dict() mutation leak | P1 | `results.py`, `test_results.py` |
-| 5 | Orchestrator uses plugin metadata | P1 | `orchestrator.py`, `test_orchestrator.py` |
-| 6 | Invoke on_start() hook | P1 | `orchestrator.py`, `test_orchestrator.py` |
-| 7 | Invoke on_complete() hook | P1 | `orchestrator.py`, `test_orchestrator.py` |
-| 8 | Use enums in RoutingAction | P1 | `results.py`, `test_results.py` |
-| 9 | Fix PluginSchema docstring | P2 | `schemas.py` |
-| 10 | Clarify RowOutcome docstring | P2 | `results.py` |
-| 11 | Populate PluginSpec schema hashes | P2 | `manager.py`, `test_manager.py` |
-| 12 | Update PHASE3_INTEGRATION.md | P1 | `PHASE3_INTEGRATION.md` |
-| 13 | Final verification | - | (verification only) |
+| 1 | Fix _freeze_dict() mutation leak | P1 | `results.py`, `test_results.py` |
+| 2 | Invoke on_start() hook | P1 | `orchestrator.py`, `test_orchestrator.py` |
+| 3 | Invoke on_complete() hook | P1 | `orchestrator.py`, `test_orchestrator.py` |
+| 4 | Use enums in RoutingAction | P1 | `results.py`, `test_results.py` |
+| 5 | Fix PluginSchema docstring | P2 | `schemas.py` |
+| 6 | Clarify RowOutcome docstring | P2 | `results.py` |
+| 7 | Populate PluginSpec schema hashes | P2 | `manager.py`, `test_manager.py` |
+| 8 | Update PHASE3_INTEGRATION.md | P1 | `PHASE3_INTEGRATION.md` |
+| 9 | Final verification | - | (verification only) |
 
-**Estimated total:** ~300-400 lines changed across 8 files
+**Estimated total:** ~200-250 lines changed across 6 files
+
+**Note:** The Filter plugin issue (Tasks 1-3 in original plan) is addressed by the architecture-alignment plan via FilterGate, which routes filtered rows to a discard sink per architecture.md:148.

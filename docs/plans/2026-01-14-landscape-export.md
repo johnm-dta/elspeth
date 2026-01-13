@@ -8,15 +8,131 @@
 
 **Tech Stack:** Pydantic (config), existing sink infrastructure, HMAC (signing), existing LandscapeRecorder query methods.
 
+**Review Status:** GO (reviewed 2026-01-14, corrections applied)
+
+---
+
+## Task 0: Add get_edges() Method to LandscapeRecorder (Prerequisite)
+
+**Context:** The LandscapeExporter needs to query edges for a run, but this method doesn't exist yet.
+
+**Files:**
+
+- Modify: `src/elspeth/core/landscape/recorder.py`
+- Modify: `src/elspeth/core/landscape/models.py` (if Edge model missing)
+- Test: `tests/core/landscape/test_recorder.py`
+
+### Step 1: Write the failing test
+
+```python
+# tests/core/landscape/test_recorder.py - add to existing file
+
+def test_get_edges_returns_all_edges_for_run():
+    """get_edges should return all edges registered for a run."""
+    db = LandscapeDB.from_url("sqlite:///:memory:")
+    recorder = LandscapeRecorder(db)
+
+    run = recorder.begin_run(config={}, canonical_version="v1")
+
+    # Register nodes
+    recorder.register_node(
+        run_id=run.run_id,
+        node_id="source_1",
+        plugin_name="csv",
+        node_type="source",
+        plugin_version="1.0.0",
+        config={},
+    )
+    recorder.register_node(
+        run_id=run.run_id,
+        node_id="sink_1",
+        plugin_name="csv",
+        node_type="sink",
+        plugin_version="1.0.0",
+        config={},
+    )
+
+    # Register edge
+    edge = recorder.register_edge(
+        run_id=run.run_id,
+        from_node_id="source_1",
+        to_node_id="sink_1",
+        label="continue",
+        mode="move",
+    )
+
+    # Query edges
+    edges = recorder.get_edges(run.run_id)
+
+    assert len(edges) == 1
+    assert edges[0].edge_id == edge.edge_id
+    assert edges[0].from_node_id == "source_1"
+    assert edges[0].to_node_id == "sink_1"
+```
+
+### Step 2: Run test to verify it fails
+
+Run: `pytest tests/core/landscape/test_recorder.py::test_get_edges_returns_all_edges_for_run -v`
+Expected: FAIL with AttributeError ('LandscapeRecorder' has no attribute 'get_edges')
+
+### Step 3: Write minimal implementation
+
+```python
+# src/elspeth/core/landscape/recorder.py - add method
+
+def get_edges(self, run_id: str) -> list[Edge]:
+    """Get all edges for a run.
+
+    Args:
+        run_id: Run ID
+
+    Returns:
+        List of Edge models for this run
+    """
+    from elspeth.core.landscape.schema import edges as edges_table
+
+    query = select(edges_table).where(edges_table.c.run_id == run_id)
+
+    with self._db.connection() as conn:
+        result = conn.execute(query)
+        rows = result.fetchall()
+
+    return [
+        Edge(
+            edge_id=r.edge_id,
+            run_id=r.run_id,
+            from_node_id=r.from_node_id,
+            to_node_id=r.to_node_id,
+            label=r.label,
+            mode=r.mode,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
+```
+
+### Step 4: Run test to verify it passes
+
+Run: `pytest tests/core/landscape/test_recorder.py::test_get_edges_returns_all_edges_for_run -v`
+Expected: PASS
+
+### Step 5: Commit
+
+```bash
+git add src/elspeth/core/landscape/recorder.py tests/core/landscape/test_recorder.py
+git commit -m "feat(landscape): add get_edges() query method to LandscapeRecorder"
+```
+
 ---
 
 ## Task 1: Add Export Config Schema
 
 **Files:**
+
 - Modify: `src/elspeth/core/config.py:59-75`
 - Test: `tests/core/test_config.py`
 
-**Step 1: Write the failing test**
+### Step 1: Write the failing test
 
 ```python
 # tests/core/test_config.py - add to existing file
@@ -49,12 +165,12 @@ def test_landscape_export_config_with_sink():
     assert settings.export.sign is True
 ```
 
-**Step 2: Run test to verify it fails**
+### Step 2: Run test to verify it fails
 
 Run: `pytest tests/core/test_config.py::test_landscape_export_config_defaults -v`
 Expected: FAIL with AttributeError (no 'export' attribute)
 
-**Step 3: Write minimal implementation**
+### Step 3: Write minimal implementation
 
 ```python
 # src/elspeth/core/config.py - add before LandscapeSettings
@@ -84,10 +200,6 @@ class LandscapeExportSettings(BaseModel):
         default=False,
         description="HMAC sign each record for integrity verification",
     )
-    include_payloads: bool = Field(
-        default=False,
-        description="Include full payload data (may be large)",
-    )
 
 
 # Modify LandscapeSettings to include export:
@@ -111,12 +223,12 @@ class LandscapeSettings(BaseModel):
     )
 ```
 
-**Step 4: Run test to verify it passes**
+### Step 4: Run test to verify it passes
 
 Run: `pytest tests/core/test_config.py::test_landscape_export_config_defaults tests/core/test_config.py::test_landscape_export_config_with_sink -v`
 Expected: PASS
 
-**Step 5: Commit**
+### Step 5: Commit
 
 ```bash
 git add src/elspeth/core/config.py tests/core/test_config.py
@@ -128,10 +240,11 @@ git commit -m "feat(config): add LandscapeExportSettings for audit trail export"
 ## Task 2: Validate Export Sink Reference
 
 **Files:**
+
 - Modify: `src/elspeth/core/config.py:130-183`
 - Test: `tests/core/test_config.py`
 
-**Step 1: Write the failing test**
+### Step 1: Write the failing test
 
 ```python
 # tests/core/test_config.py
@@ -173,12 +286,12 @@ def test_export_sink_not_required_when_disabled():
     assert settings.landscape.export.sink is None
 ```
 
-**Step 2: Run test to verify it fails**
+### Step 2: Run test to verify it fails
 
 Run: `pytest tests/core/test_config.py::test_export_sink_must_exist_when_enabled -v`
 Expected: FAIL (no validation error raised)
 
-**Step 3: Write minimal implementation**
+### Step 3: Write minimal implementation
 
 ```python
 # src/elspeth/core/config.py - add validator to ElspethSettings
@@ -199,12 +312,12 @@ def validate_export_sink_exists(self) -> "ElspethSettings":
     return self
 ```
 
-**Step 4: Run test to verify it passes**
+### Step 4: Run test to verify it passes
 
 Run: `pytest tests/core/test_config.py::test_export_sink_must_exist_when_enabled tests/core/test_config.py::test_export_sink_not_required_when_disabled -v`
 Expected: PASS
 
-**Step 5: Commit**
+### Step 5: Commit
 
 ```bash
 git add src/elspeth/core/config.py tests/core/test_config.py
@@ -216,10 +329,11 @@ git commit -m "feat(config): validate export sink reference"
 ## Task 3: Create LandscapeExporter Class
 
 **Files:**
+
 - Create: `src/elspeth/core/landscape/exporter.py`
 - Test: `tests/core/landscape/test_exporter.py`
 
-**Step 1: Write the failing test**
+### Step 1: Write the failing test
 
 ```python
 # tests/core/landscape/test_exporter.py
@@ -237,7 +351,7 @@ def populated_db():
 
     run = recorder.begin_run(config={"test": True}, canonical_version="v1")
 
-    node = recorder.register_node(
+    recorder.register_node(
         run_id=run.run_id,
         node_id="source_1",
         plugin_name="csv",
@@ -246,11 +360,12 @@ def populated_db():
         config={"path": "input.csv"},
     )
 
-    row = recorder.record_source_row(
+    # NOTE: Use create_row, not record_source_row (which doesn't exist)
+    row = recorder.create_row(
         run_id=run.run_id,
-        row_index=0,
-        row_data={"name": "Alice", "value": 100},
         source_node_id="source_1",
+        row_index=0,
+        data={"name": "Alice", "value": 100},
     )
 
     recorder.complete_run(run.run_id, status="completed")
@@ -284,12 +399,12 @@ def test_exporter_extracts_rows(populated_db):
     assert row_records[0]["row_index"] == 0
 ```
 
-**Step 2: Run test to verify it fails**
+### Step 2: Run test to verify it fails
 
 Run: `pytest tests/core/landscape/test_exporter.py::test_exporter_extracts_run_metadata -v`
 Expected: FAIL with ImportError (module doesn't exist)
 
-**Step 3: Write minimal implementation**
+### Step 3: Write minimal implementation
 
 ```python
 # src/elspeth/core/landscape/exporter.py
@@ -318,9 +433,12 @@ class LandscapeExporter:
     - edge: Graph edges
     - row: Source rows
     - token: Row instances
+    - token_parent: Token lineage for forks/joins
     - node_state: Processing records
     - routing_event: Routing decisions
     - call: External calls
+    - batch: Aggregation batches
+    - batch_member: Batch membership
     - artifact: Sink outputs
     """
 
@@ -361,6 +479,18 @@ class LandscapeExporter:
                 "config_hash": node.config_hash,
             }
 
+        # Edges (uses new get_edges method from Task 0)
+        for edge in self._recorder.get_edges(run_id):
+            yield {
+                "record_type": "edge",
+                "run_id": run_id,
+                "edge_id": edge.edge_id,
+                "from_node_id": edge.from_node_id,
+                "to_node_id": edge.to_node_id,
+                "label": edge.label,
+                "mode": edge.mode,
+            }
+
         # Rows and their tokens/states
         for row in self._recorder.get_rows(run_id):
             yield {
@@ -369,7 +499,7 @@ class LandscapeExporter:
                 "row_id": row.row_id,
                 "row_index": row.row_index,
                 "source_node_id": row.source_node_id,
-                "content_hash": row.content_hash,
+                "source_data_hash": row.source_data_hash,  # CORRECTED field name
             }
 
             # Tokens for this row
@@ -381,6 +511,15 @@ class LandscapeExporter:
                     "row_id": token.row_id,
                     "step_in_pipeline": token.step_in_pipeline,
                 }
+
+                # Token parents (for fork/join lineage)
+                for parent in self._recorder.get_token_parents(token.token_id):
+                    yield {
+                        "record_type": "token_parent",
+                        "run_id": run_id,
+                        "token_id": parent.token_id,
+                        "parent_token_id": parent.parent_token_id,
+                    }
 
                 # Node states for this token
                 for state in self._recorder.get_node_states_for_token(token.token_id):
@@ -415,12 +554,32 @@ class LandscapeExporter:
                             "run_id": run_id,
                             "call_id": call.call_id,
                             "state_id": call.state_id,
-                            "provider": call.provider,
+                            "call_type": call.call_type,  # CORRECTED: was "provider"
                             "request_hash": call.request_hash,
                             "response_hash": call.response_hash,
-                            "status_code": call.status_code,
+                            "status": call.status,  # CORRECTED: was "status_code"
                             "latency_ms": call.latency_ms,
                         }
+
+        # Batches
+        for batch in self._recorder.get_batches(run_id):
+            yield {
+                "record_type": "batch",
+                "run_id": run_id,
+                "batch_id": batch.batch_id,
+                "node_id": batch.node_id,
+                "status": batch.status,
+                "created_at": batch.created_at.isoformat() if batch.created_at else None,
+            }
+
+            # Batch members
+            for member in self._recorder.get_batch_members(batch.batch_id):
+                yield {
+                    "record_type": "batch_member",
+                    "run_id": run_id,
+                    "batch_id": member.batch_id,
+                    "token_id": member.token_id,
+                }
 
         # Artifacts
         for artifact in self._recorder.get_artifacts(run_id):
@@ -434,7 +593,7 @@ class LandscapeExporter:
             }
 ```
 
-**Step 4: Update `__init__.py` exports**
+### Step 4: Update `__init__.py` exports
 
 ```python
 # src/elspeth/core/landscape/__init__.py - add to exports
@@ -446,12 +605,12 @@ __all__ = [
 ]
 ```
 
-**Step 5: Run tests to verify they pass**
+### Step 5: Run tests to verify they pass
 
 Run: `pytest tests/core/landscape/test_exporter.py -v`
 Expected: PASS
 
-**Step 6: Commit**
+### Step 6: Commit
 
 ```bash
 git add src/elspeth/core/landscape/exporter.py src/elspeth/core/landscape/__init__.py tests/core/landscape/test_exporter.py
@@ -463,10 +622,11 @@ git commit -m "feat(landscape): add LandscapeExporter for audit trail export"
 ## Task 4: Add HMAC Signing to Exporter
 
 **Files:**
+
 - Modify: `src/elspeth/core/landscape/exporter.py`
 - Test: `tests/core/landscape/test_exporter.py`
 
-**Step 1: Write the failing test**
+### Step 1: Write the failing test
 
 ```python
 # tests/core/landscape/test_exporter.py
@@ -497,20 +657,22 @@ def test_exporter_manifest_contains_final_hash(populated_db):
     manifest = manifest_records[0]
     assert "record_count" in manifest
     assert "final_hash" in manifest
+    assert "exported_at" in manifest  # Timestamp for forensics
 ```
 
-**Step 2: Run test to verify it fails**
+### Step 2: Run test to verify it fails
 
 Run: `pytest tests/core/landscape/test_exporter.py::test_exporter_signs_records_when_enabled -v`
 Expected: FAIL (no 'signature' field)
 
-**Step 3: Write minimal implementation**
+### Step 3: Write minimal implementation
 
 ```python
 # src/elspeth/core/landscape/exporter.py - modify class
 
 import hashlib
 import hmac
+from datetime import datetime, timezone
 from elspeth.core.canonical import canonical_json
 
 
@@ -578,6 +740,7 @@ class LandscapeExporter:
                 "final_hash": running_hash.hexdigest(),
                 "hash_algorithm": "sha256",
                 "signature_algorithm": "hmac-sha256",
+                "exported_at": datetime.now(timezone.utc).isoformat(),
             }
             manifest["signature"] = self._sign_record(manifest)
             yield manifest
@@ -587,12 +750,12 @@ class LandscapeExporter:
         # ... move existing export_run logic here ...
 ```
 
-**Step 4: Run tests to verify they pass**
+### Step 4: Run tests to verify they pass
 
 Run: `pytest tests/core/landscape/test_exporter.py -v`
 Expected: PASS
 
-**Step 5: Commit**
+### Step 5: Commit
 
 ```bash
 git add src/elspeth/core/landscape/exporter.py tests/core/landscape/test_exporter.py
@@ -604,34 +767,70 @@ git commit -m "feat(landscape): add HMAC signing to audit export"
 ## Task 5: Integrate Export into Orchestrator
 
 **Files:**
+
 - Modify: `src/elspeth/engine/orchestrator.py`
 - Modify: `src/elspeth/cli.py` (pass settings to Orchestrator)
 - Test: `tests/engine/test_orchestrator.py`
 
-**Step 1: Write the failing test**
+### Step 1: Write the failing test
 
 ```python
 # tests/engine/test_orchestrator.py - add new test
 
 def test_orchestrator_exports_landscape_when_configured():
     """Orchestrator should export audit trail after run completes."""
-    from elspeth.core.config import ElspethSettings, LandscapeExportSettings
+    from elspeth.core.config import ElspethSettings
+    from elspeth.core.dag import ExecutionGraph
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import Orchestrator, PipelineConfig
-    from tests.engine.helpers import MockSource, MockSink, MockTransform
+    from elspeth.plugins.base import BaseSink, BaseSource
+    from elspeth.plugins.context import PluginContext
+
+    # Mock source that yields one row
+    class MockSource(BaseSource):
+        name = "mock"
+
+        def __init__(self):
+            super().__init__({})
+            self.node_id = None
+
+        def load(self, ctx):
+            yield {"id": 1, "value": "test"}
+
+        def close(self):
+            pass
+
+    # Mock sink that captures writes
+    class CaptureSink(BaseSink):
+        name = "capture"
+
+        def __init__(self):
+            super().__init__({})
+            self.node_id = None
+            self.captured_rows = []
+
+        def write(self, row, ctx):
+            self.captured_rows.append(row)
+
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
 
     # Create in-memory DB
     db = LandscapeDB.from_url("sqlite:///:memory:")
 
-    # Create mock sink that captures writes
-    export_sink = MockSink()
+    # Create sinks
+    output_sink = CaptureSink()
+    export_sink = CaptureSink()
 
-    # Build config with export enabled
+    # Build settings with export enabled
     settings = ElspethSettings(
         datasource={"plugin": "csv", "options": {"path": "input.csv"}},
         sinks={
             "output": {"plugin": "csv", "options": {"path": "out.csv"}},
-            "audit_export": {"plugin": "mock", "options": {}},
+            "audit_export": {"plugin": "csv", "options": {"path": "audit.csv"}},
         },
         output_sink="output",
         landscape={
@@ -644,31 +843,40 @@ def test_orchestrator_exports_landscape_when_configured():
         },
     )
 
+    source = MockSource()
     pipeline = PipelineConfig(
-        source=MockSource([{"id": 1}]),
+        source=source,
         transforms=[],
         sinks={
-            "output": MockSink(),
+            "output": output_sink,
             "audit_export": export_sink,
         },
         config={},
     )
 
+    # Build graph
+    graph = ExecutionGraph.from_plugins(
+        source=source,
+        transforms=[],
+        sinks={"output": output_sink},
+        output_sink="output",
+    )
+
     # Run with settings
     orchestrator = Orchestrator(db)
-    result = orchestrator.run(pipeline, graph=..., settings=settings)
+    result = orchestrator.run(pipeline, graph=graph, settings=settings)
 
     # Export sink should have received audit records
-    assert export_sink.rows_written > 0
+    assert len(export_sink.captured_rows) > 0
     assert any(r.get("record_type") == "run" for r in export_sink.captured_rows)
 ```
 
-**Step 2: Run test to verify it fails**
+### Step 2: Run test to verify it fails
 
 Run: `pytest tests/engine/test_orchestrator.py::test_orchestrator_exports_landscape_when_configured -v`
 Expected: FAIL (Orchestrator.run doesn't accept settings parameter)
 
-**Step 3: Write minimal implementation**
+### Step 3: Write minimal implementation
 
 ```python
 # src/elspeth/engine/orchestrator.py - modify run() method
@@ -750,7 +958,7 @@ class Orchestrator:
         sink.flush()
 ```
 
-**Step 4: Update CLI to pass settings**
+### Step 4: Update CLI to pass settings
 
 ```python
 # src/elspeth/cli.py - modify _execute_pipeline()
@@ -759,12 +967,12 @@ class Orchestrator:
 result = orchestrator.run(pipeline_config, graph=graph, settings=config)
 ```
 
-**Step 5: Run tests to verify they pass**
+### Step 5: Run tests to verify they pass
 
 Run: `pytest tests/engine/test_orchestrator.py::test_orchestrator_exports_landscape_when_configured -v`
 Expected: PASS
 
-**Step 6: Commit**
+### Step 6: Commit
 
 ```bash
 git add src/elspeth/engine/orchestrator.py src/elspeth/cli.py tests/engine/test_orchestrator.py
@@ -776,11 +984,12 @@ git commit -m "feat(engine): integrate landscape export into Orchestrator"
 ## Task 6: Add Export Format Options (CSV vs JSON)
 
 **Files:**
+
 - Create: `src/elspeth/core/landscape/formatters.py`
 - Modify: `src/elspeth/engine/orchestrator.py`
 - Test: `tests/core/landscape/test_formatters.py`
 
-**Step 1: Write the failing test**
+### Step 1: Write the failing test
 
 ```python
 # tests/core/landscape/test_formatters.py
@@ -819,12 +1028,12 @@ def test_json_formatter_preserves_structure():
     assert parsed["metadata"]["attempt"] == 1
 ```
 
-**Step 2: Run test to verify it fails**
+### Step 2: Run test to verify it fails
 
 Run: `pytest tests/core/landscape/test_formatters.py -v`
 Expected: FAIL with ImportError
 
-**Step 3: Write minimal implementation**
+### Step 3: Write minimal implementation
 
 ```python
 # src/elspeth/core/landscape/formatters.py
@@ -881,12 +1090,12 @@ class CSVFormatter:
         return self.flatten(record)
 ```
 
-**Step 4: Run tests to verify they pass**
+### Step 4: Run tests to verify they pass
 
 Run: `pytest tests/core/landscape/test_formatters.py -v`
 Expected: PASS
 
-**Step 5: Commit**
+### Step 5: Commit
 
 ```bash
 git add src/elspeth/core/landscape/formatters.py tests/core/landscape/test_formatters.py
@@ -898,10 +1107,11 @@ git commit -m "feat(landscape): add CSV and JSON formatters for export"
 ## Task 7: Update Architecture Documentation
 
 **Files:**
+
 - Modify: `docs/design/architecture.md`
 - Modify: `docs/design/requirements.md`
 
-**Step 1: Add to architecture.md (after Landscape section)**
+### Step 1: Add to architecture.md (after Landscape section)
 
 ```markdown
 ### Audit Trail Export
@@ -916,7 +1126,6 @@ landscape:
     sink: audit_archive       # Reference to configured sink
     format: csv               # csv or json
     sign: true                # HMAC signature per record
-    include_payloads: false   # Full payload data (large)
 ```
 
 **Export flow:**
@@ -931,31 +1140,29 @@ landscape:
 - Manifest with final hash for tamper detection
 
 **Environment:**
-- `ELSPETH_SIGNING_KEY`: Required for signed exports
+- `ELSPETH_SIGNING_KEY`: Required for signed exports (UTF-8 encoded string)
+
+**Redaction note:** Redaction is the responsibility of plugins BEFORE invoking Landscape recording methods. The Landscape is a faithful recorder - it stores what it's given. The export therefore exports exactly what was recorded.
 ```
 
-**Step 2: Add to requirements.md**
+### Step 2: Add to requirements.md
 
 Add new requirements section:
 
 ```markdown
 ## LANDSCAPE EXPORT REQUIREMENTS
-┌────────────────┬─────────────────────────────────────────────────────┬────────────────────────────┬─────────────────────┐
-│ Requirement ID │                     Requirement                     │           Source           │        Status       │
-├────────────────┼─────────────────────────────────────────────────────┼────────────────────────────┼─────────────────────┤
-│ EXP-001        │ Export audit trail to configured sink               │ This plan                  │ ✅ Implemented      │
-├────────────────┼─────────────────────────────────────────────────────┼────────────────────────────┼─────────────────────┤
-│ EXP-002        │ Optional HMAC signing per record                    │ This plan                  │ ✅ Implemented      │
-├────────────────┼─────────────────────────────────────────────────────┼────────────────────────────┼─────────────────────┤
-│ EXP-003        │ Manifest with final hash for tamper detection       │ This plan                  │ ✅ Implemented      │
-├────────────────┼─────────────────────────────────────────────────────┼────────────────────────────┼─────────────────────┤
-│ EXP-004        │ CSV and JSON format options                         │ This plan                  │ ✅ Implemented      │
-├────────────────┼─────────────────────────────────────────────────────┼────────────────────────────┼─────────────────────┤
-│ EXP-005        │ Export happens post-run via config, not CLI         │ This plan                  │ ✅ Implemented      │
-└────────────────┴─────────────────────────────────────────────────────┴────────────────────────────┴─────────────────────┘
+
+| Requirement ID | Requirement | Source | Status |
+|----------------|-------------|--------|--------|
+| EXP-001 | Export audit trail to configured sink | This plan | ✅ Implemented |
+| EXP-002 | Optional HMAC signing per record | This plan | ✅ Implemented |
+| EXP-003 | Manifest with final hash for tamper detection | This plan | ✅ Implemented |
+| EXP-004 | CSV and JSON format options | This plan | ✅ Implemented |
+| EXP-005 | Export happens post-run via config, not CLI | This plan | ✅ Implemented |
+| EXP-006 | Include all record types (batches, token_parents) | Code review | ✅ Implemented |
 ```
 
-**Step 3: Commit**
+### Step 3: Commit
 
 ```bash
 git add docs/design/architecture.md docs/design/requirements.md
@@ -967,17 +1174,16 @@ git commit -m "docs: add Landscape export requirements and architecture"
 ## Task 8: Add Integration Test with Example
 
 **Files:**
-- Modify: `examples/settings.yaml` (add export config)
+
+- Create: `examples/export_settings.yaml`
 - Create: `tests/integration/test_landscape_export.py`
 
-**Step 1: Write the integration test**
+### Step 1: Write the integration test
 
 ```python
 # tests/integration/test_landscape_export.py
 """Integration test for landscape export."""
 
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -1047,12 +1253,12 @@ def test_run_with_export_creates_audit_file(export_settings_yaml: Path):
     assert "row" in content
 ```
 
-**Step 2: Run test to verify it passes**
+### Step 2: Run test to verify it passes
 
 Run: `pytest tests/integration/test_landscape_export.py -v`
 Expected: PASS
 
-**Step 3: Add example to examples folder**
+### Step 3: Add example to examples folder
 
 Create `examples/export_settings.yaml`:
 
@@ -1060,6 +1266,10 @@ Create `examples/export_settings.yaml`:
 # Example: Pipeline with audit export to CSV
 #
 # Run with:
+#   uv run elspeth run -s examples/export_settings.yaml --execute
+#
+# For signed exports (legal/compliance use):
+#   export ELSPETH_SIGNING_KEY="your-secret-key"
 #   uv run elspeth run -s examples/export_settings.yaml --execute
 
 datasource:
@@ -1090,7 +1300,7 @@ landscape:
     sign: false  # Set to true and provide ELSPETH_SIGNING_KEY for legal use
 ```
 
-**Step 4: Commit**
+### Step 4: Commit
 
 ```bash
 git add examples/export_settings.yaml tests/integration/test_landscape_export.py
@@ -1099,18 +1309,103 @@ git commit -m "test: add landscape export integration test and example"
 
 ---
 
+## Task 9: Update README with Export Feature
+
+**Files:**
+
+- Modify: `README.md`
+
+### Step 1: Add Audit Export section to README
+
+Add after the existing Landscape section (or create one if it doesn't exist):
+
+```markdown
+## Audit Trail Export
+
+ELSPETH can automatically export the complete audit trail after each run for compliance and legal inquiry.
+
+### Configuration
+
+```yaml
+landscape:
+  url: sqlite:///./runs/audit.db
+  export:
+    enabled: true
+    sink: audit_archive     # Must reference a defined sink
+    format: csv             # csv or json
+    sign: true              # HMAC signature per record
+
+sinks:
+  audit_archive:
+    plugin: csv
+    options:
+      path: exports/audit_trail.csv
+```
+
+### Signed Exports
+
+For legal-grade integrity verification, enable signing:
+
+```bash
+export ELSPETH_SIGNING_KEY="your-secret-key"
+uv run elspeth run -s settings.yaml --execute
+```
+
+Each record receives an HMAC-SHA256 signature. A manifest record at the end contains:
+- Total record count
+- Running hash of all signatures
+- Export timestamp
+
+This allows auditors to:
+1. Verify no records were added, removed, or modified
+2. Trace any row through every processing step
+3. Prove chain-of-custody for legal proceedings
+
+### Export Record Types
+
+The export includes all audit data:
+
+| Record Type | Description |
+|-------------|-------------|
+| `run` | Run metadata (config hash, timestamps, status) |
+| `node` | Registered plugins (source, transforms, sinks) |
+| `edge` | Graph edges between nodes |
+| `row` | Source rows with content hashes |
+| `token` | Row instances in pipeline paths |
+| `token_parent` | Fork/join lineage |
+| `node_state` | Processing records (input/output hashes) |
+| `routing_event` | Gate routing decisions |
+| `call` | External API calls |
+| `batch` | Aggregation batches |
+| `batch_member` | Batch membership |
+| `artifact` | Sink outputs |
+| `manifest` | Final hash and metadata (signed exports only) |
+```
+
+### Step 2: Commit
+
+```bash
+git add README.md
+git commit -m "docs(readme): add Audit Trail Export section"
+```
+
+---
+
 ## Summary
 
 | Task | Description | Files |
 |------|-------------|-------|
+| 0 | Add get_edges() to LandscapeRecorder | recorder.py, test_recorder.py |
 | 1 | Add export config schema | config.py, test_config.py |
 | 2 | Validate export sink reference | config.py, test_config.py |
 | 3 | Create LandscapeExporter class | exporter.py, test_exporter.py |
 | 4 | Add HMAC signing | exporter.py, test_exporter.py |
 | 5 | Integrate into Orchestrator | orchestrator.py, cli.py |
 | 6 | Add format options | formatters.py, test_formatters.py |
-| 7 | Update documentation | architecture.md, requirements.md |
-| 8 | Integration test | test_landscape_export.py, example |
+| 7 | Update architecture docs | architecture.md, requirements.md |
+| 8 | Integration test + example | test_landscape_export.py, export_settings.yaml |
+| 9 | Update README | README.md |
 
-**Total estimated commits:** 8
+**Total commits:** 10
 **Approach:** TDD (test first, then implement)
+**Review status:** GO (corrections applied from code review)

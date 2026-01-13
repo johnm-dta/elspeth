@@ -7,7 +7,7 @@ Settings are frozen (immutable) after construction.
 """
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -21,6 +21,26 @@ class DatasourceSettings(BaseModel):
     options: dict[str, Any] = Field(
         default_factory=dict,
         description="Plugin-specific configuration options",
+    )
+
+
+class RowPluginSettings(BaseModel):
+    """Transform or gate plugin configuration per architecture."""
+
+    model_config = {"frozen": True}
+
+    plugin: str = Field(description="Plugin name")
+    type: Literal["transform", "gate"] = Field(
+        default="transform",
+        description="Plugin type: transform (pass-through) or gate (routing)",
+    )
+    options: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Plugin-specific configuration options",
+    )
+    routes: dict[str, str] | None = Field(
+        default=None,
+        description="Gate routing map: result -> sink_name or 'continue'",
     )
 
 

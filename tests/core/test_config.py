@@ -184,3 +184,38 @@ class TestDatasourceSettings:
         ds = DatasourceSettings(plugin="csv")
         with pytest.raises(ValidationError):
             ds.plugin = "json"
+
+
+class TestRowPluginSettings:
+    """RowPluginSettings matches architecture specification."""
+
+    def test_row_plugin_settings_structure(self) -> None:
+        """RowPluginSettings has plugin, type, options, routes."""
+        from elspeth.core.config import RowPluginSettings
+
+        rp = RowPluginSettings(
+            plugin="threshold_gate",
+            type="gate",
+            options={"field": "confidence", "min": 0.8},
+            routes={"pass": "continue", "fail": "quarantine"},
+        )
+        assert rp.plugin == "threshold_gate"
+        assert rp.type == "gate"
+        assert rp.options == {"field": "confidence", "min": 0.8}
+        assert rp.routes == {"pass": "continue", "fail": "quarantine"}
+
+    def test_row_plugin_settings_defaults(self) -> None:
+        """RowPluginSettings defaults: type=transform, no routes."""
+        from elspeth.core.config import RowPluginSettings
+
+        rp = RowPluginSettings(plugin="field_mapper")
+        assert rp.type == "transform"
+        assert rp.options == {}
+        assert rp.routes is None
+
+    def test_row_plugin_settings_type_validation(self) -> None:
+        """Type must be 'transform' or 'gate'."""
+        from elspeth.core.config import RowPluginSettings
+
+        with pytest.raises(ValidationError):
+            RowPluginSettings(plugin="test", type="invalid")

@@ -7,8 +7,21 @@ Settings are frozen (immutable) after construction.
 """
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
+
+
+class DatasourceSettings(BaseModel):
+    """Source plugin configuration per architecture."""
+
+    model_config = {"frozen": True}
+
+    plugin: str = Field(description="Plugin name (csv_local, json, http_poll, etc.)")
+    options: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Plugin-specific configuration options",
+    )
 
 
 class DatabaseSettings(BaseModel):

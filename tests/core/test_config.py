@@ -157,3 +157,30 @@ retry:
         missing_file = tmp_path / "nonexistent.yaml"
         with pytest.raises(FileNotFoundError, match="Config file not found"):
             load_settings(missing_file)
+
+
+class TestDatasourceSettings:
+    """DatasourceSettings matches architecture specification."""
+
+    def test_datasource_settings_structure(self) -> None:
+        """DatasourceSettings has plugin and options."""
+        from elspeth.core.config import DatasourceSettings
+
+        ds = DatasourceSettings(plugin="csv_local", options={"path": "data/input.csv"})
+        assert ds.plugin == "csv_local"
+        assert ds.options == {"path": "data/input.csv"}
+
+    def test_datasource_settings_options_default_empty(self) -> None:
+        """Options defaults to empty dict."""
+        from elspeth.core.config import DatasourceSettings
+
+        ds = DatasourceSettings(plugin="csv")
+        assert ds.options == {}
+
+    def test_datasource_settings_frozen(self) -> None:
+        """DatasourceSettings is immutable."""
+        from elspeth.core.config import DatasourceSettings
+
+        ds = DatasourceSettings(plugin="csv")
+        with pytest.raises(ValidationError):
+            ds.plugin = "json"

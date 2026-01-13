@@ -9,6 +9,7 @@ from typing import Any
 
 import pluggy
 
+from elspeth.core.canonical import stable_hash
 from elspeth.plugins.enums import Determinism, NodeType
 from elspeth.plugins.hookspecs import (
     PROJECT_NAME,
@@ -24,6 +25,33 @@ from elspeth.plugins.protocols import (
     SourceProtocol,
     TransformProtocol,
 )
+
+
+def _schema_hash(schema_cls: Any) -> str | None:
+    """Compute stable hash for a schema class.
+
+    Hashes the schema's field names and types to detect compatibility changes.
+
+    Args:
+        schema_cls: A PluginSchema subclass, or None
+
+    Returns:
+        SHA-256 hex digest of field names/types, or None if no schema
+    """
+    if schema_cls is None:
+        return None
+
+    # Use Pydantic model_fields for accurate field introspection
+    # This is legitimate type checking at a plugin boundary
+    if not hasattr(schema_cls, "model_fields"):
+        return None
+
+    # Build deterministic representation
+    fields_repr = {
+        name: str(field.annotation)
+        for name, field in schema_cls.model_fields.items()
+    }
+    return stable_hash(fields_repr)
 
 
 @dataclass(frozen=True)
@@ -43,7 +71,7 @@ class PluginSpec:
 
     @classmethod
     def from_plugin(cls, plugin_cls: type, node_type: NodeType) -> "PluginSpec":
-        """Create spec from plugin class.
+        """Create spec from plugin class with schema hashes.
 
         Args:
             plugin_cls: Plugin class to extract metadata from
@@ -52,11 +80,16 @@ class PluginSpec:
         Returns:
             PluginSpec with extracted metadata
         """
+        input_schema = getattr(plugin_cls, "input_schema", None)
+        output_schema = getattr(plugin_cls, "output_schema", None)
+
         return cls(
             name=getattr(plugin_cls, "name", plugin_cls.__name__),
             node_type=node_type,
             version=getattr(plugin_cls, "plugin_version", "0.0.0"),
             determinism=getattr(plugin_cls, "determinism", Determinism.DETERMINISTIC),
+            input_schema_hash=_schema_hash(input_schema),
+            output_schema_hash=_schema_hash(output_schema),
         )
 
 

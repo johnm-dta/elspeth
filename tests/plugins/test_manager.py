@@ -209,3 +209,56 @@ class TestDuplicateNameValidation:
 
         manager = PluginManager()
         manager.register(Plugin())  # Should not raise
+
+
+class TestPluginSpecSchemaHashes:
+    """PluginSpec.from_plugin() populates schema hashes."""
+
+    def test_from_plugin_captures_input_schema_hash(self) -> None:
+        """Input schema is hashed."""
+        from elspeth.plugins.enums import NodeType
+        from elspeth.plugins.manager import PluginSpec
+        from elspeth.plugins.schemas import PluginSchema
+
+        class InputSchema(PluginSchema):
+            field_a: str
+            field_b: int
+
+        class MyTransform:
+            name = "test"
+            plugin_version = "1.0.0"
+            input_schema = InputSchema
+            output_schema = InputSchema
+
+        spec = PluginSpec.from_plugin(MyTransform, NodeType.TRANSFORM)
+
+        assert spec.input_schema_hash is not None
+        assert len(spec.input_schema_hash) == 64  # SHA-256 hex
+
+    def test_schema_hash_stable(self) -> None:
+        """Same schema always produces same hash."""
+        from elspeth.plugins.enums import NodeType
+        from elspeth.plugins.manager import PluginSpec
+        from elspeth.plugins.schemas import PluginSchema
+
+        class MySchema(PluginSchema):
+            value: int
+
+        class T1:
+            name = "t1"
+            plugin_version = "1.0.0"
+            input_schema = MySchema
+            output_schema = MySchema
+
+        class T2:
+            name = "t2"
+            plugin_version = "1.0.0"
+            input_schema = MySchema
+            output_schema = MySchema
+
+        spec1 = PluginSpec.from_plugin(T1, NodeType.TRANSFORM)
+        spec2 = PluginSpec.from_plugin(T2, NodeType.TRANSFORM)
+
+        # Same schema = same hash (regardless of plugin)
+        assert spec1.input_schema_hash is not None  # Ensure populated
+        assert spec1.input_schema_hash == spec2.input_schema_hash

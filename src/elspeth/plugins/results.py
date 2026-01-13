@@ -19,6 +19,14 @@ from elspeth.plugins.enums import RoutingKind, RoutingMode
 class RowOutcome(Enum):
     """Terminal states for rows in the pipeline.
 
+    DESIGN NOTE: Per architecture (00-overview.md:267-279), token terminal
+    states are DERIVED from the combination of node_states, routing_events,
+    and batch membership—not stored as a column. This enum is used at
+    query/explain time to report final disposition, not at runtime.
+
+    The engine does NOT set these directly. The Landscape query layer
+    derives them when answering explain() queries.
+
     INVARIANT: Every row reaches exactly one terminal state.
     No silent drops.
     """

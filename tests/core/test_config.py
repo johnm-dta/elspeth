@@ -264,6 +264,51 @@ class TestSinkSettings:
         assert sink.options == {}
 
 
+class TestLandscapeExportSettings:
+    """LandscapeExportSettings for audit trail export configuration."""
+
+    def test_landscape_export_config_defaults(self) -> None:
+        """Export config should have sensible defaults."""
+        from elspeth.core.config import LandscapeSettings
+
+        settings = LandscapeSettings()
+        assert settings.export is not None
+        assert settings.export.enabled is False
+        assert settings.export.format == "csv"
+        assert settings.export.sign is False
+
+    def test_landscape_export_config_with_sink(self) -> None:
+        """Export config should accept sink reference."""
+        from elspeth.core.config import LandscapeSettings
+
+        settings = LandscapeSettings(
+            export={
+                "enabled": True,
+                "sink": "audit_archive",
+                "format": "csv",
+                "sign": True,
+            }
+        )
+        assert settings.export.enabled is True
+        assert settings.export.sink == "audit_archive"
+        assert settings.export.sign is True
+
+    def test_landscape_export_format_validation(self) -> None:
+        """Format must be 'csv' or 'json'."""
+        from elspeth.core.config import LandscapeExportSettings
+
+        with pytest.raises(ValidationError):
+            LandscapeExportSettings(format="xml")
+
+    def test_landscape_export_settings_frozen(self) -> None:
+        """LandscapeExportSettings is immutable."""
+        from elspeth.core.config import LandscapeExportSettings
+
+        export = LandscapeExportSettings()
+        with pytest.raises(ValidationError):
+            export.enabled = True
+
+
 class TestLandscapeSettings:
     """LandscapeSettings matches architecture specification."""
 

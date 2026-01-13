@@ -56,6 +56,33 @@ class SinkSettings(BaseModel):
     )
 
 
+class LandscapeExportSettings(BaseModel):
+    """Landscape export configuration for audit compliance.
+
+    Exports audit trail to a configured sink after run completes.
+    Optional cryptographic signing for legal-grade integrity.
+    """
+
+    model_config = {"frozen": True}
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable audit trail export after run completes",
+    )
+    sink: str | None = Field(
+        default=None,
+        description="Sink name to export to (must be defined in sinks)",
+    )
+    format: Literal["csv", "json"] = Field(
+        default="csv",
+        description="Export format: csv (human-readable) or json (machine)",
+    )
+    sign: bool = Field(
+        default=False,
+        description="HMAC sign each record for integrity verification",
+    )
+
+
 class LandscapeSettings(BaseModel):
     """Landscape audit system configuration per architecture."""
 
@@ -71,6 +98,10 @@ class LandscapeSettings(BaseModel):
     url: str = Field(
         default="sqlite:///./runs/audit.db",
         description="Full SQLAlchemy database URL",
+    )
+    export: LandscapeExportSettings = Field(
+        default_factory=LandscapeExportSettings,
+        description="Post-run audit export configuration",
     )
 
 

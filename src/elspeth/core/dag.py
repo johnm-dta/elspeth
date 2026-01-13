@@ -182,3 +182,14 @@ class ExecutionGraph:
         if not self._graph.has_node(node_id):
             raise KeyError(f"Node not found: {node_id}")
         return cast(NodeInfo, self._graph.nodes[node_id]["info"])
+
+    def get_edges(self) -> list[tuple[str, str, dict[str, Any]]]:
+        """Get all edges with their data.
+
+        Returns:
+            List of (from_node, to_node, edge_data) tuples
+        """
+        return [
+            (u, v, dict(data))
+            for u, v, data in self._graph.edges(data=True)
+        ]

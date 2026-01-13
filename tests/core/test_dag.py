@@ -206,3 +206,30 @@ class TestExecutionGraphAccessors:
 
         with pytest.raises(KeyError):
             graph.get_node_info("nonexistent")
+
+    def test_get_edges(self) -> None:
+        """Get all edges with data."""
+        from elspeth.core.dag import ExecutionGraph
+
+        graph = ExecutionGraph()
+        graph.add_node("a", node_type="source", plugin_name="src")
+        graph.add_node("b", node_type="transform", plugin_name="tf")
+        graph.add_node("c", node_type="sink", plugin_name="sink")
+        graph.add_edge("a", "b", label="continue", mode="move")
+        graph.add_edge("b", "c", label="output", mode="copy")
+
+        edges = list(graph.get_edges())
+
+        assert len(edges) == 2
+        # Each edge is (from_id, to_id, data_dict)
+        assert ("a", "b", {"label": "continue", "mode": "move"}) in edges
+        assert ("b", "c", {"label": "output", "mode": "copy"}) in edges
+
+    def test_get_edges_empty_graph(self) -> None:
+        """Empty graph returns empty list."""
+        from elspeth.core.dag import ExecutionGraph
+
+        graph = ExecutionGraph()
+        edges = list(graph.get_edges())
+
+        assert edges == []

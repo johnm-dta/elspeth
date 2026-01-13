@@ -4,9 +4,13 @@ Exports complete audit data for a run in a format suitable for
 compliance review and legal inquiry.
 """
 
+import hashlib
+import hmac
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 
+from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.recorder import LandscapeRecorder
 
@@ -46,16 +50,50 @@ class LandscapeExporter:
             write_csv(f"{rtype}.csv", typed_records)
     """
 
-    def __init__(self, db: LandscapeDB) -> None:
+    def __init__(
+        self,
+        db: LandscapeDB,
+        signing_key: bytes | None = None,
+    ) -> None:
         """Initialize exporter with database connection.
 
         Args:
             db: LandscapeDB instance to export from
+            signing_key: Optional HMAC key for signing exported records.
+                        Required if sign=True is passed to export_run().
         """
         self._db = db
         self._recorder = LandscapeRecorder(db)
+        self._signing_key = signing_key
 
-    def export_run(self, run_id: str) -> Iterator[dict[str, Any]]:
+    def _sign_record(self, record: dict[str, Any]) -> str:
+        """Compute HMAC-SHA256 signature for a record.
+
+        Args:
+            record: Record dict to sign (must not contain 'signature' key)
+
+        Returns:
+            Hex-encoded HMAC-SHA256 signature
+
+        Raises:
+            ValueError: If signing key not configured
+        """
+        if self._signing_key is None:
+            raise ValueError("Signing key not configured")
+
+        # Canonical JSON ensures consistent hash
+        canonical = canonical_json(record)
+        return hmac.new(
+            self._signing_key,
+            canonical.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def export_run(
+        self,
+        run_id: str,
+        sign: bool = False,
+    ) -> Iterator[dict[str, Any]]:
         """Export all audit data for a run.
 
         Yields flat dict records with 'record_type' field.
@@ -63,9 +101,53 @@ class LandscapeExporter:
 
         Args:
             run_id: The run ID to export
+            sign: If True, add HMAC signature to each record and emit
+                  a final manifest with running hash chain.
 
         Yields:
-            Dict records with 'record_type' and relevant fields
+            Dict records with 'record_type' and relevant fields.
+            If sign=True, includes 'signature' field and final manifest.
+
+        Raises:
+            ValueError: If run_id is not found, or sign=True without signing_key
+        """
+        if sign and self._signing_key is None:
+            raise ValueError("Signing requested but no signing_key provided")
+
+        running_hash = hashlib.sha256()
+        record_count = 0
+
+        for record in self._iter_records(run_id):
+            if sign:
+                record["signature"] = self._sign_record(record)
+                # Update running hash with signed record
+                running_hash.update(record["signature"].encode())
+
+            record_count += 1
+            yield record
+
+        # Emit manifest if signing
+        if sign:
+            manifest = {
+                "record_type": "manifest",
+                "run_id": run_id,
+                "record_count": record_count,
+                "final_hash": running_hash.hexdigest(),
+                "hash_algorithm": "sha256",
+                "signature_algorithm": "hmac-sha256",
+                "exported_at": datetime.now(UTC).isoformat(),
+            }
+            manifest["signature"] = self._sign_record(manifest)
+            yield manifest
+
+    def _iter_records(self, run_id: str) -> Iterator[dict[str, Any]]:
+        """Internal: iterate over raw records (no signing).
+
+        Args:
+            run_id: The run ID to export
+
+        Yields:
+            Dict records with 'record_type' field
 
         Raises:
             ValueError: If run_id is not found

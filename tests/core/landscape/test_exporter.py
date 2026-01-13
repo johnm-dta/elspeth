@@ -467,3 +467,109 @@ class TestLandscapeExporterComplexRun:
         # Two children, each with one parent relationship
         assert len(parent_records) == 2
         assert all(r["parent_token_id"] == parent_token.token_id for r in parent_records)
+
+
+class TestLandscapeExporterSigning:
+    """Exporter HMAC signing for legal-grade integrity verification."""
+
+    def test_exporter_signs_records_when_enabled(self, populated_db) -> None:
+        """When signing enabled, each record should have signature field."""
+        db, run_id = populated_db
+        exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
+
+        records = list(exporter.export_run(run_id, sign=True))
+
+        # All records should have signature
+        for record in records:
+            assert "signature" in record
+            assert len(record["signature"]) == 64  # SHA256 hex
+
+    def test_exporter_manifest_contains_final_hash(self, populated_db) -> None:
+        """Signed export should include manifest with hash of all records."""
+        db, run_id = populated_db
+        exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
+
+        records = list(exporter.export_run(run_id, sign=True))
+
+        manifest_records = [r for r in records if r["record_type"] == "manifest"]
+        assert len(manifest_records) == 1
+
+        manifest = manifest_records[0]
+        assert "record_count" in manifest
+        assert "final_hash" in manifest
+        assert "exported_at" in manifest  # Timestamp for forensics
+
+    def test_exporter_unsigned_has_no_signatures(self, populated_db) -> None:
+        """When signing disabled, records should not have signature field."""
+        db, run_id = populated_db
+        exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
+
+        records = list(exporter.export_run(run_id, sign=False))
+
+        for record in records:
+            assert "signature" not in record
+
+        # No manifest without signing
+        manifest_records = [r for r in records if r.get("record_type") == "manifest"]
+        assert len(manifest_records) == 0
+
+    def test_exporter_raises_when_sign_without_key(self, populated_db) -> None:
+        """Requesting signing without key should raise ValueError."""
+        db, run_id = populated_db
+        exporter = LandscapeExporter(db)  # No signing_key
+
+        with pytest.raises(ValueError, match="no signing_key provided"):
+            list(exporter.export_run(run_id, sign=True))
+
+    def test_exporter_manifest_record_count_matches(self, populated_db) -> None:
+        """Manifest record_count should match actual record count (excluding manifest)."""
+        db, run_id = populated_db
+        exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
+
+        records = list(exporter.export_run(run_id, sign=True))
+
+        manifest = [r for r in records if r["record_type"] == "manifest"][0]
+        non_manifest_count = len([r for r in records if r["record_type"] != "manifest"])
+
+        assert manifest["record_count"] == non_manifest_count
+
+    def test_exporter_signatures_are_deterministic(self, populated_db) -> None:
+        """Same data with same key should produce same signatures."""
+        db, run_id = populated_db
+        exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
+
+        records1 = list(exporter.export_run(run_id, sign=True))
+        records2 = list(exporter.export_run(run_id, sign=True))
+
+        # Compare signatures (excluding manifest which has timestamp)
+        for r1, r2 in zip(records1, records2, strict=True):
+            if r1["record_type"] != "manifest":
+                assert r1["signature"] == r2["signature"]
+
+    def test_exporter_different_keys_produce_different_signatures(
+        self, populated_db
+    ) -> None:
+        """Different signing keys should produce different signatures."""
+        db, run_id = populated_db
+        exporter1 = LandscapeExporter(db, signing_key=b"key-one")
+        exporter2 = LandscapeExporter(db, signing_key=b"key-two")
+
+        records1 = list(exporter1.export_run(run_id, sign=True))
+        records2 = list(exporter2.export_run(run_id, sign=True))
+
+        # Get first non-manifest record from each
+        r1 = [r for r in records1 if r["record_type"] != "manifest"][0]
+        r2 = [r for r in records2 if r["record_type"] != "manifest"][0]
+
+        assert r1["signature"] != r2["signature"]
+
+    def test_exporter_manifest_includes_algorithm_metadata(self, populated_db) -> None:
+        """Manifest should document algorithms used for forensic verification."""
+        db, run_id = populated_db
+        exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
+
+        records = list(exporter.export_run(run_id, sign=True))
+        manifest = [r for r in records if r["record_type"] == "manifest"][0]
+
+        assert manifest["hash_algorithm"] == "sha256"
+        assert manifest["signature_algorithm"] == "hmac-sha256"

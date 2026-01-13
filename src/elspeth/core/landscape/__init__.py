@@ -19,6 +19,7 @@ Model Classes:
 
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.exporter import LandscapeExporter
+from elspeth.core.landscape.formatters import CSVFormatter, JSONFormatter
 from elspeth.core.landscape.lineage import LineageResult, explain
 from elspeth.core.landscape.models import (
     Artifact,
@@ -58,8 +59,10 @@ __all__ = [
     "Batch",
     "BatchMember",
     "BatchOutput",
+    "CSVFormatter",
     "Call",
     "Edge",
+    "JSONFormatter",
     "LandscapeDB",
     "LandscapeExporter",
     "LandscapeRecorder",
@@ -71,13 +74,13 @@ __all__ = [
     "Run",
     "Token",
     "TokenParent",
-    "explain",
     "artifacts_table",
     "batch_members_table",
     "batch_outputs_table",
     "batches_table",
     "calls_table",
     "edges_table",
+    "explain",
     "metadata",
     "node_states_table",
     "nodes_table",

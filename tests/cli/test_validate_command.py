@@ -109,3 +109,64 @@ class TestValidateCommand:
         result = runner.invoke(app, ["validate", "-s", str(invalid_output_sink_config)])
         assert result.exit_code != 0
         assert "nonexistent" in result.output.lower() or "output_sink" in result.output.lower()
+
+
+class TestValidateCommandGraphValidation:
+    """Validate command validates graph structure."""
+
+    def test_validate_detects_invalid_route(self, tmp_path: Path) -> None:
+        """Validate command catches gate routing to nonexistent sink."""
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+row_plugins:
+  - plugin: my_gate
+    type: gate
+    routes:
+      bad_route: nonexistent_sink
+
+output_sink: output
+""")
+
+        result = runner.invoke(app, ["validate", "-s", str(config_file)])
+
+        assert result.exit_code != 0
+        output = result.stdout + (result.stderr or "")
+        assert "nonexistent_sink" in output.lower()
+
+    def test_validate_shows_graph_info(self, tmp_path: Path) -> None:
+        """Validate command shows graph structure on success."""
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  results:
+    plugin: csv
+  flagged:
+    plugin: csv
+
+row_plugins:
+  - plugin: classifier
+    type: gate
+    routes:
+      suspicious: flagged
+      clean: continue
+
+output_sink: results
+""")
+
+        result = runner.invoke(app, ["validate", "-s", str(config_file)])
+
+        assert result.exit_code == 0
+        # Should show graph info with node and edge counts
+        assert "graph" in result.stdout.lower()
+        assert "node" in result.stdout.lower()
+        assert "edge" in result.stdout.lower()

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from elspeth import __version__
 from elspeth.core.config import ElspethSettings, load_settings
+from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
 app = typer.Typer(
     name="elspeth",
@@ -305,10 +306,20 @@ def validate(
             typer.echo(f"  - {loc}: {error['msg']}", err=True)
         raise typer.Exit(1) from None
 
+    # Build and validate execution graph
+    try:
+        graph = ExecutionGraph.from_config(config)
+        graph.validate()
+    except GraphValidationError as e:
+        typer.echo(f"Pipeline graph error: {e}", err=True)
+        raise typer.Exit(1) from None
+
     typer.echo(f"Configuration valid: {settings_path.name}")
     typer.echo(f"  Source: {config.datasource.plugin}")
+    typer.echo(f"  Transforms: {len(config.row_plugins)}")
     typer.echo(f"  Sinks: {', '.join(config.sinks.keys())}")
-    typer.echo(f"  Output sink: {config.output_sink}")
+    typer.echo(f"  Output: {config.output_sink}")
+    typer.echo(f"  Graph: {graph.node_count} nodes, {graph.edge_count} edges")
 
 
 # Plugins subcommand group

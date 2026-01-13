@@ -318,7 +318,7 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> dict[st
 
     # Execute via Orchestrator (creates full audit trail)
     orchestrator = Orchestrator(db)
-    result = orchestrator.run(pipeline_config, graph=graph)
+    result = orchestrator.run(pipeline_config, graph=graph, settings=config)
 
     return {
         "run_id": result.run_id,

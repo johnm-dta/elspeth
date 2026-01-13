@@ -1098,3 +1098,385 @@ class TestLifecycleHooks:
 
         # on_complete should still be called
         assert len(completed) == 1
+
+
+class TestOrchestratorLandscapeExport:
+    """Test landscape export integration."""
+
+    def test_orchestrator_exports_landscape_when_configured(self) -> None:
+        """Orchestrator should export audit trail after run completes."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            LandscapeExportSettings,
+            LandscapeSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.schemas import PluginSchema
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "list_source"
+            output_schema = ValueSchema
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+
+            def load(self, ctx):
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class CollectSink:
+            """Sink that captures written rows."""
+
+            name = "collect"
+
+            def __init__(self):
+                self.captured_rows: list[dict] = []
+
+            def write(self, rows, ctx):
+                self.captured_rows.extend(rows)
+                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        # Create in-memory DB
+        db = LandscapeDB.in_memory()
+
+        # Create sinks
+        output_sink = CollectSink()
+        export_sink = CollectSink()
+
+        # Build settings with export enabled
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "output": SinkSettings(plugin="csv"),
+                "audit_export": SinkSettings(plugin="csv"),
+            },
+            output_sink="output",
+            landscape=LandscapeSettings(
+                url="sqlite:///:memory:",
+                export=LandscapeExportSettings(
+                    enabled=True,
+                    sink="audit_export",
+                    format="csv",
+                ),
+            ),
+        )
+
+        source = ListSource([{"value": 42}])
+
+        pipeline = PipelineConfig(
+            source=source,
+            transforms=[],
+            sinks={
+                "output": output_sink,
+                "audit_export": export_sink,
+            },
+        )
+
+        # Build graph from config
+        graph = ExecutionGraph.from_config(settings)
+
+        # Run with settings
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(pipeline, graph=graph, settings=settings)
+
+        # Run should complete
+        assert result.status == "completed"
+        assert result.rows_processed == 1
+
+        # Export sink should have received audit records
+        assert len(export_sink.captured_rows) > 0
+        # Should have at least a "run" record type
+        record_types = [r.get("record_type") for r in export_sink.captured_rows]
+        assert "run" in record_types, f"Expected 'run' record type, got: {record_types}"
+
+    def test_orchestrator_export_with_signing(self) -> None:
+        """Orchestrator should sign records when export.sign is True."""
+        import os
+        from unittest.mock import patch
+
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            LandscapeExportSettings,
+            LandscapeSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.schemas import PluginSchema
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "list_source"
+            output_schema = ValueSchema
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+
+            def load(self, ctx):
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class CollectSink:
+            name = "collect"
+
+            def __init__(self):
+                self.captured_rows: list[dict] = []
+
+            def write(self, rows, ctx):
+                self.captured_rows.extend(rows)
+                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        db = LandscapeDB.in_memory()
+        output_sink = CollectSink()
+        export_sink = CollectSink()
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "output": SinkSettings(plugin="csv"),
+                "audit_export": SinkSettings(plugin="csv"),
+            },
+            output_sink="output",
+            landscape=LandscapeSettings(
+                url="sqlite:///:memory:",
+                export=LandscapeExportSettings(
+                    enabled=True,
+                    sink="audit_export",
+                    format="csv",
+                    sign=True,
+                ),
+            ),
+        )
+
+        source = ListSource([{"value": 42}])
+
+        pipeline = PipelineConfig(
+            source=source,
+            transforms=[],
+            sinks={
+                "output": output_sink,
+                "audit_export": export_sink,
+            },
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+        orchestrator = Orchestrator(db)
+
+        # Set signing key environment variable
+        with patch.dict(os.environ, {"ELSPETH_SIGNING_KEY": "test-signing-key-12345"}):
+            result = orchestrator.run(pipeline, graph=graph, settings=settings)
+
+        assert result.status == "completed"
+        assert len(export_sink.captured_rows) > 0
+
+        # All records should have signatures when signing enabled
+        for record in export_sink.captured_rows:
+            assert "signature" in record, f"Record missing signature: {record}"
+
+        # Should have a manifest record at the end
+        record_types = [r.get("record_type") for r in export_sink.captured_rows]
+        assert "manifest" in record_types
+
+    def test_orchestrator_export_requires_signing_key_when_sign_enabled(self) -> None:
+        """Should raise error when sign=True but ELSPETH_SIGNING_KEY not set."""
+        import os
+        from unittest.mock import patch
+
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            LandscapeExportSettings,
+            LandscapeSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.schemas import PluginSchema
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "list_source"
+            output_schema = ValueSchema
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+
+            def load(self, ctx):
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class CollectSink:
+            name = "collect"
+
+            def __init__(self):
+                self.captured_rows: list[dict] = []
+
+            def write(self, rows, ctx):
+                self.captured_rows.extend(rows)
+                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        db = LandscapeDB.in_memory()
+        output_sink = CollectSink()
+        export_sink = CollectSink()
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "output": SinkSettings(plugin="csv"),
+                "audit_export": SinkSettings(plugin="csv"),
+            },
+            output_sink="output",
+            landscape=LandscapeSettings(
+                url="sqlite:///:memory:",
+                export=LandscapeExportSettings(
+                    enabled=True,
+                    sink="audit_export",
+                    format="csv",
+                    sign=True,
+                ),
+            ),
+        )
+
+        source = ListSource([{"value": 42}])
+
+        pipeline = PipelineConfig(
+            source=source,
+            transforms=[],
+            sinks={
+                "output": output_sink,
+                "audit_export": export_sink,
+            },
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+        orchestrator = Orchestrator(db)
+
+        # Ensure ELSPETH_SIGNING_KEY is not set
+        env_without_key = {k: v for k, v in os.environ.items() if k != "ELSPETH_SIGNING_KEY"}
+        with (
+            patch.dict(os.environ, env_without_key, clear=True),
+            pytest.raises(ValueError, match="ELSPETH_SIGNING_KEY"),
+        ):
+            orchestrator.run(pipeline, graph=graph, settings=settings)
+
+    def test_orchestrator_no_export_when_disabled(self) -> None:
+        """Should not export when export.enabled is False."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            LandscapeSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.schemas import PluginSchema
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "list_source"
+            output_schema = ValueSchema
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+
+            def load(self, ctx):
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class CollectSink:
+            name = "collect"
+
+            def __init__(self):
+                self.captured_rows: list[dict] = []
+
+            def write(self, rows, ctx):
+                self.captured_rows.extend(rows)
+                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        db = LandscapeDB.in_memory()
+        output_sink = CollectSink()
+        audit_sink = CollectSink()
+
+        # Export disabled (the default)
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "output": SinkSettings(plugin="csv"),
+                "audit": SinkSettings(plugin="csv"),
+            },
+            output_sink="output",
+            landscape=LandscapeSettings(
+                url="sqlite:///:memory:",
+                # export.enabled defaults to False
+            ),
+        )
+
+        source = ListSource([{"value": 42}])
+
+        pipeline = PipelineConfig(
+            source=source,
+            transforms=[],
+            sinks={
+                "output": output_sink,
+                "audit": audit_sink,
+            },
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(pipeline, graph=graph, settings=settings)
+
+        assert result.status == "completed"
+        # Output sink should have the row
+        assert len(output_sink.captured_rows) == 1
+        # Audit sink should be empty (no export)
+        assert len(audit_sink.captured_rows) == 0

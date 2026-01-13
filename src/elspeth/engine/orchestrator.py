@@ -7,11 +7,13 @@ Coordinates:
 - Row processing
 - Sink writing
 - Run completion
+- Post-run audit export (when configured)
 """
 
+import os
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
@@ -19,6 +21,9 @@ from elspeth.engine.processor import RowProcessor
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.enums import NodeType
+
+if TYPE_CHECKING:
+    from elspeth.core.config import ElspethSettings
 
 
 @dataclass
@@ -79,12 +84,14 @@ class Orchestrator:
         self,
         config: PipelineConfig,
         graph: ExecutionGraph | None = None,
+        settings: "ElspethSettings | None" = None,
     ) -> RunResult:
         """Execute a pipeline run.
 
         Args:
             config: Pipeline configuration with plugins
             graph: Pre-validated execution graph (required)
+            settings: Full settings (for post-run hooks like export)
 
         Raises:
             ValueError: If graph is not provided
@@ -110,6 +117,15 @@ class Orchestrator:
             # Complete run
             recorder.complete_run(run.run_id, status="completed")
             result.status = "completed"
+
+            # Post-run export
+            if settings is not None and settings.landscape.export.enabled:
+                self._export_landscape(
+                    run_id=run.run_id,
+                    settings=settings,
+                    sinks=config.sinks,
+                )
+
             return result
 
         except Exception:
@@ -299,3 +315,54 @@ class Orchestrator:
             rows_failed=rows_failed,
             rows_routed=rows_routed,
         )
+
+    def _export_landscape(
+        self,
+        run_id: str,
+        settings: "ElspethSettings",
+        sinks: dict[str, Any],
+    ) -> None:
+        """Export audit trail to configured sink after run completion.
+
+        Args:
+            run_id: The completed run ID
+            settings: Full settings containing export configuration
+            sinks: Dict of sink_name -> sink instance from PipelineConfig
+
+        Raises:
+            ValueError: If signing requested but ELSPETH_SIGNING_KEY not set,
+                       or if configured sink not found
+        """
+        from elspeth.core.landscape.exporter import LandscapeExporter
+
+        export_config = settings.landscape.export
+
+        # Get signing key from environment if signing enabled
+        signing_key: bytes | None = None
+        if export_config.sign:
+            key_str = os.environ.get("ELSPETH_SIGNING_KEY")
+            if not key_str:
+                raise ValueError(
+                    "ELSPETH_SIGNING_KEY environment variable required for signed export"
+                )
+            signing_key = key_str.encode("utf-8")
+
+        # Create exporter
+        exporter = LandscapeExporter(self._db, signing_key=signing_key)
+
+        # Get target sink
+        sink_name = export_config.sink
+        if sink_name not in sinks:
+            raise ValueError(f"Export sink '{sink_name}' not found in sinks")
+        sink = sinks[sink_name]
+
+        # Create context for sink writes
+        ctx = PluginContext(run_id=run_id, config={}, landscape=None)
+
+        # Export records to sink - write as list to match sink.write() signature
+        records = list(exporter.export_run(run_id, sign=export_config.sign))
+        sink.write(records, ctx)
+
+        # Flush sink to ensure all records are written
+        if hasattr(sink, "flush"):
+            sink.flush()

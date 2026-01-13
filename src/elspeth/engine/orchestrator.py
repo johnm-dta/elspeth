@@ -364,5 +364,4 @@ class Orchestrator:
         sink.write(records, ctx)
 
         # Flush sink to ensure all records are written
-        if hasattr(sink, "flush"):
-            sink.flush()
+        sink.flush()

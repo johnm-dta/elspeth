@@ -9,6 +9,7 @@ Coordinates:
 - Run completion
 """
 
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -279,6 +280,14 @@ class Orchestrator:
                     )
 
         finally:
+            # Call on_complete for all plugins (even on error)
+            # Lifecycle hooks are optional - plugins may or may not implement them
+            # suppress(Exception) ensures one plugin failure doesn't prevent others from cleanup
+            for transform in config.transforms:
+                if hasattr(transform, "on_complete"):
+                    with suppress(Exception):
+                        transform.on_complete(ctx)
+
             # Close source and all sinks
             # SinkProtocol requires close() - if missing, that's a bug
             config.source.close()

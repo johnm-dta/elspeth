@@ -970,3 +970,120 @@ class TestLifecycleHooks:
         # on_start should be called first
         assert call_order[0] == "on_start"
         assert "process" in call_order
+
+    def test_on_complete_called_after_all_rows(self) -> None:
+        """on_complete() called after all rows processed."""
+        from unittest.mock import MagicMock
+
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import TransformResult
+
+        call_order: list[str] = []
+
+        class TrackedTransform:
+            name = "tracked"
+            plugin_version = "1.0.0"
+
+            def process(self, row, ctx):
+                call_order.append("process")
+                return TransformResult.success(row)
+
+            def on_complete(self, ctx):
+                call_order.append("on_complete")
+
+        db = LandscapeDB.in_memory()
+
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([{"id": 1}, {"id": 2}])
+
+        transform = TrackedTransform()
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+        mock_sink.write.return_value = {
+            "path": "memory",
+            "size_bytes": 0,
+            "content_hash": "abc123",
+        }
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[transform],
+            sinks={"output": mock_sink},
+        )
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("transform", node_type="transform", plugin_name="tracked")
+        graph.add_node("sink", node_type="sink", plugin_name="csv")
+        graph.add_edge("source", "transform", label="continue", mode="move")
+        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph._transform_id_map = {0: "transform"}
+        graph._sink_id_map = {"output": "sink"}
+        graph._output_sink = "output"
+
+        orchestrator = Orchestrator(db)
+        orchestrator.run(config, graph=graph)
+
+        # on_complete should be called last
+        assert call_order[-1] == "on_complete"
+        # All processing should happen before on_complete
+        assert call_order.count("process") == 2
+
+    def test_on_complete_called_on_error(self) -> None:
+        """on_complete() called even when run fails."""
+        from unittest.mock import MagicMock
+
+        import pytest
+
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        completed: list[bool] = []
+
+        class FailingTransform:
+            name = "failing"
+            plugin_version = "1.0.0"
+
+            def process(self, row, ctx):
+                raise RuntimeError("intentional failure")
+
+            def on_complete(self, ctx):
+                completed.append(True)
+
+        db = LandscapeDB.in_memory()
+
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([{"id": 1}])
+
+        transform = FailingTransform()
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[transform],
+            sinks={"output": mock_sink},
+        )
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="failing")
+        graph.add_node("transform", node_type="transform", plugin_name="failing")
+        graph.add_node("sink", node_type="sink", plugin_name="csv")
+        graph.add_edge("source", "transform", label="continue", mode="move")
+        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph._transform_id_map = {0: "transform"}
+        graph._sink_id_map = {"output": "sink"}
+        graph._output_sink = "output"
+
+        orchestrator = Orchestrator(db)
+
+        with pytest.raises(RuntimeError):
+            orchestrator.run(config, graph=graph)
+
+        # on_complete should still be called
+        assert len(completed) == 1

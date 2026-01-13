@@ -13,6 +13,8 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Literal
 
+from elspeth.plugins.enums import RoutingKind, RoutingMode
+
 
 class RowOutcome(Enum):
     """Terminal states for rows in the pipeline.
@@ -51,18 +53,18 @@ class RoutingAction:
     MappingProxyType-wrapped reason.
     """
 
-    kind: Literal["continue", "route_to_sink", "fork_to_paths"]
+    kind: RoutingKind
     destinations: tuple[str, ...]  # Immutable sequence
-    mode: Literal["move", "copy"]
+    mode: RoutingMode
     reason: Mapping[str, Any]  # Immutable mapping (MappingProxyType)
 
     @classmethod
     def continue_(cls, reason: dict[str, Any] | None = None) -> "RoutingAction":
         """Row continues to next transform."""
         return cls(
-            kind="continue",
+            kind=RoutingKind.CONTINUE,
             destinations=(),
-            mode="move",
+            mode=RoutingMode.MOVE,
             reason=_freeze_dict(reason),
         )
 
@@ -71,12 +73,12 @@ class RoutingAction:
         cls,
         sink_name: str,
         *,
-        mode: Literal["move", "copy"] = "move",
+        mode: RoutingMode = RoutingMode.MOVE,
         reason: dict[str, Any] | None = None,
     ) -> "RoutingAction":
         """Route row to a named sink."""
         return cls(
-            kind="route_to_sink",
+            kind=RoutingKind.ROUTE_TO_SINK,
             destinations=(sink_name,),
             mode=mode,
             reason=_freeze_dict(reason),
@@ -91,9 +93,9 @@ class RoutingAction:
     ) -> "RoutingAction":
         """Fork row to multiple parallel paths (copy mode)."""
         return cls(
-            kind="fork_to_paths",
+            kind=RoutingKind.FORK_TO_PATHS,
             destinations=tuple(paths),
-            mode="copy",
+            mode=RoutingMode.COPY,
             reason=_freeze_dict(reason),
         )
 

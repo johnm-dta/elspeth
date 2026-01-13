@@ -168,6 +168,42 @@ class TestAcceptResult:
         assert result.batch_id is None  # Set by engine in Phase 3
 
 
+class TestRoutingActionEnums:
+    """RoutingAction uses enum types for kind and mode."""
+
+    def test_continue_uses_routing_kind_enum(self) -> None:
+        """continue_() returns RoutingKind enum value."""
+        from elspeth.plugins.enums import RoutingKind
+        from elspeth.plugins.results import RoutingAction
+
+        action = RoutingAction.continue_()
+
+        assert action.kind == RoutingKind.CONTINUE
+        assert isinstance(action.kind, RoutingKind)
+
+    def test_route_to_sink_uses_enums(self) -> None:
+        """route_to_sink() uses enum types."""
+        from elspeth.plugins.enums import RoutingKind, RoutingMode
+        from elspeth.plugins.results import RoutingAction
+
+        action = RoutingAction.route_to_sink("output", mode=RoutingMode.COPY)
+
+        assert action.kind == RoutingKind.ROUTE_TO_SINK
+        assert action.mode == RoutingMode.COPY
+        assert isinstance(action.kind, RoutingKind)
+        assert isinstance(action.mode, RoutingMode)
+
+    def test_fork_to_paths_uses_enums(self) -> None:
+        """fork_to_paths() uses enum types."""
+        from elspeth.plugins.enums import RoutingKind, RoutingMode
+        from elspeth.plugins.results import RoutingAction
+
+        action = RoutingAction.fork_to_paths(["path_a", "path_b"])
+
+        assert action.kind == RoutingKind.FORK_TO_PATHS
+        assert action.mode == RoutingMode.COPY
+
+
 class TestFreezeDictDefensiveCopy:
     """_freeze_dict makes defensive copy to prevent mutation."""
 

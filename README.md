@@ -149,6 +149,67 @@ Every operation is recorded:
 
 This isn't optional telemetry. It's the core of the system.
 
+### Audit Trail Export
+
+ELSPETH can automatically export the complete audit trail after each run for compliance and legal inquiry.
+
+#### Configuration
+
+```yaml
+landscape:
+  url: sqlite:///./runs/audit.db
+  export:
+    enabled: true
+    sink: audit_archive     # Must reference a defined sink
+    format: json            # json (note: csv requires homogeneous records)
+    sign: true              # HMAC signature per record
+
+sinks:
+  audit_archive:
+    plugin: json
+    options:
+      path: exports/audit_trail.json
+```
+
+#### Signed Exports
+
+For legal-grade integrity verification, enable signing:
+
+```bash
+export ELSPETH_SIGNING_KEY="your-secret-key"
+uv run elspeth run -s settings.yaml --execute
+```
+
+Each record receives an HMAC-SHA256 signature. A manifest record at the end contains:
+- Total record count
+- Running hash of all signatures
+- Export timestamp
+
+This allows auditors to:
+1. Verify no records were added, removed, or modified
+2. Trace any row through every processing step
+3. Prove chain-of-custody for legal proceedings
+
+#### Export Record Types
+
+The export includes all audit data:
+
+| Record Type | Description |
+|-------------|-------------|
+| `run` | Run metadata (config hash, timestamps, status) |
+| `node` | Registered plugins (source, transforms, sinks) |
+| `edge` | Graph edges between nodes |
+| `row` | Source rows with content hashes |
+| `token` | Row instances in pipeline paths |
+| `token_parent` | Fork/join lineage |
+| `node_state` | Processing records (input/output hashes) |
+| `routing_event` | Gate routing decisions |
+| `call` | External API calls |
+| `batch` | Aggregation batches |
+| `batch_member` | Batch membership |
+| `artifact` | Sink outputs |
+| `manifest` | Final hash and metadata (signed exports only) |
+
 ### Conditional Routing (Gates)
 
 Transforms can route rows to different sinks:

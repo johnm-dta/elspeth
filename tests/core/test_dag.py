@@ -319,3 +319,66 @@ class TestExecutionGraphFromConfig:
         transform_a_idx = next(i for i, n in enumerate(order) if "transform_a" in n)
         transform_b_idx = next(i for i, n in enumerate(order) if "transform_b" in n)
         assert transform_a_idx < transform_b_idx
+
+    def test_from_config_with_gate_routes(self) -> None:
+        """Build graph with gate routing to multiple sinks."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            RowPluginSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        config = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "results": SinkSettings(plugin="csv"),
+                "flagged": SinkSettings(plugin="csv"),
+            },
+            row_plugins=[
+                RowPluginSettings(
+                    plugin="safety_gate",
+                    type="gate",
+                    routes={"suspicious": "flagged", "clean": "continue"},
+                ),
+            ],
+            output_sink="results",
+        )
+
+        graph = ExecutionGraph.from_config(config)
+
+        # Should have:
+        #   source -> safety_gate -> results (via "continue"/"clean")
+        #                         -> flagged (via "suspicious")
+        assert graph.node_count == 4  # source, gate, results, flagged
+        # Edges: source->gate, gate->results (continue), gate->flagged (route)
+        assert graph.edge_count == 3
+
+    def test_from_config_validates_route_targets(self) -> None:
+        """Gate routes must reference existing sinks."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            RowPluginSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph, GraphValidationError
+
+        config = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={"output": SinkSettings(plugin="csv")},
+            row_plugins=[
+                RowPluginSettings(
+                    plugin="gate",
+                    type="gate",
+                    routes={"bad": "nonexistent_sink"},
+                ),
+            ],
+            output_sink="output",
+        )
+
+        with pytest.raises(GraphValidationError) as exc_info:
+            ExecutionGraph.from_config(config)
+
+        assert "nonexistent_sink" in str(exc_info.value)

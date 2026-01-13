@@ -210,12 +210,10 @@ class ExecutionGraph:
 
         Creates edges for:
         - Linear flow: source -> transforms -> output_sink
+        - Gate routes: gate -> routed_sink
 
-        Args:
-            config: Validated ElspethSettings
-
-        Returns:
-            ExecutionGraph ready for validation and execution
+        Raises:
+            GraphValidationError: If gate routes reference unknown sinks
         """
         import uuid
 
@@ -261,6 +259,24 @@ class ExecutionGraph:
 
             # Edge from previous node
             graph.add_edge(prev_node_id, tid, label="continue", mode="move")
+
+            # Gate routes to sinks
+            # Edge labels ARE route labels (not sink names)
+            # Example: route "suspicious" -> sink "flagged"
+            # Creates edge: gate_node -> flagged_node with label="suspicious"
+            if is_gate and plugin_config.routes:
+                for route_label, target in plugin_config.routes.items():
+                    if target == "continue":
+                        continue  # Not a sink route
+                    if target not in sink_ids:
+                        raise GraphValidationError(
+                            f"Gate '{plugin_config.plugin}' routes '{route_label}' "
+                            f"to unknown sink '{target}'. "
+                            f"Available sinks: {list(sink_ids.keys())}"
+                        )
+                    # Edge label = route_label (e.g., "suspicious")
+                    graph.add_edge(tid, sink_ids[target], label=route_label, mode="move")
+
             prev_node_id = tid
 
         # Edge from last transform (or source) to output sink

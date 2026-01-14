@@ -5,6 +5,129 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
+
+
+class TestRateLimiterValidation:
+    """Tests for rate limiter input validation."""
+
+    def test_rejects_empty_name(self) -> None:
+        """Empty name is rejected."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        with pytest.raises(ValueError, match="Invalid rate limiter name"):
+            RateLimiter(name="", requests_per_second=10)
+
+    def test_rejects_name_starting_with_number(self) -> None:
+        """Name starting with number is rejected."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        with pytest.raises(ValueError, match="Invalid rate limiter name"):
+            RateLimiter(name="123api", requests_per_second=10)
+
+    def test_rejects_name_with_special_characters(self) -> None:
+        """Name with special characters is rejected."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        with pytest.raises(ValueError, match="Invalid rate limiter name"):
+            RateLimiter(name="my-api", requests_per_second=10)
+
+        with pytest.raises(ValueError, match="Invalid rate limiter name"):
+            RateLimiter(name="my.api", requests_per_second=10)
+
+        with pytest.raises(ValueError, match="Invalid rate limiter name"):
+            RateLimiter(name="my api", requests_per_second=10)
+
+    def test_rejects_sql_injection_attempt(self) -> None:
+        """SQL injection attempts in name are rejected."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        with pytest.raises(ValueError, match="Invalid rate limiter name"):
+            RateLimiter(name="api; DROP TABLE users;--", requests_per_second=10)
+
+    def test_accepts_valid_names(self) -> None:
+        """Valid names are accepted."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        with RateLimiter(name="api", requests_per_second=10) as limiter:
+            assert limiter.name == "api"
+
+        with RateLimiter(name="my_api", requests_per_second=10) as limiter:
+            assert limiter.name == "my_api"
+
+        with RateLimiter(name="MyApi123", requests_per_second=10) as limiter:
+            assert limiter.name == "MyApi123"
+
+        with RateLimiter(name="API_v2_production", requests_per_second=10) as limiter:
+            assert limiter.name == "API_v2_production"
+
+    def test_rejects_zero_requests_per_second(self) -> None:
+        """Zero requests_per_second is rejected."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        with pytest.raises(ValueError, match="requests_per_second must be positive"):
+            RateLimiter(name="test", requests_per_second=0)
+
+    def test_rejects_negative_requests_per_second(self) -> None:
+        """Negative requests_per_second is rejected."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        with pytest.raises(ValueError, match="requests_per_second must be positive"):
+            RateLimiter(name="test", requests_per_second=-5)
+
+    def test_rejects_zero_requests_per_minute(self) -> None:
+        """Zero requests_per_minute is rejected."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        with pytest.raises(ValueError, match="requests_per_minute must be positive"):
+            RateLimiter(name="test", requests_per_second=10, requests_per_minute=0)
+
+    def test_rejects_negative_requests_per_minute(self) -> None:
+        """Negative requests_per_minute is rejected."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        with pytest.raises(ValueError, match="requests_per_minute must be positive"):
+            RateLimiter(name="test", requests_per_second=10, requests_per_minute=-1)
+
+    def test_accepts_none_requests_per_minute(self) -> None:
+        """None requests_per_minute is accepted (no per-minute limit)."""
+        from elspeth.core.rate_limit import RateLimiter
+
+        with RateLimiter(name="test", requests_per_second=10, requests_per_minute=None) as limiter:
+            assert limiter._requests_per_minute is None
+
+
+class TestTryAcquireAtomicity:
+    """Tests for try_acquire() atomic behavior across multiple rate limits."""
+
+    def test_try_acquire_does_not_consume_on_partial_failure(self) -> None:
+        """When per-minute limit blocks, per-second tokens are not consumed.
+
+        This test verifies the fix for the partial consumption bug where
+        try_acquire() would consume tokens from the per-second bucket even
+        when the per-minute bucket would reject.
+        """
+        from elspeth.core.rate_limit import RateLimiter
+
+        # Allow 100/second but only 2/minute
+        with RateLimiter(
+            name="atomic_test",
+            requests_per_second=100,
+            requests_per_minute=2,
+        ) as limiter:
+            # Use up the minute quota
+            assert limiter.try_acquire() is True
+            assert limiter.try_acquire() is True
+
+            # This should fail due to per-minute limit
+            assert limiter.try_acquire() is False
+
+            # The per-second bucket should NOT have been consumed
+            # by the failed attempt. Check by examining bucket counts.
+            # We should have exactly 2 items in each bucket.
+            assert limiter._buckets[0].count() == 2  # per-second bucket
+            assert limiter._buckets[1].count() == 2  # per-minute bucket
+
 
 class TestRateLimiter:
     """Tests for rate limiting wrapper."""
@@ -126,3 +249,62 @@ class TestRateLimiter:
 
             # Fourth should fail (hit minute limit)
             assert limiter.try_acquire() is False
+
+
+class TestRateLimitRegistry:
+    """Tests for rate limiter registry."""
+
+    def test_get_or_create_limiter(self) -> None:
+        from elspeth.core.config import RateLimitSettings
+        from elspeth.core.rate_limit import RateLimitRegistry
+
+        settings = RateLimitSettings(default_requests_per_second=10)
+        registry = RateLimitRegistry(settings)
+
+        limiter1 = registry.get_limiter("api_a")
+        limiter2 = registry.get_limiter("api_a")
+
+        # Same instance returned
+        assert limiter1 is limiter2
+
+    def test_different_services_different_limiters(self) -> None:
+        from elspeth.core.config import RateLimitSettings
+        from elspeth.core.rate_limit import RateLimitRegistry
+
+        settings = RateLimitSettings(default_requests_per_second=10)
+        registry = RateLimitRegistry(settings)
+
+        limiter_a = registry.get_limiter("api_a")
+        limiter_b = registry.get_limiter("api_b")
+
+        assert limiter_a is not limiter_b
+
+    def test_registry_respects_service_config(self) -> None:
+        from elspeth.core.config import RateLimitSettings, ServiceRateLimit
+        from elspeth.core.rate_limit import RateLimitRegistry
+
+        settings = RateLimitSettings(
+            default_requests_per_second=10,
+            services={
+                "slow_api": ServiceRateLimit(requests_per_second=1),
+            }
+        )
+        registry = RateLimitRegistry(settings)
+
+        default_limiter = registry.get_limiter("fast_api")
+        slow_limiter = registry.get_limiter("slow_api")
+
+        assert default_limiter._requests_per_second == 10
+        assert slow_limiter._requests_per_second == 1
+
+    def test_registry_disabled(self) -> None:
+        from elspeth.core.config import RateLimitSettings
+        from elspeth.core.rate_limit import NoOpLimiter, RateLimitRegistry
+
+        settings = RateLimitSettings(enabled=False)
+        registry = RateLimitRegistry(settings)
+
+        limiter = registry.get_limiter("any_api")
+
+        # Should return no-op limiter
+        assert isinstance(limiter, NoOpLimiter)

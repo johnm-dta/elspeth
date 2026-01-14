@@ -321,7 +321,7 @@ No Bug-Hiding Patterns: This codebase prohibits defensive patterns that mask bug
 
 ### Legitimate Uses
 
-This prohibition does not exclude genuine type handling at system boundaries:
+This prohibition does not extend to genuine use cases where type handling is necessary at trust boundaries, such as:
 
 - **External API responses**: Validating JSON structure from LLM providers or HTTP endpoints before processing
 - **Plugin schema contracts**: Type checking at plugin boundaries where external code meets the framework

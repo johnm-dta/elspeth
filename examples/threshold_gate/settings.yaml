@@ -4,12 +4,12 @@
 # output, and writes normal transactions to the main output.
 #
 # Run with:
-#   uv run elspeth run -s examples/settings.yaml --execute
+#   uv run elspeth run -s examples/threshold_gate/settings.yaml --execute
 
 datasource:
   plugin: csv
   options:
-    path: examples/input.csv
+    path: examples/threshold_gate/input.csv
 
 row_plugins:
   # Route transactions over $1000 to high_values sink
@@ -27,14 +27,14 @@ sinks:
   output:
     plugin: csv
     options:
-      path: examples/output/normal.csv
+      path: examples/threshold_gate/output/normal.csv
   high_values:
     plugin: csv
     options:
-      path: examples/output/high_values.csv
+      path: examples/threshold_gate/output/high_values.csv
 
 output_sink: output
 
 # Audit trail stored in examples/runs/
 landscape:
-  url: sqlite:///examples/runs/audit.db
+  url: sqlite:///examples/threshold_gate/runs/audit.db

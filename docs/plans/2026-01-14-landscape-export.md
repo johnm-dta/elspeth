@@ -1175,7 +1175,7 @@ git commit -m "docs: add Landscape export requirements and architecture"
 
 **Files:**
 
-- Create: `examples/export_settings.yaml`
+- Create: `examples/audit_export/settings.yaml`
 - Create: `tests/integration/test_landscape_export.py`
 
 ### Step 1: Write the integration test
@@ -1260,39 +1260,39 @@ Expected: PASS
 
 ### Step 3: Add example to examples folder
 
-Create `examples/export_settings.yaml`:
+Create `examples/audit_export/settings.yaml`:
 
 ```yaml
 # Example: Pipeline with audit export to CSV
 #
 # Run with:
-#   uv run elspeth run -s examples/export_settings.yaml --execute
+#   uv run elspeth run -s examples/audit_export/settings.yaml --execute
 #
 # For signed exports (legal/compliance use):
 #   export ELSPETH_SIGNING_KEY="your-secret-key"
-#   uv run elspeth run -s examples/export_settings.yaml --execute
+#   uv run elspeth run -s examples/audit_export/settings.yaml --execute
 
 datasource:
   plugin: csv
   options:
-    path: examples/input.csv
+    path: examples/audit_export/input.csv
 
 sinks:
   output:
     plugin: csv
     options:
-      path: examples/output/results.csv
+      path: examples/audit_export/output/results.csv
 
   # Export sink for compliance
   audit_export:
     plugin: csv
     options:
-      path: examples/output/audit_trail.csv
+      path: examples/audit_export/output/audit_trail.json
 
 output_sink: output
 
 landscape:
-  url: sqlite:///examples/runs/audit.db
+  url: sqlite:///examples/audit_export/runs/audit.db
   export:
     enabled: true
     sink: audit_export
@@ -1303,7 +1303,7 @@ landscape:
 ### Step 4: Commit
 
 ```bash
-git add examples/export_settings.yaml tests/integration/test_landscape_export.py
+git add examples/audit_export/settings.yaml tests/integration/test_landscape_export.py
 git commit -m "test: add landscape export integration test and example"
 ```
 

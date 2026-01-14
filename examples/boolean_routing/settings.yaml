@@ -3,12 +3,12 @@
 # Routes messages based on their 'approved' field (true/false).
 #
 # Run with:
-#   uv run elspeth run -s examples/boolean_settings.yaml --execute
+#   uv run elspeth run -s examples/boolean_routing/settings.yaml --execute
 
 datasource:
   plugin: csv
   options:
-    path: examples/boolean_input.csv
+    path: examples/boolean_routing/input.csv
 
 row_plugins:
   # Route based on approved field
@@ -27,13 +27,13 @@ sinks:
   approved:
     plugin: csv
     options:
-      path: examples/output/approved.csv
+      path: examples/boolean_routing/output/approved.csv
   rejected:
     plugin: csv
     options:
-      path: examples/output/rejected.csv
+      path: examples/boolean_routing/output/rejected.csv
 
 output_sink: rejected
 
 landscape:
-  url: sqlite:///examples/runs/audit.db
+  url: sqlite:///examples/boolean_routing/runs/audit.db

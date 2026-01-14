@@ -70,7 +70,7 @@
 - CFG-008: `output_sink` validated in `src/elspeth/core/config.py`; used by `src/elspeth/core/dag.py` and `src/elspeth/engine/orchestrator.py` (`graph.get_output_sink()`).
 - CFG-009: `LandscapeSettings.enabled` exists in `src/elspeth/core/config.py`, but the run path ignores it (audit is always on).
 - CFG-010: `LandscapeSettings.backend` exists but DB selection is via `LandscapeSettings.url` + `src/elspeth/core/landscape/database.py:LandscapeDB.from_url()`.
-- CFG-011: No `landscape.path` in schema; configuration uses `landscape.url` (`src/elspeth/core/config.py`) and examples (e.g., `examples/settings.yaml`).
+- CFG-011: No `landscape.path` in schema; configuration uses `landscape.url` (`src/elspeth/core/config.py`) and examples (e.g., `examples/threshold_gate/settings.yaml`).
 - CFG-012: No `landscape.retention.row_payloads_days` in schema; no retention implementation.
 - CFG-013: No `landscape.retention.call_payloads_days` in schema; no retention implementation.
 - CFG-014: No `landscape.redaction.profile` in schema; no redaction implementation (no `redact*` references in `src/elspeth`).

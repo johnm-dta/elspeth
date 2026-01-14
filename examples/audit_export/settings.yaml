@@ -9,35 +9,35 @@
 # per record type would be needed.
 #
 # Run with:
-#   uv run elspeth run -s examples/export_settings.yaml --execute
+#   uv run elspeth run -s examples/audit_export/settings.yaml --execute
 #
 # For signed exports (legal/compliance use):
 #   export ELSPETH_SIGNING_KEY="your-secret-key"
 #   # Then update sign: true below
-#   uv run elspeth run -s examples/export_settings.yaml --execute
+#   uv run elspeth run -s examples/audit_export/settings.yaml --execute
 
 datasource:
   plugin: csv
   options:
-    path: examples/input.csv
+    path: examples/audit_export/input.csv
 
 sinks:
   output:
     plugin: csv
     options:
-      path: examples/output/results.csv
+      path: examples/audit_export/output/results.csv
 
   # Export sink for compliance audit trail (uses JSON for heterogeneous records)
   audit_export:
     plugin: json
     options:
-      path: examples/output/audit_trail.json
+      path: examples/audit_export/output/audit_trail.json
 
 output_sink: output
 
 # Audit trail configuration
 landscape:
-  url: sqlite:///examples/runs/audit.db
+  url: sqlite:///examples/audit_export/runs/audit.db
   export:
     enabled: true
     sink: audit_export

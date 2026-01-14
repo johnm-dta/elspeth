@@ -754,3 +754,43 @@ class TestRateLimitSettings:
         limit = ServiceRateLimit(requests_per_second=10)
         with pytest.raises(ValidationError):
             limit.requests_per_second = 20  # type: ignore[misc]
+
+    def test_service_rate_limit_requests_per_second_must_be_positive(self) -> None:
+        """requests_per_second must be > 0."""
+        from elspeth.core.config import ServiceRateLimit
+
+        with pytest.raises(ValidationError):
+            ServiceRateLimit(requests_per_second=0)
+
+        with pytest.raises(ValidationError):
+            ServiceRateLimit(requests_per_second=-1)
+
+    def test_service_rate_limit_requests_per_minute_must_be_positive(self) -> None:
+        """requests_per_minute must be > 0 when provided."""
+        from elspeth.core.config import ServiceRateLimit
+
+        with pytest.raises(ValidationError):
+            ServiceRateLimit(requests_per_second=10, requests_per_minute=0)
+
+        with pytest.raises(ValidationError):
+            ServiceRateLimit(requests_per_second=10, requests_per_minute=-1)
+
+    def test_rate_limit_settings_default_requests_per_second_must_be_positive(self) -> None:
+        """default_requests_per_second must be > 0."""
+        from elspeth.core.config import RateLimitSettings
+
+        with pytest.raises(ValidationError):
+            RateLimitSettings(default_requests_per_second=0)
+
+        with pytest.raises(ValidationError):
+            RateLimitSettings(default_requests_per_second=-1)
+
+    def test_rate_limit_settings_default_requests_per_minute_must_be_positive(self) -> None:
+        """default_requests_per_minute must be > 0 when provided."""
+        from elspeth.core.config import RateLimitSettings
+
+        with pytest.raises(ValidationError):
+            RateLimitSettings(default_requests_per_minute=0)
+
+        with pytest.raises(ValidationError):
+            RateLimitSettings(default_requests_per_minute=-1)

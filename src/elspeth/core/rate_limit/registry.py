@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from types import TracebackType
 from typing import TYPE_CHECKING
 
 from elspeth.core.rate_limit.limiter import RateLimiter
@@ -11,7 +13,11 @@ if TYPE_CHECKING:
 
 
 class NoOpLimiter:
-    """No-op limiter when rate limiting is disabled."""
+    """No-op limiter when rate limiting is disabled.
+
+    Provides the same interface as RateLimiter but does nothing.
+    All operations succeed instantly without any rate limiting.
+    """
 
     def acquire(self, weight: int = 1) -> None:
         """No-op acquire (always succeeds instantly)."""
@@ -20,12 +26,29 @@ class NoOpLimiter:
         """No-op try_acquire (always succeeds)."""
         return True
 
+    def close(self) -> None:
+        """No-op close (nothing to clean up)."""
+
+    def __enter__(self) -> NoOpLimiter:
+        """Enter context manager."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Exit context manager."""
+        self.close()
+
 
 class RateLimitRegistry:
     """Registry that manages rate limiters per service.
 
     Creates limiters on demand based on configuration.
     Reuses limiter instances for the same service.
+    Thread-safe for concurrent access.
 
     Example:
         settings = RateLimitSettings(...)
@@ -35,6 +58,9 @@ class RateLimitRegistry:
         limiter = registry.get_limiter("openai")
         limiter.acquire()
         response = call_openai()
+
+        # Clean up when done
+        registry.close()
     """
 
     def __init__(self, settings: RateLimitSettings) -> None:
@@ -44,10 +70,14 @@ class RateLimitRegistry:
             settings: Rate limit configuration
         """
         self._settings = settings
-        self._limiters: dict[str, RateLimiter | NoOpLimiter] = {}
+        self._limiters: dict[str, RateLimiter] = {}
+        self._lock = threading.Lock()
+        self._noop_limiter = NoOpLimiter()
 
     def get_limiter(self, service_name: str) -> RateLimiter | NoOpLimiter:
         """Get or create a rate limiter for a service.
+
+        Thread-safe: multiple threads can call this concurrently.
 
         Args:
             service_name: Name of the external service
@@ -56,19 +86,36 @@ class RateLimitRegistry:
             RateLimiter (or NoOpLimiter if disabled)
         """
         if not self._settings.enabled:
-            return NoOpLimiter()
+            return self._noop_limiter
 
-        if service_name not in self._limiters:
-            config = self._settings.get_service_config(service_name)
-            self._limiters[service_name] = RateLimiter(
-                name=service_name,
-                requests_per_second=config.requests_per_second,
-                requests_per_minute=config.requests_per_minute,
-                persistence_path=self._settings.persistence_path,
-            )
+        with self._lock:
+            if service_name not in self._limiters:
+                config = self._settings.get_service_config(service_name)
+                self._limiters[service_name] = RateLimiter(
+                    name=service_name,
+                    requests_per_second=config.requests_per_second,
+                    requests_per_minute=config.requests_per_minute,
+                    persistence_path=self._settings.persistence_path,
+                )
 
-        return self._limiters[service_name]
+            return self._limiters[service_name]
 
     def reset_all(self) -> None:
-        """Reset all limiters (for testing)."""
-        self._limiters.clear()
+        """Reset all limiters (for testing).
+
+        Closes all existing limiters and clears the registry.
+        """
+        with self._lock:
+            for limiter in self._limiters.values():
+                limiter.close()
+            self._limiters.clear()
+
+    def close(self) -> None:
+        """Close all limiters and release resources.
+
+        Should be called when the registry is no longer needed.
+        """
+        with self._lock:
+            for limiter in self._limiters.values():
+                limiter.close()
+            self._limiters.clear()

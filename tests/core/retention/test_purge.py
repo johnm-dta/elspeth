@@ -117,12 +117,14 @@ class TestPurgeResult:
         result = PurgeResult(
             deleted_count=5,
             bytes_freed=1024,
+            skipped_count=2,
             failed_refs=["abc", "def"],
             duration_seconds=1.5,
         )
 
         assert result.deleted_count == 5
         assert result.bytes_freed == 1024
+        assert result.skipped_count == 2
         assert result.failed_refs == ["abc", "def"]
         assert result.duration_seconds == 1.5
 
@@ -315,6 +317,53 @@ class TestFindExpiredRowPayloads:
         expired_past = manager.find_expired_row_payloads(retention_days=30, as_of=as_of)
         assert "ref_45_days_old" not in expired_past
 
+    def test_find_expired_deduplicates_shared_refs(self) -> None:
+        """Multiple rows referencing the same payload return only one ref.
+
+        Content-addressed storage means identical content shares one blob,
+        so multiple rows can have the same source_data_ref. The query must
+        deduplicate to avoid returning the same ref multiple times.
+        """
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        run_id = str(uuid4())
+        node_id = str(uuid4())
+        old_completed_at = datetime.now(UTC) - timedelta(days=60)
+
+        # The shared ref that multiple rows point to (content-addressed)
+        shared_ref = "shared_content_hash_abc123"
+
+        with db.connection() as conn:
+            _create_run(
+                conn, runs_table, run_id, completed_at=old_completed_at, status="completed"
+            )
+            _create_node(conn, nodes_table, node_id, run_id)
+
+            # Create 3 rows that all reference the same payload
+            for i in range(3):
+                _create_row(
+                    conn,
+                    rows_table,
+                    row_id=str(uuid4()),
+                    run_id=run_id,
+                    node_id=node_id,
+                    row_index=i,
+                    source_data_ref=shared_ref,
+                    source_data_hash=f"hash_{i}",  # Different hashes, same ref
+                )
+
+        expired = manager.find_expired_row_payloads(retention_days=30)
+
+        # Should return exactly one instance of the shared ref, not three
+        assert expired.count(shared_ref) == 1
+        assert len(expired) == 1
+
 
 class TestPurgePayloads:
     """Tests for purge_payloads method."""
@@ -389,8 +438,8 @@ class TestPurgePayloads:
             saved_hash = result.scalar()
             assert saved_hash == "original_hash_kept"
 
-    def test_purge_tracks_failed_refs(self) -> None:
-        """Purge tracks refs that fail to delete."""
+    def test_purge_tracks_skipped_refs(self) -> None:
+        """Purge tracks refs that don't exist as skipped (not failed)."""
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.retention.purge import PurgeManager
 
@@ -405,7 +454,10 @@ class TestPurgePayloads:
         result = manager.purge_payloads([existing_ref, nonexistent_ref])
 
         assert result.deleted_count == 1
-        assert nonexistent_ref in result.failed_refs
+        assert result.skipped_count == 1
+        # Non-existent refs are skipped, not failed
+        assert nonexistent_ref not in result.failed_refs
+        assert result.failed_refs == []
 
     def test_purge_measures_duration(self) -> None:
         """Purge measures operation duration."""
@@ -435,4 +487,5 @@ class TestPurgePayloads:
 
         assert result.deleted_count == 0
         assert result.bytes_freed == 0
+        assert result.skipped_count == 0
         assert result.failed_refs == []

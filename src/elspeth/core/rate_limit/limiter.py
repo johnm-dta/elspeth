@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
-import time as time_module
 from typing import TYPE_CHECKING
 
 from pyrate_limiter import (  # type: ignore[attr-defined]
@@ -19,6 +19,41 @@ from pyrate_limiter import (  # type: ignore[attr-defined]
 
 if TYPE_CHECKING:
     from types import TracebackType
+
+# Pattern for valid rate limiter names (used in SQL table names)
+_VALID_NAME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
+
+# Track original thread excepthook
+_original_excepthook = threading.excepthook
+
+# Count of suppressions pending for each thread name
+# We use a count because multiple threads may have the same name
+_suppressed_threads: dict[str, int] = {}
+_suppressed_lock = threading.Lock()
+
+
+def _custom_excepthook(args: threading.ExceptHookArgs) -> None:
+    """Custom thread excepthook that suppresses expected cleanup exceptions.
+
+    pyrate-limiter's Leaker thread has a race condition where it can raise
+    AssertionError when all buckets are disposed. This is benign (the thread
+    is exiting anyway) but produces noisy warnings in tests.
+    """
+    thread_name = args.thread.name if args.thread else None
+    with _suppressed_lock:
+        if thread_name and thread_name in _suppressed_threads:
+            # Decrement the suppression count
+            _suppressed_threads[thread_name] -= 1
+            if _suppressed_threads[thread_name] <= 0:
+                del _suppressed_threads[thread_name]
+            return
+
+    # Not a suppressed thread, use original handler
+    _original_excepthook(args)
+
+
+# Install custom excepthook
+threading.excepthook = _custom_excepthook
 
 
 class RateLimiter:
@@ -56,11 +91,36 @@ class RateLimiter:
         """Initialize rate limiter.
 
         Args:
-            name: Identifier for this rate limiter (used as bucket key)
-            requests_per_second: Maximum requests allowed per second
-            requests_per_minute: Optional maximum requests per minute
+            name: Identifier for this rate limiter (used as bucket key).
+                Must start with a letter and contain only alphanumeric
+                characters and underscores.
+            requests_per_second: Maximum requests allowed per second.
+                Must be greater than 0.
+            requests_per_minute: Optional maximum requests per minute.
+                Must be greater than 0 if provided.
             persistence_path: Optional SQLite database path for persistence
+
+        Raises:
+            ValueError: If name is invalid or rate limits are not positive.
         """
+        # Validate name - used in SQL table names, so must be safe
+        if not _VALID_NAME_PATTERN.match(name):
+            msg = (
+                f"Invalid rate limiter name: {name!r}. "
+                "Name must start with a letter and contain only "
+                "alphanumeric characters and underscores."
+            )
+            raise ValueError(msg)
+
+        # Validate rate limits
+        if requests_per_second <= 0:
+            msg = f"requests_per_second must be positive, got {requests_per_second}"
+            raise ValueError(msg)
+
+        if requests_per_minute is not None and requests_per_minute <= 0:
+            msg = f"requests_per_minute must be positive, got {requests_per_minute}"
+            raise ValueError(msg)
+
         self.name = name
         self._requests_per_second = requests_per_second
         self._requests_per_minute = requests_per_minute
@@ -124,6 +184,25 @@ class RateLimiter:
         for limiter in self._limiters:
             limiter.try_acquire(self.name, weight=weight)
 
+    def _would_all_buckets_accept(self, weight: int) -> bool:
+        """Check if all buckets would accept without consuming tokens.
+
+        This performs a peek-style check by examining bucket count and rate limits
+        without actually putting items into the buckets.
+
+        Args:
+            weight: Number of tokens to check
+
+        Returns:
+            True if all buckets would accept, False otherwise
+        """
+        for bucket in self._buckets:
+            current_count = bucket.count()
+            for rate in bucket.rates:
+                if current_count + weight > rate.limit:
+                    return False
+        return True
+
     def try_acquire(self, weight: int = 1) -> bool:
         """Try to acquire tokens without blocking.
 
@@ -134,15 +213,20 @@ class RateLimiter:
             True if acquired, False if rate limited
         """
         with self._lock:
-            # First check if ALL limiters would allow the acquire
-            # We need to temporarily disable blocking for each check
+            # First check if ALL buckets would accept (peek without consuming)
+            if not self._would_all_buckets_accept(weight):
+                return False
+
+            # All buckets would accept, now actually acquire from all limiters
+            # Since we checked capacity, these should all succeed
             for limiter in self._limiters:
                 original_max_delay = limiter.max_delay
                 limiter.max_delay = None
                 try:
                     limiter.try_acquire(self.name, weight=weight)
                 except BucketFullException:
-                    # Restore and return failure
+                    # This should not happen since we pre-checked capacity
+                    # but if it does due to a race, restore and return failure
                     limiter.max_delay = original_max_delay
                     return False
                 finally:
@@ -152,13 +236,35 @@ class RateLimiter:
 
     def close(self) -> None:
         """Close the rate limiter and release resources."""
+        # Get references to the leaker threads before disposing
+        # Each limiter's bucket_factory has a _leaker attribute
+        leakers = []
+        for limiter in self._limiters:
+            leaker = limiter.bucket_factory._leaker
+            if leaker is not None and leaker.is_alive():
+                leakers.append(leaker)
+                # Register thread for exception suppression
+                # pyrate-limiter has a race condition that causes AssertionError
+                # during cleanup - this is benign but noisy
+                with _suppressed_lock:
+                    _suppressed_threads[leaker.name] = (
+                        _suppressed_threads.get(leaker.name, 0) + 1
+                    )
+
         # Dispose all buckets from their limiters
+        # This deregisters them from the leaker thread
         for limiter, bucket in zip(self._limiters, self._buckets, strict=True):
             limiter.dispose(bucket)
 
+        # Wait for leaker threads to exit
+        # The pyrate-limiter Leaker thread has a race condition where it can fail
+        # with an assertion error if we close too quickly. We suppress that
+        # exception via the custom excepthook above.
+        for leaker in leakers:
+            # Wait up to 50ms for thread to exit
+            leaker.join(timeout=0.05)
+
         if self._conn is not None:
-            # Allow leaker threads to process disposal before closing connection
-            time_module.sleep(0.05)
             self._conn.close()
             self._conn = None
 

@@ -58,9 +58,9 @@ class TestCheckpointRecoveryIntegration:
         resume_point = recovery_mgr.get_resume_point(run_id)
         assert resume_point is not None
 
-        # 5. Get unprocessed rows
+        # 5. Get unprocessed rows (setup creates 5 rows 0-4, checkpoint at sequence 2)
         unprocessed = recovery_mgr.get_unprocessed_rows(run_id)
-        assert len(unprocessed) > 0  # Some rows still need processing
+        assert len(unprocessed) == 2  # rows 3 and 4
 
     def test_checkpoint_sequence_ordering(self, test_env) -> None:
         """Verify checkpoints are ordered by sequence number."""
@@ -71,6 +71,7 @@ class TestCheckpointRecoveryIntegration:
 
         # Create additional checkpoints at different sequence numbers
         # Use token IDs that were created by _setup_partial_run (tok-001-003, tok-001-004)
+        # and use matching node_id from _setup_partial_run (default run_suffix="001")
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
             token_id="tok-001-003",

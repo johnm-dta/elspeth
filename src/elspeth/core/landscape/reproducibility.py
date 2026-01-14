@@ -99,7 +99,7 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str) -> None:
         db: LandscapeDB instance
         run_id: Run ID to potentially degrade
     """
-    # Get current grade
+    # Use single connection for transactional safety (read-modify-write)
     query = select(runs_table.c.reproducibility_grade).where(
         runs_table.c.run_id == run_id
     )
@@ -108,14 +108,14 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str) -> None:
         result = conn.execute(query)
         row = result.fetchone()
 
-    if row is None:
-        return  # Run doesn't exist
+        if row is None:
+            return  # Run doesn't exist
 
-    current_grade = row[0]
+        current_grade = row[0]
 
-    # Only REPLAY_REPRODUCIBLE needs to degrade
-    if current_grade == ReproducibilityGrade.REPLAY_REPRODUCIBLE.value:
-        with db.connection() as conn:
+        # Only REPLAY_REPRODUCIBLE needs to degrade
+        # Also guard against NULL grades (shouldn't happen, but defensive)
+        if current_grade == ReproducibilityGrade.REPLAY_REPRODUCIBLE.value:
             conn.execute(
                 runs_table.update()
                 .where(runs_table.c.run_id == run_id)

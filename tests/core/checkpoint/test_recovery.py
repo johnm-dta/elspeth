@@ -277,3 +277,146 @@ class TestRecoveryProtocol:
         assert resume_point is not None
         assert resume_point.aggregation_state == agg_state
         assert resume_point.sequence_number == 5
+
+
+class TestGetUnprocessedRows:
+    """Unit tests for RecoveryManager.get_unprocessed_rows()."""
+
+    @pytest.fixture
+    def landscape_db(self, tmp_path):
+        from elspeth.core.landscape.database import LandscapeDB
+
+        db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
+        return db
+
+    @pytest.fixture
+    def checkpoint_manager(self, landscape_db):
+        from elspeth.core.checkpoint import CheckpointManager
+
+        return CheckpointManager(landscape_db)
+
+    @pytest.fixture
+    def recovery_manager(self, landscape_db, checkpoint_manager):
+        from elspeth.core.checkpoint import RecoveryManager
+
+        return RecoveryManager(landscape_db, checkpoint_manager)
+
+    def _setup_run_with_rows(
+        self, landscape_db, checkpoint_manager, *, create_checkpoint: bool = True
+    ) -> str:
+        """Helper to create a run with multiple rows and optionally a checkpoint."""
+        from elspeth.core.landscape.schema import (
+            nodes_table,
+            rows_table,
+            runs_table,
+            tokens_table,
+        )
+
+        run_id = "unprocessed-test-run"
+        now = datetime.now(timezone.utc)
+
+        with landscape_db.engine.connect() as conn:
+            conn.execute(
+                runs_table.insert().values(
+                    run_id=run_id,
+                    started_at=now,
+                    config_hash="abc",
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status="failed",
+                )
+            )
+            conn.execute(
+                nodes_table.insert().values(
+                    node_id="node-unproc",
+                    run_id=run_id,
+                    plugin_name="test",
+                    node_type="transform",
+                    plugin_version="1.0",
+                    determinism="deterministic",
+                    config_hash="xyz",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+            # Create 5 rows (indices 0-4)
+            for i in range(5):
+                row_id = f"row-unproc-{i:03d}"
+                conn.execute(
+                    rows_table.insert().values(
+                        row_id=row_id,
+                        run_id=run_id,
+                        source_node_id="node-unproc",
+                        row_index=i,
+                        source_data_hash=f"hash{i}",
+                        created_at=now,
+                    )
+                )
+                conn.execute(
+                    tokens_table.insert().values(
+                        token_id=f"tok-unproc-{i:03d}",
+                        row_id=row_id,
+                        created_at=now,
+                    )
+                )
+            conn.commit()
+
+        if create_checkpoint:
+            # Checkpoint at row index 2 (rows 0, 1, 2 are processed)
+            checkpoint_manager.create_checkpoint(
+                run_id, "tok-unproc-002", "node-unproc", 2
+            )
+
+        return run_id
+
+    def test_returns_correct_rows_when_checkpoint_exists(
+        self, landscape_db, checkpoint_manager, recovery_manager
+    ) -> None:
+        """Returns rows with index > checkpoint.sequence_number."""
+        run_id = self._setup_run_with_rows(
+            landscape_db, checkpoint_manager, create_checkpoint=True
+        )
+
+        unprocessed = recovery_manager.get_unprocessed_rows(run_id)
+
+        # Checkpoint at sequence 2, so rows 3 and 4 are unprocessed
+        assert len(unprocessed) == 2
+        assert "row-unproc-003" in unprocessed
+        assert "row-unproc-004" in unprocessed
+
+    def test_returns_empty_list_when_no_checkpoint_exists(
+        self, landscape_db, checkpoint_manager, recovery_manager
+    ) -> None:
+        """Returns empty list when there is no checkpoint for the run."""
+        run_id = self._setup_run_with_rows(
+            landscape_db, checkpoint_manager, create_checkpoint=False
+        )
+
+        unprocessed = recovery_manager.get_unprocessed_rows(run_id)
+
+        assert unprocessed == []
+
+    def test_returns_empty_list_when_all_rows_processed(
+        self, landscape_db, checkpoint_manager, recovery_manager
+    ) -> None:
+        """Returns empty list when checkpoint is at or beyond all rows."""
+        run_id = self._setup_run_with_rows(
+            landscape_db, checkpoint_manager, create_checkpoint=False
+        )
+
+        # Create checkpoint at sequence 4 (the last row)
+        checkpoint_manager.create_checkpoint(
+            run_id, "tok-unproc-004", "node-unproc", 4
+        )
+
+        unprocessed = recovery_manager.get_unprocessed_rows(run_id)
+
+        assert unprocessed == []
+
+    def test_handles_nonexistent_run_id_gracefully(
+        self, recovery_manager
+    ) -> None:
+        """Returns empty list for a run_id that does not exist."""
+        unprocessed = recovery_manager.get_unprocessed_rows("nonexistent-run-id")
+
+        assert unprocessed == []

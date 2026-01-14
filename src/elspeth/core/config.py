@@ -132,8 +132,10 @@ class ServiceRateLimit(BaseModel):
 
     model_config = {"frozen": True}
 
-    requests_per_second: int
-    requests_per_minute: int | None = None
+    requests_per_second: int = Field(gt=0, description="Maximum requests per second")
+    requests_per_minute: int | None = Field(
+        default=None, gt=0, description="Maximum requests per minute"
+    )
 
 
 class RateLimitSettings(BaseModel):
@@ -154,11 +156,21 @@ class RateLimitSettings(BaseModel):
 
     model_config = {"frozen": True}
 
-    enabled: bool = True
-    default_requests_per_second: int = 10
-    default_requests_per_minute: int | None = None
-    persistence_path: str | None = None  # SQLite path for cross-process limits
-    services: dict[str, ServiceRateLimit] = Field(default_factory=dict)
+    enabled: bool = Field(
+        default=True, description="Enable rate limiting for external calls"
+    )
+    default_requests_per_second: int = Field(
+        default=10, gt=0, description="Default rate limit for unconfigured services"
+    )
+    default_requests_per_minute: int | None = Field(
+        default=None, gt=0, description="Optional per-minute rate limit"
+    )
+    persistence_path: str | None = Field(
+        default=None, description="SQLite path for cross-process limits"
+    )
+    services: dict[str, ServiceRateLimit] = Field(
+        default_factory=dict, description="Per-service rate limit configurations"
+    )
 
     def get_service_config(self, service_name: str) -> ServiceRateLimit:
         """Get rate limit config for a service, with fallback to defaults."""

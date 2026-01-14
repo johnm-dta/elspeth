@@ -308,3 +308,101 @@ class TestRateLimitRegistry:
 
         # Should return no-op limiter
         assert isinstance(limiter, NoOpLimiter)
+
+    def test_registry_disabled_returns_same_noop_instance(self) -> None:
+        """When disabled, registry returns the same NoOpLimiter instance."""
+        from elspeth.core.config import RateLimitSettings
+        from elspeth.core.rate_limit import NoOpLimiter, RateLimitRegistry
+
+        settings = RateLimitSettings(enabled=False)
+        registry = RateLimitRegistry(settings)
+
+        limiter1 = registry.get_limiter("api_a")
+        limiter2 = registry.get_limiter("api_b")
+
+        # Should return the same cached instance
+        assert isinstance(limiter1, NoOpLimiter)
+        assert limiter1 is limiter2
+
+    def test_reset_all_clears_registry(self) -> None:
+        """reset_all() clears all limiters from the registry."""
+        from elspeth.core.config import RateLimitSettings
+        from elspeth.core.rate_limit import RateLimitRegistry
+
+        settings = RateLimitSettings(default_requests_per_second=10)
+        registry = RateLimitRegistry(settings)
+
+        # Create some limiters
+        limiter_a = registry.get_limiter("api_a")
+        limiter_b = registry.get_limiter("api_b")
+
+        # Verify they exist
+        assert limiter_a is registry.get_limiter("api_a")
+        assert limiter_b is registry.get_limiter("api_b")
+
+        # Reset all
+        registry.reset_all()
+
+        # New calls should create new instances
+        new_limiter_a = registry.get_limiter("api_a")
+        new_limiter_b = registry.get_limiter("api_b")
+
+        assert new_limiter_a is not limiter_a
+        assert new_limiter_b is not limiter_b
+
+    def test_registry_close(self) -> None:
+        """close() cleans up all limiters."""
+        from elspeth.core.config import RateLimitSettings
+        from elspeth.core.rate_limit import RateLimitRegistry
+
+        settings = RateLimitSettings(default_requests_per_second=10)
+        registry = RateLimitRegistry(settings)
+
+        # Create some limiters
+        registry.get_limiter("api_a")
+        registry.get_limiter("api_b")
+
+        # Close should not raise
+        registry.close()
+
+        # After close, registry should be empty (new calls create new instances)
+        # This verifies close() cleared internal state
+        assert len(registry._limiters) == 0
+
+
+class TestNoOpLimiter:
+    """Tests for NoOpLimiter."""
+
+    def test_noop_limiter_acquire(self) -> None:
+        """NoOpLimiter.acquire() always succeeds instantly."""
+        from elspeth.core.rate_limit import NoOpLimiter
+
+        limiter = NoOpLimiter()
+
+        # Should not block or raise
+        limiter.acquire()
+        limiter.acquire(weight=100)
+
+    def test_noop_limiter_try_acquire(self) -> None:
+        """NoOpLimiter.try_acquire() always returns True."""
+        from elspeth.core.rate_limit import NoOpLimiter
+
+        limiter = NoOpLimiter()
+
+        assert limiter.try_acquire() is True
+        assert limiter.try_acquire(weight=100) is True
+
+    def test_noop_limiter_context_manager(self) -> None:
+        """NoOpLimiter can be used as a context manager."""
+        from elspeth.core.rate_limit import NoOpLimiter
+
+        with NoOpLimiter() as limiter:
+            limiter.acquire()
+            assert limiter.try_acquire() is True
+
+    def test_noop_limiter_close(self) -> None:
+        """NoOpLimiter.close() does nothing but doesn't raise."""
+        from elspeth.core.rate_limit import NoOpLimiter
+
+        limiter = NoOpLimiter()
+        limiter.close()  # Should not raise

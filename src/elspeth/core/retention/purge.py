@@ -36,11 +36,18 @@ class PayloadStoreProtocol(Protocol):
 
 @dataclass
 class PurgeResult:
-    """Result of a purge operation."""
+    """Result of a purge operation.
+
+    Note: bytes_freed is always 0 in the current implementation because
+    PayloadStoreProtocol.delete() does not return the size of deleted content.
+    This field is retained for future compatibility when PayloadStore provides
+    size information on deletion.
+    """
 
     deleted_count: int
     bytes_freed: int
-    failed_refs: list[str]
+    skipped_count: int  # Refs that didn't exist (already purged/never stored)
+    failed_refs: list[str]  # Refs that existed but failed to delete
     duration_seconds: float
 
 
@@ -84,8 +91,11 @@ class PurgeManager:
 
         # Query rows from completed runs older than cutoff
         # Only return non-null source_data_ref values
+        # Use distinct() because multiple rows can reference the same payload
+        # (content-addressed storage means identical content shares one blob)
         query = (
             select(rows_table.c.source_data_ref)
+            .distinct()
             .select_from(rows_table.join(runs_table, rows_table.c.run_id == runs_table.c.run_id))
             .where(
                 and_(
@@ -113,11 +123,14 @@ class PurgeManager:
             refs: List of payload references (content hashes) to delete
 
         Returns:
-            PurgeResult with deletion statistics
+            PurgeResult with deletion statistics. Note that skipped_count
+            tracks refs that didn't exist (already purged or never stored),
+            while failed_refs tracks refs that existed but failed to delete.
         """
         start_time = perf_counter()
 
         deleted_count = 0
+        skipped_count = 0
         bytes_freed = 0  # Not tracked by current PayloadStore protocol
         failed_refs: list[str] = []
 
@@ -129,14 +142,16 @@ class PurgeManager:
                 else:
                     failed_refs.append(ref)
             else:
-                # Ref doesn't exist in store - record as failed
-                failed_refs.append(ref)
+                # Ref doesn't exist - already purged or never stored
+                # This is not a failure, just skip it
+                skipped_count += 1
 
         duration_seconds = perf_counter() - start_time
 
         return PurgeResult(
             deleted_count=deleted_count,
             bytes_freed=bytes_freed,
+            skipped_count=skipped_count,
             failed_refs=failed_refs,
             duration_seconds=duration_seconds,
         )

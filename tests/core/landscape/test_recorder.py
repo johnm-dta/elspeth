@@ -1985,3 +1985,86 @@ class TestReproducibilityGradeComputation:
 
         # Empty pipeline is trivially reproducible
         assert grade == ReproducibilityGrade.FULL_REPRODUCIBLE
+
+    def test_update_grade_after_purge_nonexistent_run(self) -> None:
+        """update_grade_after_purge() silently handles nonexistent run."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.reproducibility import update_grade_after_purge
+
+        db = LandscapeDB.in_memory()
+
+        # Should not raise - silently returns for nonexistent run
+        update_grade_after_purge(db, "nonexistent_run_id")
+
+    def test_attributable_only_unchanged_after_purge(self) -> None:
+        """ATTRIBUTABLE_ONLY remains unchanged after purge (already at lowest grade)."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.reproducibility import (
+            ReproducibilityGrade,
+            update_grade_after_purge,
+        )
+        from elspeth.plugins.enums import Determinism
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Nondeterministic pipeline
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="llm_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.NONDETERMINISTIC,
+        )
+
+        # Finalize and degrade to ATTRIBUTABLE_ONLY
+        recorder.finalize_run(run.run_id, status="completed")
+        update_grade_after_purge(db, run.run_id)
+
+        # Verify it's ATTRIBUTABLE_ONLY
+        run_after_first_purge = recorder.get_run(run.run_id)
+        assert run_after_first_purge is not None
+        assert run_after_first_purge.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
+
+        # Call purge again - should remain ATTRIBUTABLE_ONLY
+        update_grade_after_purge(db, run.run_id)
+
+        run_after_second_purge = recorder.get_run(run.run_id)
+        assert run_after_second_purge is not None
+        assert run_after_second_purge.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
+
+    def test_default_determinism_counts_as_deterministic(self) -> None:
+        """Nodes registered without explicit determinism default to DETERMINISTIC."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.reproducibility import ReproducibilityGrade
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register nodes WITHOUT specifying determinism - should default to DETERMINISTIC
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            # determinism not specified - should default to DETERMINISTIC
+        )
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="field_mapper",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            # determinism not specified - should default to DETERMINISTIC
+        )
+
+        grade = recorder.compute_reproducibility_grade(run.run_id)
+
+        # Since defaults are DETERMINISTIC, should get FULL_REPRODUCIBLE
+        assert grade == ReproducibilityGrade.FULL_REPRODUCIBLE

@@ -36,6 +36,8 @@ class TestCLIBasics:
         assert "explain" in result.stdout
         assert "validate" in result.stdout
         assert "plugins" in result.stdout
+        assert "resume" in result.stdout
+        assert "purge" in result.stdout
 
 
 class TestRunCommandExecutesTransforms:
@@ -251,7 +253,7 @@ class TestPurgeCommand:
             input="n\n",  # Say no to confirmation
         )
 
-        assert result.exit_code == 0 or result.exit_code == 1
+        assert result.exit_code == 1
         assert "abort" in result.stdout.lower() or "cancel" in result.stdout.lower()
 
     def test_purge_with_yes_flag_skips_confirmation(self, tmp_path: Path) -> None:
@@ -285,64 +287,262 @@ class TestPurgeCommand:
         db_url = f"sqlite:///{db_file}"
         db = LandscapeDB.from_url(db_url)
 
-        # Create payload store
-        payload_dir = tmp_path / "payloads"
-        store = FilesystemPayloadStore(payload_dir)
-        content_hash = store.store(b"test payload data")
+        try:
+            # Create payload store
+            payload_dir = tmp_path / "payloads"
+            store = FilesystemPayloadStore(payload_dir)
+            content_hash = store.store(b"test payload data")
 
-        # Create old run (100 days ago)
-        old_date = datetime.now(UTC) - timedelta(days=100)
+            # Create old run (100 days ago)
+            old_date = datetime.now(UTC) - timedelta(days=100)
+            with db.connection() as conn:
+                conn.execute(
+                    insert(runs_table).values(
+                        run_id="old-run-123",
+                        status="completed",
+                        started_at=old_date,
+                        completed_at=old_date,
+                        config_hash="abc123",
+                        settings_json="{}",
+                        canonical_version="1.0.0",
+                    )
+                )
+                conn.execute(
+                    insert(nodes_table).values(
+                        node_id="source-node-purge",
+                        run_id="old-run-123",
+                        plugin_name="csv",
+                        node_type="source",
+                        plugin_version="1.0.0",
+                        determinism="deterministic",
+                        config_hash="def456",
+                        config_json="{}",
+                        registered_at=old_date,
+                    )
+                )
+                conn.execute(
+                    insert(rows_table).values(
+                        run_id="old-run-123",
+                        row_id="row-1",
+                        source_node_id="source-node-purge",
+                        row_index=0,
+                        source_data_hash="hash1",
+                        source_data_ref=content_hash,
+                        created_at=old_date,
+                    )
+                )
+
+            # Verify payload exists
+            assert store.exists(content_hash)
+
+            result = runner.invoke(app, [
+                "purge",
+                "--yes",
+                "--retention-days", "90",
+                "--database", str(db_file),
+                "--payload-dir", str(payload_dir),
+            ])
+
+            assert result.exit_code == 0
+            assert "deleted" in result.stdout.lower() or "1" in result.stdout
+            # Verify payload was deleted
+            assert not store.exists(content_hash)
+        finally:
+            db.close()
+
+
+class TestResumeCommand:
+    """Tests for resume CLI command."""
+
+    def test_resume_help(self) -> None:
+        """resume --help shows usage."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, ["resume", "--help"])
+
+        assert result.exit_code == 0
+        assert "run" in result.stdout.lower()
+
+    def test_resume_nonexistent_run(self, tmp_path: Path) -> None:
+        """resume fails gracefully for nonexistent run."""
+        from elspeth.cli import app
+
+        db_file = tmp_path / "test.db"
+
+        result = runner.invoke(app, [
+            "resume", "nonexistent-run-id",
+            "--database", str(db_file),
+        ])
+
+        assert result.exit_code != 0
+        output = result.output.lower()
+        assert "not found" in output or "error" in output
+
+    def test_resume_completed_run(self, tmp_path: Path) -> None:
+        """resume fails for already-completed run."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import insert
+
+        from elspeth.cli import app
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.landscape.schema import runs_table
+
+        # Set up database with a completed run
+        db_file = tmp_path / "test.db"
+        db_url = f"sqlite:///{db_file}"
+        db = LandscapeDB.from_url(db_url)
+
+        now = datetime.now(UTC)
         with db.connection() as conn:
             conn.execute(
                 insert(runs_table).values(
-                    run_id="old-run-123",
+                    run_id="completed-run-001",
                     status="completed",
-                    started_at=old_date,
-                    completed_at=old_date,
+                    started_at=now,
+                    completed_at=now,
+                    config_hash="abc123",
+                    settings_json="{}",
+                    canonical_version="1.0.0",
+                )
+            )
+        db.close()
+
+        result = runner.invoke(app, [
+            "resume", "completed-run-001",
+            "--database", str(db_file),
+        ])
+
+        assert result.exit_code != 0
+        output = result.output.lower()
+        assert "completed" in output or "cannot resume" in output
+
+    def test_resume_running_run(self, tmp_path: Path) -> None:
+        """resume fails for still-running run."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import insert
+
+        from elspeth.cli import app
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.landscape.schema import runs_table
+
+        # Set up database with a running run
+        db_file = tmp_path / "test.db"
+        db_url = f"sqlite:///{db_file}"
+        db = LandscapeDB.from_url(db_url)
+
+        now = datetime.now(UTC)
+        with db.connection() as conn:
+            conn.execute(
+                insert(runs_table).values(
+                    run_id="running-run-001",
+                    status="running",
+                    started_at=now,
+                    completed_at=None,
+                    config_hash="abc123",
+                    settings_json="{}",
+                    canonical_version="1.0.0",
+                )
+            )
+        db.close()
+
+        result = runner.invoke(app, [
+            "resume", "running-run-001",
+            "--database", str(db_file),
+        ])
+
+        assert result.exit_code != 0
+        output = result.output.lower()
+        assert "in progress" in output or "running" in output
+
+    def test_resume_failed_run_without_checkpoint(self, tmp_path: Path) -> None:
+        """resume fails for failed run that has no checkpoint."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import insert
+
+        from elspeth.cli import app
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.landscape.schema import runs_table
+
+        # Set up database with a failed run (no checkpoint)
+        db_file = tmp_path / "test.db"
+        db_url = f"sqlite:///{db_file}"
+        db = LandscapeDB.from_url(db_url)
+
+        now = datetime.now(UTC)
+        with db.connection() as conn:
+            conn.execute(
+                insert(runs_table).values(
+                    run_id="failed-no-checkpoint-001",
+                    status="failed",
+                    started_at=now,
+                    completed_at=now,
+                    config_hash="abc123",
+                    settings_json="{}",
+                    canonical_version="1.0.0",
+                )
+            )
+        db.close()
+
+        result = runner.invoke(app, [
+            "resume", "failed-no-checkpoint-001",
+            "--database", str(db_file),
+        ])
+
+        assert result.exit_code != 0
+        output = result.output.lower()
+        assert "checkpoint" in output or "no checkpoint" in output
+
+    def test_resume_shows_resume_point_info(self, tmp_path: Path) -> None:
+        """resume shows checkpoint info for resumable run."""
+        from datetime import UTC, datetime
+
+        from sqlalchemy import insert
+
+        from elspeth.cli import app
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.landscape.schema import checkpoints_table, runs_table
+
+        # Set up database with a failed run that has a checkpoint
+        db_file = tmp_path / "test.db"
+        db_url = f"sqlite:///{db_file}"
+        db = LandscapeDB.from_url(db_url)
+
+        now = datetime.now(UTC)
+        with db.connection() as conn:
+            conn.execute(
+                insert(runs_table).values(
+                    run_id="failed-with-checkpoint-001",
+                    status="failed",
+                    started_at=now,
+                    completed_at=now,
                     config_hash="abc123",
                     settings_json="{}",
                     canonical_version="1.0.0",
                 )
             )
             conn.execute(
-                insert(nodes_table).values(
-                    node_id="source-node-purge",
-                    run_id="old-run-123",
-                    plugin_name="csv",
-                    node_type="source",
-                    plugin_version="1.0.0",
-                    determinism="deterministic",
-                    config_hash="def456",
-                    config_json="{}",
-                    registered_at=old_date,
+                insert(checkpoints_table).values(
+                    checkpoint_id="cp-test123",
+                    run_id="failed-with-checkpoint-001",
+                    token_id="token-abc",
+                    node_id="transform-xyz",
+                    sequence_number=42,
+                    created_at=now,
+                    aggregation_state_json=None,
                 )
             )
-            conn.execute(
-                insert(rows_table).values(
-                    run_id="old-run-123",
-                    row_id="row-1",
-                    source_node_id="source-node-purge",
-                    row_index=0,
-                    source_data_hash="hash1",
-                    source_data_ref=content_hash,
-                    created_at=old_date,
-                )
-            )
-
-        # Verify payload exists
-        assert store.exists(content_hash)
+        db.close()
 
         result = runner.invoke(app, [
-            "purge",
-            "--yes",
-            "--retention-days", "90",
+            "resume", "failed-with-checkpoint-001",
             "--database", str(db_file),
-            "--payload-dir", str(payload_dir),
         ])
 
+        # Should succeed and show resume point info
         assert result.exit_code == 0
-        assert "deleted" in result.stdout.lower() or "1" in result.stdout
-        # Verify payload was deleted
-        assert not store.exists(content_hash)
-
-        db.close()
+        # Should show checkpoint info
+        assert "token" in result.stdout.lower() or "node" in result.stdout.lower()
+        assert "42" in result.stdout or "sequence" in result.stdout.lower()

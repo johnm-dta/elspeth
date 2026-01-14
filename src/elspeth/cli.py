@@ -513,50 +513,141 @@ def purge(
         typer.echo(f"Error connecting to database: {e}", err=True)
         raise typer.Exit(1) from None
 
-    payload_store = FilesystemPayloadStore(payload_path)
-    purge_manager = PurgeManager(db, payload_store)
+    try:
+        payload_store = FilesystemPayloadStore(payload_path)
+        purge_manager = PurgeManager(db, payload_store)
 
-    # Find expired payloads
-    expired_refs = purge_manager.find_expired_row_payloads(retention_days)
+        # Find expired payloads
+        expired_refs = purge_manager.find_expired_row_payloads(retention_days)
 
-    if not expired_refs:
-        typer.echo(f"No payloads older than {retention_days} days found.")
+        if not expired_refs:
+            typer.echo(f"No payloads older than {retention_days} days found.")
+            return
+
+        if dry_run:
+            typer.echo(f"Would delete {len(expired_refs)} payload(s) older than {retention_days} days:")
+            for ref in expired_refs[:10]:  # Show first 10
+                exists = payload_store.exists(ref)
+                status = "exists" if exists else "already deleted"
+                typer.echo(f"  {ref[:16]}... ({status})")
+            if len(expired_refs) > 10:
+                typer.echo(f"  ... and {len(expired_refs) - 10} more")
+            return
+
+        # Confirm unless --yes
+        if not yes:
+            confirm = typer.confirm(
+                f"Delete {len(expired_refs)} payload(s) older than {retention_days} days?"
+            )
+            if not confirm:
+                typer.echo("Aborted.")
+                raise typer.Exit(1)
+
+        # Execute purge
+        result = purge_manager.purge_payloads(expired_refs)
+
+        typer.echo(f"Purge completed in {result.duration_seconds:.2f}s:")
+        typer.echo(f"  Deleted: {result.deleted_count}")
+        typer.echo(f"  Skipped (not found): {result.skipped_count}")
+        if result.failed_refs:
+            typer.echo(f"  Failed: {len(result.failed_refs)}")
+            for ref in result.failed_refs[:5]:
+                typer.echo(f"    {ref[:16]}...")
+    finally:
         db.close()
-        return
 
-    if dry_run:
-        typer.echo(f"Would delete {len(expired_refs)} payload(s) older than {retention_days} days:")
-        for ref in expired_refs[:10]:  # Show first 10
-            exists = payload_store.exists(ref)
-            status = "exists" if exists else "already deleted"
-            typer.echo(f"  {ref[:16]}... ({status})")
-        if len(expired_refs) > 10:
-            typer.echo(f"  ... and {len(expired_refs) - 10} more")
-        db.close()
-        return
 
-    # Confirm unless --yes
-    if not yes:
-        confirm = typer.confirm(
-            f"Delete {len(expired_refs)} payload(s) older than {retention_days} days?"
-        )
-        if not confirm:
-            typer.echo("Aborted.")
-            db.close()
+@app.command()
+def resume(
+    run_id: str = typer.Argument(..., help="Run ID to resume"),
+    database: str | None = typer.Option(
+        None,
+        "--database", "-d",
+        help="Path to Landscape database file (SQLite).",
+    ),
+) -> None:
+    """Resume a failed run from its last checkpoint.
+
+    Continues processing from where the run left off.
+    Only works for runs that failed and have checkpoints.
+
+    Note: Full execution is not yet implemented - this command validates
+    and reports what WOULD happen when resume execution is added.
+
+    Examples:
+
+        # Resume a specific run
+        elspeth resume run-abc123
+
+        # Resume with explicit database path
+        elspeth resume run-abc123 --database ./landscape.db
+    """
+    from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+    from elspeth.core.landscape import LandscapeDB
+
+    # Resolve database URL
+    db_url: str | None = None
+
+    if database:
+        db_path = Path(database)
+        db_url = f"sqlite:///{db_path.resolve()}"
+    else:
+        # Try loading from settings.yaml
+        settings_path = Path("settings.yaml")
+        if settings_path.exists():
+            try:
+                config = load_settings(settings_path)
+                db_url = config.landscape.url
+                typer.echo(f"Using database from settings.yaml: {db_url}")
+            except Exception as e:
+                typer.echo(f"Error loading settings.yaml: {e}", err=True)
+                typer.echo("Specify --database to provide path directly.", err=True)
+                raise typer.Exit(1) from None
+        else:
+            typer.echo("Error: No settings.yaml found and --database not provided.", err=True)
+            typer.echo("Specify --database to provide path to Landscape database.", err=True)
+            raise typer.Exit(1) from None
+
+    # Initialize database and recovery manager
+    try:
+        db = LandscapeDB.from_url(db_url)
+    except Exception as e:
+        typer.echo(f"Error connecting to database: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    try:
+        checkpoint_manager = CheckpointManager(db)
+        recovery_manager = RecoveryManager(db, checkpoint_manager)
+
+        # Check if run can be resumed
+        can_resume_run, reason = recovery_manager.can_resume(run_id)
+
+        if not can_resume_run:
+            typer.echo(f"Cannot resume run {run_id}: {reason}", err=True)
             raise typer.Exit(1)
 
-    # Execute purge
-    result = purge_manager.purge_payloads(expired_refs)
+        # Get resume point information
+        resume_point = recovery_manager.get_resume_point(run_id)
+        if resume_point is None:
+            typer.echo(f"Error: Could not get resume point for run {run_id}", err=True)
+            raise typer.Exit(1)
 
-    typer.echo(f"Purge completed in {result.duration_seconds:.2f}s:")
-    typer.echo(f"  Deleted: {result.deleted_count}")
-    typer.echo(f"  Skipped (not found): {result.skipped_count}")
-    if result.failed_refs:
-        typer.echo(f"  Failed: {len(result.failed_refs)}")
-        for ref in result.failed_refs[:5]:
-            typer.echo(f"    {ref[:16]}...")
+        # Display resume point information
+        typer.echo(f"Run {run_id} can be resumed.")
+        typer.echo("\nResume point:")
+        typer.echo(f"  Token ID: {resume_point.token_id}")
+        typer.echo(f"  Node ID: {resume_point.node_id}")
+        typer.echo(f"  Sequence number: {resume_point.sequence_number}")
+        if resume_point.aggregation_state:
+            typer.echo("  Has aggregation state: Yes")
+        else:
+            typer.echo("  Has aggregation state: No")
 
-    db.close()
+        typer.echo("\nNote: Full resume execution is not yet implemented (Phase 6).")
+        typer.echo("This command validates that the run CAN be resumed from the checkpoint above.")
+
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":

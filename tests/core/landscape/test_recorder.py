@@ -1537,7 +1537,7 @@ class TestExplainGracefulDegradation:
             row_id=row.row_id,
         )
 
-        assert hasattr(lineage, "payload_available")
+        assert lineage is not None
         assert lineage.payload_available is False
 
     def test_explain_with_available_payload(self, tmp_path) -> None:
@@ -1673,3 +1673,315 @@ class TestExplainGracefulDegradation:
         assert lineage.source_hash is not None
         assert lineage.source_data is None  # No payload_ref
         assert lineage.payload_available is False
+
+    def test_explain_row_with_corrupted_payload(self, tmp_path) -> None:
+        """explain_row() handles corrupted payload (invalid JSON) gracefully."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        db = LandscapeDB.in_memory()
+        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+        recorder = LandscapeRecorder(db, payload_store=payload_store)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+
+        # Store corrupted (non-JSON) data directly to payload store
+        corrupted_data = b"this is not valid json {{{{"
+        payload_ref = payload_store.store(corrupted_data)
+
+        # Create row with the corrupted payload ref
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={"name": "test"},  # Valid data for hash
+            payload_ref=payload_ref,
+        )
+
+        # explain_row should handle JSONDecodeError gracefully
+        lineage = recorder.explain_row(
+            run_id=run.run_id,
+            row_id=row.row_id,
+        )
+
+        assert lineage is not None
+        assert lineage.source_hash is not None  # Hash preserved
+        assert lineage.source_data is None  # Corrupted payload not returned
+        assert lineage.payload_available is False  # Reports as unavailable
+
+    def test_explain_row_rejects_run_id_mismatch(self, tmp_path) -> None:
+        """explain_row() returns None when row belongs to different run."""
+        import json
+
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        db = LandscapeDB.in_memory()
+        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+        recorder = LandscapeRecorder(db, payload_store=payload_store)
+
+        # Create two runs
+        run1 = recorder.begin_run(config={}, canonical_version="v1")
+        run2 = recorder.begin_run(config={}, canonical_version="v1")
+
+        source = recorder.register_node(
+            run_id=run1.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+
+        # Create row in run1
+        row_data = {"name": "test"}
+        payload_ref = payload_store.store(json.dumps(row_data).encode())
+        row = recorder.create_row(
+            run_id=run1.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data=row_data,
+            payload_ref=payload_ref,
+        )
+
+        # Try to explain using run2's ID - should return None
+        lineage = recorder.explain_row(
+            run_id=run2.run_id,  # Wrong run!
+            row_id=row.row_id,
+        )
+
+        assert lineage is None
+
+        # Same row with correct run_id should work
+        lineage_correct = recorder.explain_row(
+            run_id=run1.run_id,
+            row_id=row.row_id,
+        )
+
+        assert lineage_correct is not None
+        assert lineage_correct.row_id == row.row_id
+
+
+class TestReproducibilityGradeComputation:
+    """Tests for reproducibility grade computation based on node determinism values."""
+
+    def test_pure_pipeline_gets_full_reproducible(self) -> None:
+        """Pipeline with only deterministic/seeded nodes gets FULL_REPRODUCIBLE."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.reproducibility import ReproducibilityGrade
+        from elspeth.plugins.enums import Determinism
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # All deterministic nodes
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+        )
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="field_mapper",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+        )
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="seeded_sampler",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.SEEDED,  # seeded counts as reproducible
+        )
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+        )
+
+        grade = recorder.compute_reproducibility_grade(run.run_id)
+
+        assert grade == ReproducibilityGrade.FULL_REPRODUCIBLE
+
+    def test_external_calls_gets_replay_reproducible(self) -> None:
+        """Pipeline with nondeterministic nodes gets REPLAY_REPRODUCIBLE."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.reproducibility import ReproducibilityGrade
+        from elspeth.plugins.enums import Determinism
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Mix of deterministic and nondeterministic nodes
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+        )
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="llm_classifier",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.NONDETERMINISTIC,  # LLM call
+        )
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+        )
+
+        grade = recorder.compute_reproducibility_grade(run.run_id)
+
+        assert grade == ReproducibilityGrade.REPLAY_REPRODUCIBLE
+
+    def test_finalize_run_sets_grade(self) -> None:
+        """finalize_run() computes grade and completes the run."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.reproducibility import ReproducibilityGrade
+        from elspeth.plugins.enums import Determinism
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register deterministic nodes
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+        )
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+        )
+
+        completed_run = recorder.finalize_run(run.run_id, status="completed")
+
+        assert completed_run.status == "completed"
+        assert completed_run.completed_at is not None
+        assert completed_run.reproducibility_grade == ReproducibilityGrade.FULL_REPRODUCIBLE.value
+
+    def test_grade_degrades_after_purge(self) -> None:
+        """REPLAY_REPRODUCIBLE degrades to ATTRIBUTABLE_ONLY after purge."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.reproducibility import (
+            ReproducibilityGrade,
+            update_grade_after_purge,
+        )
+        from elspeth.plugins.enums import Determinism
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Nondeterministic pipeline
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="llm_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.NONDETERMINISTIC,
+        )
+
+        # Finalize with REPLAY_REPRODUCIBLE grade
+        completed_run = recorder.finalize_run(run.run_id, status="completed")
+        assert completed_run.reproducibility_grade == ReproducibilityGrade.REPLAY_REPRODUCIBLE.value
+
+        # Simulate purge - grade should degrade
+        update_grade_after_purge(db, run.run_id)
+
+        # Check grade was degraded
+        updated_run = recorder.get_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
+
+    def test_full_reproducible_unchanged_after_purge(self) -> None:
+        """FULL_REPRODUCIBLE remains unchanged after purge (payloads not needed for replay)."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.reproducibility import (
+            ReproducibilityGrade,
+            update_grade_after_purge,
+        )
+        from elspeth.plugins.enums import Determinism
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Deterministic pipeline
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+        )
+
+        # Finalize with FULL_REPRODUCIBLE grade
+        completed_run = recorder.finalize_run(run.run_id, status="completed")
+        assert completed_run.reproducibility_grade == ReproducibilityGrade.FULL_REPRODUCIBLE.value
+
+        # Simulate purge - grade should NOT degrade
+        update_grade_after_purge(db, run.run_id)
+
+        # Check grade unchanged
+        updated_run = recorder.get_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.reproducibility_grade == ReproducibilityGrade.FULL_REPRODUCIBLE.value
+
+    def test_compute_grade_empty_pipeline(self) -> None:
+        """Empty pipeline (no nodes) gets FULL_REPRODUCIBLE."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.reproducibility import ReproducibilityGrade
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # No nodes registered
+        grade = recorder.compute_reproducibility_grade(run.run_id)
+
+        # Empty pipeline is trivially reproducible
+        assert grade == ReproducibilityGrade.FULL_REPRODUCIBLE

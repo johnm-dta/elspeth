@@ -38,6 +38,12 @@ from elspeth.core.landscape.models import (
     TokenParent,
 )
 from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.landscape.reproducibility import (
+    ReproducibilityGrade,
+    compute_grade,
+    set_run_grade,
+    update_grade_after_purge,
+)
 from elspeth.core.landscape.schema import (
     artifacts_table,
     batch_members_table,
@@ -71,6 +77,7 @@ __all__ = [
     "LineageResult",
     "Node",
     "NodeState",
+    "ReproducibilityGrade",
     "RoutingEvent",
     "Row",
     "RowLineage",
@@ -82,6 +89,7 @@ __all__ = [
     "batch_outputs_table",
     "batches_table",
     "calls_table",
+    "compute_grade",
     "edges_table",
     "explain",
     "metadata",
@@ -90,6 +98,8 @@ __all__ = [
     "routing_events_table",
     "rows_table",
     "runs_table",
+    "set_run_grade",
     "token_parents_table",
     "tokens_table",
+    "update_grade_after_purge",
 ]

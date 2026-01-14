@@ -8,7 +8,10 @@ pipeline execution. It wraps the low-level database operations.
 import uuid
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
+
+if TYPE_CHECKING:
+    from elspeth.core.landscape.reproducibility import ReproducibilityGrade
 
 from sqlalchemy import select
 
@@ -1638,11 +1641,16 @@ class LandscapeRecorder:
 
         Returns:
             RowLineage with hash and optionally source data, or None if row not found
+            or if row doesn't belong to the specified run
         """
         import json
 
         row = self.get_row(row_id)
         if row is None:
+            return None
+
+        # Validate row belongs to the specified run - audit systems must be strict
+        if row.run_id != run_id:
             return None
 
         # Try to load payload
@@ -1668,3 +1676,40 @@ class LandscapeRecorder:
             source_data=source_data,
             payload_available=payload_available,
         )
+
+    # === Reproducibility Grade Management ===
+
+    def compute_reproducibility_grade(self, run_id: str) -> "ReproducibilityGrade":
+        """Compute reproducibility grade for a run based on node determinism.
+
+        Logic:
+        - If any node has determinism='nondeterministic', returns REPLAY_REPRODUCIBLE
+        - Otherwise returns FULL_REPRODUCIBLE
+        - 'seeded' counts as reproducible
+
+        Args:
+            run_id: Run ID to compute grade for
+
+        Returns:
+            ReproducibilityGrade enum value
+        """
+        from elspeth.core.landscape.reproducibility import compute_grade
+
+        return compute_grade(self._db, run_id)
+
+    def finalize_run(self, run_id: str, status: str) -> Run:
+        """Finalize a run by computing grade and completing it.
+
+        Convenience method that:
+        1. Computes the reproducibility grade based on node determinism
+        2. Completes the run with the specified status and computed grade
+
+        Args:
+            run_id: Run to finalize
+            status: Final status (completed, failed)
+
+        Returns:
+            Updated Run model
+        """
+        grade = self.compute_reproducibility_grade(run_id)
+        return self.complete_run(run_id, status, reproducibility_grade=grade.value)

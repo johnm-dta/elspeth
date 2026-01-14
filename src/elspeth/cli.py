@@ -428,5 +428,136 @@ def plugins_list(
     typer.echo()  # Final newline
 
 
+@app.command()
+def purge(
+    database: str | None = typer.Option(
+        None,
+        "--database", "-d",
+        help="Path to Landscape database file (SQLite).",
+    ),
+    payload_dir: str | None = typer.Option(
+        None,
+        "--payload-dir", "-p",
+        help="Path to payload storage directory.",
+    ),
+    retention_days: int = typer.Option(
+        90,
+        "--retention-days", "-r",
+        help="Delete payloads older than this many days.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show what would be deleted without deleting.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes", "-y",
+        help="Skip confirmation prompt.",
+    ),
+) -> None:
+    """Purge old payloads to free storage.
+
+    Deletes PayloadStore blobs older than retention period.
+    Landscape metadata (hashes) is preserved for audit trail.
+
+    Examples:
+
+        # See what would be deleted
+        elspeth purge --dry-run --database ./landscape.db
+
+        # Delete payloads older than 30 days
+        elspeth purge --retention-days 30 --yes --database ./landscape.db
+    """
+    from elspeth.core.landscape import LandscapeDB
+    from elspeth.core.payload_store import FilesystemPayloadStore
+    from elspeth.core.retention.purge import PurgeManager
+
+    # Try to load settings from settings.yaml if database not provided
+    db_url: str | None = None
+    payload_path: Path | None = None
+
+    if database:
+        db_path = Path(database)
+        db_url = f"sqlite:///{db_path.resolve()}"
+    else:
+        # Try loading from settings.yaml
+        settings_path = Path("settings.yaml")
+        if settings_path.exists():
+            try:
+                config = load_settings(settings_path)
+                db_url = config.landscape.url
+                typer.echo(f"Using database from settings.yaml: {db_url}")
+            except Exception as e:
+                typer.echo(f"Error loading settings.yaml: {e}", err=True)
+                typer.echo("Specify --database to provide path directly.", err=True)
+                raise typer.Exit(1) from None
+        else:
+            typer.echo("Error: No settings.yaml found and --database not provided.", err=True)
+            typer.echo("Specify --database to provide path to Landscape database.", err=True)
+            raise typer.Exit(1) from None
+
+    if payload_dir:
+        payload_path = Path(payload_dir)
+    else:
+        # Default to ./payloads relative to database location
+        if database:
+            payload_path = Path(database).parent / "payloads"
+        else:
+            payload_path = Path("payloads")
+
+    # Initialize database and payload store
+    try:
+        db = LandscapeDB.from_url(db_url)
+    except Exception as e:
+        typer.echo(f"Error connecting to database: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    payload_store = FilesystemPayloadStore(payload_path)
+    purge_manager = PurgeManager(db, payload_store)
+
+    # Find expired payloads
+    expired_refs = purge_manager.find_expired_row_payloads(retention_days)
+
+    if not expired_refs:
+        typer.echo(f"No payloads older than {retention_days} days found.")
+        db.close()
+        return
+
+    if dry_run:
+        typer.echo(f"Would delete {len(expired_refs)} payload(s) older than {retention_days} days:")
+        for ref in expired_refs[:10]:  # Show first 10
+            exists = payload_store.exists(ref)
+            status = "exists" if exists else "already deleted"
+            typer.echo(f"  {ref[:16]}... ({status})")
+        if len(expired_refs) > 10:
+            typer.echo(f"  ... and {len(expired_refs) - 10} more")
+        db.close()
+        return
+
+    # Confirm unless --yes
+    if not yes:
+        confirm = typer.confirm(
+            f"Delete {len(expired_refs)} payload(s) older than {retention_days} days?"
+        )
+        if not confirm:
+            typer.echo("Aborted.")
+            db.close()
+            raise typer.Exit(1)
+
+    # Execute purge
+    result = purge_manager.purge_payloads(expired_refs)
+
+    typer.echo(f"Purge completed in {result.duration_seconds:.2f}s:")
+    typer.echo(f"  Deleted: {result.deleted_count}")
+    typer.echo(f"  Skipped (not found): {result.skipped_count}")
+    if result.failed_refs:
+        typer.echo(f"  Failed: {len(result.failed_refs)}")
+        for ref in result.failed_refs[:5]:
+            typer.echo(f"    {ref[:16]}...")
+
+    db.close()
+
+
 if __name__ == "__main__":
     app()

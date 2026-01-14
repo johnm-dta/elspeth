@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 # Note: In Click 8.0+, mix_stderr is no longer a CliRunner parameter.
@@ -145,3 +144,205 @@ landscape:
             f"Field mapper should have renamed 'old_name' to 'new_name'. "
             f"Output was: {output_content}"
         )
+
+
+class TestPurgeCommand:
+    """Tests for purge CLI command."""
+
+    def test_purge_help(self) -> None:
+        """purge --help shows usage."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, ["purge", "--help"])
+
+        assert result.exit_code == 0
+        assert "retention" in result.stdout.lower() or "days" in result.stdout.lower()
+
+    def test_purge_dry_run(self, tmp_path: Path) -> None:
+        """purge --dry-run shows what would be deleted."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, [
+            "purge",
+            "--dry-run",
+            "--database", str(tmp_path / "test.db"),
+        ])
+
+        assert result.exit_code == 0
+        assert "would delete" in result.stdout.lower() or "0" in result.stdout
+
+    def test_purge_with_retention_override(self, tmp_path: Path) -> None:
+        """purge --retention-days overrides default."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, [
+            "purge",
+            "--dry-run",
+            "--retention-days", "30",
+            "--database", str(tmp_path / "test.db"),
+        ])
+
+        assert result.exit_code == 0
+
+    def test_purge_requires_confirmation(self, tmp_path: Path) -> None:
+        """purge without --yes asks for confirmation."""
+        from datetime import UTC, datetime, timedelta
+
+        from sqlalchemy import insert
+
+        from elspeth.cli import app
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        # Set up database with old completed run so there's something to purge
+        db_file = tmp_path / "landscape.db"
+        db_url = f"sqlite:///{db_file}"
+        db = LandscapeDB.from_url(db_url)
+
+        # Create payload store with some data
+        payload_dir = tmp_path / "payloads"
+        store = FilesystemPayloadStore(payload_dir)
+        content_hash = store.store(b"test payload data")
+
+        # Create old run (100 days ago) so it's older than retention
+        old_date = datetime.now(UTC) - timedelta(days=100)
+        with db.connection() as conn:
+            conn.execute(
+                insert(runs_table).values(
+                    run_id="old-run-for-confirm",
+                    status="completed",
+                    started_at=old_date,
+                    completed_at=old_date,
+                    config_hash="abc123",
+                    settings_json="{}",
+                    canonical_version="1.0.0",
+                )
+            )
+            conn.execute(
+                insert(nodes_table).values(
+                    node_id="source-node-1",
+                    run_id="old-run-for-confirm",
+                    plugin_name="csv",
+                    node_type="source",
+                    plugin_version="1.0.0",
+                    determinism="deterministic",
+                    config_hash="def456",
+                    config_json="{}",
+                    registered_at=old_date,
+                )
+            )
+            conn.execute(
+                insert(rows_table).values(
+                    row_id="row-confirm-1",
+                    run_id="old-run-for-confirm",
+                    source_node_id="source-node-1",
+                    row_index=0,
+                    source_data_hash="hash1",
+                    source_data_ref=content_hash,
+                    created_at=old_date,
+                )
+            )
+        db.close()
+
+        result = runner.invoke(
+            app,
+            ["purge", "--database", str(db_file), "--payload-dir", str(payload_dir)],
+            input="n\n",  # Say no to confirmation
+        )
+
+        assert result.exit_code == 0 or result.exit_code == 1
+        assert "abort" in result.stdout.lower() or "cancel" in result.stdout.lower()
+
+    def test_purge_with_yes_flag_skips_confirmation(self, tmp_path: Path) -> None:
+        """purge --yes skips confirmation prompt."""
+        from elspeth.cli import app
+
+        result = runner.invoke(app, [
+            "purge",
+            "--yes",
+            "--database", str(tmp_path / "test.db"),
+        ])
+
+        # Should complete without asking for confirmation
+        assert result.exit_code == 0
+        # Should not ask for confirmation
+        assert "confirm" not in result.stdout.lower() or "yes" in result.stdout.lower()
+
+    def test_purge_with_payloads_to_delete(self, tmp_path: Path) -> None:
+        """purge deletes expired payloads when present."""
+        from datetime import UTC, datetime, timedelta
+
+        from sqlalchemy import insert
+
+        from elspeth.cli import app
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        # Set up database with old completed run
+        db_file = tmp_path / "landscape.db"
+        db_url = f"sqlite:///{db_file}"
+        db = LandscapeDB.from_url(db_url)
+
+        # Create payload store
+        payload_dir = tmp_path / "payloads"
+        store = FilesystemPayloadStore(payload_dir)
+        content_hash = store.store(b"test payload data")
+
+        # Create old run (100 days ago)
+        old_date = datetime.now(UTC) - timedelta(days=100)
+        with db.connection() as conn:
+            conn.execute(
+                insert(runs_table).values(
+                    run_id="old-run-123",
+                    status="completed",
+                    started_at=old_date,
+                    completed_at=old_date,
+                    config_hash="abc123",
+                    settings_json="{}",
+                    canonical_version="1.0.0",
+                )
+            )
+            conn.execute(
+                insert(nodes_table).values(
+                    node_id="source-node-purge",
+                    run_id="old-run-123",
+                    plugin_name="csv",
+                    node_type="source",
+                    plugin_version="1.0.0",
+                    determinism="deterministic",
+                    config_hash="def456",
+                    config_json="{}",
+                    registered_at=old_date,
+                )
+            )
+            conn.execute(
+                insert(rows_table).values(
+                    run_id="old-run-123",
+                    row_id="row-1",
+                    source_node_id="source-node-purge",
+                    row_index=0,
+                    source_data_hash="hash1",
+                    source_data_ref=content_hash,
+                    created_at=old_date,
+                )
+            )
+
+        # Verify payload exists
+        assert store.exists(content_hash)
+
+        result = runner.invoke(app, [
+            "purge",
+            "--yes",
+            "--retention-days", "90",
+            "--database", str(db_file),
+            "--payload-dir", str(payload_dir),
+        ])
+
+        assert result.exit_code == 0
+        assert "deleted" in result.stdout.lower() or "1" in result.stdout
+        # Verify payload was deleted
+        assert not store.exists(content_hash)
+
+        db.close()

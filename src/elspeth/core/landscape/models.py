@@ -27,6 +27,12 @@ class Run:
     status: str  # running, completed, failed
     completed_at: datetime | None = None
     reproducibility_grade: str | None = None
+    # Export tracking - separate from run status
+    export_status: str | None = None  # pending, completed, failed
+    export_error: str | None = None
+    exported_at: datetime | None = None
+    export_format: str | None = None  # csv, json
+    export_sink: str | None = None
 
 
 @dataclass

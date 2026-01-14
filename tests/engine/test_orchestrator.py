@@ -1141,8 +1141,12 @@ class TestOrchestratorLandscapeExport:
             def __init__(self):
                 self.captured_rows: list[dict] = []
 
-            def write(self, rows, ctx):
-                self.captured_rows.extend(rows)
+            def write(self, row, ctx):
+                # Row processing writes batches (lists), export writes single records
+                if isinstance(row, list):
+                    self.captured_rows.extend(row)
+                else:
+                    self.captured_rows.append(row)
                 return {"path": "memory", "size_bytes": 0, "content_hash": ""}
 
             def flush(self):
@@ -1171,7 +1175,7 @@ class TestOrchestratorLandscapeExport:
                 export=LandscapeExportSettings(
                     enabled=True,
                     sink="audit_export",
-                    format="csv",
+                    format="json",  # JSON works with mock sinks; CSV requires file path
                 ),
             ),
         )
@@ -1243,8 +1247,12 @@ class TestOrchestratorLandscapeExport:
             def __init__(self):
                 self.captured_rows: list[dict] = []
 
-            def write(self, rows, ctx):
-                self.captured_rows.extend(rows)
+            def write(self, row, ctx):
+                # Row processing writes batches (lists), export writes single records
+                if isinstance(row, list):
+                    self.captured_rows.extend(row)
+                else:
+                    self.captured_rows.append(row)
                 return {"path": "memory", "size_bytes": 0, "content_hash": ""}
 
             def flush(self):
@@ -1269,7 +1277,7 @@ class TestOrchestratorLandscapeExport:
                 export=LandscapeExportSettings(
                     enabled=True,
                     sink="audit_export",
-                    format="csv",
+                    format="json",  # JSON works with mock sinks; CSV requires file path
                     sign=True,
                 ),
             ),

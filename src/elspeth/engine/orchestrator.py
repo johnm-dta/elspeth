@@ -110,6 +110,7 @@ class Orchestrator:
             canonical_version=self._canonical_version,
         )
 
+        run_completed = False
         try:
             with self._span_factory.run_span(run.run_id):
                 result = self._execute_run(recorder, run.run_id, config, graph)
@@ -117,19 +118,42 @@ class Orchestrator:
             # Complete run
             recorder.complete_run(run.run_id, status="completed")
             result.status = "completed"
+            run_completed = True
 
-            # Post-run export
+            # Post-run export (separate from run status - export failures
+            # don't change run status)
             if settings is not None and settings.landscape.export.enabled:
-                self._export_landscape(
-                    run_id=run.run_id,
-                    settings=settings,
-                    sinks=config.sinks,
+                export_config = settings.landscape.export
+                recorder.set_export_status(
+                    run.run_id,
+                    status="pending",
+                    export_format=export_config.format,
+                    export_sink=export_config.sink,
                 )
+                try:
+                    self._export_landscape(
+                        run_id=run.run_id,
+                        settings=settings,
+                        sinks=config.sinks,
+                    )
+                    recorder.set_export_status(run.run_id, status="completed")
+                except Exception as export_error:
+                    recorder.set_export_status(
+                        run.run_id,
+                        status="failed",
+                        error=str(export_error),
+                    )
+                    # Re-raise so caller knows export failed
+                    # (run is still "completed" in Landscape)
+                    raise
 
             return result
 
         except Exception:
-            recorder.complete_run(run.run_id, status="failed")
+            # Only mark run as failed if it didn't complete successfully
+            # (export failures are tracked separately)
+            if not run_completed:
+                recorder.complete_run(run.run_id, status="failed")
             raise
 
     def _execute_run(
@@ -324,6 +348,12 @@ class Orchestrator:
     ) -> None:
         """Export audit trail to configured sink after run completion.
 
+        For JSON format: writes all records to a single sink (records are
+        heterogeneous but JSON handles that naturally).
+
+        For CSV format: writes separate files per record_type to a directory,
+        since CSV requires homogeneous schemas per file.
+
         Args:
             run_id: The completed run ID
             settings: Full settings containing export configuration
@@ -333,7 +363,10 @@ class Orchestrator:
             ValueError: If signing requested but ELSPETH_SIGNING_KEY not set,
                        or if configured sink not found
         """
+        from pathlib import Path
+
         from elspeth.core.landscape.exporter import LandscapeExporter
+        from elspeth.core.landscape.formatters import CSVFormatter
 
         export_config = settings.landscape.export
 
@@ -350,7 +383,7 @@ class Orchestrator:
         # Create exporter
         exporter = LandscapeExporter(self._db, signing_key=signing_key)
 
-        # Get target sink
+        # Get target sink config
         sink_name = export_config.sink
         if sink_name not in sinks:
             raise ValueError(f"Export sink '{sink_name}' not found in sinks")
@@ -359,9 +392,89 @@ class Orchestrator:
         # Create context for sink writes
         ctx = PluginContext(run_id=run_id, config={}, landscape=None)
 
-        # Export records to sink - write as list to match sink.write() signature
-        records = list(exporter.export_run(run_id, sign=export_config.sign))
-        sink.write(records, ctx)
+        # Unwrap SinkAdapter if present (adapter expects bulk writes,
+        # but export writes records individually)
+        from elspeth.engine.adapters import SinkAdapter
 
-        # Flush sink to ensure all records are written
-        sink.flush()
+        raw_sink = sink._sink if isinstance(sink, SinkAdapter) else sink
+
+        if export_config.format == "csv":
+            # Multi-file CSV export: one file per record type
+            self._export_csv_multifile(
+                exporter=exporter,
+                run_id=run_id,
+                sink=raw_sink,
+                sign=export_config.sign,
+                ctx=ctx,
+            )
+        else:
+            # JSON export: write records one at a time to single sink
+            for record in exporter.export_run(run_id, sign=export_config.sign):
+                raw_sink.write(record, ctx)
+            raw_sink.flush()
+            raw_sink.close()  # Finalize file (JSONSink writes array on close)
+
+    def _export_csv_multifile(
+        self,
+        exporter: Any,  # LandscapeExporter (avoid circular import in type hint)
+        run_id: str,
+        sink: Any,  # BaseSink
+        sign: bool,
+        ctx: PluginContext,
+    ) -> None:
+        """Export audit trail as multiple CSV files (one per record type).
+
+        Creates a directory at the sink's configured path, then writes
+        separate CSV files for each record type (run.csv, nodes.csv, etc.).
+
+        Args:
+            exporter: LandscapeExporter instance
+            run_id: The completed run ID
+            sink: The configured export sink (used for path extraction)
+            sign: Whether to sign records
+            ctx: Plugin context for sink operations
+        """
+        import csv
+        from pathlib import Path
+
+        from elspeth.core.landscape.formatters import CSVFormatter
+
+        # Get the sink's configured path and convert to directory
+        # The sink was configured with a file path, we'll use it as directory
+        if not hasattr(sink, "_path"):
+            raise ValueError(
+                "CSV export requires a sink with a '_path' attribute (e.g., CSVSink)"
+            )
+
+        export_dir = Path(sink._path)
+        if export_dir.suffix:
+            # Remove file extension if present, treat as directory
+            export_dir = export_dir.with_suffix("")
+
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        # Get records grouped by type
+        grouped = exporter.export_run_grouped(run_id, sign=sign)
+        formatter = CSVFormatter()
+
+        # Write each record type to its own CSV file
+        for record_type, records in grouped.items():
+            if not records:
+                continue
+
+            csv_path = export_dir / f"{record_type}.csv"
+
+            # Flatten all records for CSV
+            flat_records = [formatter.format(r) for r in records]
+
+            # Get union of all keys (some records may have optional fields)
+            all_keys: set[str] = set()
+            for rec in flat_records:
+                all_keys.update(rec.keys())
+            fieldnames = sorted(all_keys)  # Sorted for determinism
+
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for rec in flat_records:
+                    writer.writerow(rec)

@@ -221,6 +221,11 @@ class LandscapeRecorder:
             canonical_version=row.canonical_version,
             status=row.status,
             reproducibility_grade=row.reproducibility_grade,
+            export_status=row.export_status,
+            export_error=row.export_error,
+            exported_at=row.exported_at,
+            export_format=row.export_format,
+            export_sink=row.export_sink,
         )
 
     def list_runs(self, *, status: str | None = None) -> list[Run]:
@@ -251,9 +256,53 @@ class LandscapeRecorder:
                 canonical_version=row.canonical_version,
                 status=row.status,
                 reproducibility_grade=row.reproducibility_grade,
+                export_status=row.export_status,
+                export_error=row.export_error,
+                exported_at=row.exported_at,
+                export_format=row.export_format,
+                export_sink=row.export_sink,
             )
             for row in rows
         ]
+
+    def set_export_status(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+        export_format: str | None = None,
+        export_sink: str | None = None,
+    ) -> None:
+        """Set export status for a run.
+
+        This is separate from run status so export failures don't mask
+        successful pipeline completion.
+
+        Args:
+            run_id: Run to update
+            status: Export status (pending, completed, failed)
+            error: Error message if status is 'failed'
+            export_format: Format used (csv, json)
+            export_sink: Sink name used for export
+        """
+        updates: dict[str, Any] = {"export_status": status}
+
+        if status == "completed":
+            updates["exported_at"] = _now()
+        if error is not None:
+            updates["export_error"] = error
+        if export_format is not None:
+            updates["export_format"] = export_format
+        if export_sink is not None:
+            updates["export_sink"] = export_sink
+
+        with self._db.connection() as conn:
+            conn.execute(
+                runs_table.update()
+                .where(runs_table.c.run_id == run_id)
+                .values(**updates)
+            )
 
     # === Node and Edge Registration ===
 
@@ -423,9 +472,14 @@ class LandscapeRecorder:
             run_id: Run ID
 
         Returns:
-            List of Edge models for this run
+            List of Edge models for this run, ordered by created_at then edge_id
+            for deterministic export signatures.
         """
-        query = select(edges_table).where(edges_table.c.run_id == run_id)
+        query = (
+            select(edges_table)
+            .where(edges_table.c.run_id == run_id)
+            .order_by(edges_table.c.created_at, edges_table.c.edge_id)
+        )
 
         with self._db.connection() as conn:
             result = conn.execute(query)
@@ -1116,7 +1170,8 @@ class LandscapeRecorder:
             node_id: Optional aggregation node filter
 
         Returns:
-            List of Batch models
+            List of Batch models, ordered by created_at then batch_id
+            for deterministic export signatures.
         """
         query = select(batches_table).where(batches_table.c.run_id == run_id)
 
@@ -1124,6 +1179,9 @@ class LandscapeRecorder:
             query = query.where(batches_table.c.status == status)
         if node_id:
             query = query.where(batches_table.c.aggregation_node_id == node_id)
+
+        # Order for deterministic export signatures
+        query = query.order_by(batches_table.c.created_at, batches_table.c.batch_id)
 
         with self._db.connection() as conn:
             result = conn.execute(query)
@@ -1311,9 +1369,14 @@ class LandscapeRecorder:
             row_id: Row ID
 
         Returns:
-            List of Token models
+            List of Token models, ordered by created_at then token_id
+            for deterministic export signatures.
         """
-        query = select(tokens_table).where(tokens_table.c.row_id == row_id)
+        query = (
+            select(tokens_table)
+            .where(tokens_table.c.row_id == row_id)
+            .order_by(tokens_table.c.created_at, tokens_table.c.token_id)
+        )
 
         with self._db.connection() as conn:
             result = conn.execute(query)
@@ -1489,10 +1552,15 @@ class LandscapeRecorder:
             state_id: State ID
 
         Returns:
-            List of RoutingEvent models
+            List of RoutingEvent models, ordered by ordinal then event_id
+            for deterministic export signatures.
         """
-        query = select(routing_events_table).where(
-            routing_events_table.c.state_id == state_id
+        query = (
+            select(routing_events_table)
+            .where(routing_events_table.c.state_id == state_id)
+            .order_by(
+                routing_events_table.c.ordinal, routing_events_table.c.event_id
+            )
         )
 
         with self._db.connection() as conn:

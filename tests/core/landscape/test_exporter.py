@@ -573,3 +573,129 @@ class TestLandscapeExporterSigning:
 
         assert manifest["hash_algorithm"] == "sha256"
         assert manifest["signature_algorithm"] == "hmac-sha256"
+
+    def test_exporter_final_hash_deterministic_with_multiple_records(self) -> None:
+        """Final hash must be identical across multiple exports.
+
+        This test creates multiple records of each type to stress-test the
+        ordering guarantees added to recorder query methods. Without
+        deterministic ORDER BY clauses, the final_hash would differ between
+        exports even for identical data.
+        """
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Create a run with multiple records of each type
+        run = recorder.begin_run(config={"test": True}, canonical_version="v1")
+
+        # Multiple nodes (tests get_nodes ordering)
+        for i in range(3):
+            recorder.register_node(
+                run_id=run.run_id,
+                node_id=f"node_{i}",
+                plugin_name="test",
+                node_type="transform",
+                plugin_version="1.0.0",
+                config={"index": i},
+            )
+
+        # Multiple edges (tests get_edges ordering)
+        for i in range(2):
+            recorder.register_edge(
+                run_id=run.run_id,
+                from_node_id=f"node_{i}",
+                to_node_id=f"node_{i + 1}",
+                label="continue",
+                mode="move",
+            )
+
+        # Multiple rows (tests get_rows ordering)
+        for i in range(3):
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id="node_0",
+                row_index=i,
+                data={"value": i * 10},
+            )
+
+            # Multiple tokens per row (tests get_tokens ordering)
+            for j in range(2):
+                token = recorder.create_token(row_id=row.row_id, branch_name=f"branch_{j}")
+
+                # Multiple states per token (tests get_node_states_for_token ordering)
+                for k, node_id in enumerate(["node_0", "node_1"]):
+                    state = recorder.begin_node_state(
+                        token_id=token.token_id,
+                        node_id=node_id,
+                        step_index=k,
+                        input_data={"x": i * j},
+                    )
+                    recorder.complete_node_state(state.state_id, status="completed")
+
+                    # Multiple routing events (tests get_routing_events ordering)
+                    if k == 0:
+                        recorder.record_routing_event(
+                            state_id=state.state_id,
+                            edge_id="edge_placeholder",  # Not validated
+                            mode="move",
+                        )
+
+        # Multiple batches (tests get_batches ordering)
+        for i in range(2):
+            batch = recorder.create_batch(
+                run_id=run.run_id,
+                aggregation_node_id="node_1",
+            )
+            recorder.complete_batch(batch.batch_id, status="completed")
+
+        recorder.complete_run(run.run_id, status="completed")
+
+        # Export multiple times and verify final_hash is identical
+        exporter = LandscapeExporter(db, signing_key=b"determinism-test-key")
+
+        final_hashes = []
+        for _ in range(5):  # Export 5 times
+            records = list(exporter.export_run(run.run_id, sign=True))
+            manifest = [r for r in records if r["record_type"] == "manifest"][0]
+            final_hashes.append(manifest["final_hash"])
+
+        # All final hashes must be identical
+        assert len(set(final_hashes)) == 1, (
+            f"Non-deterministic export detected! Got {len(set(final_hashes))} "
+            f"different hashes: {final_hashes}"
+        )
+
+    def test_exporter_record_order_is_stable(self) -> None:
+        """Record order must be identical across multiple exports.
+
+        Beyond just the final hash, verify the actual record sequence
+        is stable (important for CSV exports and debugging).
+        """
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        for i in range(5):
+            recorder.register_node(
+                run_id=run.run_id,
+                node_id=f"node_{i}",
+                plugin_name="test",
+                node_type="transform",
+                plugin_version="1.0.0",
+                config={},
+            )
+        recorder.complete_run(run.run_id, status="completed")
+
+        exporter = LandscapeExporter(db)
+
+        # Get record IDs from multiple exports
+        exports = []
+        for _ in range(3):
+            records = list(exporter.export_run(run.run_id))
+            node_ids = [r["node_id"] for r in records if r["record_type"] == "node"]
+            exports.append(tuple(node_ids))
+
+        # All exports should produce the same order
+        assert len(set(exports)) == 1, (
+            f"Record order changed between exports: {exports}"
+        )

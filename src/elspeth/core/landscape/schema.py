@@ -35,6 +35,13 @@ runs_table = Table(
     Column("reproducibility_grade", String(32)),
     Column("canonical_version", String(64), nullable=False),
     Column("status", String(32), nullable=False),
+    # Export tracking - separate from run status so export failures
+    # don't mask successful pipeline completion
+    Column("export_status", String(32)),  # pending, completed, failed, None if not configured
+    Column("export_error", Text),  # Error message if export failed
+    Column("exported_at", DateTime(timezone=True)),  # When export completed
+    Column("export_format", String(16)),  # csv, json
+    Column("export_sink", String(128)),  # Sink name used for export
 )
 
 # === Nodes (Plugin Instances) ===

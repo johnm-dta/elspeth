@@ -6,6 +6,7 @@ compliance review and legal inquiry.
 
 import hashlib
 import hmac
+from collections import defaultdict
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
@@ -322,3 +323,35 @@ class LandscapeExporter:
                 "content_hash": artifact.content_hash,
                 "size_bytes": artifact.size_bytes,
             }
+
+    def export_run_grouped(
+        self,
+        run_id: str,
+        sign: bool = False,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Export all audit data for a run, grouped by record type.
+
+        This method is useful for CSV export where each record type needs
+        its own file (since record types have different schemas).
+
+        Args:
+            run_id: The run ID to export
+            sign: If True, add HMAC signature to each record
+
+        Returns:
+            Dict mapping record_type -> list of records.
+            Keys are in deterministic order for signature stability.
+
+        Raises:
+            ValueError: If run_id is not found, or sign=True without signing_key
+        """
+        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+        for record in self.export_run(run_id, sign=sign):
+            record_type = record["record_type"]
+            groups[record_type].append(record)
+
+        # Return as regular dict with deterministic key order
+        # (Python 3.7+ dicts maintain insertion order, and export_run
+        # yields records in a consistent type order)
+        return dict(groups)

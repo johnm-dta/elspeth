@@ -261,3 +261,20 @@ Index("ix_node_states_token", node_states_table.c.token_id)
 Index("ix_node_states_node", node_states_table.c.node_id)
 Index("ix_calls_state", calls_table.c.state_id)
 Index("ix_artifacts_run", artifacts_table.c.run_id)
+
+# === Checkpoints (Phase 5: Production Hardening) ===
+
+checkpoints_table = Table(
+    "checkpoints",
+    metadata,
+    Column("checkpoint_id", String(64), primary_key=True),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("token_id", String(64), ForeignKey("tokens.token_id"), nullable=False),
+    Column("node_id", String(64), ForeignKey("nodes.node_id"), nullable=False),
+    Column("sequence_number", Integer, nullable=False),  # Monotonic progress marker
+    Column("aggregation_state_json", Text),  # Serialized aggregation buffers (if any)
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+Index("ix_checkpoints_run", checkpoints_table.c.run_id)
+Index("ix_checkpoints_run_seq", checkpoints_table.c.run_id, checkpoints_table.c.sequence_number)

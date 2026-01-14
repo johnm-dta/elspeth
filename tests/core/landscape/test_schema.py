@@ -172,3 +172,74 @@ class TestNodesDeterminismColumn:
         # Current enum values (not the granular architecture spec values)
         expected = {"deterministic", "seeded", "nondeterministic"}
         assert valid_values == expected
+
+
+class TestPhase5CheckpointSchema:
+    """Tests for checkpoint table added in Phase 5."""
+
+    def test_checkpoints_table_exists(self) -> None:
+        from elspeth.core.landscape.schema import checkpoints_table
+
+        assert checkpoints_table.name == "checkpoints"
+        columns = {c.name for c in checkpoints_table.columns}
+        assert "checkpoint_id" in columns
+        assert "run_id" in columns
+        assert "token_id" in columns
+        assert "node_id" in columns
+        assert "created_at" in columns
+
+    def test_checkpoints_table_has_progress_columns(self) -> None:
+        """Verify sequence_number and aggregation_state_json columns."""
+        from elspeth.core.landscape.schema import checkpoints_table
+
+        columns = {c.name for c in checkpoints_table.columns}
+        assert "sequence_number" in columns
+        assert "aggregation_state_json" in columns
+
+    def test_checkpoints_table_in_metadata(self) -> None:
+        """Verify checkpoints table is registered in metadata."""
+        from elspeth.core.landscape.schema import metadata
+
+        assert "checkpoints" in metadata.tables
+
+    def test_checkpoints_table_creates_in_database(self, tmp_path: Path) -> None:
+        """Verify checkpoints table can be created in a real database."""
+        from sqlalchemy import create_engine, inspect
+
+        from elspeth.core.landscape.schema import metadata
+
+        db_path = tmp_path / "test_checkpoints.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        assert "checkpoints" in tables
+
+    def test_checkpoint_model(self) -> None:
+        from elspeth.core.landscape.models import Checkpoint
+
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-001",
+            run_id="run-001",
+            token_id="tok-001",
+            node_id="node-001",
+            sequence_number=42,
+            created_at=None,
+        )
+        assert checkpoint.sequence_number == 42
+
+    def test_checkpoint_model_with_aggregation_state(self) -> None:
+        """Verify Checkpoint model supports aggregation state."""
+        from elspeth.core.landscape.models import Checkpoint
+
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-002",
+            run_id="run-001",
+            token_id="tok-001",
+            node_id="node-001",
+            sequence_number=100,
+            created_at=None,
+            aggregation_state_json='{"buffer": [1, 2, 3]}',
+        )
+        assert checkpoint.aggregation_state_json == '{"buffer": [1, 2, 3]}'

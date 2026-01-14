@@ -199,3 +199,20 @@ class BatchOutput:
     batch_id: str
     output_type: str  # token, artifact
     output_id: str
+
+
+@dataclass
+class Checkpoint:
+    """Checkpoint for crash recovery.
+
+    Captures run progress at row/transform boundaries.
+    sequence_number is monotonically increasing within a run.
+    """
+
+    checkpoint_id: str
+    run_id: str
+    token_id: str
+    node_id: str
+    sequence_number: int
+    created_at: datetime | None
+    aggregation_state_json: str | None = None

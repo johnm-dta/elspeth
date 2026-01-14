@@ -441,10 +441,7 @@ class Orchestrator:
             ValueError: If signing requested but ELSPETH_SIGNING_KEY not set,
                        or if configured sink not found
         """
-        from pathlib import Path
-
         from elspeth.core.landscape.exporter import LandscapeExporter
-        from elspeth.core.landscape.formatters import CSVFormatter
 
         export_config = settings.landscape.export
 

@@ -16,6 +16,7 @@ class TestPayloadStoreProtocol:
         assert hasattr(PayloadStore, "store")
         assert hasattr(PayloadStore, "retrieve")
         assert hasattr(PayloadStore, "exists")
+        assert hasattr(PayloadStore, "delete")
 
 
 class TestFilesystemPayloadStore:
@@ -84,3 +85,22 @@ class TestFilesystemPayloadStore:
 
         assert expected_dir.exists()
         assert expected_file.exists()
+
+    def test_delete_removes_content(self, tmp_path: Path) -> None:
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        store = FilesystemPayloadStore(base_path=tmp_path)
+        content = b"content to delete"
+        content_hash = store.store(content)
+
+        assert store.exists(content_hash)
+        result = store.delete(content_hash)
+        assert result is True
+        assert store.exists(content_hash) is False
+
+    def test_delete_nonexistent_returns_false(self, tmp_path: Path) -> None:
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        store = FilesystemPayloadStore(base_path=tmp_path)
+        result = store.delete("nonexistent" * 4)
+        assert result is False

@@ -57,6 +57,17 @@ class PayloadStore(Protocol):
         """
         ...
 
+    def delete(self, content_hash: str) -> bool:
+        """Delete content by hash.
+
+        Args:
+            content_hash: SHA-256 hex digest
+
+        Returns:
+            True if content was deleted, False if not found
+        """
+        ...
+
 
 class FilesystemPayloadStore:
     """Filesystem-based payload store.
@@ -103,3 +114,15 @@ class FilesystemPayloadStore:
     def exists(self, content_hash: str) -> bool:
         """Check if content exists."""
         return self._path_for_hash(content_hash).exists()
+
+    def delete(self, content_hash: str) -> bool:
+        """Delete content by hash.
+
+        Returns:
+            True if content was deleted, False if not found
+        """
+        path = self._path_for_hash(content_hash)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True

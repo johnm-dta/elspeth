@@ -24,6 +24,7 @@ from elspeth.core.landscape.models import (
     NodeState,
     RoutingEvent,
     Row,
+    RowLineage,
     Run,
     Token,
     TokenParent,
@@ -1621,3 +1622,49 @@ class LandscapeRecorder:
             )
             for r in db_rows
         ]
+
+    # === Explain Methods (Graceful Degradation) ===
+
+    def explain_row(self, run_id: str, row_id: str) -> RowLineage | None:
+        """Get lineage for a row, gracefully handling purged payloads.
+
+        This method returns row lineage information even when the actual
+        payload data has been purged by retention policies. The hash is
+        always preserved, ensuring audit integrity can be verified.
+
+        Args:
+            run_id: Run this row belongs to
+            row_id: Row ID to explain
+
+        Returns:
+            RowLineage with hash and optionally source data, or None if row not found
+        """
+        import json
+
+        row = self.get_row(row_id)
+        if row is None:
+            return None
+
+        # Try to load payload
+        source_data: dict[str, Any] | None = None
+        payload_available = False
+
+        if row.source_data_ref and self._payload_store:
+            try:
+                payload_bytes = self._payload_store.retrieve(row.source_data_ref)
+                source_data = json.loads(payload_bytes.decode("utf-8"))
+                payload_available = True
+            except (KeyError, json.JSONDecodeError, OSError):
+                # Payload has been purged or is corrupted
+                # KeyError: raised by PayloadStore when content not found
+                # JSONDecodeError: content corrupted
+                # OSError: filesystem issues
+                pass
+
+        return RowLineage(
+            row_id=row_id,
+            run_id=run_id,
+            source_hash=row.source_data_hash,
+            source_data=source_data,
+            payload_available=payload_available,
+        )

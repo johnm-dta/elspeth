@@ -216,3 +216,28 @@ class Checkpoint:
     sequence_number: int
     created_at: datetime | None
     aggregation_state_json: str | None = None
+
+
+@dataclass
+class RowLineage:
+    """Lineage information for a row with graceful payload degradation.
+
+    Used by explain_row() to report row lineage even when payloads
+    have been purged. The hash is always preserved, but the actual
+    data may be unavailable.
+    """
+
+    row_id: str
+    """Unique identifier for the row."""
+
+    run_id: str
+    """Run this row belongs to."""
+
+    source_hash: str
+    """Hash of the original source data (always preserved)."""
+
+    source_data: dict[str, object] | None
+    """Original source data, or None if payload was purged."""
+
+    payload_available: bool
+    """True if source_data is available, False if purged or unavailable."""

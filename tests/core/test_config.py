@@ -688,3 +688,69 @@ class TestElspethSettingsArchitecture:
             )
 
         assert "sink" in str(exc_info.value).lower()
+
+
+class TestRateLimitSettings:
+    """Tests for rate limit configuration."""
+
+    def test_rate_limit_settings_defaults(self) -> None:
+        from elspeth.core.config import RateLimitSettings
+
+        settings = RateLimitSettings()
+
+        assert settings.enabled is True
+        assert settings.default_requests_per_second == 10
+        assert settings.persistence_path is None
+
+    def test_rate_limit_per_service(self) -> None:
+        from elspeth.core.config import RateLimitSettings, ServiceRateLimit
+
+        settings = RateLimitSettings(
+            services={
+                "openai": ServiceRateLimit(
+                    requests_per_second=5,
+                    requests_per_minute=100,
+                ),
+                "weather_api": ServiceRateLimit(
+                    requests_per_second=20,
+                ),
+            }
+        )
+
+        assert settings.services["openai"].requests_per_second == 5
+        assert settings.services["openai"].requests_per_minute == 100
+        assert settings.services["weather_api"].requests_per_second == 20
+
+    def test_rate_limit_get_service_config(self) -> None:
+        from elspeth.core.config import RateLimitSettings, ServiceRateLimit
+
+        settings = RateLimitSettings(
+            default_requests_per_second=10,
+            services={
+                "openai": ServiceRateLimit(requests_per_second=5),
+            }
+        )
+
+        # Configured service
+        openai_config = settings.get_service_config("openai")
+        assert openai_config.requests_per_second == 5
+
+        # Unconfigured service falls back to default
+        other_config = settings.get_service_config("other_api")
+        assert other_config.requests_per_second == 10
+
+    def test_rate_limit_settings_frozen(self) -> None:
+        """RateLimitSettings is immutable."""
+        from elspeth.core.config import RateLimitSettings
+
+        settings = RateLimitSettings()
+        with pytest.raises(ValidationError):
+            settings.enabled = False  # type: ignore[misc]
+
+    def test_service_rate_limit_frozen(self) -> None:
+        """ServiceRateLimit is immutable."""
+        from elspeth.core.config import ServiceRateLimit
+
+        limit = ServiceRateLimit(requests_per_second=10)
+        with pytest.raises(ValidationError):
+            limit.requests_per_second = 20  # type: ignore[misc]

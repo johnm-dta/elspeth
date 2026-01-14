@@ -127,6 +127,49 @@ class DatabaseSettings(BaseModel):
     echo: bool = Field(default=False, description="Echo SQL statements")
 
 
+class ServiceRateLimit(BaseModel):
+    """Rate limit configuration for a specific service."""
+
+    model_config = {"frozen": True}
+
+    requests_per_second: int
+    requests_per_minute: int | None = None
+
+
+class RateLimitSettings(BaseModel):
+    """Configuration for rate limiting external calls.
+
+    Example YAML:
+        rate_limit:
+          enabled: true
+          default_requests_per_second: 10
+          persistence_path: ./rate_limits.db
+          services:
+            openai:
+              requests_per_second: 5
+              requests_per_minute: 100
+            weather_api:
+              requests_per_second: 20
+    """
+
+    model_config = {"frozen": True}
+
+    enabled: bool = True
+    default_requests_per_second: int = 10
+    default_requests_per_minute: int | None = None
+    persistence_path: str | None = None  # SQLite path for cross-process limits
+    services: dict[str, ServiceRateLimit] = Field(default_factory=dict)
+
+    def get_service_config(self, service_name: str) -> ServiceRateLimit:
+        """Get rate limit config for a service, with fallback to defaults."""
+        if service_name in self.services:
+            return self.services[service_name]
+        return ServiceRateLimit(
+            requests_per_second=self.default_requests_per_second,
+            requests_per_minute=self.default_requests_per_minute,
+        )
+
+
 class CheckpointSettings(BaseModel):
     """Configuration for crash recovery checkpointing.
 
@@ -227,6 +270,10 @@ class ElspethSettings(BaseModel):
     checkpoint: CheckpointSettings = Field(
         default_factory=CheckpointSettings,
         description="Crash recovery checkpoint configuration",
+    )
+    rate_limit: RateLimitSettings = Field(
+        default_factory=RateLimitSettings,
+        description="Rate limiting configuration",
     )
 
     @model_validator(mode="after")

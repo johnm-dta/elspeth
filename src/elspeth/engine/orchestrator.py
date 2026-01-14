@@ -23,7 +23,8 @@ from elspeth.plugins.context import PluginContext
 from elspeth.plugins.enums import NodeType
 
 if TYPE_CHECKING:
-    from elspeth.core.config import ElspethSettings
+    from elspeth.core.checkpoint import CheckpointManager
+    from elspeth.core.config import CheckpointSettings, ElspethSettings
 
 
 @dataclass
@@ -75,10 +76,63 @@ class Orchestrator:
         db: LandscapeDB,
         *,
         canonical_version: str = "sha256-rfc8785-v1",
+        checkpoint_manager: "CheckpointManager | None" = None,
+        checkpoint_settings: "CheckpointSettings | None" = None,
     ) -> None:
         self._db = db
         self._canonical_version = canonical_version
         self._span_factory = SpanFactory()
+        self._checkpoint_manager = checkpoint_manager
+        self._checkpoint_settings = checkpoint_settings
+        self._sequence_number = 0  # Monotonic counter for checkpoint ordering
+
+    def _maybe_checkpoint(self, run_id: str, token_id: str, node_id: str) -> None:
+        """Create checkpoint if configured.
+
+        Called after each row is processed. Creates a checkpoint based on
+        the configured frequency:
+        - every_row: Always checkpoint
+        - every_n: Checkpoint at intervals (e.g., every 10 rows)
+        - aggregation_only: No per-row checkpoints (handled separately)
+
+        Args:
+            run_id: Current run ID
+            token_id: Token that was just processed
+            node_id: Node that processed it (last in chain before sink)
+        """
+        if not self._checkpoint_settings or not self._checkpoint_settings.enabled:
+            return
+        if self._checkpoint_manager is None:
+            return
+
+        self._sequence_number += 1
+
+        should_checkpoint = False
+        if self._checkpoint_settings.frequency == "every_row":
+            should_checkpoint = True
+        elif self._checkpoint_settings.frequency == "every_n":
+            interval = self._checkpoint_settings.checkpoint_interval
+            # interval is validated in CheckpointSettings when frequency="every_n"
+            assert interval is not None  # Validated by CheckpointSettings model
+            should_checkpoint = (self._sequence_number % interval) == 0
+        # aggregation_only: checkpointed separately in aggregation flush
+
+        if should_checkpoint:
+            self._checkpoint_manager.create_checkpoint(
+                run_id=run_id,
+                token_id=token_id,
+                node_id=node_id,
+                sequence_number=self._sequence_number,
+            )
+
+    def _delete_checkpoints(self, run_id: str) -> None:
+        """Delete all checkpoints for a run after successful completion.
+
+        Args:
+            run_id: Run to clean up checkpoints for
+        """
+        if self._checkpoint_manager is not None:
+            self._checkpoint_manager.delete_checkpoints(run_id)
 
     def run(
         self,
@@ -119,6 +173,10 @@ class Orchestrator:
             recorder.complete_run(run.run_id, status="completed")
             result.status = "completed"
             run_completed = True
+
+            # Delete checkpoints on successful completion
+            # (checkpoints are for recovery, not needed after success)
+            self._delete_checkpoints(run.run_id)
 
             # Post-run export (separate from run status - export failures
             # don't change run status)
@@ -280,13 +338,33 @@ class Orchestrator:
                         ctx=ctx,
                     )
 
+                    # Determine the last node that processed this row
+                    # (used for checkpoint to know where to resume from)
+                    last_node_id = (
+                        config.transforms[-1].node_id
+                        if config.transforms
+                        else source_id
+                    )
+
                     if result.outcome == "completed":
                         rows_succeeded += 1
                         pending_tokens[output_sink_name].append(result.token)
+                        # Checkpoint after successful row processing
+                        self._maybe_checkpoint(
+                            run_id=run_id,
+                            token_id=result.token.token_id,
+                            node_id=last_node_id,
+                        )
                     elif result.outcome == "routed":
                         rows_routed += 1
                         if result.sink_name and result.sink_name in config.sinks:
                             pending_tokens[result.sink_name].append(result.token)
+                            # Checkpoint after successful routing
+                            self._maybe_checkpoint(
+                                run_id=run_id,
+                                token_id=result.token.token_id,
+                                node_id=last_node_id,
+                            )
                         elif result.sink_name:
                             # Gate routed to non-existent sink - configuration error
                             raise ValueError(

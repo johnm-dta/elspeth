@@ -127,6 +127,29 @@ class DatabaseSettings(BaseModel):
     echo: bool = Field(default=False, description="Echo SQL statements")
 
 
+class CheckpointSettings(BaseModel):
+    """Configuration for crash recovery checkpointing.
+
+    Checkpoint frequency trade-offs:
+    - every_row: Safest, can resume from any row. Higher I/O overhead.
+    - every_n: Balance safety and performance. Lose up to N-1 rows on crash.
+    - aggregation_only: Fastest, checkpoint only at aggregation flushes.
+    """
+
+    model_config = {"frozen": True}
+
+    enabled: bool = True
+    frequency: Literal["every_row", "every_n", "aggregation_only"] = "every_row"
+    checkpoint_interval: int | None = Field(default=None, gt=0)  # Required if frequency == "every_n"
+    aggregation_boundaries: bool = True  # Always checkpoint at aggregation flush
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> "CheckpointSettings":
+        if self.frequency == "every_n" and self.checkpoint_interval is None:
+            raise ValueError("checkpoint_interval required when frequency='every_n'")
+        return self
+
+
 class RetrySettings(BaseModel):
     """Retry behavior configuration."""
 
@@ -200,6 +223,10 @@ class ElspethSettings(BaseModel):
     payload_store: PayloadStoreSettings = Field(
         default_factory=PayloadStoreSettings,
         description="Large payload storage configuration",
+    )
+    checkpoint: CheckpointSettings = Field(
+        default_factory=CheckpointSettings,
+        description="Crash recovery checkpoint configuration",
     )
 
     @model_validator(mode="after")

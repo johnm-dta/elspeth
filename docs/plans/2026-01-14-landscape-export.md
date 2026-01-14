@@ -1263,7 +1263,7 @@ Expected: PASS
 Create `examples/audit_export/settings.yaml`:
 
 ```yaml
-# Example: Pipeline with audit export to CSV
+# Example: Pipeline with audit export to JSON
 #
 # Run with:
 #   uv run elspeth run -s examples/audit_export/settings.yaml --execute
@@ -1277,26 +1277,44 @@ datasource:
   options:
     path: examples/audit_export/input.csv
 
+row_plugins:
+  # Gate: Route corporate submissions to a dedicated sink.
+  - plugin: field_match_gate
+    type: gate
+    options:
+      field: category
+      matches:
+        "corporate": corporate_label
+      default_label: non_corporate_label
+    routes:
+      corporate_label: corporate
+      non_corporate_label: continue
+
 sinks:
-  output:
+  non_corporate:
     plugin: csv
     options:
-      path: examples/audit_export/output/results.csv
+      path: examples/audit_export/output/non_corporate.csv
+
+  corporate:
+    plugin: csv
+    options:
+      path: examples/audit_export/output/corporate.csv
 
   # Export sink for compliance
   audit_export:
-    plugin: csv
+    plugin: json
     options:
       path: examples/audit_export/output/audit_trail.json
 
-output_sink: output
+output_sink: non_corporate
 
 landscape:
   url: sqlite:///examples/audit_export/runs/audit.db
   export:
     enabled: true
     sink: audit_export
-    format: csv
+    format: json
     sign: false  # Set to true and provide ELSPETH_SIGNING_KEY for legal use
 ```
 

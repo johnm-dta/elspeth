@@ -551,6 +551,75 @@ class TestExportSinkValidation:
         assert settings.landscape.export.sink == "audit_archive"
 
 
+class TestCheckpointSettings:
+    """Tests for checkpoint configuration."""
+
+    def test_checkpoint_settings_defaults(self) -> None:
+        from elspeth.core.config import CheckpointSettings
+
+        settings = CheckpointSettings()
+
+        assert settings.enabled is True
+        assert settings.frequency == "every_row"
+        assert settings.aggregation_boundaries is True
+
+    def test_checkpoint_frequency_options(self) -> None:
+        from elspeth.core.config import CheckpointSettings
+
+        # Every row (safest, slowest)
+        s1 = CheckpointSettings(frequency="every_row")
+        assert s1.frequency == "every_row"
+
+        # Every N rows (balanced)
+        s2 = CheckpointSettings(frequency="every_n", checkpoint_interval=100)
+        assert s2.frequency == "every_n"
+        assert s2.checkpoint_interval == 100
+
+        # Aggregation boundaries only (fastest, less safe)
+        s3 = CheckpointSettings(frequency="aggregation_only")
+        assert s3.frequency == "aggregation_only"
+
+    def test_checkpoint_settings_validation(self) -> None:
+        from pydantic import ValidationError
+
+        from elspeth.core.config import CheckpointSettings
+
+        # every_n requires checkpoint_interval
+        with pytest.raises(ValidationError):
+            CheckpointSettings(frequency="every_n", checkpoint_interval=None)
+
+    def test_checkpoint_interval_must_be_positive(self) -> None:
+        """checkpoint_interval must be > 0 when provided."""
+        from pydantic import ValidationError
+
+        from elspeth.core.config import CheckpointSettings
+
+        # Zero is invalid
+        with pytest.raises(ValidationError):
+            CheckpointSettings(frequency="every_n", checkpoint_interval=0)
+
+        # Negative is invalid
+        with pytest.raises(ValidationError):
+            CheckpointSettings(frequency="every_n", checkpoint_interval=-1)
+
+    def test_checkpoint_settings_frozen(self) -> None:
+        """CheckpointSettings is immutable."""
+        from elspeth.core.config import CheckpointSettings
+
+        settings = CheckpointSettings()
+        with pytest.raises(ValidationError):
+            settings.enabled = False  # type: ignore[misc]
+
+    def test_checkpoint_settings_invalid_frequency(self) -> None:
+        """Frequency must be a valid option."""
+        from pydantic import ValidationError
+
+        from elspeth.core.config import CheckpointSettings
+
+        with pytest.raises(ValidationError):
+            CheckpointSettings(frequency="invalid")
+
+
 class TestElspethSettingsArchitecture:
     """Top-level settings matches architecture specification."""
 

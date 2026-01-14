@@ -1,4 +1,4 @@
-# Phase 5: Production Hardening (Tasks 1-14)
+# Phase 5: Production Hardening (Tasks 0-14)
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
@@ -65,35 +65,124 @@ The `runs.reproducibility_grade` column tracks what level of reproducibility is 
 
 | Grade | Meaning | When Assigned |
 |-------|---------|---------------|
-| `FULL_REPRODUCIBLE` | All transforms deterministic | Run completion (no `external_call` determinism nodes) |
-| `REPLAY_REPRODUCIBLE` | Has non-deterministic calls, payloads retained | Run completion (has `external_call` nodes, payloads exist) |
+| `FULL_REPRODUCIBLE` | All transforms deterministic or seeded | Run completion (all nodes have `deterministic` or `seeded` determinism) |
+| `REPLAY_REPRODUCIBLE` | Has non-deterministic transforms, payloads retained | Run completion (has `nondeterministic` nodes, payloads exist) |
 | `ATTRIBUTABLE_ONLY` | Payloads purged | After purge job runs |
 
-**Computation:** At run completion, scan `nodes.determinism` for any `external_call` or `non_deterministic` values. Grade degrades from `FULL_REPRODUCIBLE` → `ATTRIBUTABLE_ONLY` over time as payloads are purged.
+**Computation:** At run completion, scan `nodes.determinism` for any `nondeterministic` values (from `Determinism` enum). Grade degrades from `FULL_REPRODUCIBLE` → `ATTRIBUTABLE_ONLY` over time as payloads are purged.
 
 ---
 
-## Schema Pre-requisite: Add determinism Column to nodes_table
+## Task 0: Add determinism Column to nodes_table (Pre-requisite)
 
-**Context:** The reproducibility grade computation (Task 14) requires scanning `nodes.determinism` to determine if a run used any non-deterministic transforms. This column must be added to the Landscape schema.
+**Context:** The reproducibility grade computation (Task 14) requires scanning `nodes.determinism` to determine if a run used any non-deterministic transforms. This column must be added to the Landscape schema before other tasks can proceed.
 
 **Files:**
 - Modify: `src/elspeth/core/landscape/schema.py`
 - Modify: `src/elspeth/core/landscape/models.py`
+- Modify: `tests/core/landscape/test_schema.py`
 
-**Implementation:**
-
-Add to `nodes_table` in `schema.py` (after `plugin_version` column):
-
-```python
-Column("determinism", String(32), nullable=False),  # pure, io_dependent, external_call, non_deterministic
-```
-
-Add to `Node` dataclass in `models.py`:
+### Step 1: Write the failing test
 
 ```python
-determinism: str  # From Determinism enum: pure, io_dependent, external_call, non_deterministic
+# Add to tests/core/landscape/test_schema.py
+
+class TestNodesDeterminismColumn:
+    """Tests for determinism column in nodes table."""
+
+    def test_nodes_table_has_determinism_column(self) -> None:
+        from elspeth.core.landscape.schema import nodes_table
+
+        columns = {c.name for c in nodes_table.columns}
+        assert "determinism" in columns
+
+    def test_node_model_has_determinism_field(self) -> None:
+        from elspeth.core.landscape.models import Node
+        from datetime import datetime, timezone
+
+        node = Node(
+            node_id="node-001",
+            run_id="run-001",
+            plugin_name="test_plugin",
+            node_type="transform",
+            plugin_version="1.0.0",
+            determinism="deterministic",  # New field
+            config_hash="abc123",
+            config_json="{}",
+            registered_at=datetime.now(timezone.utc),
+        )
+        assert node.determinism == "deterministic"
+
+    def test_determinism_values(self) -> None:
+        """Verify valid determinism values match Determinism enum."""
+        from elspeth.plugins.enums import Determinism
+
+        valid_values = {d.value for d in Determinism}
+        # Current enum values (not the granular architecture spec values)
+        expected = {"deterministic", "seeded", "nondeterministic"}
+        assert valid_values == expected
 ```
+
+### Step 2: Run test to verify it fails
+
+Run: `pytest tests/core/landscape/test_schema.py::TestNodesDeterminismColumn -v`
+Expected: FAIL (determinism column/field not found)
+
+### Step 3: Add determinism column to schema
+
+Add to `nodes_table` in `src/elspeth/core/landscape/schema.py` (after `plugin_version` column):
+
+```python
+Column("determinism", String(32), nullable=False),  # deterministic, seeded, nondeterministic (from Determinism enum)
+```
+
+### Step 4: Add determinism field to Node model
+
+Update the `Node` dataclass in `src/elspeth/core/landscape/models.py`:
+
+```python
+@dataclass
+class Node:
+    """A node (plugin instance) in the execution graph."""
+
+    node_id: str
+    run_id: str
+    plugin_name: str
+    node_type: str  # source, transform, gate, aggregation, coalesce, sink
+    plugin_version: str
+    determinism: str  # From Determinism enum: deterministic, seeded, nondeterministic
+    config_hash: str
+    config_json: str
+    registered_at: datetime
+    schema_hash: str | None = None
+    sequence_in_pipeline: int | None = None
+```
+
+### Step 5: Update LandscapeRecorder.register_node()
+
+The `register_node` method in `src/elspeth/core/landscape/recorder.py` must accept and store the determinism value:
+
+```python
+def register_node(
+    self,
+    run_id: str,
+    node_id: str,
+    plugin_name: str,
+    node_type: NodeType,
+    plugin_version: str,
+    config: dict[str, Any],
+    determinism: str = "deterministic",  # Add this parameter with default
+    schema_hash: str | None = None,
+    sequence_in_pipeline: int | None = None,
+) -> Node:
+    # ... existing code ...
+    # Add determinism to the insert values
+```
+
+### Step 6: Run tests
+
+Run: `pytest tests/core/landscape/test_schema.py::TestNodesDeterminismColumn -v`
+Expected: PASS
 
 **Note:** This column captures the plugin's declared determinism level (from `elspeth.plugins.enums.Determinism`). The engine sets this when registering nodes based on the plugin's `determinism` attribute.
 
@@ -591,10 +680,10 @@ Add to `src/elspeth/core/config.py`:
 ```python
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import BaseModel, model_validator
 
 
-class CheckpointSettings(BaseSettings):
+class CheckpointSettings(BaseModel):
     """Configuration for crash recovery checkpointing.
 
     Checkpoint frequency trade-offs:
@@ -602,6 +691,8 @@ class CheckpointSettings(BaseSettings):
     - every_n: Balance safety and performance. Lose up to N-1 rows on crash.
     - aggregation_only: Fastest, checkpoint only at aggregation flushes.
     """
+
+    model_config = {"frozen": True}
 
     enabled: bool = True
     frequency: Literal["every_row", "every_n", "aggregation_only"] = "every_row"
@@ -618,7 +709,7 @@ class CheckpointSettings(BaseSettings):
 Also add to `ElspethSettings`:
 
 ```python
-class ElspethSettings(BaseSettings):
+class ElspethSettings(BaseModel):
     # ... existing fields ...
     checkpoint: CheckpointSettings = CheckpointSettings()
 ```
@@ -1140,16 +1231,37 @@ class RecoveryManager:
             return unprocessed
 
     def _row_completed(self, conn, row_id: str) -> bool:
-        """Check if a row reached terminal state."""
-        from sqlalchemy import select, exists
+        """Check if a row reached terminal state.
+
+        Handles retry scenarios by checking the LATEST attempt for each
+        token/node combination. The node_states table has a unique constraint
+        on (token_id, node_id, attempt), so multiple attempts may exist.
+        """
+        from sqlalchemy import select, exists, func
         from elspeth.core.landscape.schema import (
             tokens_table,
             node_states_table,
             nodes_table,
         )
 
-        # A row is complete if any of its tokens reached a sink
-        # (simplistic check - full implementation would check terminal states)
+        # A row is complete if any of its tokens reached a sink node
+        # with status "completed" on the latest attempt.
+        # Subquery to get the max attempt for each token/node pair
+        latest_attempt_subq = (
+            select(
+                node_states_table.c.token_id,
+                node_states_table.c.node_id,
+                func.max(node_states_table.c.attempt).label("max_attempt")
+            )
+            .group_by(
+                node_states_table.c.token_id,
+                node_states_table.c.node_id
+            )
+            .subquery()
+        )
+
+        # Check if row has a token that reached a sink with completed status
+        # on its latest attempt
         result = conn.execute(
             select(exists().where(
                 and_(
@@ -1158,6 +1270,10 @@ class RecoveryManager:
                     node_states_table.c.status == "completed",
                     nodes_table.c.node_id == node_states_table.c.node_id,
                     nodes_table.c.node_type == "sink",
+                    # Join with latest attempt subquery
+                    node_states_table.c.token_id == latest_attempt_subq.c.token_id,
+                    node_states_table.c.node_id == latest_attempt_subq.c.node_id,
+                    node_states_table.c.attempt == latest_attempt_subq.c.max_attempt,
                 )
             ))
         ).scalar()
@@ -1361,6 +1477,7 @@ class RateLimiter:
         self.name = name
         self._requests_per_second = requests_per_second
         self._requests_per_minute = requests_per_minute
+        self._persistence_path = persistence_path  # Store for reset()
 
         # Build rates
         rates = [Rate(requests_per_second, Duration.SECOND)]
@@ -1384,7 +1501,8 @@ class RateLimiter:
         Args:
             weight: Number of tokens to acquire (default 1)
         """
-        self._limiter.try_acquire(self.name, weight=weight)
+        # Explicit block=True ensures blocking behavior across pyrate-limiter versions
+        self._limiter.try_acquire(self.name, weight=weight, block=True)
 
     def try_acquire(self, weight: int = 1) -> bool:
         """Try to acquire tokens without blocking.
@@ -1410,6 +1528,7 @@ class RateLimiter:
             name=self.name,
             requests_per_second=self._requests_per_second,
             requests_per_minute=self._requests_per_minute,
+            persistence_path=self._persistence_path,
         )
 ```
 
@@ -1493,14 +1612,19 @@ Expected: FAIL (ImportError)
 Add to `src/elspeth/core/config.py`:
 
 ```python
-class ServiceRateLimit(BaseSettings):
+from pydantic import BaseModel
+
+
+class ServiceRateLimit(BaseModel):
     """Rate limit configuration for a specific service."""
+
+    model_config = {"frozen": True}
 
     requests_per_second: int
     requests_per_minute: int | None = None
 
 
-class RateLimitSettings(BaseSettings):
+class RateLimitSettings(BaseModel):
     """Configuration for rate limiting external calls.
 
     Example YAML:
@@ -1515,6 +1639,8 @@ class RateLimitSettings(BaseSettings):
             weather_api:
               requests_per_second: 20
     """
+
+    model_config = {"frozen": True}
 
     enabled: bool = True
     default_requests_per_second: int = 10
@@ -1535,7 +1661,7 @@ class RateLimitSettings(BaseSettings):
 Also add to `ElspethSettings`:
 
 ```python
-class ElspethSettings(BaseSettings):
+class ElspethSettings(BaseModel):
     # ... existing fields ...
     rate_limit: RateLimitSettings = RateLimitSettings()
 ```
@@ -2257,7 +2383,7 @@ def purge(
     else:
         settings = ElspethSettings()
 
-    db_path = database or settings.database.url.replace("sqlite:///", "")
+    db_path = database or settings.landscape.url.replace("sqlite:///", "")
     payload_path = settings.payload_store.base_path
 
     db = LandscapeDB(f"sqlite:///{db_path}")
@@ -2519,6 +2645,33 @@ Expected: PASS
 class TestResumeCommand:
     """Tests for resume CLI command."""
 
+    @pytest.fixture
+    def completed_run_id(self, tmp_path) -> str:
+        """Create a completed run in a test database."""
+        from datetime import datetime, timezone
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import runs_table
+
+        db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
+        db.create_tables()
+
+        run_id = "completed-run-001"
+        now = datetime.now(timezone.utc)
+
+        with db.engine.connect() as conn:
+            conn.execute(runs_table.insert().values(
+                run_id=run_id,
+                started_at=now,
+                completed_at=now,
+                config_hash="test",
+                settings_json="{}",
+                canonical_version="sha256-rfc8785-v1",
+                status="completed",
+            ))
+            conn.commit()
+
+        return run_id
+
     def test_resume_help(self) -> None:
         """resume --help shows usage."""
         from elspeth.cli import app
@@ -2589,7 +2742,7 @@ def resume(
     else:
         settings = ElspethSettings()
 
-    db_path = database or settings.database.url.replace("sqlite:///", "")
+    db_path = database or settings.landscape.url.replace("sqlite:///", "")
 
     db = LandscapeDB(f"sqlite:///{db_path}")
     checkpoint_mgr = CheckpointManager(db)
@@ -2617,14 +2770,152 @@ def resume(
     unprocessed = recovery_mgr.get_unprocessed_rows(run_id)
     typer.echo(f"  Rows to process: {len(unprocessed)}")
 
-    # TODO: Actually resume the run via Orchestrator
-    # This requires loading the original pipeline config from the run
-    # and calling orchestrator.resume(run_id, resume_point)
+    # Load original pipeline config from run's settings_json
+    from elspeth.engine.orchestrator import Orchestrator
 
-    typer.echo("\nResume functionality will be completed when Orchestrator supports it.")
+    orchestrator = Orchestrator(db)
+    result = orchestrator.resume(run_id, resume_point)
+
+    if result.status == "completed":
+        typer.echo(f"\nResumed run completed successfully!")
+        typer.echo(f"  Rows processed: {result.rows_processed}")
+        typer.echo(f"  Rows succeeded: {result.rows_succeeded}")
+    else:
+        typer.echo(f"\nResumed run failed: {result.status}", err=True)
+        raise typer.Exit(1)
 ```
 
-### Step 4: Run tests
+### Step 4: Add Orchestrator.resume() method
+
+Add to `src/elspeth/engine/orchestrator.py`:
+
+```python
+def resume(
+    self,
+    run_id: str,
+    resume_point: "ResumePoint",
+) -> RunResult:
+    """Resume a failed run from a checkpoint.
+
+    Args:
+        run_id: The run to resume
+        resume_point: Checkpoint info from RecoveryManager
+
+    Returns:
+        RunResult with final status
+
+    Note:
+        The original pipeline config is reconstructed from the run's
+        settings_json stored in Landscape. This requires plugins to
+        be re-instantiated from their stored configuration.
+    """
+    from elspeth.core.checkpoint import CheckpointManager
+
+    recorder = LandscapeRecorder(self._db)
+
+    # Update run status to running
+    self._update_run_status(run_id, "running")
+
+    # Get original config from settings_json
+    original_config = self._load_run_config(run_id)
+
+    # Re-create pipeline from stored config
+    # (Implementation depends on how plugins are serialized)
+    pipeline_config = self._reconstruct_pipeline(original_config)
+
+    # Get execution graph
+    graph = self._reconstruct_graph(run_id)
+
+    try:
+        with self._span_factory.run_span(run_id):
+            result = self._execute_run_from_checkpoint(
+                recorder=recorder,
+                run_id=run_id,
+                config=pipeline_config,
+                graph=graph,
+                resume_point=resume_point,
+            )
+
+        # Complete run
+        recorder.complete_run(run_id, status="completed")
+        result.status = "completed"
+
+        # Clean up checkpoints on success
+        checkpoint_mgr = CheckpointManager(self._db)
+        checkpoint_mgr.delete_checkpoints(run_id)
+
+        return result
+
+    except Exception:
+        recorder.complete_run(run_id, status="failed")
+        raise
+
+def _execute_run_from_checkpoint(
+    self,
+    recorder: LandscapeRecorder,
+    run_id: str,
+    config: PipelineConfig,
+    graph: ExecutionGraph,
+    resume_point: "ResumePoint",
+) -> RunResult:
+    """Execute run starting from checkpoint position.
+
+    Skips rows that were already processed according to the checkpoint.
+    """
+    # Implementation follows similar pattern to _execute_run()
+    # but starts from resume_point.sequence_number and skips
+    # rows that already reached terminal states
+
+    # For aggregations, restore state from resume_point.aggregation_state
+    if resume_point.aggregation_state:
+        self._restore_aggregation_state(config, resume_point.aggregation_state)
+
+    # ... rest of implementation follows _execute_run pattern
+    # but filters source rows to only unprocessed ones
+    pass  # Full implementation follows _execute_run() pattern
+
+def _update_run_status(self, run_id: str, status: str) -> None:
+    """Update run status in Landscape."""
+    from sqlalchemy import update
+    from elspeth.core.landscape.schema import runs_table
+
+    with self._db.engine.connect() as conn:
+        conn.execute(
+            update(runs_table)
+            .where(runs_table.c.run_id == run_id)
+            .values(status=status)
+        )
+        conn.commit()
+
+def _load_run_config(self, run_id: str) -> dict:
+    """Load original run configuration from Landscape."""
+    import json
+    from sqlalchemy import select
+    from elspeth.core.landscape.schema import runs_table
+
+    with self._db.engine.connect() as conn:
+        result = conn.execute(
+            select(runs_table.c.settings_json)
+            .where(runs_table.c.run_id == run_id)
+        ).fetchone()
+
+    if result is None:
+        raise ValueError(f"Run {run_id} not found")
+
+    return json.loads(result[0])
+```
+
+**Note:** The full `_execute_run_from_checkpoint` implementation mirrors `_execute_run()` but:
+1. Filters source rows to skip already-processed ones
+2. Restores aggregation state from checkpoint
+3. Continues from the checkpoint's sequence number
+
+This is marked as partial implementation - the full implementation requires careful handling of:
+- Plugin re-instantiation from stored config
+- Aggregation state restoration
+- Source row filtering
+
+### Step 5: Run tests
 
 Run: `pytest tests/cli/test_cli.py::TestResumeCommand -v`
 Expected: PASS
@@ -2796,6 +3087,113 @@ Expected: PASS
 class TestReproducibilityGradeComputation:
     """Tests for reproducibility grade computation at run completion."""
 
+    @pytest.fixture
+    def landscape_db(self, tmp_path):
+        """Create test database."""
+        from elspeth.core.landscape.database import LandscapeDB
+
+        db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
+        db.create_tables()
+        return db
+
+    @pytest.fixture
+    def recorder(self, landscape_db):
+        """Create LandscapeRecorder for tests."""
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        return LandscapeRecorder(landscape_db)
+
+    @pytest.fixture
+    def run_id(self, landscape_db) -> str:
+        """Create a basic run for testing."""
+        from datetime import datetime, timezone
+        from elspeth.core.landscape.schema import runs_table
+
+        run_id = "test-run-001"
+        now = datetime.now(timezone.utc)
+
+        with landscape_db.engine.connect() as conn:
+            conn.execute(runs_table.insert().values(
+                run_id=run_id,
+                started_at=now,
+                config_hash="test",
+                settings_json="{}",
+                canonical_version="sha256-rfc8785-v1",
+                status="running",
+            ))
+            conn.commit()
+
+        return run_id
+
+    @pytest.fixture
+    def run_with_pure_transforms(self, landscape_db) -> str:
+        """Create a run with only deterministic transforms."""
+        from datetime import datetime, timezone
+        from elspeth.core.landscape.schema import runs_table, nodes_table
+
+        run_id = "pure-run-001"
+        now = datetime.now(timezone.utc)
+
+        with landscape_db.engine.connect() as conn:
+            conn.execute(runs_table.insert().values(
+                run_id=run_id,
+                started_at=now,
+                config_hash="pure",
+                settings_json="{}",
+                canonical_version="sha256-rfc8785-v1",
+                status="completed",
+            ))
+            # All nodes are deterministic
+            conn.execute(nodes_table.insert().values(
+                node_id="source-001", run_id=run_id, plugin_name="csv_source",
+                node_type="source", plugin_version="1.0",
+                determinism="deterministic",  # Uses actual enum value
+                config_hash="x", config_json="{}", registered_at=now
+            ))
+            conn.execute(nodes_table.insert().values(
+                node_id="transform-001", run_id=run_id, plugin_name="passthrough",
+                node_type="transform", plugin_version="1.0",
+                determinism="deterministic",  # Uses actual enum value
+                config_hash="y", config_json="{}", registered_at=now
+            ))
+            conn.commit()
+
+        return run_id
+
+    @pytest.fixture
+    def run_with_external_calls(self, landscape_db) -> str:
+        """Create a run with nondeterministic (external call) transforms."""
+        from datetime import datetime, timezone
+        from elspeth.core.landscape.schema import runs_table, nodes_table
+
+        run_id = "external-run-001"
+        now = datetime.now(timezone.utc)
+
+        with landscape_db.engine.connect() as conn:
+            conn.execute(runs_table.insert().values(
+                run_id=run_id,
+                started_at=now,
+                config_hash="external",
+                settings_json="{}",
+                canonical_version="sha256-rfc8785-v1",
+                status="completed",
+            ))
+            conn.execute(nodes_table.insert().values(
+                node_id="source-001", run_id=run_id, plugin_name="csv_source",
+                node_type="source", plugin_version="1.0",
+                determinism="deterministic",
+                config_hash="x", config_json="{}", registered_at=now
+            ))
+            # This transform makes external calls (nondeterministic)
+            conn.execute(nodes_table.insert().values(
+                node_id="llm-transform-001", run_id=run_id, plugin_name="llm_classifier",
+                node_type="transform", plugin_version="1.0",
+                determinism="nondeterministic",  # Uses actual enum value
+                config_hash="z", config_json="{}", registered_at=now
+            ))
+            conn.commit()
+
+        return run_id
+
     def test_pure_pipeline_gets_full_reproducible(
         self, recorder, run_with_pure_transforms
     ) -> None:
@@ -2900,9 +3298,10 @@ def compute_grade(db, run_id: str) -> ReproducibilityGrade:
 
     Algorithm:
     1. Scan all nodes in the run
-    2. If any node has determinism='external_call' or 'non_deterministic',
+    2. If any node has determinism='nondeterministic' (from Determinism enum),
        grade is at best REPLAY_REPRODUCIBLE
-    3. Otherwise, grade is FULL_REPRODUCIBLE
+    3. 'deterministic' and 'seeded' both allow FULL_REPRODUCIBLE
+       (seeded transforms are reproducible given the same seed)
 
     Args:
         db: LandscapeDB instance
@@ -2911,7 +3310,9 @@ def compute_grade(db, run_id: str) -> ReproducibilityGrade:
     Returns:
         Computed ReproducibilityGrade
     """
+    from sqlalchemy import select
     from elspeth.core.landscape.schema import nodes_table
+    from elspeth.plugins.enums import Determinism
 
     with db.engine.connect() as conn:
         # Check for non-deterministic nodes
@@ -2922,10 +3323,9 @@ def compute_grade(db, run_id: str) -> ReproducibilityGrade:
 
     determinisms = {r[0] for r in results}
 
-    # If any external call or non-deterministic transform, not fully reproducible
-    non_deterministic_types = {"external_call", "non_deterministic", "io_dependent"}
-
-    if determinisms & non_deterministic_types:
+    # If any nondeterministic transform, not fully reproducible
+    # (Note: 'seeded' counts as reproducible since seed is recorded)
+    if Determinism.NONDETERMINISTIC.value in determinisms:
         return ReproducibilityGrade.REPLAY_REPRODUCIBLE
 
     return ReproducibilityGrade.FULL_REPRODUCIBLE

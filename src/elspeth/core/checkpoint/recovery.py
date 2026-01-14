@@ -17,7 +17,7 @@ from sqlalchemy.engine import Row
 from elspeth.core.checkpoint.manager import CheckpointManager
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.models import Checkpoint
-from elspeth.core.landscape.schema import runs_table
+from elspeth.core.landscape.schema import rows_table, runs_table
 
 
 @dataclass
@@ -130,6 +130,33 @@ class RecoveryManager:
             sequence_number=checkpoint.sequence_number,
             aggregation_state=agg_state,
         )
+
+    def get_unprocessed_rows(self, run_id: str) -> list[str]:
+        """Get row IDs that were not processed before the run failed.
+
+        Returns rows with row_index greater than the checkpoint's sequence_number,
+        representing rows that still need processing after recovery.
+
+        Args:
+            run_id: The run to get unprocessed rows for
+
+        Returns:
+            List of row_id strings for rows that need processing.
+            Empty list if run cannot be resumed or all rows were processed.
+        """
+        checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
+        if checkpoint is None:
+            return []
+
+        with self._db.engine.connect() as conn:
+            result = conn.execute(
+                select(rows_table.c.row_id)
+                .where(rows_table.c.run_id == run_id)
+                .where(rows_table.c.row_index > checkpoint.sequence_number)
+                .order_by(rows_table.c.row_index)
+            ).fetchall()
+
+        return [row.row_id for row in result]
 
     def _get_run(self, run_id: str) -> Row[Any] | None:
         """Get run metadata from the database.

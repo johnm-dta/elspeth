@@ -135,3 +135,40 @@ class TestPhase3AModels:
             created_at=None,  # type: ignore[arg-type]
         )
         assert batch.status == "draft"
+
+
+class TestNodesDeterminismColumn:
+    """Tests for determinism column in nodes table."""
+
+    def test_nodes_table_has_determinism_column(self) -> None:
+        from elspeth.core.landscape.schema import nodes_table
+
+        columns = {c.name for c in nodes_table.columns}
+        assert "determinism" in columns
+
+    def test_node_model_has_determinism_field(self) -> None:
+        from datetime import UTC, datetime
+
+        from elspeth.core.landscape.models import Node
+
+        node = Node(
+            node_id="node-001",
+            run_id="run-001",
+            plugin_name="test_plugin",
+            node_type="transform",
+            plugin_version="1.0.0",
+            determinism="deterministic",  # New field
+            config_hash="abc123",
+            config_json="{}",
+            registered_at=datetime.now(UTC),
+        )
+        assert node.determinism == "deterministic"
+
+    def test_determinism_values(self) -> None:
+        """Verify valid determinism values match Determinism enum."""
+        from elspeth.plugins.enums import Determinism
+
+        valid_values = {d.value for d in Determinism}
+        # Current enum values (not the granular architecture spec values)
+        expected = {"deterministic", "seeded", "nondeterministic"}
+        assert valid_values == expected

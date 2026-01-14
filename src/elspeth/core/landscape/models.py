@@ -44,6 +44,7 @@ class Node:
     plugin_name: str
     node_type: str  # source, transform, gate, aggregation, coalesce, sink
     plugin_version: str
+    determinism: str  # From Determinism enum: deterministic, seeded, nondeterministic
     config_hash: str
     config_json: str
     registered_at: datetime

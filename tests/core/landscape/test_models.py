@@ -34,11 +34,13 @@ class TestNodeModel:
             plugin_name="csv",
             node_type="source",
             plugin_version="1.0.0",
+            determinism="deterministic",
             config_hash="def456",
             config_json="{}",
             registered_at=datetime.now(UTC),
         )
         assert node.node_type == "source"
+        assert node.determinism == "deterministic"
 
 
 class TestRowModel:

@@ -54,6 +54,7 @@ nodes_table = Table(
     Column("plugin_name", String(128), nullable=False),
     Column("node_type", String(32), nullable=False),
     Column("plugin_version", String(32), nullable=False),
+    Column("determinism", String(32), nullable=False),  # deterministic, seeded, nondeterministic (from Determinism enum)
     Column("config_hash", String(64), nullable=False),
     Column("config_json", Text, nullable=False),
     Column("schema_hash", String(64)),

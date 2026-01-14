@@ -341,7 +341,7 @@ class LandscapeRecorder:
         """
         # Validate and coerce enums early - fail fast on typos
         node_type_enum = _coerce_enum(node_type, NodeType)
-        _coerce_enum(determinism, Determinism)  # Validate only, not stored in Node
+        determinism_enum = _coerce_enum(determinism, Determinism)
 
         node_id = node_id or _generate_id()
         config_json = canonical_json(config)
@@ -354,6 +354,7 @@ class LandscapeRecorder:
             plugin_name=plugin_name,
             node_type=node_type_enum.value,  # Store string in DB
             plugin_version=plugin_version,
+            determinism=determinism_enum.value,  # Store string in DB
             config_hash=config_hash,
             config_json=config_json,
             schema_hash=schema_hash,
@@ -369,6 +370,7 @@ class LandscapeRecorder:
                     plugin_name=node.plugin_name,
                     node_type=node.node_type,
                     plugin_version=node.plugin_version,
+                    determinism=node.determinism,
                     config_hash=node.config_hash,
                     config_json=node.config_json,
                     schema_hash=node.schema_hash,
@@ -456,6 +458,7 @@ class LandscapeRecorder:
                 plugin_name=row.plugin_name,
                 node_type=row.node_type,
                 plugin_version=row.plugin_version,
+                determinism=row.determinism,
                 config_hash=row.config_hash,
                 config_json=row.config_json,
                 schema_hash=row.schema_hash,

@@ -465,7 +465,7 @@ allow_hits:
   # bug-hiding but legitimate Optional return type semantics.
   # ============================================================
 
-  - key: "plugins/gates/field_match_gate.py:R1:FieldMatchGate:_find_matching_label:line=168"
+  - key: "plugins/gates/field_match_gate.py:R1:FieldMatchGate:_find_matching_label:line=169"
     owner: "architecture"
     reason: "Intentional Optional API: returns None when value not in matches dict"
     safety: "Caller checks return value - None triggers default_label path"

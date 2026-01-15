@@ -13,6 +13,7 @@ from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import TransformResult
 from elspeth.plugins.schemas import PluginSchema
+from elspeth.plugins.sentinels import MISSING
 
 
 class FieldMapperSchema(PluginSchema):
@@ -71,7 +72,7 @@ class FieldMapper(BaseTransform):
         for source, target in self._mapping.items():
             value = self._get_nested(row, source)
 
-            if value is _MISSING:
+            if value is MISSING:
                 if self._strict:
                     return TransformResult.error(
                         {"message": f"Required field '{source}' not found in row"}
@@ -94,14 +95,14 @@ class FieldMapper(BaseTransform):
             path: Dot-separated path (e.g., "meta.source")
 
         Returns:
-            Value at path or _MISSING sentinel
+            Value at path or MISSING sentinel
         """
         parts = path.split(".")
         current: Any = data
 
         for part in parts:
             if not isinstance(current, dict) or part not in current:
-                return _MISSING
+                return MISSING
             current = current[part]
 
         return current
@@ -109,13 +110,3 @@ class FieldMapper(BaseTransform):
     def close(self) -> None:
         """No resources to release."""
         pass
-
-
-# Sentinel for missing values (distinct from None)
-class _MissingSentinel:
-    """Sentinel to distinguish missing fields from None values."""
-
-    pass
-
-
-_MISSING = _MissingSentinel()

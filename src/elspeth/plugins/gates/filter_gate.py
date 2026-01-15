@@ -15,6 +15,7 @@ from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import GateResult, RoutingAction
 from elspeth.plugins.schemas import PluginSchema
+from elspeth.plugins.sentinels import MISSING
 
 
 class FilterGateSchema(PluginSchema):
@@ -174,7 +175,7 @@ class FilterGate(BaseGate):
         value = self._get_nested(row, self._field)
 
         # Handle missing field
-        if value is _MISSING:
+        if value is MISSING:
             if self._allow_missing:
                 return GateResult(
                     row=row,
@@ -231,14 +232,14 @@ class FilterGate(BaseGate):
             path: Dot-separated path (e.g., "metrics.score")
 
         Returns:
-            Value at path or _MISSING sentinel
+            Value at path or MISSING sentinel
         """
         parts = path.split(".")
         current: Any = data
 
         for part in parts:
             if not isinstance(current, dict) or part not in current:
-                return _MISSING
+                return MISSING
             current = current[part]
 
         return current
@@ -246,13 +247,3 @@ class FilterGate(BaseGate):
     def close(self) -> None:
         """No resources to release."""
         pass
-
-
-# Sentinel for missing values
-class _MissingSentinel:
-    """Sentinel to distinguish missing fields from None values."""
-
-    pass
-
-
-_MISSING = _MissingSentinel()

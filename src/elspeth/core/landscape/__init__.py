@@ -48,6 +48,7 @@ from elspeth.core.landscape.reproducibility import (
     set_run_grade,
     update_grade_after_purge,
 )
+from elspeth.core.landscape.row_data import RowDataResult, RowDataState
 from elspeth.core.landscape.schema import (
     artifacts_table,
     batch_members_table,
@@ -84,6 +85,8 @@ __all__ = [
     "ReproducibilityGrade",
     "RoutingEvent",
     "Row",
+    "RowDataResult",
+    "RowDataState",
     "RowLineage",
     "Run",
     "Token",

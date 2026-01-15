@@ -32,6 +32,7 @@ from elspeth.core.landscape.models import (
     Token,
     TokenParent,
 )
+from elspeth.core.landscape.row_data import RowDataResult, RowDataState
 from elspeth.core.landscape.schema import (
     artifacts_table,
     batch_members_table,
@@ -1475,34 +1476,36 @@ class LandscapeRecorder:
             created_at=r.created_at,
         )
 
-    def get_row_data(self, row_id: str) -> dict[str, Any] | None:
-        """Get the payload data for a row.
+    def get_row_data(self, row_id: str) -> RowDataResult:
+        """Get the payload data for a row with explicit state.
 
-        Retrieves the actual row content from payload store if available.
+        Returns a RowDataResult with explicit state indicating why data
+        may be unavailable. This replaces the previous ambiguous None return.
 
         Args:
             row_id: Row ID
 
         Returns:
-            Row data dict, or None if row not found or payload purged
+            RowDataResult with state and data (if available)
         """
         row = self.get_row(row_id)
         if row is None:
-            return None
+            return RowDataResult(state=RowDataState.ROW_NOT_FOUND, data=None)
 
-        if row.source_data_ref and self._payload_store:
-            # Retrieve from payload store
+        if row.source_data_ref is None:
+            return RowDataResult(state=RowDataState.NEVER_STORED, data=None)
+
+        if self._payload_store is None:
+            return RowDataResult(state=RowDataState.STORE_NOT_CONFIGURED, data=None)
+
+        try:
             import json
-            from typing import cast
 
             payload_bytes = self._payload_store.retrieve(row.source_data_ref)
-            data: dict[str, Any] = cast(
-                dict[str, Any], json.loads(payload_bytes.decode("utf-8"))
-            )
-            return data
-
-        # No payload store or no ref - data not available
-        return None
+            data = json.loads(payload_bytes.decode("utf-8"))
+            return RowDataResult(state=RowDataState.AVAILABLE, data=data)
+        except KeyError:
+            return RowDataResult(state=RowDataState.PURGED, data=None)
 
     def get_token(self, token_id: str) -> Token | None:
         """Get a token by ID.

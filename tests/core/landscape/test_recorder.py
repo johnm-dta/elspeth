@@ -1417,9 +1417,10 @@ class TestLandscapeRecorderQueryMethods:
         assert events[0].mode == "move"
         assert events[0].edge_id == edge.edge_id
 
-    def test_get_row_data_without_payload_store(self) -> None:
+    def test_get_row_data_without_payload_ref(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.row_data import RowDataState
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)  # No payload store
@@ -1438,9 +1439,10 @@ class TestLandscapeRecorderQueryMethods:
             data={"name": "test"},
         )
 
-        # Without payload store, should return None
+        # Without payload_ref, should return NEVER_STORED
         result = recorder.get_row_data(row.row_id)
-        assert result is None
+        assert result.state == RowDataState.NEVER_STORED
+        assert result.data is None
 
 
 class TestExplainGracefulDegradation:

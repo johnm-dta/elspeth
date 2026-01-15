@@ -6,6 +6,9 @@ These tests verify:
 2. Full pipeline execution with audit trail verification
 3. "Audit spine" tests proving every token reaches terminal state
 4. "No silent audit loss" tests proving errors raise, not skip
+
+All test plugins inherit from base classes (BaseTransform, BaseGate)
+because the processor uses isinstance() for type-safe plugin detection.
 """
 
 from __future__ import annotations
@@ -14,7 +17,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from elspeth.plugins.base import BaseGate, BaseTransform
+
 if TYPE_CHECKING:
+    from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
 
 
@@ -40,7 +46,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
     for i, t in enumerate(config.transforms):
         node_id = f"transform_{i}"
         transform_ids[i] = node_id
-        is_gate = hasattr(t, "evaluate")
+        is_gate = isinstance(t, BaseGate)
         graph.add_node(
             node_id,
             node_type="gate" if is_gate else "transform",
@@ -59,7 +65,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
 
         # Gates can route to any sink, so add edges from all gates
         for i, t in enumerate(config.transforms):
-            if hasattr(t, "evaluate"):
+            if isinstance(t, BaseGate):
                 gate_id = f"transform_{i}"
                 if gate_id != prev:  # Don't duplicate edge
                     graph.add_edge(gate_id, node_id, label=sink_name, mode="move")
@@ -72,7 +78,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
     # In test graphs, route labels = sink names for simplicity
     route_resolution_map: dict[tuple[str, str], str] = {}
     for i, t in enumerate(config.transforms):
-        if hasattr(t, "evaluate"):  # It's a gate
+        if isinstance(t, BaseGate):  # It's a gate
             gate_id = f"transform_{i}"
             for sink_name in sink_ids:
                 route_resolution_map[(gate_id, sink_name)] = sink_name
@@ -162,16 +168,13 @@ class TestEngineIntegration:
             def close(self):
                 pass
 
-        class MarkProcessedTransform:
+        class MarkProcessedTransform(BaseTransform):
             name = "mark_processed"
             input_schema = ValueSchema
             output_schema = OutputSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(
@@ -281,30 +284,24 @@ class TestEngineIntegration:
             def close(self):
                 pass
 
-        class DoubleTransform:
+        class DoubleTransform(BaseTransform):
             name = "double"
             input_schema = NumberSchema
             output_schema = NumberSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success({"n": row["n"] * 2})
 
-        class AddTenTransform:
+        class AddTenTransform(BaseTransform):
             name = "add_ten"
             input_schema = NumberSchema
             output_schema = NumberSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success({"n": row["n"] + 10})
@@ -439,18 +436,13 @@ class TestEngineIntegration:
             def close(self):
                 pass
 
-        class EvenOddGate:
-            """Routes even numbers to 'even' sink, odd to default."""
-
+        class EvenOddGate(BaseGate):
             name = "even_odd_gate"
             input_schema = NumberSchema
             output_schema = NumberSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def evaluate(self, row, ctx):
                 if row["value"] % 2 == 0:
@@ -589,18 +581,13 @@ class TestNoSilentAuditLoss:
             def close(self):
                 pass
 
-        class MisroutingGate:
-            """Gate that routes to a non-existent route label."""
-
+        class MisroutingGate(BaseGate):
             name = "misrouting_gate"
             input_schema = RowSchema
             output_schema = RowSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def evaluate(self, row, ctx):
                 # Route to "phantom" which is not in route_resolution_map
@@ -700,16 +687,13 @@ class TestNoSilentAuditLoss:
             def close(self):
                 pass
 
-        class ExplodingTransform:
+        class ExplodingTransform(BaseTransform):
             name = "exploder"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 raise RuntimeError("Intentional explosion")
@@ -785,16 +769,13 @@ class TestNoSilentAuditLoss:
             def close(self):
                 pass
 
-        class IdentityTransform:
+        class IdentityTransform(BaseTransform):
             name = "identity"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)
@@ -866,16 +847,13 @@ class TestAuditTrailCompleteness:
             def close(self):
                 pass
 
-        class IdentityTransform:
+        class IdentityTransform(BaseTransform):
             name = "identity"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)
@@ -955,18 +933,13 @@ class TestAuditTrailCompleteness:
             def close(self):
                 pass
 
-        class SplitGate:
-            """Routes based on value threshold."""
-
+        class SplitGate(BaseGate):
             name = "split_gate"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def evaluate(self, row, ctx):
                 if row["value"] > 50:

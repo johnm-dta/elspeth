@@ -20,6 +20,7 @@ from elspeth.engine.executors import (
 )
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenInfo, TokenManager
+from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import RowOutcome
 
@@ -129,11 +130,13 @@ class RowProcessor:
             current_token = token
 
             for step, transform in enumerate(transforms, start=1):
-                # Check transform type and execute accordingly
-                if hasattr(transform, "evaluate"):
+                # Type-safe plugin detection using base classes
+                if isinstance(transform, BaseGate):
                     # Gate transform
+                    # Note: mypy [arg-type] - executors expect *Like protocols with node_id,
+                    # which is added at runtime by the orchestrator, not the base class
                     outcome = self._gate_executor.execute_gate(
-                        gate=transform,
+                        gate=transform,  # type: ignore[arg-type]
                         token=current_token,
                         ctx=ctx,
                         step_in_pipeline=step,
@@ -158,10 +161,10 @@ class RowProcessor:
                             outcome=RowOutcome.FORKED,
                         )
 
-                elif hasattr(transform, "accept"):
+                elif isinstance(transform, BaseAggregation):
                     # Aggregation transform
                     accept_result = self._aggregation_executor.accept(
-                        aggregation=transform,
+                        aggregation=transform,  # type: ignore[arg-type]
                         token=current_token,
                         ctx=ctx,
                         step_in_pipeline=step,
@@ -169,7 +172,7 @@ class RowProcessor:
 
                     if accept_result.trigger:
                         self._aggregation_executor.flush(
-                            aggregation=transform,
+                            aggregation=transform,  # type: ignore[arg-type]
                             ctx=ctx,
                             trigger_reason="threshold",
                             step_in_pipeline=step,
@@ -181,10 +184,10 @@ class RowProcessor:
                         outcome=RowOutcome.CONSUMED_IN_BATCH,
                     )
 
-                else:
+                elif isinstance(transform, BaseTransform):
                     # Regular transform
                     result, current_token = self._transform_executor.execute_transform(
-                        transform=transform,
+                        transform=transform,  # type: ignore[arg-type]
                         token=current_token,
                         ctx=ctx,
                         step_in_pipeline=step,
@@ -196,6 +199,12 @@ class RowProcessor:
                             final_data=current_token.row_data,
                             outcome=RowOutcome.FAILED,
                         )
+
+                else:
+                    raise TypeError(
+                        f"Unknown transform type: {type(transform).__name__}. "
+                        f"Expected BaseTransform, BaseGate, or BaseAggregation."
+                    )
 
             return RowResult(
                 token=current_token,

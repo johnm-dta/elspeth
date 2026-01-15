@@ -9,6 +9,7 @@ from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+from elspeth.plugins.base import BaseGate, BaseTransform
 from elspeth.plugins.results import GateResult, RoutingAction, TransformResult
 from elspeth.plugins.schemas import PluginSchema
 
@@ -135,14 +136,15 @@ class CollectSink:
         pass
 
 
-class TrackingTransform:
+class TrackingTransform(BaseTransform):
     """Transform that tracks whether close() was called."""
 
     input_schema = ValueSchema
     output_schema = ValueSchema
 
     def __init__(self, name: str = "tracking") -> None:
-        self.name = name
+        super().__init__({})
+        self.name = name  # type: ignore[misc]
         self.close_called = False
         self.close_call_count = 0
 
@@ -169,14 +171,15 @@ class FailingCloseTransform(TrackingTransform):
         raise RuntimeError("Close failed!")
 
 
-class TrackingGate:
+class TrackingGate(BaseGate):
     """Gate that tracks whether close() was called."""
 
     input_schema = ValueSchema
     output_schema = ValueSchema
 
     def __init__(self, name: str = "tracking_gate") -> None:
-        self.name = name
+        super().__init__({})
+        self.name = name  # type: ignore[misc]
         self.close_called = False
         self.close_call_count = 0
 
@@ -281,30 +284,29 @@ class TestOrchestratorCleanup:
     def test_cleanup_handles_missing_close_method(self) -> None:
         """Cleanup should handle transforms without close() method gracefully.
 
-        This tests graceful degradation for old plugins that may not have
-        the close() method (they implement an older protocol version).
+        This tests graceful degradation for transforms that inherit from
+        BaseTransform but don't override the close() method (which is not
+        part of the base class).
         """
         db = LandscapeDB.in_memory()
 
-        # Create a transform without close() method (simulating old plugin)
-        class OldStyleTransform:
-            name = "old_style"
+        # Create a transform without close() method (BaseTransform doesn't define one)
+        class MinimalTransform(BaseTransform):
+            name = "minimal"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx) -> None:
-                pass
-
-            def on_complete(self, ctx) -> None:
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)
 
-            # Note: No close() method!
+            # Note: No close() method - this is valid since BaseTransform
+            # doesn't require one
 
         source = ListSource([{"value": 1}])
-        transform = OldStyleTransform()
+        transform = MinimalTransform()
         sink = CollectSink()
 
         config = PipelineConfig(

@@ -1,5 +1,9 @@
 # tests/engine/test_orchestrator.py
-"""Tests for Orchestrator."""
+"""Tests for Orchestrator.
+
+All test plugins inherit from base classes (BaseTransform, BaseGate)
+because the processor uses isinstance() for type-safe plugin detection.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from elspeth.plugins.base import BaseGate, BaseTransform
+
 if TYPE_CHECKING:
+    from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
 
 
@@ -33,7 +40,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
     for i, t in enumerate(config.transforms):
         node_id = f"transform_{i}"
         transform_ids[i] = node_id
-        is_gate = hasattr(t, "evaluate")
+        is_gate = isinstance(t, BaseGate)
         graph.add_node(
             node_id,
             node_type="gate" if is_gate else "transform",
@@ -52,7 +59,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
 
         # Gates can route to any sink, so add edges from all gates
         for i, t in enumerate(config.transforms):
-            if hasattr(t, "evaluate"):
+            if isinstance(t, BaseGate):
                 gate_id = f"transform_{i}"
                 if gate_id != prev:  # Don't duplicate edge
                     graph.add_edge(gate_id, node_id, label=sink_name, mode="move")
@@ -65,7 +72,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
     # In test graphs, route labels = sink names for simplicity
     route_resolution_map: dict[tuple[str, str], str] = {}
     for i, t in enumerate(config.transforms):
-        if hasattr(t, "evaluate"):  # It's a gate
+        if isinstance(t, BaseGate):  # It's a gate
             gate_id = f"transform_{i}"
             for sink_name in sink_ids:
                 route_resolution_map[(gate_id, sink_name)] = sink_name
@@ -115,16 +122,13 @@ class TestOrchestrator:
             def close(self):
                 pass
 
-        class DoubleTransform:
+        class DoubleTransform(BaseTransform):
             name = "double"
             input_schema = InputSchema
             output_schema = OutputSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(
@@ -201,16 +205,13 @@ class TestOrchestrator:
             def close(self):
                 pass
 
-        class ThresholdGate:
+        class ThresholdGate(BaseGate):
             name = "threshold"
             input_schema = RowSchema
             output_schema = RowSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def evaluate(self, row, ctx):
                 if row["value"] > 50:
@@ -295,16 +296,13 @@ class TestOrchestratorAuditTrail:
             def close(self):
                 pass
 
-        class IdentityTransform:
+        class IdentityTransform(BaseTransform):
             name = "identity"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)
@@ -391,16 +389,13 @@ class TestOrchestratorErrorHandling:
             def close(self):
                 pass
 
-        class ExplodingTransform:
+        class ExplodingTransform(BaseTransform):
             name = "exploding"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 raise RuntimeError("Transform exploded!")
@@ -486,30 +481,24 @@ class TestOrchestratorMultipleTransforms:
             def close(self):
                 pass
 
-        class AddOneTransform:
+        class AddOneTransform(BaseTransform):
             name = "add_one"
             input_schema = NumberSchema
             output_schema = NumberSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success({"value": row["value"] + 1})
 
-        class MultiplyTwoTransform:
+        class MultiplyTwoTransform(BaseTransform):
             name = "multiply_two"
             input_schema = NumberSchema
             output_schema = NumberSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success({"value": row["value"] * 2})
@@ -650,16 +639,13 @@ class TestOrchestratorEmptyPipeline:
             def close(self):
                 pass
 
-        class IdentityTransform:
+        class IdentityTransform(BaseTransform):
             name = "identity"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)
@@ -736,18 +722,13 @@ class TestOrchestratorInvalidRouting:
             def close(self):
                 pass
 
-        class MisroutingGate:
-            """Gate that routes to a route label that doesn't exist."""
-
+        class MisroutingGate(BaseGate):
             name = "misrouting_gate"
             input_schema = RowSchema
             output_schema = RowSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def evaluate(self, row, ctx):
                 # Route to a label that wasn't configured
@@ -1013,6 +994,7 @@ class TestOrchestratorGateRouting:
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import GateResult, RoutingAction
+        from elspeth.plugins.schemas import PluginSchema
 
         db = LandscapeDB.in_memory()
 
@@ -1033,20 +1015,30 @@ class TestOrchestratorGateRouting:
         )
         graph = ExecutionGraph.from_config(settings)
 
+        class TestSchema(PluginSchema):
+            model_config = {"extra": "allow"}  # noqa: RUF012
+
         # Mock source
         mock_source = MagicMock()
         mock_source.name = "csv"
         mock_source.load.return_value = iter([{"id": 1, "score": 0.2}])
 
-        # Mock gate that routes using "suspicious" label (maps to "flagged" sink in routes config)
-        mock_gate = MagicMock()
-        mock_gate.name = "test_gate"
-        mock_gate.evaluate.return_value = GateResult(
-            row={"id": 1, "score": 0.2},
-            action=RoutingAction.route(
-                "suspicious", reason={"score": "low"}
-            ),  # Uses route label
-        )
+        # Gate that routes using "suspicious" label (maps to "flagged" sink in routes config)
+        class RoutingGate(BaseGate):
+            name = "test_gate"
+            input_schema = TestSchema
+            output_schema = TestSchema
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def evaluate(self, row, ctx):
+                return GateResult(
+                    row={"id": 1, "score": 0.2},
+                    action=RoutingAction.route(
+                        "suspicious", reason={"score": "low"}
+                    ),  # Uses route label
+                )
 
         # Mock sinks - must return proper artifact info from write()
         mock_results = MagicMock()
@@ -1063,7 +1055,7 @@ class TestOrchestratorGateRouting:
 
         pipeline_config = PipelineConfig(
             source=mock_source,
-            transforms=[mock_gate],
+            transforms=[RoutingGate()],
             sinks={"results": mock_results, "flagged": mock_flagged},
         )
 
@@ -1094,9 +1086,19 @@ class TestLifecycleHooks:
 
         call_order: list[str] = []
 
-        class TrackedTransform:
+        from elspeth.plugins.schemas import PluginSchema
+
+        class TestSchema(PluginSchema):
+            model_config = {"extra": "allow"}  # noqa: RUF012
+
+        class TrackedTransform(BaseTransform):
             name = "tracked"
+            input_schema = TestSchema
+            output_schema = TestSchema
             plugin_version = "1.0.0"
+
+            def __init__(self) -> None:
+                super().__init__({})
 
             def on_start(self, ctx):
                 call_order.append("on_start")
@@ -1151,12 +1153,21 @@ class TestLifecycleHooks:
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
+        from elspeth.plugins.schemas import PluginSchema
 
         call_order: list[str] = []
 
-        class TrackedTransform:
+        class TestSchema(PluginSchema):
+            model_config = {"extra": "allow"}  # noqa: RUF012
+
+        class TrackedTransform(BaseTransform):
             name = "tracked"
+            input_schema = TestSchema
+            output_schema = TestSchema
             plugin_version = "1.0.0"
+
+            def __init__(self) -> None:
+                super().__init__({})
 
             def on_start(self, ctx):
                 call_order.append("on_start")
@@ -1217,12 +1228,21 @@ class TestLifecycleHooks:
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.schemas import PluginSchema
 
         completed: list[bool] = []
 
-        class FailingTransform:
+        class TestSchema(PluginSchema):
+            model_config = {"extra": "allow"}  # noqa: RUF012
+
+        class FailingTransform(BaseTransform):
             name = "failing"
+            input_schema = TestSchema
+            output_schema = TestSchema
             plugin_version = "1.0.0"
+
+            def __init__(self) -> None:
+                super().__init__({})
 
             def on_start(self, ctx):
                 pass
@@ -1863,12 +1883,21 @@ class TestSinkLifecycleHooks:
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.schemas import PluginSchema
 
         completed: list[str] = []
 
-        class FailingTransform:
+        class TestSchema(PluginSchema):
+            model_config = {"extra": "allow"}  # noqa: RUF012
+
+        class FailingTransform(BaseTransform):
             name = "failing"
+            input_schema = TestSchema
+            output_schema = TestSchema
             plugin_version = "1.0.0"
+
+            def __init__(self) -> None:
+                super().__init__({})
 
             def on_start(self, ctx):
                 pass
@@ -1994,16 +2023,13 @@ class TestOrchestratorCheckpointing:
             def close(self):
                 pass
 
-        class IdentityTransform:
+        class IdentityTransform(BaseTransform):
             name = "identity"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)
@@ -2090,16 +2116,13 @@ class TestOrchestratorCheckpointing:
             def close(self):
                 pass
 
-        class IdentityTransform:
+        class IdentityTransform(BaseTransform):
             name = "identity"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)
@@ -2179,16 +2202,13 @@ class TestOrchestratorCheckpointing:
             def close(self):
                 pass
 
-        class IdentityTransform:
+        class IdentityTransform(BaseTransform):
             name = "identity"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)
@@ -2270,19 +2290,14 @@ class TestOrchestratorCheckpointing:
             def close(self):
                 pass
 
-        class FailOnThirdTransform:
+        class FailOnThirdTransform(BaseTransform):
             name = "fail_on_third"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
             def __init__(self):
+                super().__init__({})
                 self.count = 0
-
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
 
             def process(self, row, ctx):
                 self.count += 1
@@ -2377,16 +2392,13 @@ class TestOrchestratorCheckpointing:
             def close(self):
                 pass
 
-        class IdentityTransform:
+        class IdentityTransform(BaseTransform):
             name = "identity"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)
@@ -2466,16 +2478,13 @@ class TestOrchestratorCheckpointing:
             def close(self):
                 pass
 
-        class IdentityTransform:
+        class IdentityTransform(BaseTransform):
             name = "identity"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)
@@ -2556,16 +2565,13 @@ class TestOrchestratorConfigRecording:
             def close(self):
                 pass
 
-        class IdentityTransform:
+        class IdentityTransform(BaseTransform):
             name = "identity"
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)
@@ -2742,18 +2748,15 @@ class TestNodeMetadataFromPlugin:
             def close(self):
                 pass
 
-        class VersionedTransform:
+        class VersionedTransform(BaseTransform):
             name = "versioned_transform"
             input_schema = ValueSchema
             output_schema = ValueSchema
             plugin_version = "2.5.0"  # Custom version (not 1.0.0)
             determinism = Determinism.NONDETERMINISTIC
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)
@@ -2868,18 +2871,15 @@ class TestNodeMetadataFromPlugin:
             def close(self):
                 pass
 
-        class NonDeterministicTransform:
+        class NonDeterministicTransform(BaseTransform):
             name = "nondeterministic_transform"
             input_schema = ValueSchema
             output_schema = ValueSchema
             plugin_version = "1.0.0"
             determinism = Determinism.NONDETERMINISTIC  # Explicit nondeterministic
 
-            def on_start(self, ctx):
-                pass
-
-            def on_complete(self, ctx):
-                pass
+            def __init__(self) -> None:
+                super().__init__({})
 
             def process(self, row, ctx):
                 return TransformResult.success(row)

@@ -589,21 +589,9 @@ allow_hits:
     expires: null  # Permanent - intentional design
 
   # ============================================================
-  # ROW PROCESSOR PLUGIN DISPATCH (Permanent)
+  # ROW PROCESSOR PLUGIN DISPATCH
   # ============================================================
-  # RowProcessor uses hasattr to distinguish between transform types
-  # (gate, aggregation, regular transform). This is legitimate duck-typing
-  # for polymorphic dispatch.
+  # Previously used hasattr duck-typing. Now uses isinstance() checks
+  # against base classes (BaseTransform, BaseGate, BaseAggregation).
+  # Stale allowlist entries removed by Task 7.
   # ============================================================
-
-  - key: "engine/processor.py:R3:RowProcessor:process_row:line=133"
-    owner: "architecture"
-    reason: "Polymorphic dispatch: checking for gate interface (evaluate method)"
-    safety: "Legitimate duck-typing - transforms have different interfaces by design"
-    expires: null  # Permanent - intentional design
-
-  - key: "engine/processor.py:R3:RowProcessor:process_row:line=161"
-    owner: "architecture"
-    reason: "Polymorphic dispatch: checking for aggregation interface (accept method)"
-    safety: "Legitimate duck-typing - transforms have different interfaces by design"
-    expires: null  # Permanent - intentional design

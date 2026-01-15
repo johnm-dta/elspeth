@@ -1,9 +1,29 @@
 # tests/engine/test_processor.py
-"""Tests for RowProcessor."""
+"""Tests for RowProcessor.
+
+All test plugins inherit from base classes (BaseTransform, BaseGate, BaseAggregation)
+because the processor uses isinstance() for type-safe plugin detection.
+"""
 
 from typing import Any
 
-from elspeth.plugins.results import RowOutcome
+from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
+from elspeth.plugins.context import PluginContext
+from elspeth.plugins.results import (
+    AcceptResult,
+    GateResult,
+    RoutingAction,
+    RowOutcome,
+    TransformResult,
+)
+from elspeth.plugins.schemas import PluginSchema
+
+
+# Shared schema for test plugins
+class _TestSchema(PluginSchema):
+    """Dynamic schema for test plugins."""
+
+    model_config = {"extra": "allow"}  # noqa: RUF012
 
 
 class TestRowProcessor:
@@ -13,8 +33,6 @@ class TestRowProcessor:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import TransformResult
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -43,18 +61,28 @@ class TestRowProcessor:
             config={},
         )
 
-        class DoubleTransform:
+        class DoubleTransform(BaseTransform):
             name = "double"
-            node_id = transform1.node_id
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
 
             def process(
                 self, row: dict[str, Any], ctx: PluginContext
             ) -> TransformResult:
                 return TransformResult.success({"value": row["value"] * 2})
 
-        class AddOneTransform:
+        class AddOneTransform(BaseTransform):
             name = "add_one"
-            node_id = transform2.node_id
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
 
             def process(
                 self, row: dict[str, Any], ctx: PluginContext
@@ -72,7 +100,10 @@ class TestRowProcessor:
         result = processor.process_row(
             row_index=0,
             row_data={"value": 10},
-            transforms=[DoubleTransform(), AddOneTransform()],
+            transforms=[
+                DoubleTransform(transform1.node_id),
+                AddOneTransform(transform2.node_id),
+            ],
             ctx=ctx,
         )
 
@@ -85,8 +116,6 @@ class TestRowProcessor:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import TransformResult
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -107,9 +136,14 @@ class TestRowProcessor:
             config={},
         )
 
-        class EnricherTransform:
+        class EnricherTransform(BaseTransform):
             name = "enricher"
-            node_id = transform.node_id
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
 
             def process(
                 self, row: dict[str, Any], ctx: PluginContext
@@ -127,7 +161,7 @@ class TestRowProcessor:
         result = processor.process_row(
             row_index=0,
             row_data={"name": "test"},
-            transforms=[EnricherTransform()],
+            transforms=[EnricherTransform(transform.node_id)],
             ctx=ctx,
         )
 
@@ -142,7 +176,6 @@ class TestRowProcessor:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.plugins.context import PluginContext
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -179,8 +212,6 @@ class TestRowProcessor:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import TransformResult
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -201,9 +232,14 @@ class TestRowProcessor:
             config={},
         )
 
-        class ValidatorTransform:
+        class ValidatorTransform(BaseTransform):
             name = "validator"
-            node_id = transform.node_id
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
 
             def process(
                 self, row: dict[str, Any], ctx: PluginContext
@@ -225,7 +261,7 @@ class TestRowProcessor:
         result = processor.process_row(
             row_index=0,
             row_data={"value": -5},
-            transforms=[ValidatorTransform()],
+            transforms=[ValidatorTransform(transform.node_id)],
             ctx=ctx,
         )
 
@@ -242,8 +278,6 @@ class TestRowProcessorGates:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import GateResult, RoutingAction, TransformResult
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -271,16 +305,26 @@ class TestRowProcessorGates:
             config={},
         )
 
-        class PassGate:
+        class PassGate(BaseGate):
             name = "pass_gate"
-            node_id = gate.node_id
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
 
             def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
                 return GateResult(row=row, action=RoutingAction.continue_())
 
-        class FinalTransform:
+        class FinalTransform(BaseTransform):
             name = "final"
-            node_id = transform.node_id
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
 
             def process(
                 self, row: dict[str, Any], ctx: PluginContext
@@ -298,7 +342,7 @@ class TestRowProcessorGates:
         result = processor.process_row(
             row_index=0,
             row_data={"value": 42},
-            transforms=[PassGate(), FinalTransform()],
+            transforms=[PassGate(gate.node_id), FinalTransform(transform.node_id)],
             ctx=ctx,
         )
 
@@ -310,8 +354,6 @@ class TestRowProcessorGates:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import GateResult, RoutingAction
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -348,9 +390,14 @@ class TestRowProcessorGates:
             mode="move",
         )
 
-        class RouterGate:
+        class RouterGate(BaseGate):
             name = "router"
-            node_id = gate.node_id
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
 
             def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
                 if row.get("value", 0) > 100:
@@ -376,7 +423,7 @@ class TestRowProcessorGates:
         result = processor.process_row(
             row_index=0,
             row_data={"value": 150},
-            transforms=[RouterGate()],
+            transforms=[RouterGate(gate.node_id)],
             ctx=ctx,
         )
 
@@ -389,8 +436,6 @@ class TestRowProcessorGates:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import GateResult, RoutingAction
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -441,9 +486,14 @@ class TestRowProcessorGates:
             mode="copy",
         )
 
-        class SplitterGate:
+        class SplitterGate(BaseGate):
             name = "splitter"
-            node_id = gate.node_id
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
 
             def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
                 return GateResult(
@@ -467,7 +517,7 @@ class TestRowProcessorGates:
         result = processor.process_row(
             row_index=0,
             row_data={"value": 42},
-            transforms=[SplitterGate()],
+            transforms=[SplitterGate(gate.node_id)],
             ctx=ctx,
         )
 
@@ -484,8 +534,6 @@ class TestRowProcessorAggregation:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import AcceptResult
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -506,15 +554,23 @@ class TestRowProcessorAggregation:
             config={},
         )
 
-        class CounterAggregation:
+        class CounterAggregation(BaseAggregation):
             name = "counter"
-            node_id = agg.node_id
-            _batch_id: str | None = None
-            _count: int = 0
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+                self._batch_id: str | None = None
+                self._count: int = 0
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._count += 1
                 return AcceptResult(accepted=True, trigger=False)
+
+            def should_trigger(self) -> bool:
+                return False
 
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 result = [{"count": self._count}]
@@ -532,7 +588,7 @@ class TestRowProcessorAggregation:
         result = processor.process_row(
             row_index=0,
             row_data={"value": 1},
-            transforms=[CounterAggregation()],
+            transforms=[CounterAggregation(agg.node_id)],
             ctx=ctx,
         )
 
@@ -543,8 +599,6 @@ class TestRowProcessorAggregation:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import AcceptResult
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -565,21 +619,26 @@ class TestRowProcessorAggregation:
             config={},
         )
 
-        flush_called = []
+        flush_called: list[bool] = []
 
-        class ThresholdAggregation:
+        class ThresholdAggregation(BaseAggregation):
             name = "threshold_agg"
-            node_id = agg.node_id
-            _batch_id: str | None = None
-            _values: list[int]
+            input_schema = _TestSchema
+            output_schema = _TestSchema
 
-            def __init__(self) -> None:
-                self._values = []
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+                self._batch_id: str | None = None
+                self._values: list[int] = []
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._values.append(row["value"])
                 # Trigger when we have 2 values
                 return AcceptResult(accepted=True, trigger=len(self._values) >= 2)
+
+            def should_trigger(self) -> bool:
+                return len(self._values) >= 2
 
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 flush_called.append(True)
@@ -588,7 +647,7 @@ class TestRowProcessorAggregation:
                 return result
 
         ctx = PluginContext(run_id=run.run_id, config={})
-        aggregation = ThresholdAggregation()
+        aggregation = ThresholdAggregation(agg.node_id)
         processor = RowProcessor(
             recorder=recorder,
             span_factory=SpanFactory(),
@@ -625,7 +684,6 @@ class TestRowProcessorTokenIdentity:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.plugins.context import PluginContext
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -669,8 +727,6 @@ class TestRowProcessorTokenIdentity:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import TransformResult
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -698,9 +754,13 @@ class TestRowProcessorTokenIdentity:
             config={},
         )
 
-        class IdentityTransform:
+        class IdentityTransform(BaseTransform):
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
             def __init__(self, name: str, node_id: str) -> None:
-                self.name = name
+                super().__init__({})
+                self.name = name  # type: ignore[misc]
                 self.node_id = node_id
 
             def process(
@@ -734,3 +794,57 @@ class TestRowProcessorTokenIdentity:
         # Steps should be 1 and 2 (source is 0, transforms start at 1)
         step_indices = {s.step_index for s in states}
         assert step_indices == {1, 2}
+
+
+class TestRowProcessorUnknownType:
+    """Test handling of unknown plugin types."""
+
+    def test_unknown_type_raises_type_error(self) -> None:
+        """Unknown plugin types raise TypeError with helpful message."""
+        import pytest
+
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+        )
+
+        class NotAPlugin:
+            """A class that doesn't inherit from any base class."""
+
+            name = "fake"
+            node_id = "fake_id"
+
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> None:
+                pass
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+        )
+
+        with pytest.raises(TypeError) as exc_info:
+            processor.process_row(
+                row_index=0,
+                row_data={"value": 1},
+                transforms=[NotAPlugin()],
+                ctx=ctx,
+            )
+
+        assert "Unknown transform type: NotAPlugin" in str(exc_info.value)
+        assert "BaseTransform" in str(exc_info.value)
+        assert "BaseGate" in str(exc_info.value)
+        assert "BaseAggregation" in str(exc_info.value)

@@ -435,11 +435,11 @@ def plugins_list(
         None,
         "--type",
         "-t",
-        help="Filter by plugin type (source, transform, sink).",
+        help="Filter by plugin type (source, transform, gate, sink).",
     ),
 ) -> None:
     """List available plugins."""
-    valid_types = {"source", "transform", "sink"}
+    valid_types = set(PLUGIN_REGISTRY.keys())
 
     if plugin_type and plugin_type not in valid_types:
         typer.echo(f"Error: Invalid type '{plugin_type}'.", err=True)

@@ -301,10 +301,12 @@ class Orchestrator:
         )
 
         # Call on_start for all plugins BEFORE processing
-        # Lifecycle hooks are optional - plugins may or may not implement them
+        # Base classes provide no-op implementations, so no hasattr needed
+        config.source.on_start(ctx)
         for transform in config.transforms:
-            if hasattr(transform, "on_start"):
-                transform.on_start(ctx)
+            transform.on_start(ctx)
+        for sink in config.sinks.values():
+            sink.on_start(ctx)
 
         # Create processor
         processor = RowProcessor(
@@ -396,12 +398,16 @@ class Orchestrator:
 
         finally:
             # Call on_complete for all plugins (even on error)
-            # Lifecycle hooks are optional - plugins may or may not implement them
+            # Base classes provide no-op implementations, so no hasattr needed
             # suppress(Exception) ensures one plugin failure doesn't prevent others from cleanup
             for transform in config.transforms:
-                if hasattr(transform, "on_complete"):
-                    with suppress(Exception):
-                        transform.on_complete(ctx)
+                with suppress(Exception):
+                    transform.on_complete(ctx)
+            for sink in config.sinks.values():
+                with suppress(Exception):
+                    sink.on_complete(ctx)
+            with suppress(Exception):
+                config.source.on_complete(ctx)
 
             # Close source and all sinks
             # SinkProtocol requires close() - if missing, that's a bug

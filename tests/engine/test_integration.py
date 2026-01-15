@@ -152,6 +152,9 @@ class TestEngineIntegration:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -162,6 +165,12 @@ class TestEngineIntegration:
             name = "mark_processed"
             input_schema = ValueSchema
             output_schema = OutputSchema
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def process(self, row, ctx):
                 return TransformResult.success({
@@ -174,6 +183,12 @@ class TestEngineIntegration:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -251,6 +266,9 @@ class TestEngineIntegration:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -262,6 +280,12 @@ class TestEngineIntegration:
             input_schema = NumberSchema
             output_schema = NumberSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 return TransformResult.success({"n": row["n"] * 2})
 
@@ -269,6 +293,12 @@ class TestEngineIntegration:
             name = "add_ten"
             input_schema = NumberSchema
             output_schema = NumberSchema
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def process(self, row, ctx):
                 return TransformResult.success({"n": row["n"] + 10})
@@ -278,6 +308,12 @@ class TestEngineIntegration:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -375,6 +411,9 @@ class TestEngineIntegration:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -387,6 +426,12 @@ class TestEngineIntegration:
             name = "even_odd_gate"
             input_schema = NumberSchema
             output_schema = NumberSchema
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def evaluate(self, row, ctx):
                 if row["value"] % 2 == 0:
@@ -402,6 +447,12 @@ class TestEngineIntegration:
             def __init__(self, sink_name: str):
                 self.name = sink_name
                 self.results: list[dict] = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -499,6 +550,9 @@ class TestNoSilentAuditLoss:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -512,6 +566,12 @@ class TestNoSilentAuditLoss:
             input_schema = RowSchema
             output_schema = RowSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def evaluate(self, row, ctx):
                 # Route to "phantom" which is not in route_resolution_map
                 return GateResult(
@@ -524,6 +584,12 @@ class TestNoSilentAuditLoss:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -592,6 +658,9 @@ class TestNoSilentAuditLoss:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -603,6 +672,12 @@ class TestNoSilentAuditLoss:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 raise RuntimeError("Intentional explosion")
 
@@ -611,6 +686,12 @@ class TestNoSilentAuditLoss:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -660,6 +741,9 @@ class TestNoSilentAuditLoss:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -671,11 +755,23 @@ class TestNoSilentAuditLoss:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 return TransformResult.success(row)
 
         class ExplodingSink:
             name = "exploding_sink"
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 raise OSError("Sink explosion")
@@ -725,6 +821,9 @@ class TestAuditTrailCompleteness:
             name = "empty"
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 return iter([])
 
@@ -736,6 +835,12 @@ class TestAuditTrailCompleteness:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 return TransformResult.success(row)
 
@@ -744,6 +849,12 @@ class TestAuditTrailCompleteness:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -796,6 +907,9 @@ class TestAuditTrailCompleteness:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -809,6 +923,12 @@ class TestAuditTrailCompleteness:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def evaluate(self, row, ctx):
                 if row["value"] > 50:
                     return GateResult(row=row, action=RoutingAction.route("high"))  # Route label
@@ -818,6 +938,12 @@ class TestAuditTrailCompleteness:
             def __init__(self, sink_name: str):
                 self.name = sink_name
                 self.results: list[dict] = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)

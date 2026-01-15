@@ -105,6 +105,9 @@ class TestOrchestrator:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -115,6 +118,12 @@ class TestOrchestrator:
             name = "double"
             input_schema = InputSchema
             output_schema = OutputSchema
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def process(self, row, ctx):
                 return TransformResult.success({
@@ -127,6 +136,12 @@ class TestOrchestrator:
 
             def __init__(self):
                 self.results = []  # Instance attribute, not class attribute
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -171,6 +186,9 @@ class TestOrchestrator:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -181,6 +199,12 @@ class TestOrchestrator:
             name = "threshold"
             input_schema = RowSchema
             output_schema = RowSchema
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def evaluate(self, row, ctx):
                 if row["value"] > 50:
@@ -195,6 +219,12 @@ class TestOrchestrator:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -245,6 +275,9 @@ class TestOrchestratorAuditTrail:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -256,6 +289,12 @@ class TestOrchestratorAuditTrail:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 return TransformResult.success(row)
 
@@ -264,6 +303,12 @@ class TestOrchestratorAuditTrail:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -323,6 +368,9 @@ class TestOrchestratorErrorHandling:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -334,6 +382,12 @@ class TestOrchestratorErrorHandling:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 raise RuntimeError("Transform exploded!")
 
@@ -342,6 +396,12 @@ class TestOrchestratorErrorHandling:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -400,6 +460,9 @@ class TestOrchestratorMultipleTransforms:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -411,6 +474,12 @@ class TestOrchestratorMultipleTransforms:
             input_schema = NumberSchema
             output_schema = NumberSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 return TransformResult.success({"value": row["value"] + 1})
 
@@ -418,6 +487,12 @@ class TestOrchestratorMultipleTransforms:
             name = "multiply_two"
             input_schema = NumberSchema
             output_schema = NumberSchema
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def process(self, row, ctx):
                 return TransformResult.success({"value": row["value"] * 2})
@@ -427,6 +502,12 @@ class TestOrchestratorMultipleTransforms:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -476,6 +557,9 @@ class TestOrchestratorEmptyPipeline:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -487,6 +571,12 @@ class TestOrchestratorEmptyPipeline:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -528,6 +618,9 @@ class TestOrchestratorEmptyPipeline:
             name = "empty"
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 return iter([])
 
@@ -539,6 +632,12 @@ class TestOrchestratorEmptyPipeline:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 return TransformResult.success(row)
 
@@ -547,6 +646,12 @@ class TestOrchestratorEmptyPipeline:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -596,6 +701,9 @@ class TestOrchestratorInvalidRouting:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -609,6 +717,12 @@ class TestOrchestratorInvalidRouting:
             input_schema = RowSchema
             output_schema = RowSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def evaluate(self, row, ctx):
                 # Route to a label that wasn't configured
                 return GateResult(
@@ -621,6 +735,12 @@ class TestOrchestratorInvalidRouting:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -997,6 +1117,9 @@ class TestLifecycleHooks:
             name = "tracked"
             plugin_version = "1.0.0"
 
+            def on_start(self, ctx):
+                call_order.append("on_start")
+
             def process(self, row, ctx):
                 call_order.append("process")
                 return TransformResult.success(row)
@@ -1038,8 +1161,9 @@ class TestLifecycleHooks:
         orchestrator = Orchestrator(db)
         orchestrator.run(config, graph=graph)
 
-        # on_complete should be called last
-        assert call_order[-1] == "on_complete"
+        # on_complete should be called last (among transform lifecycle calls)
+        transform_calls = [c for c in call_order if c in ["on_start", "process", "on_complete"]]
+        assert transform_calls[-1] == "on_complete"
         # All processing should happen before on_complete
         assert call_order.count("process") == 2
 
@@ -1058,6 +1182,9 @@ class TestLifecycleHooks:
         class FailingTransform:
             name = "failing"
             plugin_version = "1.0.0"
+
+            def on_start(self, ctx):
+                pass
 
             def process(self, row, ctx):
                 raise RuntimeError("intentional failure")
@@ -1127,6 +1254,9 @@ class TestOrchestratorLandscapeExport:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -1140,6 +1270,12 @@ class TestOrchestratorLandscapeExport:
 
             def __init__(self):
                 self.captured_rows: list[dict] = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, row, ctx):
                 # Row processing writes batches (lists), export writes single records
@@ -1235,6 +1371,9 @@ class TestOrchestratorLandscapeExport:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -1246,6 +1385,12 @@ class TestOrchestratorLandscapeExport:
 
             def __init__(self):
                 self.captured_rows: list[dict] = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, row, ctx):
                 # Row processing writes batches (lists), export writes single records
@@ -1339,6 +1484,9 @@ class TestOrchestratorLandscapeExport:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -1350,6 +1498,12 @@ class TestOrchestratorLandscapeExport:
 
             def __init__(self):
                 self.captured_rows: list[dict] = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.captured_rows.extend(rows)
@@ -1428,6 +1582,9 @@ class TestOrchestratorLandscapeExport:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -1439,6 +1596,12 @@ class TestOrchestratorLandscapeExport:
 
             def __init__(self):
                 self.captured_rows: list[dict] = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.captured_rows.extend(rows)
@@ -1488,6 +1651,224 @@ class TestOrchestratorLandscapeExport:
         assert len(output_sink.captured_rows) == 1
         # Audit sink should be empty (no export)
         assert len(audit_sink.captured_rows) == 0
+
+
+class TestSourceLifecycleHooks:
+    """Tests for source plugin lifecycle hook calls."""
+
+    def test_source_lifecycle_hooks_called(self) -> None:
+        """Source on_start, on_complete should be called around loading."""
+        from unittest.mock import MagicMock
+
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        call_order: list[str] = []
+
+        class TrackedSource:
+            """Source that tracks lifecycle calls."""
+
+            name = "tracked_source"
+
+            def on_start(self, ctx):
+                call_order.append("source_on_start")
+
+            def load(self, ctx):
+                call_order.append("source_load")
+                yield {"value": 1}
+
+            def on_complete(self, ctx):
+                call_order.append("source_on_complete")
+
+            def close(self):
+                call_order.append("source_close")
+
+        db = LandscapeDB.in_memory()
+
+        source = TrackedSource()
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+        mock_sink.write.return_value = {
+            "path": "memory",
+            "size_bytes": 0,
+            "content_hash": "abc123",
+        }
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[],
+            sinks={"output": mock_sink},
+        )
+
+        # Minimal graph
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="tracked_source")
+        graph.add_node("sink", node_type="sink", plugin_name="csv")
+        graph.add_edge("source", "sink", label="continue", mode="move")
+        graph._transform_id_map = {}
+        graph._sink_id_map = {"output": "sink"}
+        graph._output_sink = "output"
+
+        orchestrator = Orchestrator(db)
+        orchestrator.run(config, graph=graph)
+
+        # on_start should be called BEFORE load
+        assert "source_on_start" in call_order, "Source on_start should be called"
+        assert call_order.index("source_on_start") < call_order.index("source_load"), (
+            "Source on_start should be called before load"
+        )
+        # on_complete should be called AFTER load and BEFORE close
+        assert "source_on_complete" in call_order, "Source on_complete should be called"
+        assert call_order.index("source_on_complete") > call_order.index("source_load"), (
+            "Source on_complete should be called after load"
+        )
+        assert call_order.index("source_on_complete") < call_order.index("source_close"), (
+            "Source on_complete should be called before close"
+        )
+
+
+class TestSinkLifecycleHooks:
+    """Tests for sink plugin lifecycle hook calls."""
+
+    def test_sink_lifecycle_hooks_called(self) -> None:
+        """Sink on_start and on_complete should be called."""
+        from unittest.mock import MagicMock
+
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        call_order: list[str] = []
+
+        class TrackedSink:
+            """Sink that tracks lifecycle calls."""
+
+            name = "tracked_sink"
+
+            def on_start(self, ctx):
+                call_order.append("sink_on_start")
+
+            def on_complete(self, ctx):
+                call_order.append("sink_on_complete")
+
+            def write(self, rows, ctx):
+                call_order.append("sink_write")
+                return {"path": "memory", "size_bytes": 0, "content_hash": "abc123"}
+
+            def close(self):
+                call_order.append("sink_close")
+
+        db = LandscapeDB.in_memory()
+
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([{"value": 1}])
+
+        sink = TrackedSink()
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[],
+            sinks={"output": sink},
+        )
+
+        # Minimal graph
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("sink", node_type="sink", plugin_name="tracked_sink")
+        graph.add_edge("source", "sink", label="continue", mode="move")
+        graph._transform_id_map = {}
+        graph._sink_id_map = {"output": "sink"}
+        graph._output_sink = "output"
+
+        orchestrator = Orchestrator(db)
+        orchestrator.run(config, graph=graph)
+
+        # on_start should be called before write
+        assert "sink_on_start" in call_order, "Sink on_start should be called"
+        assert call_order.index("sink_on_start") < call_order.index("sink_write"), (
+            "Sink on_start should be called before write"
+        )
+        # on_complete should be called after write, before close
+        assert "sink_on_complete" in call_order, "Sink on_complete should be called"
+        assert call_order.index("sink_on_complete") > call_order.index("sink_write"), (
+            "Sink on_complete should be called after write"
+        )
+
+    def test_sink_on_complete_called_even_on_error(self) -> None:
+        """Sink on_complete should be called even when run fails."""
+        from unittest.mock import MagicMock
+
+        import pytest
+
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import TransformResult
+
+        completed: list[str] = []
+
+        class FailingTransform:
+            name = "failing"
+            plugin_version = "1.0.0"
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
+            def process(self, row, ctx):
+                raise RuntimeError("intentional failure")
+
+        class TrackedSink:
+            name = "tracked_sink"
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                completed.append("sink_on_complete")
+
+            def write(self, rows, ctx):
+                return {"path": "memory", "size_bytes": 0, "content_hash": "abc123"}
+
+            def close(self):
+                pass
+
+        db = LandscapeDB.in_memory()
+
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([{"value": 1}])
+
+        transform = FailingTransform()
+        sink = TrackedSink()
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[transform],
+            sinks={"output": sink},
+        )
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("transform", node_type="transform", plugin_name="failing")
+        graph.add_node("sink", node_type="sink", plugin_name="tracked_sink")
+        graph.add_edge("source", "transform", label="continue", mode="move")
+        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph._transform_id_map = {0: "transform"}
+        graph._sink_id_map = {"output": "sink"}
+        graph._output_sink = "output"
+
+        orchestrator = Orchestrator(db)
+
+        with pytest.raises(RuntimeError):
+            orchestrator.run(config, graph=graph)
+
+        # on_complete should still be called
+        assert "sink_on_complete" in completed
 
 
 class TestOrchestratorCheckpointing:
@@ -1544,6 +1925,9 @@ class TestOrchestratorCheckpointing:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -1555,6 +1939,12 @@ class TestOrchestratorCheckpointing:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 return TransformResult.success(row)
 
@@ -1563,6 +1953,12 @@ class TestOrchestratorCheckpointing:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -1620,6 +2016,9 @@ class TestOrchestratorCheckpointing:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -1631,6 +2030,12 @@ class TestOrchestratorCheckpointing:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 return TransformResult.success(row)
 
@@ -1639,6 +2044,12 @@ class TestOrchestratorCheckpointing:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -1691,6 +2102,9 @@ class TestOrchestratorCheckpointing:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -1702,6 +2116,12 @@ class TestOrchestratorCheckpointing:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 return TransformResult.success(row)
 
@@ -1710,6 +2130,12 @@ class TestOrchestratorCheckpointing:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -1764,6 +2190,9 @@ class TestOrchestratorCheckpointing:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -1778,6 +2207,12 @@ class TestOrchestratorCheckpointing:
             def __init__(self):
                 self.count = 0
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 self.count += 1
                 if self.count == 3:
@@ -1789,6 +2224,12 @@ class TestOrchestratorCheckpointing:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -1853,6 +2294,9 @@ class TestOrchestratorCheckpointing:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -1864,6 +2308,12 @@ class TestOrchestratorCheckpointing:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 return TransformResult.success(row)
 
@@ -1872,6 +2322,12 @@ class TestOrchestratorCheckpointing:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
@@ -1924,6 +2380,9 @@ class TestOrchestratorCheckpointing:
             def __init__(self, data: list[dict]) -> None:
                 self._data = data
 
+            def on_start(self, ctx):
+                pass
+
             def load(self, ctx):
                 yield from self._data
 
@@ -1935,6 +2394,12 @@ class TestOrchestratorCheckpointing:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
             def process(self, row, ctx):
                 return TransformResult.success(row)
 
@@ -1943,6 +2408,12 @@ class TestOrchestratorCheckpointing:
 
             def __init__(self):
                 self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
 
             def write(self, rows, ctx):
                 self.results.extend(rows)

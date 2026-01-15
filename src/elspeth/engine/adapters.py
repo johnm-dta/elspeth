@@ -118,6 +118,16 @@ class SinkAdapter:
         """
         self._sink.close()
 
+    def on_start(self, ctx: Any) -> None:
+        """Delegate on_start to wrapped sink if it implements it."""
+        if hasattr(self._sink, "on_start"):
+            self._sink.on_start(ctx)
+
+    def on_complete(self, ctx: Any) -> None:
+        """Delegate on_complete to wrapped sink if it implements it."""
+        if hasattr(self._sink, "on_complete"):
+            self._sink.on_complete(ctx)
+
     def _compute_artifact_info(self) -> dict[str, Any]:
         """Compute artifact metadata based on descriptor kind.
 

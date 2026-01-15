@@ -80,6 +80,10 @@ class SourceProtocol(Protocol):
         """Called before load(). Override for setup."""
         ...
 
+    def on_complete(self, ctx: "PluginContext") -> None:
+        """Called after load() completes. Override for cleanup before close()."""
+        ...
+
 
 @runtime_checkable
 class TransformProtocol(Protocol):

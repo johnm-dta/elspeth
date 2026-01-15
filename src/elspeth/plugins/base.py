@@ -343,3 +343,6 @@ class BaseSource(ABC):
 
     def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called before load()."""
+
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027
+        """Called after load() completes (before close)."""

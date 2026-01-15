@@ -119,12 +119,20 @@ class SinkAdapter:
         self._sink.close()
 
     def on_start(self, ctx: Any) -> None:
-        """Delegate on_start to wrapped sink if it implements it."""
+        """Delegate on_start to wrapped sink.
+
+        Uses hasattr because wrapped sink may be Phase 2 plugin not
+        inheriting from BaseSink (legitimate trust boundary check).
+        """
         if hasattr(self._sink, "on_start"):
             self._sink.on_start(ctx)
 
     def on_complete(self, ctx: Any) -> None:
-        """Delegate on_complete to wrapped sink if it implements it."""
+        """Delegate on_complete to wrapped sink.
+
+        Uses hasattr because wrapped sink may be Phase 2 plugin not
+        inheriting from BaseSink (legitimate trust boundary check).
+        """
         if hasattr(self._sink, "on_complete"):
             self._sink.on_complete(ctx)
 

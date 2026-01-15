@@ -40,6 +40,9 @@ class TestSourceProtocol:
             def on_start(self, ctx: PluginContext) -> None:
                 pass
 
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
         source = MySource({"path": "test.csv"})
 
         # IMPORTANT: Verify protocol conformance at runtime

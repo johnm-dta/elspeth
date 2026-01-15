@@ -13,6 +13,7 @@ Coordinates:
 import os
 from contextlib import suppress
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from elspeth.core.dag import ExecutionGraph
@@ -25,6 +26,17 @@ from elspeth.plugins.enums import NodeType
 if TYPE_CHECKING:
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.config import CheckpointSettings, ElspethSettings
+
+
+class RunStatus(str, Enum):
+    """Status for pipeline runs.
+
+    RUNNING is intermediate, COMPLETED/FAILED are terminal.
+    """
+
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 @dataclass
@@ -42,7 +54,7 @@ class RunResult:
     """Result of a pipeline run."""
 
     run_id: str
-    status: str  # completed, failed
+    status: RunStatus
     rows_processed: int
     rows_succeeded: int
     rows_failed: int
@@ -196,7 +208,7 @@ class Orchestrator:
 
             # Complete run
             recorder.complete_run(run.run_id, status="completed")
-            result.status = "completed"
+            result.status = RunStatus.COMPLETED
             run_completed = True
 
             # Delete checkpoints on successful completion
@@ -481,7 +493,7 @@ class Orchestrator:
 
         return RunResult(
             run_id=run_id,
-            status="running",  # Will be updated
+            status=RunStatus.RUNNING,  # Will be updated to COMPLETED
             rows_processed=rows_processed,
             rows_succeeded=rows_succeeded,
             rows_failed=rows_failed,

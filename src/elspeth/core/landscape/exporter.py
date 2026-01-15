@@ -13,6 +13,10 @@ from typing import Any
 
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.models import (
+    NodeStateCompleted,
+    NodeStateOpen,
+)
 from elspeth.core.landscape.recorder import LandscapeRecorder
 
 
@@ -231,27 +235,55 @@ class LandscapeExporter:
 
                 # Node states for this token
                 for state in self._recorder.get_node_states_for_token(token.token_id):
-                    yield {
-                        "record_type": "node_state",
-                        "run_id": run_id,
-                        "state_id": state.state_id,
-                        "token_id": state.token_id,
-                        "node_id": state.node_id,
-                        "step_index": state.step_index,
-                        "attempt": state.attempt,
-                        "status": state.status,
-                        "input_hash": state.input_hash,
-                        "output_hash": state.output_hash,
-                        "duration_ms": state.duration_ms,
-                        "started_at": (
-                            state.started_at.isoformat() if state.started_at else None
-                        ),
-                        "completed_at": (
-                            state.completed_at.isoformat()
-                            if state.completed_at
-                            else None
-                        ),
-                    }
+                    # Handle discriminated union types
+                    if isinstance(state, NodeStateOpen):
+                        yield {
+                            "record_type": "node_state",
+                            "run_id": run_id,
+                            "state_id": state.state_id,
+                            "token_id": state.token_id,
+                            "node_id": state.node_id,
+                            "step_index": state.step_index,
+                            "attempt": state.attempt,
+                            "status": state.status.value,
+                            "input_hash": state.input_hash,
+                            "output_hash": None,
+                            "duration_ms": None,
+                            "started_at": state.started_at.isoformat(),
+                            "completed_at": None,
+                        }
+                    elif isinstance(state, NodeStateCompleted):
+                        yield {
+                            "record_type": "node_state",
+                            "run_id": run_id,
+                            "state_id": state.state_id,
+                            "token_id": state.token_id,
+                            "node_id": state.node_id,
+                            "step_index": state.step_index,
+                            "attempt": state.attempt,
+                            "status": state.status.value,
+                            "input_hash": state.input_hash,
+                            "output_hash": state.output_hash,
+                            "duration_ms": state.duration_ms,
+                            "started_at": state.started_at.isoformat(),
+                            "completed_at": state.completed_at.isoformat(),
+                        }
+                    else:  # NodeStateFailed
+                        yield {
+                            "record_type": "node_state",
+                            "run_id": run_id,
+                            "state_id": state.state_id,
+                            "token_id": state.token_id,
+                            "node_id": state.node_id,
+                            "step_index": state.step_index,
+                            "attempt": state.attempt,
+                            "status": state.status.value,
+                            "input_hash": state.input_hash,
+                            "output_hash": state.output_hash,
+                            "duration_ms": state.duration_ms,
+                            "started_at": state.started_at.isoformat(),
+                            "completed_at": state.completed_at.isoformat(),
+                        }
 
                     # Routing events for this state
                     for event in self._recorder.get_routing_events(state.state_id):

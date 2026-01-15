@@ -704,7 +704,9 @@ class TestLandscapeRecorderNodeStates:
             input_data={},
             attempt=0,
         )
-        recorder.complete_node_state(state1.state_id, status="failed", error={})
+        recorder.complete_node_state(
+            state1.state_id, status="failed", error={}, duration_ms=1.0
+        )
 
         # Second attempt
         state2 = recorder.begin_node_state(

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape import LandscapeRecorder
-from elspeth.core.landscape.models import Artifact, NodeState, RoutingSpec
+from elspeth.core.landscape.models import Artifact, NodeStateOpen, RoutingSpec
 from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenInfo
@@ -730,7 +730,7 @@ class SinkExecutor:
         rows = [t.row_data for t in tokens]
 
         # Create node_state for EACH token - this is how we derive COMPLETED terminal state
-        states: list[tuple[TokenInfo, NodeState]] = []
+        states: list[tuple[TokenInfo, NodeStateOpen]] = []
         for token in tokens:
             state = self._recorder.begin_node_state(
                 token_id=token.token_id,

@@ -130,24 +130,113 @@ class TokenParent:
     ordinal: int
 
 
+class NodeStateStatus(str, Enum):
+    """Status for node state records.
+
+    OPEN is intermediate (processing in progress).
+    COMPLETED and FAILED are terminal.
+    """
+
+    OPEN = "open"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 @dataclass
-class NodeState:
-    """What happened when a token visited a node."""
+class NodeStateOpen:
+    """A node state that is currently being processed.
+
+    This is the initial state created by begin_node_state().
+    Processing has started but not yet completed.
+
+    Invariants:
+    - No output_hash (output not produced yet)
+    - No completed_at (not completed yet)
+    - No duration_ms (not finished timing)
+    - No error_json (no error yet)
+    - No context_after_json (processing not done)
+    """
 
     state_id: str
     token_id: str
     node_id: str
     step_index: int
     attempt: int
-    status: str  # open, completed, failed
+    status: Literal[NodeStateStatus.OPEN]
     input_hash: str
     started_at: datetime
+    context_before_json: str | None = None
+
+
+@dataclass
+class NodeStateCompleted:
+    """A node state that completed successfully.
+
+    Created when complete_node_state() is called with status="completed".
+
+    Invariants:
+    - Has output_hash (processing produced output)
+    - Has completed_at (finished processing)
+    - Has duration_ms (timing complete)
+    - No error_json (no error occurred)
+    """
+
+    state_id: str
+    token_id: str
+    node_id: str
+    step_index: int
+    attempt: int
+    status: Literal[NodeStateStatus.COMPLETED]
+    input_hash: str
+    started_at: datetime
+    output_hash: str
+    completed_at: datetime
+    duration_ms: float
+    context_before_json: str | None = None
+    context_after_json: str | None = None
+
+
+@dataclass
+class NodeStateFailed:
+    """A node state that failed during processing.
+
+    Created when complete_node_state() is called with status="failed".
+
+    Invariants:
+    - Has completed_at (finished, albeit with failure)
+    - Has duration_ms (timing complete)
+    - May have error_json (error details if captured)
+    - May have output_hash (partial output in some cases)
+    """
+
+    state_id: str
+    token_id: str
+    node_id: str
+    step_index: int
+    attempt: int
+    status: Literal[NodeStateStatus.FAILED]
+    input_hash: str
+    started_at: datetime
+    completed_at: datetime
+    duration_ms: float
+    error_json: str | None = None
     output_hash: str | None = None
     context_before_json: str | None = None
     context_after_json: str | None = None
-    duration_ms: float | None = None
-    error_json: str | None = None
-    completed_at: datetime | None = None
+
+
+# Discriminated union type - use status field to discriminate
+NodeState = NodeStateOpen | NodeStateCompleted | NodeStateFailed
+"""Union type for all node states.
+
+Use isinstance() or check the status field to discriminate:
+    if state.status == NodeStateStatus.OPEN:
+        # state is NodeStateOpen
+    elif state.status == NodeStateStatus.COMPLETED:
+        # state is NodeStateCompleted
+    elif state.status == NodeStateStatus.FAILED:
+        # state is NodeStateFailed
+"""
 
 
 @dataclass

@@ -25,6 +25,10 @@ from elspeth.core.landscape.models import (
     Edge,
     Node,
     NodeState,
+    NodeStateCompleted,
+    NodeStateFailed,
+    NodeStateOpen,
+    NodeStateStatus,
     RoutingEvent,
     RoutingSpec,
     Row,
@@ -87,6 +91,67 @@ def _coerce_enum(value: str | E, enum_type: type[E]) -> E:
         return value
     # str-based enums use value lookup
     return enum_type(value)
+
+
+def _row_to_node_state(row: Any) -> NodeState:
+    """Convert a database row to the appropriate NodeState type.
+
+    Uses discriminated union pattern - status field determines the concrete type.
+
+    Args:
+        row: Database row from node_states table
+
+    Returns:
+        NodeStateOpen, NodeStateCompleted, or NodeStateFailed depending on status
+    """
+    status = NodeStateStatus(row.status)
+
+    if status == NodeStateStatus.OPEN:
+        return NodeStateOpen(
+            state_id=row.state_id,
+            token_id=row.token_id,
+            node_id=row.node_id,
+            step_index=row.step_index,
+            attempt=row.attempt,
+            status=NodeStateStatus.OPEN,
+            input_hash=row.input_hash,
+            started_at=row.started_at,
+            context_before_json=row.context_before_json,
+        )
+    elif status == NodeStateStatus.COMPLETED:
+        # Completed states must have output_hash, completed_at, duration_ms
+        return NodeStateCompleted(
+            state_id=row.state_id,
+            token_id=row.token_id,
+            node_id=row.node_id,
+            step_index=row.step_index,
+            attempt=row.attempt,
+            status=NodeStateStatus.COMPLETED,
+            input_hash=row.input_hash,
+            started_at=row.started_at,
+            output_hash=row.output_hash or "",  # Should never be None for completed
+            completed_at=row.completed_at,
+            duration_ms=row.duration_ms or 0.0,  # Should never be None for completed
+            context_before_json=row.context_before_json,
+            context_after_json=row.context_after_json,
+        )
+    else:  # FAILED
+        return NodeStateFailed(
+            state_id=row.state_id,
+            token_id=row.token_id,
+            node_id=row.node_id,
+            step_index=row.step_index,
+            attempt=row.attempt,
+            status=NodeStateStatus.FAILED,
+            input_hash=row.input_hash,
+            started_at=row.started_at,
+            completed_at=row.completed_at,
+            duration_ms=row.duration_ms or 0.0,  # Should never be None for failed
+            error_json=row.error_json,
+            output_hash=row.output_hash,
+            context_before_json=row.context_before_json,
+            context_after_json=row.context_after_json,
+        )
 
 
 class LandscapeRecorder:
@@ -759,7 +824,7 @@ class LandscapeRecorder:
         state_id: str | None = None,
         attempt: int = 0,
         context_before: dict[str, Any] | None = None,
-    ) -> NodeState:
+    ) -> NodeStateOpen:
         """Begin recording a node state (token visiting a node).
 
         Args:
@@ -772,7 +837,7 @@ class LandscapeRecorder:
             context_before: Optional context snapshot before processing
 
         Returns:
-            NodeState model with status="open"
+            NodeStateOpen model with status=OPEN
         """
         state_id = state_id or _generate_id()
         input_hash = stable_hash(input_data)
@@ -780,13 +845,13 @@ class LandscapeRecorder:
 
         context_json = canonical_json(context_before) if context_before else None
 
-        state = NodeState(
+        state = NodeStateOpen(
             state_id=state_id,
             token_id=token_id,
             node_id=node_id,
             step_index=step_index,
             attempt=attempt,
-            status="open",
+            status=NodeStateStatus.OPEN,
             input_hash=input_hash,
             context_before_json=context_json,
             started_at=now,
@@ -800,7 +865,7 @@ class LandscapeRecorder:
                     node_id=state.node_id,
                     step_index=state.step_index,
                     attempt=state.attempt,
-                    status=state.status,
+                    status=state.status.value,
                     input_hash=state.input_hash,
                     context_before_json=state.context_before_json,
                     started_at=state.started_at,
@@ -812,26 +877,45 @@ class LandscapeRecorder:
     def complete_node_state(
         self,
         state_id: str,
-        status: str,
+        status: NodeStateStatus | str,
         *,
         output_data: dict[str, Any] | None = None,
         duration_ms: float | None = None,
         error: dict[str, Any] | None = None,
         context_after: dict[str, Any] | None = None,
-    ) -> NodeState:
+    ) -> NodeStateCompleted | NodeStateFailed:
         """Complete a node state.
 
         Args:
             state_id: State to complete
-            status: Final status (completed, failed)
+            status: Final status (completed, failed, or "rejected" which maps to failed)
             output_data: Output data for hashing (if success)
-            duration_ms: Processing duration
+            duration_ms: Processing duration (required)
             error: Error details (if failed)
             context_after: Optional context snapshot after processing
 
         Returns:
-            Updated NodeState model
+            NodeStateCompleted if status is completed, NodeStateFailed otherwise
+
+        Raises:
+            ValueError: If status is not a valid terminal status
+            ValueError: If duration_ms is not provided
         """
+        # Coerce string status to enum (handle "rejected" as failed)
+        # Check for enum first since NodeStateStatus is a str subclass
+        if isinstance(status, NodeStateStatus):
+            status_enum = status
+        elif status == "rejected":
+            status_enum = NodeStateStatus.FAILED
+        else:
+            status_enum = NodeStateStatus(status)
+
+        if status_enum == NodeStateStatus.OPEN:
+            raise ValueError("Cannot complete a node state with status OPEN")
+
+        if duration_ms is None:
+            raise ValueError("duration_ms is required when completing a node state")
+
         now = _now()
         output_hash = stable_hash(output_data) if output_data else None
         error_json = canonical_json(error) if error else None
@@ -842,7 +926,7 @@ class LandscapeRecorder:
                 node_states_table.update()
                 .where(node_states_table.c.state_id == state_id)
                 .values(
-                    status=status,
+                    status=status_enum.value,
                     output_hash=output_hash,
                     duration_ms=duration_ms,
                     error_json=error_json,
@@ -853,6 +937,10 @@ class LandscapeRecorder:
 
         result = self.get_node_state(state_id)
         assert result is not None, f"NodeState {state_id} not found after update"
+        # Type narrowing: result is guaranteed to be Completed or Failed
+        assert not isinstance(
+            result, NodeStateOpen
+        ), "State should be terminal after completion"
         return result
 
     def get_node_state(self, state_id: str) -> NodeState | None:
@@ -862,7 +950,7 @@ class LandscapeRecorder:
             state_id: State ID to retrieve
 
         Returns:
-            NodeState model or None
+            NodeState (union of Open, Completed, or Failed) or None
         """
         with self._db.connection() as conn:
             result = conn.execute(
@@ -875,22 +963,7 @@ class LandscapeRecorder:
         if row is None:
             return None
 
-        return NodeState(
-            state_id=row.state_id,
-            token_id=row.token_id,
-            node_id=row.node_id,
-            step_index=row.step_index,
-            attempt=row.attempt,
-            status=row.status,
-            input_hash=row.input_hash,
-            output_hash=row.output_hash,
-            context_before_json=row.context_before_json,
-            context_after_json=row.context_after_json,
-            duration_ms=row.duration_ms,
-            error_json=row.error_json,
-            started_at=row.started_at,
-            completed_at=row.completed_at,
-        )
+        return _row_to_node_state(row)
 
     # === Routing Event Recording ===
 
@@ -1436,7 +1509,7 @@ class LandscapeRecorder:
             token_id: Token ID
 
         Returns:
-            List of NodeState models, ordered by step_index
+            List of NodeState models (discriminated union), ordered by step_index
         """
         query = (
             select(node_states_table)
@@ -1448,25 +1521,7 @@ class LandscapeRecorder:
             result = conn.execute(query)
             db_rows = result.fetchall()
 
-        return [
-            NodeState(
-                state_id=r.state_id,
-                token_id=r.token_id,
-                node_id=r.node_id,
-                step_index=r.step_index,
-                attempt=r.attempt,
-                status=r.status,
-                input_hash=r.input_hash,
-                output_hash=r.output_hash,
-                started_at=r.started_at,
-                completed_at=r.completed_at,
-                duration_ms=r.duration_ms,
-                context_before_json=r.context_before_json,
-                context_after_json=r.context_after_json,
-                error_json=r.error_json,
-            )
-            for r in db_rows
-        ]
+        return [_row_to_node_state(r) for r in db_rows]
 
     def get_row(self, row_id: str) -> Row | None:
         """Get a row by ID.

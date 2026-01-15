@@ -24,7 +24,7 @@ def populated_db():
         config={"path": "input.csv"},
     )
 
-    row = recorder.create_row(
+    recorder.create_row(
         run_id=run.run_id,
         source_node_id="source_1",
         row_index=0,
@@ -58,7 +58,7 @@ class TestLandscapeExporterRunMetadata:
         exporter = LandscapeExporter(db)
 
         records = list(exporter.export_run(run_id))
-        run_record = [r for r in records if r["record_type"] == "run"][0]
+        run_record = next(r for r in records if r["record_type"] == "run")
 
         required_fields = [
             "record_type",
@@ -93,7 +93,7 @@ class TestLandscapeExporterRows:
         exporter = LandscapeExporter(db)
 
         records = list(exporter.export_run(run_id))
-        row_record = [r for r in records if r["record_type"] == "row"][0]
+        row_record = next(r for r in records if r["record_type"] == "row")
 
         required_fields = [
             "record_type",
@@ -241,6 +241,7 @@ class TestLandscapeExporterComplexRun:
             state_id=state.state_id,
             status="completed",
             output_data={"x": 1},
+            duration_ms=10.0,
         )
         recorder.complete_run(run.run_id, status="completed")
 
@@ -388,7 +389,7 @@ class TestLandscapeExporterComplexRun:
             plugin_version="1.0.0",
             config={},
         )
-        sink = recorder.register_node(
+        recorder.register_node(
             run_id=run.run_id,
             node_id="sink",
             plugin_name="csv",
@@ -530,7 +531,7 @@ class TestLandscapeExporterSigning:
 
         records = list(exporter.export_run(run_id, sign=True))
 
-        manifest = [r for r in records if r["record_type"] == "manifest"][0]
+        manifest = next(r for r in records if r["record_type"] == "manifest")
         non_manifest_count = len([r for r in records if r["record_type"] != "manifest"])
 
         assert manifest["record_count"] == non_manifest_count
@@ -560,8 +561,8 @@ class TestLandscapeExporterSigning:
         records2 = list(exporter2.export_run(run_id, sign=True))
 
         # Get first non-manifest record from each
-        r1 = [r for r in records1 if r["record_type"] != "manifest"][0]
-        r2 = [r for r in records2 if r["record_type"] != "manifest"][0]
+        r1 = next(r for r in records1 if r["record_type"] != "manifest")
+        r2 = next(r for r in records2 if r["record_type"] != "manifest")
 
         assert r1["signature"] != r2["signature"]
 
@@ -571,7 +572,7 @@ class TestLandscapeExporterSigning:
         exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
 
         records = list(exporter.export_run(run_id, sign=True))
-        manifest = [r for r in records if r["record_type"] == "manifest"][0]
+        manifest = next(r for r in records if r["record_type"] == "manifest")
 
         assert manifest["hash_algorithm"] == "sha256"
         assert manifest["signature_algorithm"] == "hmac-sha256"
@@ -634,7 +635,9 @@ class TestLandscapeExporterSigning:
                         step_index=k,
                         input_data={"x": i * j},
                     )
-                    recorder.complete_node_state(state.state_id, status="completed")
+                    recorder.complete_node_state(
+                        state.state_id, status="completed", duration_ms=5.0
+                    )
 
                     # Multiple routing events (tests get_routing_events ordering)
                     if k == 0:
@@ -645,7 +648,7 @@ class TestLandscapeExporterSigning:
                         )
 
         # Multiple batches (tests get_batches ordering)
-        for i in range(2):
+        for _ in range(2):
             batch = recorder.create_batch(
                 run_id=run.run_id,
                 aggregation_node_id="node_1",
@@ -660,7 +663,7 @@ class TestLandscapeExporterSigning:
         final_hashes = []
         for _ in range(5):  # Export 5 times
             records = list(exporter.export_run(run.run_id, sign=True))
-            manifest = [r for r in records if r["record_type"] == "manifest"][0]
+            manifest = next(r for r in records if r["record_type"] == "manifest")
             final_hashes.append(manifest["final_hash"])
 
         # All final hashes must be identical

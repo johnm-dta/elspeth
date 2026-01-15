@@ -256,7 +256,9 @@ class TestSignedExportDeterminism:
                 step_index=0,
                 input_data={"x": i},
             )
-            recorder.complete_node_state(state.state_id, status="completed")
+            recorder.complete_node_state(
+                state.state_id, status="completed", duration_ms=5.0
+            )
 
         recorder.complete_run(run.run_id, status="completed")
 
@@ -267,7 +269,7 @@ class TestSignedExportDeterminism:
         final_hashes = []
         for _ in range(2):
             records = list(exporter.export_run(run.run_id, sign=True))
-            manifest = [r for r in records if r["record_type"] == "manifest"][0]
+            manifest = next(r for r in records if r["record_type"] == "manifest")
             final_hashes.append(manifest["final_hash"])
 
         # Both exports must produce the same final hash
@@ -380,7 +382,7 @@ class TestSignedExportDeterminism:
             assert result.exit_code == 0, f"Run with key {i} failed: {result.stdout}"
 
             records = json.loads(audit_json.read_text())
-            manifest = [r for r in records if r["record_type"] == "manifest"][0]
+            manifest = next(r for r in records if r["record_type"] == "manifest")
             final_hashes.append(manifest["final_hash"])
 
         # Different keys must produce different hashes

@@ -196,7 +196,9 @@ class LandscapeRecorder:
                 )
             )
 
-        return self.get_run(run_id)  # type: ignore[return-value]
+        result = self.get_run(run_id)
+        assert result is not None, f"Run {run_id} not found after update"
+        return result
 
     def get_run(self, run_id: str) -> Run | None:
         """Get a run by ID.
@@ -828,7 +830,9 @@ class LandscapeRecorder:
                 )
             )
 
-        return self.get_node_state(state_id)  # type: ignore[return-value]
+        result = self.get_node_state(state_id)
+        assert result is not None, f"NodeState {state_id} not found after update"
+        return result
 
     def get_node_state(self, state_id: str) -> NodeState | None:
         """Get a node state by ID.
@@ -1130,7 +1134,9 @@ class LandscapeRecorder:
                 )
             )
 
-        return self.get_batch(batch_id)  # type: ignore[return-value]
+        result = self.get_batch(batch_id)
+        assert result is not None, f"Batch {batch_id} not found after update"
+        return result
 
     def get_batch(self, batch_id: str) -> Batch | None:
         """Get a batch by ID.

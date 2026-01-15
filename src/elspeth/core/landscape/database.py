@@ -46,8 +46,10 @@ class LandscapeDB:
         """Configure SQLite for reliability."""
 
         @event.listens_for(self._engine, "connect")
-        def set_sqlite_pragma(dbapi_connection, connection_record):  # type: ignore[no-untyped-def]
-            cursor = dbapi_connection.cursor()
+        def set_sqlite_pragma(
+            dbapi_connection: object, connection_record: object
+        ) -> None:
+            cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
             # Enable WAL mode for better concurrency
             cursor.execute("PRAGMA journal_mode=WAL")
             # Enable foreign key enforcement
@@ -74,7 +76,12 @@ class LandscapeDB:
     def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[no-untyped-def]
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
         self.close()
 
     @classmethod

@@ -267,7 +267,7 @@ class Orchestrator:
 
                 # Extract determinism if defined and valid (Determinism enum or string)
                 raw_determinism = getattr(plugin, "determinism", None)
-                if isinstance(raw_determinism, (Determinism, str)):
+                if isinstance(raw_determinism, Determinism | str):
                     determinism = raw_determinism
 
             recorder.register_node(
@@ -333,7 +333,7 @@ class Orchestrator:
         ctx = PluginContext(
             run_id=run_id,
             config=config.config,
-            landscape=recorder,  # type: ignore[arg-type]
+            landscape=recorder,  # type: ignore[arg-type]  # TODO: align PluginContext.landscape type with LandscapeRecorder
         )
 
         # Call on_start for all plugins BEFORE processing

@@ -128,7 +128,9 @@ retry:
         assert settings.datasource.options == {"path": "input.csv"}
         assert settings.retry.max_attempts == 5
 
-    def test_load_with_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_load_with_env_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from elspeth.core.config import load_settings
 
         config_file = tmp_path / "settings.yaml"
@@ -316,7 +318,9 @@ class TestLandscapeSettings:
         """LandscapeSettings has enabled, backend, url."""
         from elspeth.core.config import LandscapeSettings
 
-        ls = LandscapeSettings(enabled=True, backend="sqlite", url="sqlite:///./runs/audit.db")
+        ls = LandscapeSettings(
+            enabled=True, backend="sqlite", url="sqlite:///./runs/audit.db"
+        )
         assert ls.enabled is True
         assert ls.backend == "sqlite"
         assert ls.url == "sqlite:///./runs/audit.db"
@@ -493,7 +497,9 @@ class TestExportSinkValidation:
                 },
             )
 
-        assert "export.sink 'nonexistent_sink' not found in sinks" in str(exc_info.value)
+        assert "export.sink 'nonexistent_sink' not found in sinks" in str(
+            exc_info.value
+        )
 
     def test_export_sink_not_required_when_disabled(self) -> None:
         """If export.enabled=False, sink can be None."""
@@ -527,7 +533,9 @@ class TestExportSinkValidation:
                 },
             )
 
-        assert "landscape.export.sink is required when export is enabled" in str(exc_info.value)
+        assert "landscape.export.sink is required when export is enabled" in str(
+            exc_info.value
+        )
 
     def test_export_sink_valid_reference(self) -> None:
         """If export.sink references a valid sink, no error."""
@@ -728,7 +736,7 @@ class TestRateLimitSettings:
             default_requests_per_second=10,
             services={
                 "openai": ServiceRateLimit(requests_per_second=5),
-            }
+            },
         )
 
         # Configured service
@@ -775,7 +783,9 @@ class TestRateLimitSettings:
         with pytest.raises(ValidationError):
             ServiceRateLimit(requests_per_second=10, requests_per_minute=-1)
 
-    def test_rate_limit_settings_default_requests_per_second_must_be_positive(self) -> None:
+    def test_rate_limit_settings_default_requests_per_second_must_be_positive(
+        self,
+    ) -> None:
         """default_requests_per_second must be > 0."""
         from elspeth.core.config import RateLimitSettings
 
@@ -785,7 +795,9 @@ class TestRateLimitSettings:
         with pytest.raises(ValidationError):
             RateLimitSettings(default_requests_per_second=-1)
 
-    def test_rate_limit_settings_default_requests_per_minute_must_be_positive(self) -> None:
+    def test_rate_limit_settings_default_requests_per_minute_must_be_positive(
+        self,
+    ) -> None:
         """default_requests_per_minute must be > 0 when provided."""
         from elspeth.core.config import RateLimitSettings
 
@@ -865,7 +877,11 @@ class TestResolveConfig:
             sinks={"output": {"plugin": "csv"}},
             output_sink="output",
             row_plugins=[
-                {"plugin": "field_mapper", "type": "transform", "options": {"mapping": {"a": "b"}}},
+                {
+                    "plugin": "field_mapper",
+                    "type": "transform",
+                    "options": {"mapping": {"a": "b"}},
+                },
             ],
         )
 

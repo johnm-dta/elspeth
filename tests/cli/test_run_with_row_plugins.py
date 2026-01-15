@@ -36,7 +36,9 @@ class TestRunWithTransforms:
         config = {
             "datasource": {"plugin": "csv", "options": {"path": str(sample_csv)}},
             "row_plugins": [{"plugin": "passthrough", "type": "transform"}],
-            "sinks": {"output": {"plugin": "csv", "options": {"path": str(output_csv)}}},
+            "sinks": {
+                "output": {"plugin": "csv", "options": {"path": str(output_csv)}}
+            },
             "output_sink": "output",
             "landscape": {"url": f"sqlite:///{tmp_path}/audit.db"},
         }
@@ -60,7 +62,9 @@ class TestRunWithTransforms:
                     },
                 }
             ],
-            "sinks": {"output": {"plugin": "csv", "options": {"path": str(output_csv)}}},
+            "sinks": {
+                "output": {"plugin": "csv", "options": {"path": str(output_csv)}}
+            },
             "output_sink": "output",
             "landscape": {"url": f"sqlite:///{tmp_path}/audit.db"},
         }
@@ -83,7 +87,9 @@ class TestRunWithTransforms:
                     "options": {"mapping": {"name": "person_name"}},
                 },
             ],
-            "sinks": {"output": {"plugin": "csv", "options": {"path": str(output_csv)}}},
+            "sinks": {
+                "output": {"plugin": "csv", "options": {"path": str(output_csv)}}
+            },
             "output_sink": "output",
             "landscape": {"url": f"sqlite:///{tmp_path}/audit.db"},
         }
@@ -114,7 +120,9 @@ class TestRunWithTransforms:
         """Field mapper transform renames columns correctly."""
         from elspeth.cli import app
 
-        result = runner.invoke(app, ["run", "-s", str(settings_with_field_mapper), "-x"])
+        result = runner.invoke(
+            app, ["run", "-s", str(settings_with_field_mapper), "-x"]
+        )
         assert result.exit_code == 0, f"Failed with: {result.output}"
 
         output_content = output_csv.read_text()
@@ -228,7 +236,9 @@ class TestRunWithGates:
         """Threshold gate routes rows to correct sinks based on score."""
         from elspeth.cli import app
 
-        result = runner.invoke(app, ["run", "-s", str(settings_with_threshold_gate), "-x"])
+        result = runner.invoke(
+            app, ["run", "-s", str(settings_with_threshold_gate), "-x"]
+        )
         assert result.exit_code == 0, f"Failed with: {result.output}"
 
         high_output = (tmp_path / "high_scores.csv").read_text()

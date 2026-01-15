@@ -45,7 +45,9 @@ class TestRoutingAction:
 
         action = RoutingAction.route("suspicious", reason={"confidence": 0.95})
         assert action.kind == "route"
-        assert action.destinations == ("suspicious",)  # Tuple - route label, not sink name
+        assert action.destinations == (
+            "suspicious",
+        )  # Tuple - route label, not sink name
         assert action.reason["confidence"] == 0.95  # Access via mapping
 
     def test_fork_to_paths(self) -> None:
@@ -128,7 +130,9 @@ class TestGateResult:
             action=RoutingAction.route("suspicious", reason={"score": 0.9}),
         )
         assert result.action.kind == "route"
-        assert result.action.destinations == ("suspicious",)  # Route label, not sink name
+        assert result.action.destinations == (
+            "suspicious",
+        )  # Route label, not sink name
 
     def test_has_audit_fields(self) -> None:
         """Phase 3 integration: audit fields must exist."""

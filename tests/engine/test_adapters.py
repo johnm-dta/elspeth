@@ -197,6 +197,7 @@ class TestArtifactDescriptor:
         )
 
         import pytest
+
         with pytest.raises((AttributeError, TypeError)):
             desc.content_hash = "modified"  # type: ignore[misc]
 

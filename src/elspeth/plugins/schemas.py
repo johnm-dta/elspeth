@@ -36,8 +36,8 @@ class PluginSchema(BaseModel):
 
     model_config = ConfigDict(
         extra="ignore",  # Rows may have extra fields
-        strict=False,    # Allow coercion (e.g., int -> float)
-        frozen=False,    # Allow modification
+        strict=False,  # Allow coercion (e.g., int -> float)
+        frozen=False,  # Allow modification
     )
 
     def to_row(self) -> dict[str, Any]:
@@ -88,11 +88,13 @@ def validate_row(
         errors = []
         for error in e.errors():
             field = ".".join(str(loc) for loc in error["loc"])
-            errors.append(SchemaValidationError(
-                field=field,
-                message=error["msg"],
-                value=error.get("input"),
-            ))
+            errors.append(
+                SchemaValidationError(
+                    field=field,
+                    message=error["msg"],
+                    value=error.get("input"),
+                )
+            )
         return errors
 
 
@@ -161,12 +163,16 @@ def check_compatibility(
                 missing.append(field_name)
         else:
             producer_field = producer_fields[field_name]
-            if not _types_compatible(producer_field.annotation, consumer_field.annotation):
-                mismatches.append((
-                    field_name,
-                    _type_name(consumer_field.annotation),
-                    _type_name(producer_field.annotation),
-                ))
+            if not _types_compatible(
+                producer_field.annotation, consumer_field.annotation
+            ):
+                mismatches.append(
+                    (
+                        field_name,
+                        _type_name(consumer_field.annotation),
+                        _type_name(producer_field.annotation),
+                    )
+                )
 
     compatible = len(missing) == 0 and len(mismatches) == 0
 

@@ -73,7 +73,7 @@ from elspeth.plugins.schemas import (
     validate_row,
 )
 
-__all__ = [  # noqa: RUF022  # Grouped by category for readability
+__all__ = [  # Grouped by category for readability
     # Results
     "AcceptResult",
     "GateResult",

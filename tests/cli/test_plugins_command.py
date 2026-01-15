@@ -1,6 +1,5 @@
 """Tests for elspeth plugins commands."""
 
-import pytest
 from typer.testing import CliRunner
 
 runner = CliRunner()

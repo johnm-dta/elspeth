@@ -8,7 +8,6 @@ record type (now implemented as multi-file export).
 """
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -189,7 +188,9 @@ class TestLandscapeExport:
 
         # Audit export should NOT be created
         audit_json = tmp_path / "audit_export.json"
-        assert not audit_json.exists(), "Audit file should not exist when export disabled"
+        assert (
+            not audit_json.exists()
+        ), "Audit file should not exist when export disabled"
 
 
 class TestSignedExportDeterminism:
@@ -270,9 +271,9 @@ class TestSignedExportDeterminism:
             final_hashes.append(manifest["final_hash"])
 
         # Both exports must produce the same final hash
-        assert final_hashes[0] == final_hashes[1], (
-            f"Non-deterministic export! Hash 1: {final_hashes[0]}, Hash 2: {final_hashes[1]}"
-        )
+        assert (
+            final_hashes[0] == final_hashes[1]
+        ), f"Non-deterministic export! Hash 1: {final_hashes[0]}, Hash 2: {final_hashes[1]}"
 
     def test_signed_export_all_records_have_signatures(self, tmp_path: Path) -> None:
         """All exported records should have HMAC signatures when signing enabled."""
@@ -289,12 +290,20 @@ class TestSignedExportDeterminism:
             "datasource": {"plugin": "csv", "options": {"path": str(input_csv)}},
             "sinks": {
                 "output": {"plugin": "csv", "options": {"path": str(output_csv)}},
-                "audit_export": {"plugin": "json", "options": {"path": str(audit_json)}},
+                "audit_export": {
+                    "plugin": "json",
+                    "options": {"path": str(audit_json)},
+                },
             },
             "output_sink": "output",
             "landscape": {
                 "url": f"sqlite:///{db_path}",
-                "export": {"enabled": True, "sink": "audit_export", "format": "json", "sign": True},
+                "export": {
+                    "enabled": True,
+                    "sink": "audit_export",
+                    "format": "json",
+                    "sign": True,
+                },
             },
         }
 
@@ -312,10 +321,16 @@ class TestSignedExportDeterminism:
 
         # Every record must have a signature
         for record in records:
-            assert "signature" in record, f"Missing signature: {record.get('record_type')}"
-            assert len(record["signature"]) == 64, "Signature should be 64-char hex (SHA256)"
+            assert (
+                "signature" in record
+            ), f"Missing signature: {record.get('record_type')}"
+            assert (
+                len(record["signature"]) == 64
+            ), "Signature should be 64-char hex (SHA256)"
 
-    def test_different_signing_keys_produce_different_hashes(self, tmp_path: Path) -> None:
+    def test_different_signing_keys_produce_different_hashes(
+        self, tmp_path: Path
+    ) -> None:
         """Different signing keys should produce different final hashes.
 
         This verifies the signature actually depends on the key, not just the data.
@@ -337,12 +352,20 @@ class TestSignedExportDeterminism:
                 "datasource": {"plugin": "csv", "options": {"path": str(input_csv)}},
                 "sinks": {
                     "output": {"plugin": "csv", "options": {"path": str(output_csv)}},
-                    "audit_export": {"plugin": "json", "options": {"path": str(audit_json)}},
+                    "audit_export": {
+                        "plugin": "json",
+                        "options": {"path": str(audit_json)},
+                    },
                 },
                 "output_sink": "output",
                 "landscape": {
                     "url": f"sqlite:///{db_path}",
-                    "export": {"enabled": True, "sink": "audit_export", "format": "json", "sign": True},
+                    "export": {
+                        "enabled": True,
+                        "sink": "audit_export",
+                        "format": "json",
+                        "sign": True,
+                    },
                 },
             }
 
@@ -361,6 +384,6 @@ class TestSignedExportDeterminism:
             final_hashes.append(manifest["final_hash"])
 
         # Different keys must produce different hashes
-        assert final_hashes[0] != final_hashes[1], (
-            "Different keys produced same hash - signature not key-dependent!"
-        )
+        assert (
+            final_hashes[0] != final_hashes[1]
+        ), "Different keys produced same hash - signature not key-dependent!"

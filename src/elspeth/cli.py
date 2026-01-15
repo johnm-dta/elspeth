@@ -102,7 +102,9 @@ def run(
         raise typer.Exit(1) from None
 
     if verbose:
-        typer.echo(f"Graph validated: {graph.node_count} nodes, {graph.edge_count} edges")
+        typer.echo(
+            f"Graph validated: {graph.node_count} nodes, {graph.edge_count} edges"
+        )
 
     if dry_run:
         typer.echo("Dry run mode - would execute:")
@@ -438,17 +440,20 @@ def plugins_list(
 def purge(
     database: str | None = typer.Option(
         None,
-        "--database", "-d",
+        "--database",
+        "-d",
         help="Path to Landscape database file (SQLite).",
     ),
     payload_dir: str | None = typer.Option(
         None,
-        "--payload-dir", "-p",
+        "--payload-dir",
+        "-p",
         help="Path to payload storage directory.",
     ),
     retention_days: int = typer.Option(
         90,
-        "--retention-days", "-r",
+        "--retention-days",
+        "-r",
         help="Delete payloads older than this many days.",
     ),
     dry_run: bool = typer.Option(
@@ -458,7 +463,8 @@ def purge(
     ),
     yes: bool = typer.Option(
         False,
-        "--yes", "-y",
+        "--yes",
+        "-y",
         help="Skip confirmation prompt.",
     ),
 ) -> None:
@@ -499,8 +505,12 @@ def purge(
                 typer.echo("Specify --database to provide path directly.", err=True)
                 raise typer.Exit(1) from None
         else:
-            typer.echo("Error: No settings.yaml found and --database not provided.", err=True)
-            typer.echo("Specify --database to provide path to Landscape database.", err=True)
+            typer.echo(
+                "Error: No settings.yaml found and --database not provided.", err=True
+            )
+            typer.echo(
+                "Specify --database to provide path to Landscape database.", err=True
+            )
             raise typer.Exit(1) from None
 
     if payload_dir:
@@ -531,7 +541,9 @@ def purge(
             return
 
         if dry_run:
-            typer.echo(f"Would delete {len(expired_refs)} payload(s) older than {retention_days} days:")
+            typer.echo(
+                f"Would delete {len(expired_refs)} payload(s) older than {retention_days} days:"
+            )
             for ref in expired_refs[:10]:  # Show first 10
                 exists = payload_store.exists(ref)
                 status = "exists" if exists else "already deleted"
@@ -568,7 +580,8 @@ def resume(
     run_id: str = typer.Argument(..., help="Run ID to resume"),
     database: str | None = typer.Option(
         None,
-        "--database", "-d",
+        "--database",
+        "-d",
         help="Path to Landscape database file (SQLite).",
     ),
 ) -> None:
@@ -610,8 +623,12 @@ def resume(
                 typer.echo("Specify --database to provide path directly.", err=True)
                 raise typer.Exit(1) from None
         else:
-            typer.echo("Error: No settings.yaml found and --database not provided.", err=True)
-            typer.echo("Specify --database to provide path to Landscape database.", err=True)
+            typer.echo(
+                "Error: No settings.yaml found and --database not provided.", err=True
+            )
+            typer.echo(
+                "Specify --database to provide path to Landscape database.", err=True
+            )
             raise typer.Exit(1) from None
 
     # Initialize database and recovery manager
@@ -650,7 +667,9 @@ def resume(
             typer.echo("  Has aggregation state: No")
 
         typer.echo("\nNote: Full resume execution is not yet implemented (Phase 6).")
-        typer.echo("This command validates that the run CAN be resumed from the checkpoint above.")
+        typer.echo(
+            "This command validates that the run CAN be resumed from the checkpoint above."
+        )
 
     finally:
         db.close()

@@ -466,7 +466,9 @@ class TestLandscapeExporterComplexRun:
         parent_records = [r for r in records if r["record_type"] == "token_parent"]
         # Two children, each with one parent relationship
         assert len(parent_records) == 2
-        assert all(r["parent_token_id"] == parent_token.token_id for r in parent_records)
+        assert all(
+            r["parent_token_id"] == parent_token.token_id for r in parent_records
+        )
 
 
 class TestLandscapeExporterSigning:
@@ -620,7 +622,9 @@ class TestLandscapeExporterSigning:
 
             # Multiple tokens per row (tests get_tokens ordering)
             for j in range(2):
-                token = recorder.create_token(row_id=row.row_id, branch_name=f"branch_{j}")
+                token = recorder.create_token(
+                    row_id=row.row_id, branch_name=f"branch_{j}"
+                )
 
                 # Multiple states per token (tests get_node_states_for_token ordering)
                 for k, node_id in enumerate(["node_0", "node_1"]):
@@ -696,6 +700,6 @@ class TestLandscapeExporterSigning:
             exports.append(tuple(node_ids))
 
         # All exports should produce the same order
-        assert len(set(exports)) == 1, (
-            f"Record order changed between exports: {exports}"
-        )
+        assert (
+            len(set(exports)) == 1
+        ), f"Record order changed between exports: {exports}"

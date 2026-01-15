@@ -92,9 +92,7 @@ class RowProcessor:
         self._gate_executor = GateExecutor(
             recorder, span_factory, edge_map, route_resolution_map
         )
-        self._aggregation_executor = AggregationExecutor(
-            recorder, span_factory, run_id
-        )
+        self._aggregation_executor = AggregationExecutor(recorder, span_factory, run_id)
 
     def process_row(
         self,

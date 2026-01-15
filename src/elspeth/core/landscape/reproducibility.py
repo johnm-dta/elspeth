@@ -119,5 +119,7 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str) -> None:
             conn.execute(
                 runs_table.update()
                 .where(runs_table.c.run_id == run_id)
-                .values(reproducibility_grade=ReproducibilityGrade.ATTRIBUTABLE_ONLY.value)
+                .values(
+                    reproducibility_grade=ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
+                )
             )

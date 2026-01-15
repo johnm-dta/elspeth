@@ -325,9 +325,7 @@ class GateExecutor:
         elif action.kind == "route":
             # Gate returned a route label - resolve via routes config
             route_label = action.destinations[0]
-            destination = self._route_resolution_map.get(
-                (gate.node_id, route_label)
-            )
+            destination = self._route_resolution_map.get((gate.node_id, route_label))
 
             if destination is None:
                 # Label not in routes config - this is a configuration error

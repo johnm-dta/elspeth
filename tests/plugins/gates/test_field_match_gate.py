@@ -23,10 +23,12 @@ class TestFieldMatchGate:
         """FieldMatchGate implements GateProtocol."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
-        gate = FieldMatchGate({
-            "field": "status",
-            "matches": {"active": "active_route", "deleted": "archive_route"},
-        })
+        gate = FieldMatchGate(
+            {
+                "field": "status",
+                "matches": {"active": "active_route", "deleted": "archive_route"},
+            }
+        )
         assert isinstance(gate, GateProtocol)
 
     def test_has_required_attributes(self) -> None:
@@ -41,14 +43,16 @@ class TestFieldMatchGate:
         """Route based on exact field value match."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
-        gate = FieldMatchGate({
-            "field": "status",
-            "matches": {
-                "active": "active_route",
-                "pending": "pending_route",
-                "deleted": "archive_route",
-            },
-        })
+        gate = FieldMatchGate(
+            {
+                "field": "status",
+                "matches": {
+                    "active": "active_route",
+                    "pending": "pending_route",
+                    "deleted": "archive_route",
+                },
+            }
+        )
 
         active_row = {"id": 1, "status": "active"}
         result = gate.evaluate(active_row, ctx)
@@ -63,11 +67,13 @@ class TestFieldMatchGate:
         """Use default_label when no match found."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
-        gate = FieldMatchGate({
-            "field": "status",
-            "matches": {"active": "active_route"},
-            "default_label": "other",
-        })
+        gate = FieldMatchGate(
+            {
+                "field": "status",
+                "matches": {"active": "active_route"},
+                "default_label": "other",
+            }
+        )
         row = {"id": 1, "status": "unknown"}
 
         result = gate.evaluate(row, ctx)
@@ -79,10 +85,12 @@ class TestFieldMatchGate:
         """Use 'no_match' label when no default_label specified."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
-        gate = FieldMatchGate({
-            "field": "status",
-            "matches": {"active": "active_route"},
-        })
+        gate = FieldMatchGate(
+            {
+                "field": "status",
+                "matches": {"active": "active_route"},
+            }
+        )
         row = {"id": 1, "status": "unknown"}
 
         result = gate.evaluate(row, ctx)
@@ -94,14 +102,16 @@ class TestFieldMatchGate:
         """Route based on regex pattern match."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
-        gate = FieldMatchGate({
-            "field": "email",
-            "mode": "regex",
-            "matches": {
-                r".*@example\.com$": "internal",
-                r".*@partner\.org$": "partner",
-            },
-        })
+        gate = FieldMatchGate(
+            {
+                "field": "email",
+                "mode": "regex",
+                "matches": {
+                    r".*@example\.com$": "internal",
+                    r".*@partner\.org$": "partner",
+                },
+            }
+        )
 
         internal_row = {"id": 1, "email": "alice@example.com"}
         result = gate.evaluate(internal_row, ctx)
@@ -115,13 +125,15 @@ class TestFieldMatchGate:
         """Route multiple values to same label."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
-        gate = FieldMatchGate({
-            "field": "country",
-            "matches": {
-                "US,CA,MX": "north_america",  # Comma-separated
-                "UK,FR,DE": "europe",
-            },
-        })
+        gate = FieldMatchGate(
+            {
+                "field": "country",
+                "matches": {
+                    "US,CA,MX": "north_america",  # Comma-separated
+                    "UK,FR,DE": "europe",
+                },
+            }
+        )
 
         us_row = {"id": 1, "country": "US"}
         result = gate.evaluate(us_row, ctx)
@@ -135,10 +147,12 @@ class TestFieldMatchGate:
         """Access nested field with dot notation."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
-        gate = FieldMatchGate({
-            "field": "meta.type",
-            "matches": {"internal": "internal_route"},
-        })
+        gate = FieldMatchGate(
+            {
+                "field": "meta.type",
+                "matches": {"internal": "internal_route"},
+            }
+        )
         row = {"id": 1, "meta": {"type": "internal"}}
 
         result = gate.evaluate(row, ctx)
@@ -148,11 +162,13 @@ class TestFieldMatchGate:
         """Use default_label when field is missing."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
-        gate = FieldMatchGate({
-            "field": "status",
-            "matches": {"active": "active_route"},
-            "default_label": "missing_field",
-        })
+        gate = FieldMatchGate(
+            {
+                "field": "status",
+                "matches": {"active": "active_route"},
+                "default_label": "missing_field",
+            }
+        )
         row = {"id": 1}  # No status field
 
         result = gate.evaluate(row, ctx)
@@ -163,11 +179,13 @@ class TestFieldMatchGate:
         """Error when field is missing in strict mode."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
-        gate = FieldMatchGate({
-            "field": "status",
-            "matches": {"active": "active_route"},
-            "strict": True,
-        })
+        gate = FieldMatchGate(
+            {
+                "field": "status",
+                "matches": {"active": "active_route"},
+                "strict": True,
+            }
+        )
         row = {"id": 1}
 
         with pytest.raises(ValueError, match="status"):
@@ -177,11 +195,13 @@ class TestFieldMatchGate:
         """Case-insensitive matching when configured."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
-        gate = FieldMatchGate({
-            "field": "status",
-            "matches": {"active": "active_route"},
-            "case_insensitive": True,
-        })
+        gate = FieldMatchGate(
+            {
+                "field": "status",
+                "matches": {"active": "active_route"},
+                "case_insensitive": True,
+            }
+        )
 
         upper_row = {"id": 1, "status": "ACTIVE"}
         result = gate.evaluate(upper_row, ctx)
@@ -195,10 +215,12 @@ class TestFieldMatchGate:
         """RoutingAction includes reason with match details."""
         from elspeth.plugins.gates.field_match_gate import FieldMatchGate
 
-        gate = FieldMatchGate({
-            "field": "status",
-            "matches": {"active": "active_route"},
-        })
+        gate = FieldMatchGate(
+            {
+                "field": "status",
+                "matches": {"active": "active_route"},
+            }
+        )
         row = {"id": 1, "status": "active"}
 
         result = gate.evaluate(row, ctx)

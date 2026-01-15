@@ -48,8 +48,7 @@ def _schema_hash(schema_cls: Any) -> str | None:
 
     # Build deterministic representation
     fields_repr = {
-        name: str(field.annotation)
-        for name, field in schema_cls.model_fields.items()
+        name: str(field.annotation) for name, field in schema_cls.model_fields.items()
     }
     return stable_hash(fields_repr)
 

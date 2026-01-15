@@ -1,8 +1,6 @@
 """Tests for lineage query functionality."""
 
-from datetime import datetime, timezone
-
-import pytest
+from datetime import UTC, datetime
 
 
 class TestLineageResult:
@@ -23,7 +21,7 @@ class TestLineageResult:
             token=Token(
                 token_id="t1",
                 row_id="r1",
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             ),
             source_row=Row(
                 row_id="r1",
@@ -31,7 +29,7 @@ class TestLineageResult:
                 source_node_id="src",
                 row_index=0,
                 source_data_hash="abc",
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             ),
             node_states=[],
             routing_events=[],

@@ -216,9 +216,9 @@ class GateProtocol(Protocol):
 class CoalescePolicy(Enum):
     """How coalesce handles partial arrivals."""
 
-    REQUIRE_ALL = "require_all"   # Wait for all branches; any failure fails
-    QUORUM = "quorum"             # Merge if >= n branches succeed
-    BEST_EFFORT = "best_effort"   # Merge whatever arrives by timeout
+    REQUIRE_ALL = "require_all"  # Wait for all branches; any failure fails
+    QUORUM = "quorum"  # Merge if >= n branches succeed
+    BEST_EFFORT = "best_effort"  # Merge whatever arrives by timeout
 
 
 @runtime_checkable

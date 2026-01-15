@@ -34,13 +34,13 @@ allow_hits:
   # ============================================================
 
   # --- ExplainScreen exception handling ---
-  - key: "tui/screens/explain_screen.py:R4:ExplainScreen:_load_pipeline_structure:line=81"
+  - key: "tui/screens/explain_screen.py:R4:ExplainScreen:_load_pipeline_structure:line=82"
     owner: "architecture"
     reason: "Trust boundary: loading pipeline structure that may fail for corrupt/incomplete runs"
     safety: "Graceful degradation - displays error message in UI instead of crash"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/screens/explain_screen.py:R4:ExplainScreen:_load_node_state:line=143"
+  - key: "tui/screens/explain_screen.py:R4:ExplainScreen:_load_node_state:line=144"
     owner: "architecture"
     reason: "Trust boundary: loading node state that may fail for incomplete audit trails"
     safety: "Graceful degradation - displays error message in UI instead of crash"
@@ -254,37 +254,37 @@ allow_hits:
   # names is intentional, not a bug-hiding pattern.
   # ============================================================
 
-  - key: "plugins/manager.py:R1:PluginManager:get_source_by_name:line=245"
+  - key: "plugins/manager.py:R1:PluginManager:get_source_by_name:line=244"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_transform_by_name:line=249"
+  - key: "plugins/manager.py:R1:PluginManager:get_transform_by_name:line=248"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_gate_by_name:line=253"
+  - key: "plugins/manager.py:R1:PluginManager:get_gate_by_name:line=252"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_aggregation_by_name:line=257"
+  - key: "plugins/manager.py:R1:PluginManager:get_aggregation_by_name:line=256"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_coalesce_by_name:line=261"
+  - key: "plugins/manager.py:R1:PluginManager:get_coalesce_by_name:line=260"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_sink_by_name:line=265"
+  - key: "plugins/manager.py:R1:PluginManager:get_sink_by_name:line=264"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
@@ -403,13 +403,13 @@ allow_hits:
     safety: "Raises immediately with node_id and label for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=406"
+  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=404"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=420"
+  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=418"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
@@ -435,13 +435,13 @@ allow_hits:
     safety: "Duck-typing at plugin boundary - fallback to None is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=84"
+  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=82"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define output_schema attribute"
     safety: "Duck-typing at plugin boundary - fallback to None is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=87"
+  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=86"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
@@ -453,43 +453,43 @@ allow_hits:
     safety: "Duck-typing at plugin boundary - fallback to '0.0.0' is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=90"
+  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=88"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define determinism attribute"
     safety: "Duck-typing at plugin boundary - fallback to DETERMINISTIC is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=149"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=148"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=159"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=158"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=169"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=168"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=179"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=178"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=189"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=188"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=199"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=198"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
@@ -502,13 +502,13 @@ allow_hits:
   # Pydantic errors are external data, type introspection is for error messages.
   # ============================================================
 
-  - key: "plugins/schemas.py:R1:validate_row:line=94"
+  - key: "plugins/schemas.py:R1:validate_row:line=95"
     owner: "architecture"
     reason: "Trust boundary: Pydantic error dict may not have 'input' key"
     safety: "Graceful handling - validation error message still produced"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/schemas.py:R3:_type_name:line=182"
+  - key: "plugins/schemas.py:R3:_type_name:line=188"
     owner: "architecture"
     reason: "Type introspection: not all types have __name__ attribute"
     safety: "Graceful fallback to str() - error message still produced"
@@ -569,13 +569,13 @@ allow_hits:
   # for polymorphic dispatch.
   # ============================================================
 
-  - key: "engine/processor.py:R3:RowProcessor:process_row:line=134"
+  - key: "engine/processor.py:R3:RowProcessor:process_row:line=132"
     owner: "architecture"
     reason: "Polymorphic dispatch: checking for gate interface (evaluate method)"
     safety: "Legitimate duck-typing - transforms have different interfaces by design"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/processor.py:R3:RowProcessor:process_row:line=162"
+  - key: "engine/processor.py:R3:RowProcessor:process_row:line=160"
     owner: "architecture"
     reason: "Polymorphic dispatch: checking for aggregation interface (accept method)"
     safety: "Legitimate duck-typing - transforms have different interfaces by design"

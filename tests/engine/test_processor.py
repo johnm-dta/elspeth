@@ -45,14 +45,18 @@ class TestRowProcessor:
             name = "double"
             node_id = transform1.node_id
 
-            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success({"value": row["value"] * 2})
 
         class AddOneTransform:
             name = "add_one"
             node_id = transform2.node_id
 
-            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success({"value": row["value"] + 1})
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -105,7 +109,9 @@ class TestRowProcessor:
             name = "enricher"
             node_id = transform.node_id
 
-            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success({**row, "enriched": True})
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -197,9 +203,13 @@ class TestRowProcessor:
             name = "validator"
             node_id = transform.node_id
 
-            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 if row.get("value", 0) < 0:
-                    return TransformResult.error({"message": "negative values not allowed"})
+                    return TransformResult.error(
+                        {"message": "negative values not allowed"}
+                    )
                 return TransformResult.success(row)
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -270,7 +280,9 @@ class TestRowProcessorGates:
             name = "final"
             node_id = transform.node_id
 
-            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success({**row, "final": True})
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -689,7 +701,9 @@ class TestRowProcessorTokenIdentity:
                 self.name = name
                 self.node_id = node_id
 
-            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success(row)
 
         ctx = PluginContext(run_id=run.run_id, config={})

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def ctx() -> "PluginContext":
+def ctx() -> PluginContext:
     """Create minimal plugin context."""
     from elspeth.plugins.context import PluginContext
 
@@ -30,42 +30,48 @@ def ctx() -> "PluginContext":
 class TestFilterGate:
     """Test FilterGate returns route labels."""
 
-    def test_passing_row_routes_to_pass_label(self, ctx: "PluginContext") -> None:
+    def test_passing_row_routes_to_pass_label(self, ctx: PluginContext) -> None:
         """Row that passes filter returns 'pass' label."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
-        gate = FilterGate({
-            "field": "score",
-            "greater_than": 0.5,
-        })
+        gate = FilterGate(
+            {
+                "field": "score",
+                "greater_than": 0.5,
+            }
+        )
 
         result = gate.evaluate({"id": 1, "score": 0.8}, ctx)
 
         assert result.action.kind == "route"
         assert result.action.destinations == ("pass",)
 
-    def test_failing_row_routes_to_discard_label(self, ctx: "PluginContext") -> None:
+    def test_failing_row_routes_to_discard_label(self, ctx: PluginContext) -> None:
         """Row that fails filter returns 'discard' label."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
-        gate = FilterGate({
-            "field": "score",
-            "greater_than": 0.5,
-        })
+        gate = FilterGate(
+            {
+                "field": "score",
+                "greater_than": 0.5,
+            }
+        )
 
         result = gate.evaluate({"id": 1, "score": 0.3}, ctx)
 
         assert result.action.kind == "route"
         assert result.action.destinations == ("discard",)
 
-    def test_reason_includes_filter_details(self, ctx: "PluginContext") -> None:
+    def test_reason_includes_filter_details(self, ctx: PluginContext) -> None:
         """Routing reason includes why the row was filtered."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
-        gate = FilterGate({
-            "field": "score",
-            "greater_than": 0.5,
-        })
+        gate = FilterGate(
+            {
+                "field": "score",
+                "greater_than": 0.5,
+            }
+        )
 
         result = gate.evaluate({"id": 1, "score": 0.3}, ctx)
 
@@ -75,14 +81,16 @@ class TestFilterGate:
         assert result.action.reason["threshold"] == 0.5
         assert result.action.reason["result"] == "discard"
 
-    def test_missing_field_routes_to_discard(self, ctx: "PluginContext") -> None:
+    def test_missing_field_routes_to_discard(self, ctx: PluginContext) -> None:
         """Row with missing field returns 'discard' label by default."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
-        gate = FilterGate({
-            "field": "score",
-            "greater_than": 0.5,
-        })
+        gate = FilterGate(
+            {
+                "field": "score",
+                "greater_than": 0.5,
+            }
+        )
 
         result = gate.evaluate({"id": 1}, ctx)  # No "score" field
 
@@ -90,15 +98,17 @@ class TestFilterGate:
         assert result.action.destinations == ("discard",)
         assert "missing" in result.action.reason.get("result", "")
 
-    def test_missing_field_passes_when_allowed(self, ctx: "PluginContext") -> None:
+    def test_missing_field_passes_when_allowed(self, ctx: PluginContext) -> None:
         """Row with missing field returns 'pass' if allow_missing=True."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
-        gate = FilterGate({
-            "field": "score",
-            "greater_than": 0.5,
-            "allow_missing": True,
-        })
+        gate = FilterGate(
+            {
+                "field": "score",
+                "greater_than": 0.5,
+                "allow_missing": True,
+            }
+        )
 
         result = gate.evaluate({"id": 1}, ctx)  # No "score" field
 
@@ -115,11 +125,13 @@ class TestFilterGateValidation:
         from elspeth.plugins.gates.filter_gate import FilterGate
 
         with pytest.raises(PluginConfigError, match="Multiple comparison operators"):
-            FilterGate({
-                "field": "score",
-                "greater_than": 0.5,
-                "less_than": 0.9,
-            })
+            FilterGate(
+                {
+                    "field": "score",
+                    "greater_than": 0.5,
+                    "less_than": 0.9,
+                }
+            )
 
     def test_no_operator_raises_error(self) -> None:
         """Specifying no operator raises PluginConfigError."""
@@ -127,9 +139,11 @@ class TestFilterGateValidation:
         from elspeth.plugins.gates.filter_gate import FilterGate
 
         with pytest.raises(PluginConfigError, match="No comparison operator specified"):
-            FilterGate({
-                "field": "score",
-            })
+            FilterGate(
+                {
+                    "field": "score",
+                }
+            )
 
 
 class TestFilterGateOperators:
@@ -162,7 +176,7 @@ class TestFilterGateOperators:
     )
     def test_operator(
         self,
-        ctx: "PluginContext",
+        ctx: PluginContext,
         operator: str,
         threshold: float | str | int,
         value: float | str | int,
@@ -171,10 +185,12 @@ class TestFilterGateOperators:
         """Parametrized test for all operators."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
-        gate = FilterGate({
-            "field": "score",
-            operator: threshold,
-        })
+        gate = FilterGate(
+            {
+                "field": "score",
+                operator: threshold,
+            }
+        )
 
         result = gate.evaluate({"id": 1, "score": value}, ctx)
 
@@ -185,14 +201,16 @@ class TestFilterGateOperators:
 class TestFilterGateNestedFields:
     """Test nested field access via dot notation."""
 
-    def test_nested_field_access(self, ctx: "PluginContext") -> None:
+    def test_nested_field_access(self, ctx: PluginContext) -> None:
         """Dot notation accesses nested fields."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
-        gate = FilterGate({
-            "field": "metrics.score",
-            "greater_than": 0.5,
-        })
+        gate = FilterGate(
+            {
+                "field": "metrics.score",
+                "greater_than": 0.5,
+            }
+        )
 
         result = gate.evaluate(
             {"id": 1, "metrics": {"score": 0.8}},
@@ -202,14 +220,16 @@ class TestFilterGateNestedFields:
         assert result.action.kind == "route"
         assert result.action.destinations == ("pass",)
 
-    def test_nested_field_routes_when_fails(self, ctx: "PluginContext") -> None:
+    def test_nested_field_routes_when_fails(self, ctx: PluginContext) -> None:
         """Nested field that fails condition routes to 'discard'."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
-        gate = FilterGate({
-            "field": "metrics.score",
-            "greater_than": 0.5,
-        })
+        gate = FilterGate(
+            {
+                "field": "metrics.score",
+                "greater_than": 0.5,
+            }
+        )
 
         result = gate.evaluate(
             {"id": 1, "metrics": {"score": 0.3}},
@@ -219,16 +239,16 @@ class TestFilterGateNestedFields:
         assert result.action.kind == "route"
         assert result.action.destinations == ("discard",)
 
-    def test_missing_nested_field_routes_to_discard(
-        self, ctx: "PluginContext"
-    ) -> None:
+    def test_missing_nested_field_routes_to_discard(self, ctx: PluginContext) -> None:
         """Missing nested field routes to 'discard'."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
-        gate = FilterGate({
-            "field": "metrics.score",
-            "greater_than": 0.5,
-        })
+        gate = FilterGate(
+            {
+                "field": "metrics.score",
+                "greater_than": 0.5,
+            }
+        )
 
         result = gate.evaluate({"id": 1, "metrics": {}}, ctx)
 
@@ -236,14 +256,16 @@ class TestFilterGateNestedFields:
         assert result.action.destinations == ("discard",)
         assert "missing" in result.action.reason.get("result", "")
 
-    def test_deeply_nested_field(self, ctx: "PluginContext") -> None:
+    def test_deeply_nested_field(self, ctx: PluginContext) -> None:
         """Deeply nested field access works correctly."""
         from elspeth.plugins.gates.filter_gate import FilterGate
 
-        gate = FilterGate({
-            "field": "data.analysis.metrics.confidence",
-            "greater_than_or_equal": 0.9,
-        })
+        gate = FilterGate(
+            {
+                "field": "data.analysis.metrics.confidence",
+                "greater_than_or_equal": 0.9,
+            }
+        )
 
         result = gate.evaluate(
             {"id": 1, "data": {"analysis": {"metrics": {"confidence": 0.95}}}},

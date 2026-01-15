@@ -1490,7 +1490,9 @@ class LandscapeRecorder:
             from typing import cast
 
             payload_bytes = self._payload_store.retrieve(row.source_data_ref)
-            data: dict[str, Any] = cast(dict[str, Any], json.loads(payload_bytes.decode("utf-8")))
+            data: dict[str, Any] = cast(
+                dict[str, Any], json.loads(payload_bytes.decode("utf-8"))
+            )
             return data
 
         # No payload store or no ref - data not available
@@ -1565,9 +1567,7 @@ class LandscapeRecorder:
         query = (
             select(routing_events_table)
             .where(routing_events_table.c.state_id == state_id)
-            .order_by(
-                routing_events_table.c.ordinal, routing_events_table.c.event_id
-            )
+            .order_by(routing_events_table.c.ordinal, routing_events_table.c.event_id)
         )
 
         with self._db.connection() as conn:

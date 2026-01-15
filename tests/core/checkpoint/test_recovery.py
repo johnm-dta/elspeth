@@ -1,6 +1,6 @@
 """Tests for checkpoint recovery protocol."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -38,7 +38,7 @@ class TestRecoveryProtocol:
         )
 
         run_id = "failed-run-001"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         with landscape_db.engine.connect() as conn:
             conn.execute(
@@ -90,7 +90,7 @@ class TestRecoveryProtocol:
         from elspeth.core.landscape.schema import runs_table
 
         run_id = "completed-run-001"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         with landscape_db.engine.connect() as conn:
             conn.execute(
@@ -113,7 +113,7 @@ class TestRecoveryProtocol:
         from elspeth.core.landscape.schema import runs_table
 
         run_id = "failed-no-cp-001"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         with landscape_db.engine.connect() as conn:
             conn.execute(
@@ -135,7 +135,7 @@ class TestRecoveryProtocol:
         from elspeth.core.landscape.schema import runs_table
 
         run_id = "running-run-001"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         with landscape_db.engine.connect() as conn:
             conn.execute(
@@ -222,7 +222,7 @@ class TestRecoveryProtocol:
         )
 
         run_id = "agg-state-run"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         with landscape_db.engine.connect() as conn:
             conn.execute(
@@ -313,7 +313,7 @@ class TestGetUnprocessedRows:
         )
 
         run_id = "unprocessed-test-run"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         with landscape_db.engine.connect() as conn:
             conn.execute(
@@ -405,17 +405,13 @@ class TestGetUnprocessedRows:
         )
 
         # Create checkpoint at sequence 4 (the last row)
-        checkpoint_manager.create_checkpoint(
-            run_id, "tok-unproc-004", "node-unproc", 4
-        )
+        checkpoint_manager.create_checkpoint(run_id, "tok-unproc-004", "node-unproc", 4)
 
         unprocessed = recovery_manager.get_unprocessed_rows(run_id)
 
         assert unprocessed == []
 
-    def test_handles_nonexistent_run_id_gracefully(
-        self, recovery_manager
-    ) -> None:
+    def test_handles_nonexistent_run_id_gracefully(self, recovery_manager) -> None:
         """Returns empty list for a run_id that does not exist."""
         unprocessed = recovery_manager.get_unprocessed_rows("nonexistent-run-id")
 

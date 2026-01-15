@@ -210,7 +210,9 @@ class SpanFactory:
             yield self._NOOP_SPAN
             return
 
-        with self._tracer.start_as_current_span(f"aggregation:{aggregation_name}") as span:
+        with self._tracer.start_as_current_span(
+            f"aggregation:{aggregation_name}"
+        ) as span:
             span.set_attribute("plugin.name", aggregation_name)
             span.set_attribute("plugin.type", "aggregation")
             if batch_id:

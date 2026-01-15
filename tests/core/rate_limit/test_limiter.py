@@ -93,7 +93,9 @@ class TestRateLimiterValidation:
         """None requests_per_minute is accepted (no per-minute limit)."""
         from elspeth.core.rate_limit import RateLimiter
 
-        with RateLimiter(name="test", requests_per_second=10, requests_per_minute=None) as limiter:
+        with RateLimiter(
+            name="test", requests_per_second=10, requests_per_minute=None
+        ) as limiter:
             assert limiter._requests_per_minute is None
 
 
@@ -240,7 +242,7 @@ class TestRateLimiter:
         with RateLimiter(
             name="minute_limit",
             requests_per_second=100,  # Very permissive per-second
-            requests_per_minute=3,    # But only 3 per minute total
+            requests_per_minute=3,  # But only 3 per minute total
         ) as limiter:
             # First three should work (under minute limit)
             assert limiter.try_acquire() is True
@@ -287,7 +289,7 @@ class TestRateLimitRegistry:
             default_requests_per_second=10,
             services={
                 "slow_api": ServiceRateLimit(requests_per_second=1),
-            }
+            },
         )
         registry = RateLimitRegistry(settings)
 

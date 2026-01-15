@@ -37,7 +37,9 @@ runs_table = Table(
     Column("status", String(32), nullable=False),
     # Export tracking - separate from run status so export failures
     # don't mask successful pipeline completion
-    Column("export_status", String(32)),  # pending, completed, failed, None if not configured
+    Column(
+        "export_status", String(32)
+    ),  # pending, completed, failed, None if not configured
     Column("export_error", Text),  # Error message if export failed
     Column("exported_at", DateTime(timezone=True)),  # When export completed
     Column("export_format", String(16)),  # csv, json
@@ -54,7 +56,9 @@ nodes_table = Table(
     Column("plugin_name", String(128), nullable=False),
     Column("node_type", String(32), nullable=False),
     Column("plugin_version", String(32), nullable=False),
-    Column("determinism", String(32), nullable=False),  # deterministic, seeded, nondeterministic (from Determinism enum)
+    Column(
+        "determinism", String(32), nullable=False
+    ),  # deterministic, seeded, nondeterministic (from Determinism enum)
     Column("config_hash", String(64), nullable=False),
     Column("config_json", Text, nullable=False),
     Column("schema_hash", String(64)),
@@ -102,7 +106,9 @@ tokens_table = Table(
     Column("fork_group_id", String(64)),
     Column("join_group_id", String(64)),
     Column("branch_name", String(64)),
-    Column("step_in_pipeline", Integer),  # Step where this token was created (fork/coalesce)
+    Column(
+        "step_in_pipeline", Integer
+    ),  # Step where this token was created (fork/coalesce)
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
@@ -111,9 +117,7 @@ tokens_table = Table(
 token_parents_table = Table(
     "token_parents",
     metadata,
-    Column(
-        "token_id", String(64), ForeignKey("tokens.token_id"), primary_key=True
-    ),
+    Column("token_id", String(64), ForeignKey("tokens.token_id"), primary_key=True),
     Column(
         "parent_token_id",
         String(64),
@@ -153,9 +157,7 @@ calls_table = Table(
     "calls",
     metadata,
     Column("call_id", String(64), primary_key=True),
-    Column(
-        "state_id", String(64), ForeignKey("node_states.state_id"), nullable=False
-    ),
+    Column("state_id", String(64), ForeignKey("node_states.state_id"), nullable=False),
     Column("call_index", Integer, nullable=False),
     Column("call_type", String(32), nullable=False),
     Column("status", String(32), nullable=False),
@@ -214,7 +216,9 @@ batches_table = Table(
     metadata,
     Column("batch_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("aggregation_node_id", String(64), ForeignKey("nodes.node_id"), nullable=False),
+    Column(
+        "aggregation_node_id", String(64), ForeignKey("nodes.node_id"), nullable=False
+    ),
     Column("aggregation_state_id", String(64), ForeignKey("node_states.state_id")),
     Column("trigger_reason", String(128)),
     Column("attempt", Integer, nullable=False, default=0),
@@ -277,4 +281,8 @@ checkpoints_table = Table(
 )
 
 Index("ix_checkpoints_run", checkpoints_table.c.run_id)
-Index("ix_checkpoints_run_seq", checkpoints_table.c.run_id, checkpoints_table.c.sequence_number)
+Index(
+    "ix_checkpoints_run_seq",
+    checkpoints_table.c.run_id,
+    checkpoints_table.c.sequence_number,
+)

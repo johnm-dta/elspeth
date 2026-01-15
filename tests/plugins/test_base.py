@@ -33,10 +33,12 @@ class TestBaseTransform:
             output_schema = OutputSchema
 
             def process(self, row: dict, ctx: PluginContext) -> TransformResult:
-                return TransformResult.success({
-                    "x": row["x"],
-                    "doubled": row["x"] * 2,
-                })
+                return TransformResult.success(
+                    {
+                        "x": row["x"],
+                        "doubled": row["x"] * 2,
+                    }
+                )
 
         transform = DoubleTransform({"some": "config"})
         ctx = PluginContext(run_id="test", config={})

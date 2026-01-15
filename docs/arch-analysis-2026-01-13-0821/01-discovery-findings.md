@@ -44,4 +44,3 @@
 - `elspeth.core.landscape.recorder` imports `elspeth.plugins.enums` (core depends on plugins for `NodeType`, `Determinism`).
 - `elspeth.plugins.context.PluginContext.landscape` is typed as a minimal protocol (`record_event()`), but the engine passes a full `LandscapeRecorder` implementation with many methods (`type: ignore`).
 - Engine sink execution expects a batch sink adapter (`SinkLike.write(rows) -> artifact info`), while plugin `SinkProtocol.write(row) -> None` is per-row.
-

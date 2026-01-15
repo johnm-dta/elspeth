@@ -66,14 +66,15 @@ class ExplainScreen:
                 "source": {
                     "name": source_nodes[0].plugin_name if source_nodes else "unknown",
                     "node_id": source_nodes[0].node_id if source_nodes else None,
-                } if source_nodes else {"name": "unknown", "node_id": None},
+                }
+                if source_nodes
+                else {"name": "unknown", "node_id": None},
                 "transforms": [
                     {"name": n.plugin_name, "node_id": n.node_id}
                     for n in transform_nodes
                 ],
                 "sinks": [
-                    {"name": n.plugin_name, "node_id": n.node_id}
-                    for n in sink_nodes
+                    {"name": n.plugin_name, "node_id": n.node_id} for n in sink_nodes
                 ],
                 "tokens": [],  # Tokens loaded separately when needed
             }

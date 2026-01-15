@@ -22,10 +22,12 @@ class TestThresholdGate:
         """ThresholdGate implements GateProtocol."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
-        gate = ThresholdGate({
-            "field": "score",
-            "threshold": 50,
-        })
+        gate = ThresholdGate(
+            {
+                "field": "score",
+                "threshold": 50,
+            }
+        )
         assert isinstance(gate, GateProtocol)
 
     def test_has_required_attributes(self) -> None:
@@ -40,10 +42,12 @@ class TestThresholdGate:
         """Route to 'above' label when value > threshold."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
-        gate = ThresholdGate({
-            "field": "score",
-            "threshold": 50,
-        })
+        gate = ThresholdGate(
+            {
+                "field": "score",
+                "threshold": 50,
+            }
+        )
         row = {"id": 1, "score": 75}
 
         result = gate.evaluate(row, ctx)
@@ -56,10 +60,12 @@ class TestThresholdGate:
         """Route to 'below' label when value < threshold."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
-        gate = ThresholdGate({
-            "field": "score",
-            "threshold": 50,
-        })
+        gate = ThresholdGate(
+            {
+                "field": "score",
+                "threshold": 50,
+            }
+        )
         row = {"id": 1, "score": 25}
 
         result = gate.evaluate(row, ctx)
@@ -71,10 +77,12 @@ class TestThresholdGate:
         """Equal value routes to 'below' label by default."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
-        gate = ThresholdGate({
-            "field": "score",
-            "threshold": 50,
-        })
+        gate = ThresholdGate(
+            {
+                "field": "score",
+                "threshold": 50,
+            }
+        )
         row = {"id": 1, "score": 50}
 
         result = gate.evaluate(row, ctx)
@@ -84,11 +92,13 @@ class TestThresholdGate:
         """Equal value routes to 'above' label when inclusive=True."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
-        gate = ThresholdGate({
-            "field": "score",
-            "threshold": 50,
-            "inclusive": True,  # >= routes to above
-        })
+        gate = ThresholdGate(
+            {
+                "field": "score",
+                "threshold": 50,
+                "inclusive": True,  # >= routes to above
+            }
+        )
         row = {"id": 1, "score": 50}
 
         result = gate.evaluate(row, ctx)
@@ -98,10 +108,12 @@ class TestThresholdGate:
         """Access nested field with dot notation."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
-        gate = ThresholdGate({
-            "field": "metrics.score",
-            "threshold": 50,
-        })
+        gate = ThresholdGate(
+            {
+                "field": "metrics.score",
+                "threshold": 50,
+            }
+        )
         row = {"id": 1, "metrics": {"score": 75}}
 
         result = gate.evaluate(row, ctx)
@@ -111,10 +123,12 @@ class TestThresholdGate:
         """Error when required field is missing."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
-        gate = ThresholdGate({
-            "field": "score",
-            "threshold": 50,
-        })
+        gate = ThresholdGate(
+            {
+                "field": "score",
+                "threshold": 50,
+            }
+        )
         row = {"id": 1}  # No score field
 
         with pytest.raises(ValueError, match="score"):
@@ -124,11 +138,13 @@ class TestThresholdGate:
         """String values are cast to float when cast=True (default)."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
-        gate = ThresholdGate({
-            "field": "score",
-            "threshold": 50,
-            "cast": True,  # Default
-        })
+        gate = ThresholdGate(
+            {
+                "field": "score",
+                "threshold": 50,
+                "cast": True,  # Default
+            }
+        )
         row = {"id": 1, "score": "75"}
 
         result = gate.evaluate(row, ctx)
@@ -140,11 +156,13 @@ class TestThresholdGate:
         """Error when field is string and cast=False."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
-        gate = ThresholdGate({
-            "field": "score",
-            "threshold": 50,
-            "cast": False,
-        })
+        gate = ThresholdGate(
+            {
+                "field": "score",
+                "threshold": 50,
+                "cast": False,
+            }
+        )
         row = {"id": 1, "score": "75"}
 
         with pytest.raises(TypeError, match="numeric"):
@@ -154,10 +172,12 @@ class TestThresholdGate:
         """RoutingAction includes reason with threshold details."""
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
-        gate = ThresholdGate({
-            "field": "score",
-            "threshold": 50,
-        })
+        gate = ThresholdGate(
+            {
+                "field": "score",
+                "threshold": 50,
+            }
+        )
         row = {"id": 1, "score": 75}
 
         result = gate.evaluate(row, ctx)
@@ -192,8 +212,10 @@ class TestThresholdGateConfigValidation:
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
         with pytest.raises(PluginConfigError, match="Extra inputs"):
-            ThresholdGate({
-                "field": "score",
-                "threshold": 50,
-                "unknown_field": "value",
-            })
+            ThresholdGate(
+                {
+                    "field": "score",
+                    "threshold": 50,
+                    "unknown_field": "value",
+                }
+            )

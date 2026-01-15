@@ -49,11 +49,15 @@ class TestPluginSystemIntegration:
             input_schema = InputSchema
             output_schema = EnrichedSchema
 
-            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
-                return TransformResult.success({
-                    "value": row["value"],
-                    "doubled": row["value"] * 2,
-                })
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success(
+                    {
+                        "value": row["value"],
+                        "doubled": row["value"] * 2,
+                    }
+                )
 
         class ThresholdGate(BaseGate):
             name = "threshold"
@@ -64,7 +68,9 @@ class TestPluginSystemIntegration:
                 if row["doubled"] > self.config["threshold"]:
                     return GateResult(
                         row=row,
-                        action=RoutingAction.route("above"),  # Route label - sent elsewhere
+                        action=RoutingAction.route(
+                            "above"
+                        ),  # Route label - sent elsewhere
                     )
                 # Below threshold: continue to next step (sink in this test)
                 return GateResult(row=row, action=RoutingAction.continue_())

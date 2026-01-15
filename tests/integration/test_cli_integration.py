@@ -59,9 +59,7 @@ class TestCLIIntegration:
         assert "valid" in result.stdout.lower()
 
         # Step 2: Run pipeline with --execute flag (required for safety)
-        result = runner.invoke(
-            app, ["run", "-s", str(pipeline_config), "--execute"]
-        )
+        result = runner.invoke(app, ["run", "-s", str(pipeline_config), "--execute"])
         assert result.exit_code == 0
         assert "completed" in result.stdout.lower()
 
@@ -96,17 +94,13 @@ class TestCLIIntegration:
         output_file = tmp_path / "output.json"
         assert not output_file.exists()
 
-        result = runner.invoke(
-            app, ["run", "-s", str(pipeline_config), "--dry-run"]
-        )
+        result = runner.invoke(app, ["run", "-s", str(pipeline_config), "--dry-run"])
         assert result.exit_code == 0
 
         # Output should NOT be created
         assert not output_file.exists()
 
-    def test_run_without_flags_exits_with_warning(
-        self, pipeline_config: Path
-    ) -> None:
+    def test_run_without_flags_exits_with_warning(self, pipeline_config: Path) -> None:
         """run without --execute shows warning and exits non-zero."""
         from elspeth.cli import app
 

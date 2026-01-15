@@ -1,7 +1,5 @@
 """Tests for explain command TUI integration."""
 
-import pytest
-
 
 class TestExplainScreen:
     """Tests for ExplainScreen component."""

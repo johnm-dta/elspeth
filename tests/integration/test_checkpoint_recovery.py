@@ -187,9 +187,7 @@ class TestCheckpointRecoveryIntegration:
         assert len(checkpoint_mgr.get_checkpoints(run_id_1)) == 0
         assert len(checkpoint_mgr.get_checkpoints(run_id_2)) > 0
 
-    def _setup_partial_run(
-        self, db, checkpoint_mgr, *, run_suffix: str = "001"
-    ) -> str:
+    def _setup_partial_run(self, db, checkpoint_mgr, *, run_suffix: str = "001") -> str:
         """Helper to create a partially-completed run with checkpoints."""
         from elspeth.core.landscape.schema import (
             nodes_table,

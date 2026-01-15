@@ -139,7 +139,9 @@ class RateLimiter:
         if persistence_path:
             self._conn = sqlite3.connect(persistence_path, check_same_thread=False)
             table_name = f"ratelimit_{name}_second"
-            self._conn.execute(SQLiteQueries.CREATE_BUCKET_TABLE.format(table=table_name))
+            self._conn.execute(
+                SQLiteQueries.CREATE_BUCKET_TABLE.format(table=table_name)
+            )
             self._conn.commit()
             second_bucket: InMemoryBucket | SQLiteBucket = SQLiteBucket(
                 rates=second_rates,
@@ -159,7 +161,9 @@ class RateLimiter:
             minute_rates = [Rate(requests_per_minute, Duration.MINUTE)]
             if persistence_path and self._conn is not None:
                 table_name = f"ratelimit_{name}_minute"
-                self._conn.execute(SQLiteQueries.CREATE_BUCKET_TABLE.format(table=table_name))
+                self._conn.execute(
+                    SQLiteQueries.CREATE_BUCKET_TABLE.format(table=table_name)
+                )
                 self._conn.commit()
                 minute_bucket: InMemoryBucket | SQLiteBucket = SQLiteBucket(
                     rates=minute_rates,

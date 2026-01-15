@@ -132,8 +132,9 @@ def canonical_json(obj: Any) -> str:
         TypeError: If data contains types that cannot be serialized
     """
     normalized = _normalize_for_canonical(obj)
-    # rfc8785.dumps returns bytes, decode to string
-    return rfc8785.dumps(normalized).decode("utf-8")
+    # rfc8785.dumps returns bytes (untyped library), decode to string
+    result: bytes = rfc8785.dumps(normalized)  # type: ignore[no-any-return]
+    return result.decode("utf-8")
 
 
 def stable_hash(obj: Any, version: str = CANONICAL_VERSION) -> str:

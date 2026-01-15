@@ -145,4 +145,3 @@ This is an analysis-oriented decomposition of `src/elspeth/` into cohesive submo
 - **Audit integrity:** `stable_hash` + Landscape invariants enforced by engine executor behavior (e.g., `MissingEdgeError`).
 - **Layering tension:** Types like `NodeType` and `Determinism` are needed in core+engine+plugins; currently located in `plugins.enums` but imported by core.
 - **Phase alignment:** Several interfaces are “future-facing” (CLI, sink adapter, DAG execution); classify these as integration seams rather than bugs.
-

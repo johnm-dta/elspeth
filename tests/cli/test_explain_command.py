@@ -14,9 +14,7 @@ class TestExplainCommand:
 
         result = runner.invoke(app, ["explain"])
         assert result.exit_code != 0
-        assert (
-            "missing" in result.output.lower() or "required" in result.output.lower()
-        )
+        assert "missing" in result.output.lower() or "required" in result.output.lower()
 
     def test_explain_no_tui_mode(self) -> None:
         """explain --no-tui outputs text instead of TUI."""
@@ -33,6 +31,6 @@ class TestExplainCommand:
 
         result = runner.invoke(app, ["explain", "--run", "test-run", "--json"])
         # Should output JSON (even if error)
-        assert result.output.strip().startswith("{") or result.output.strip().startswith(
-            "["
-        )
+        assert result.output.strip().startswith(
+            "{"
+        ) or result.output.strip().startswith("[")

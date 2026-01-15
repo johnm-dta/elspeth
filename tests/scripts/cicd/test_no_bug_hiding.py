@@ -564,10 +564,12 @@ class TestFileScanning:
     def test_scan_file_with_violations(self, temp_dir):
         """File with violations should produce findings."""
         py_file = temp_dir / "test_module.py"
-        py_file.write_text(dedent("""
+        py_file.write_text(
+            dedent("""
             def process(data):
                 return data.get("key", None)
-        """))
+        """)
+        )
 
         findings = scan_file(py_file, temp_dir)
         assert len(findings) == 1
@@ -577,10 +579,12 @@ class TestFileScanning:
     def test_scan_file_no_violations(self, temp_dir):
         """Clean file should produce no findings."""
         py_file = temp_dir / "clean_module.py"
-        py_file.write_text(dedent("""
+        py_file.write_text(
+            dedent("""
             def process(data):
                 return data["key"]
-        """))
+        """)
+        )
 
         findings = scan_file(py_file, temp_dir)
         assert len(findings) == 0
@@ -606,10 +610,12 @@ class TestIntegration:
         """Full workflow: findings, allowlisting, and stale detection."""
         # Create a file with one violation
         py_file = temp_dir / "module.py"
-        py_file.write_text(dedent("""
+        py_file.write_text(
+            dedent("""
             def process(data):
                 return data.get("key")
-        """))
+        """)
+        )
 
         # Scan and get finding
         findings = scan_file(py_file, temp_dir)

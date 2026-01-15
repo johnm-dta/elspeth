@@ -44,12 +44,14 @@ class TestFieldMapper:
         """Rename multiple fields at once."""
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
-        transform = FieldMapper({
-            "mapping": {
-                "first_name": "firstName",
-                "last_name": "lastName",
+        transform = FieldMapper(
+            {
+                "mapping": {
+                    "first_name": "firstName",
+                    "last_name": "lastName",
+                }
             }
-        })
+        )
         row = {"first_name": "Alice", "last_name": "Smith", "id": 1}
 
         result = transform.process(row, ctx)
@@ -61,10 +63,12 @@ class TestFieldMapper:
         """Only include specified fields (drop others)."""
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
-        transform = FieldMapper({
-            "mapping": {"id": "id", "name": "name"},
-            "select_only": True,
-        })
+        transform = FieldMapper(
+            {
+                "mapping": {"id": "id", "name": "name"},
+                "select_only": True,
+            }
+        )
         row = {"id": 1, "name": "alice", "secret": "password", "extra": "data"}
 
         result = transform.process(row, ctx)
@@ -78,10 +82,12 @@ class TestFieldMapper:
         """Error when required field is missing and strict mode enabled."""
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
-        transform = FieldMapper({
-            "mapping": {"required_field": "output"},
-            "strict": True,
-        })
+        transform = FieldMapper(
+            {
+                "mapping": {"required_field": "output"},
+                "strict": True,
+            }
+        )
         row = {"other_field": "value"}
 
         result = transform.process(row, ctx)
@@ -93,10 +99,12 @@ class TestFieldMapper:
         """Skip missing fields when strict mode disabled."""
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
-        transform = FieldMapper({
-            "mapping": {"maybe_field": "output"},
-            "strict": False,
-        })
+        transform = FieldMapper(
+            {
+                "mapping": {"maybe_field": "output"},
+                "strict": False,
+            }
+        )
         row = {"other_field": "value"}
 
         result = transform.process(row, ctx)
@@ -120,9 +128,11 @@ class TestFieldMapper:
         """Access nested fields with dot notation."""
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
-        transform = FieldMapper({
-            "mapping": {"meta.source": "origin"},
-        })
+        transform = FieldMapper(
+            {
+                "mapping": {"meta.source": "origin"},
+            }
+        )
         row = {"id": 1, "meta": {"source": "api", "timestamp": 123}}
 
         result = transform.process(row, ctx)

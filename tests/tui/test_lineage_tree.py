@@ -1,7 +1,5 @@
 """Tests for lineage tree widget."""
 
-import pytest
-
 
 class TestLineageTreeWidget:
     """Tests for LineageTree widget."""
@@ -52,7 +50,11 @@ class TestLineageTreeWidget:
             "transforms": [{"name": "filter", "node_id": "node-002"}],
             "sinks": [{"name": "output", "node_id": "node-003"}],
             "tokens": [
-                {"token_id": "token-001", "row_id": "row-001", "path": ["node-001", "node-002", "node-003"]},
+                {
+                    "token_id": "token-001",
+                    "row_id": "row-001",
+                    "path": ["node-001", "node-002", "node-003"],
+                },
             ],
         }
 
@@ -93,8 +95,16 @@ class TestLineageTreeWidget:
                 {"name": "low", "node_id": "node-004"},
             ],
             "tokens": [
-                {"token_id": "token-001", "row_id": "row-001", "path": ["node-001", "node-002", "node-003"]},
-                {"token_id": "token-002", "row_id": "row-002", "path": ["node-001", "node-002", "node-004"]},
+                {
+                    "token_id": "token-001",
+                    "row_id": "row-001",
+                    "path": ["node-001", "node-002", "node-003"],
+                },
+                {
+                    "token_id": "token-002",
+                    "row_id": "row-002",
+                    "path": ["node-001", "node-002", "node-004"],
+                },
             ],
         }
 

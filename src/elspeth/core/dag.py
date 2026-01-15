@@ -46,8 +46,12 @@ class ExecutionGraph:
         self._sink_id_map: dict[str, str] = {}
         self._transform_id_map: dict[int, str] = {}
         self._output_sink: str = ""
-        self._route_label_map: dict[tuple[str, str], str] = {}  # (gate_node, sink_name) -> route_label
-        self._route_resolution_map: dict[tuple[str, str], str] = {}  # (gate_node, label) -> sink_name | "continue"
+        self._route_label_map: dict[
+            tuple[str, str], str
+        ] = {}  # (gate_node, sink_name) -> route_label
+        self._route_resolution_map: dict[
+            tuple[str, str], str
+        ] = {}  # (gate_node, label) -> sink_name | "continue"
 
     @property
     def node_count(self) -> int:
@@ -202,10 +206,7 @@ class ExecutionGraph:
         Returns:
             List of (from_node, to_node, edge_data) tuples
         """
-        return [
-            (u, v, dict(data))
-            for u, v, data in self._graph.edges(data=True)
-        ]
+        return [(u, v, dict(data)) for u, v, data in self._graph.edges(data=True)]
 
     @classmethod
     def from_config(cls, config: ElspethSettings) -> ExecutionGraph:
@@ -294,7 +295,9 @@ class ExecutionGraph:
                             f"Available sinks: {list(sink_ids.keys())}"
                         )
                     # Edge label = route_label (e.g., "suspicious")
-                    graph.add_edge(tid, sink_ids[target], label=route_label, mode="move")
+                    graph.add_edge(
+                        tid, sink_ids[target], label=route_label, mode="move"
+                    )
                     # Store reverse mapping: (gate_node, sink_name) -> route_label
                     graph._route_label_map[(tid, target)] = route_label
 

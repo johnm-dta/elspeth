@@ -81,8 +81,7 @@ landscape:
   enabled: true
   backend: sqlite
   url: "sqlite:///{audit_db}"
-"""
-        )
+""")
 
         result = runner.invoke(app, ["run", "-s", str(config_file), "--execute", "-v"])
 
@@ -131,8 +130,7 @@ landscape:
   enabled: true
   backend: sqlite
   url: "sqlite:///{audit_db}"
-"""
-        )
+""")
 
         result = runner.invoke(app, ["run", "-s", str(config_file), "--execute", "-v"])
 
@@ -164,11 +162,15 @@ class TestPurgeCommand:
         """purge --dry-run shows what would be deleted."""
         from elspeth.cli import app
 
-        result = runner.invoke(app, [
-            "purge",
-            "--dry-run",
-            "--database", str(tmp_path / "test.db"),
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "purge",
+                "--dry-run",
+                "--database",
+                str(tmp_path / "test.db"),
+            ],
+        )
 
         assert result.exit_code == 0
         assert "would delete" in result.stdout.lower() or "0" in result.stdout
@@ -177,12 +179,17 @@ class TestPurgeCommand:
         """purge --retention-days overrides default."""
         from elspeth.cli import app
 
-        result = runner.invoke(app, [
-            "purge",
-            "--dry-run",
-            "--retention-days", "30",
-            "--database", str(tmp_path / "test.db"),
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "purge",
+                "--dry-run",
+                "--retention-days",
+                "30",
+                "--database",
+                str(tmp_path / "test.db"),
+            ],
+        )
 
         assert result.exit_code == 0
 
@@ -260,11 +267,15 @@ class TestPurgeCommand:
         """purge --yes skips confirmation prompt."""
         from elspeth.cli import app
 
-        result = runner.invoke(app, [
-            "purge",
-            "--yes",
-            "--database", str(tmp_path / "test.db"),
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "purge",
+                "--yes",
+                "--database",
+                str(tmp_path / "test.db"),
+            ],
+        )
 
         # Should complete without asking for confirmation
         assert result.exit_code == 0
@@ -335,13 +346,19 @@ class TestPurgeCommand:
             # Verify payload exists
             assert store.exists(content_hash)
 
-            result = runner.invoke(app, [
-                "purge",
-                "--yes",
-                "--retention-days", "90",
-                "--database", str(db_file),
-                "--payload-dir", str(payload_dir),
-            ])
+            result = runner.invoke(
+                app,
+                [
+                    "purge",
+                    "--yes",
+                    "--retention-days",
+                    "90",
+                    "--database",
+                    str(db_file),
+                    "--payload-dir",
+                    str(payload_dir),
+                ],
+            )
 
             assert result.exit_code == 0
             assert "deleted" in result.stdout.lower() or "1" in result.stdout
@@ -369,10 +386,15 @@ class TestResumeCommand:
 
         db_file = tmp_path / "test.db"
 
-        result = runner.invoke(app, [
-            "resume", "nonexistent-run-id",
-            "--database", str(db_file),
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "resume",
+                "nonexistent-run-id",
+                "--database",
+                str(db_file),
+            ],
+        )
 
         assert result.exit_code != 0
         output = result.output.lower()
@@ -408,10 +430,15 @@ class TestResumeCommand:
             )
         db.close()
 
-        result = runner.invoke(app, [
-            "resume", "completed-run-001",
-            "--database", str(db_file),
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "resume",
+                "completed-run-001",
+                "--database",
+                str(db_file),
+            ],
+        )
 
         assert result.exit_code != 0
         output = result.output.lower()
@@ -447,10 +474,15 @@ class TestResumeCommand:
             )
         db.close()
 
-        result = runner.invoke(app, [
-            "resume", "running-run-001",
-            "--database", str(db_file),
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "resume",
+                "running-run-001",
+                "--database",
+                str(db_file),
+            ],
+        )
 
         assert result.exit_code != 0
         output = result.output.lower()
@@ -486,10 +518,15 @@ class TestResumeCommand:
             )
         db.close()
 
-        result = runner.invoke(app, [
-            "resume", "failed-no-checkpoint-001",
-            "--database", str(db_file),
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "resume",
+                "failed-no-checkpoint-001",
+                "--database",
+                str(db_file),
+            ],
+        )
 
         assert result.exit_code != 0
         output = result.output.lower()
@@ -536,10 +573,15 @@ class TestResumeCommand:
             )
         db.close()
 
-        result = runner.invoke(app, [
-            "resume", "failed-with-checkpoint-001",
-            "--database", str(db_file),
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "resume",
+                "failed-with-checkpoint-001",
+                "--database",
+                str(db_file),
+            ],
+        )
 
         # Should succeed and show resume point info
         assert result.exit_code == 0

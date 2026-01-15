@@ -20,18 +20,15 @@ repos:
       # Formatter
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.9.0
-    hooks:
-      - id: mypy
-        additional_dependencies:
-          - pydantic>=2.6
-          - pandas-stubs>=2.2
-          - types-networkx>=3.2
-        args: [--config-file=pyproject.toml]
-
   - repo: local
     hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy src/elspeth
+        language: system
+        types: [python]
+        pass_filenames: false
+
       - id: no-bug-hiding
         name: No Bug-Hiding Patterns
         entry: uv run python scripts/cicd/no_bug_hiding.py check --root src/elspeth

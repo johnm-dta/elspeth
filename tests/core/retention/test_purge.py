@@ -149,7 +149,11 @@ class TestFindExpiredRowPayloads:
 
         with db.connection() as conn:
             _create_run(
-                conn, runs_table, run_id, completed_at=old_completed_at, status="completed"
+                conn,
+                runs_table,
+                run_id,
+                completed_at=old_completed_at,
+                status="completed",
             )
             _create_node(conn, nodes_table, node_id, run_id)
             _create_row(
@@ -185,7 +189,11 @@ class TestFindExpiredRowPayloads:
 
         with db.connection() as conn:
             _create_run(
-                conn, runs_table, run_id, completed_at=recent_completed_at, status="completed"
+                conn,
+                runs_table,
+                run_id,
+                completed_at=recent_completed_at,
+                status="completed",
             )
             _create_node(conn, nodes_table, node_id, run_id)
             _create_row(
@@ -259,7 +267,11 @@ class TestFindExpiredRowPayloads:
 
         with db.connection() as conn:
             _create_run(
-                conn, runs_table, run_id, completed_at=old_completed_at, status="completed"
+                conn,
+                runs_table,
+                run_id,
+                completed_at=old_completed_at,
+                status="completed",
             )
             _create_node(conn, nodes_table, node_id, run_id)
             _create_row(
@@ -341,7 +353,11 @@ class TestFindExpiredRowPayloads:
 
         with db.connection() as conn:
             _create_run(
-                conn, runs_table, run_id, completed_at=old_completed_at, status="completed"
+                conn,
+                runs_table,
+                run_id,
+                completed_at=old_completed_at,
+                status="completed",
             )
             _create_node(conn, nodes_table, node_id, run_id)
 
@@ -408,7 +424,11 @@ class TestPurgePayloads:
 
         with db.connection() as conn:
             _create_run(
-                conn, runs_table, run_id, completed_at=old_completed_at, status="completed"
+                conn,
+                runs_table,
+                run_id,
+                completed_at=old_completed_at,
+                status="completed",
             )
             _create_node(conn, nodes_table, node_id, run_id)
             _create_row(
@@ -433,7 +453,9 @@ class TestPurgePayloads:
             from sqlalchemy import select
 
             result = conn.execute(
-                select(rows_table.c.source_data_hash).where(rows_table.c.row_id == row_id)
+                select(rows_table.c.source_data_hash).where(
+                    rows_table.c.row_id == row_id
+                )
             )
             saved_hash = result.scalar()
             assert saved_hash == "original_hash_kept"

@@ -1,7 +1,5 @@
 """Tests for node detail panel widget."""
 
-import pytest
-
 
 class TestNodeDetailPanel:
     """Tests for NodeDetailPanel widget."""
@@ -138,12 +136,14 @@ class TestNodeDetailPanel:
         panel = NodeDetailPanel(None)
         assert "No node selected" in panel.render_content()
 
-        panel.update_state({
-            "state_id": "state-001",
-            "plugin_name": "filter",
-            "node_type": "transform",
-            "status": "completed",
-        })
+        panel.update_state(
+            {
+                "state_id": "state-001",
+                "plugin_name": "filter",
+                "node_type": "transform",
+                "status": "completed",
+            }
+        )
         content = panel.render_content()
         assert "filter" in content
 
@@ -151,17 +151,19 @@ class TestNodeDetailPanel:
         """Formats file sizes correctly."""
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
-        panel = NodeDetailPanel({
-            "state_id": "state-001",
-            "plugin_name": "sink",
-            "node_type": "sink",
-            "status": "completed",
-            "artifact": {
-                "artifact_id": "a-001",
-                "path_or_uri": "/out.csv",
-                "content_hash": "hash",
-                "size_bytes": 1536,  # 1.5 KB
-            },
-        })
+        panel = NodeDetailPanel(
+            {
+                "state_id": "state-001",
+                "plugin_name": "sink",
+                "node_type": "sink",
+                "status": "completed",
+                "artifact": {
+                    "artifact_id": "a-001",
+                    "path_or_uri": "/out.csv",
+                    "content_hash": "hash",
+                    "size_bytes": 1536,  # 1.5 KB
+                },
+            }
+        )
         content = panel.render_content()
         assert "1.5 KB" in content

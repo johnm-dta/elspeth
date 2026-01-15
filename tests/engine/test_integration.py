@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from elspeth.engine.orchestrator import PipelineConfig
 
 
-def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
+def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
     """Build a simple graph for testing (temporary until from_config is wired).
 
     Creates a linear graph matching the PipelineConfig structure:
@@ -174,10 +174,12 @@ class TestEngineIntegration:
                 pass
 
             def process(self, row, ctx):
-                return TransformResult.success({
-                    "value": row["value"],
-                    "processed": True,
-                })
+                return TransformResult.success(
+                    {
+                        "value": row["value"],
+                        "processed": True,
+                    }
+                )
 
         class CollectSink:
             name = "output_sink"
@@ -193,7 +195,9 @@ class TestEngineIntegration:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory://output", size_bytes=100, content_hash="abc123")
+                return ArtifactDescriptor.for_file(
+                    path="memory://output", size_bytes=100, content_hash="abc123"
+                )
 
             def close(self):
                 pass
@@ -319,7 +323,9 @@ class TestEngineIntegration:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory://out", size_bytes=len(rows), content_hash="hash")
+                return ArtifactDescriptor.for_file(
+                    path="memory://out", size_bytes=len(rows), content_hash="hash"
+                )
 
             def close(self):
                 pass
@@ -347,8 +353,14 @@ class TestEngineIntegration:
 
         # Get all nodes to identify transforms and sinks
         nodes = recorder.get_nodes(result.run_id)
-        transform_node_ids = {n.node_id for n in nodes if n.node_type in (NodeType.TRANSFORM.value, "transform")}
-        sink_node_ids = {n.node_id for n in nodes if n.node_type in (NodeType.SINK.value, "sink")}
+        transform_node_ids = {
+            n.node_id
+            for n in nodes
+            if n.node_type in (NodeType.TRANSFORM.value, "transform")
+        }
+        sink_node_ids = {
+            n.node_id for n in nodes if n.node_type in (NodeType.SINK.value, "sink")
+        }
 
         # Get all rows
         rows = recorder.get_rows(result.run_id)
@@ -357,31 +369,35 @@ class TestEngineIntegration:
         for row in rows:
             # Every row must have at least one token
             tokens = recorder.get_tokens(row.row_id)
-            assert len(tokens) >= 1, f"Row {row.row_id} has no tokens - audit spine broken"
+            assert (
+                len(tokens) >= 1
+            ), f"Row {row.row_id} has no tokens - audit spine broken"
 
             for token in tokens:
                 # Every token must have node_states
                 states = recorder.get_node_states_for_token(token.token_id)
-                assert len(states) > 0, f"Token {token.token_id} has no node_states - audit spine broken"
+                assert (
+                    len(states) > 0
+                ), f"Token {token.token_id} has no node_states - audit spine broken"
 
                 # Verify token has states at BOTH transforms
                 state_node_ids = {s.node_id for s in states}
                 for transform_id in transform_node_ids:
-                    assert transform_id in state_node_ids, (
-                        f"Token {token.token_id} missing state at transform {transform_id}"
-                    )
+                    assert (
+                        transform_id in state_node_ids
+                    ), f"Token {token.token_id} missing state at transform {transform_id}"
 
                 # Verify token has state at sink
                 sink_states = [s for s in states if s.node_id in sink_node_ids]
-                assert len(sink_states) >= 1, (
-                    f"Token {token.token_id} never reached a sink - audit spine broken"
-                )
+                assert (
+                    len(sink_states) >= 1
+                ), f"Token {token.token_id} never reached a sink - audit spine broken"
 
                 # All states must be completed
                 for state in states:
-                    assert state.status == "completed", (
-                        f"Token {token.token_id} has non-completed state: {state.status}"
-                    )
+                    assert (
+                        state.status == "completed"
+                    ), f"Token {token.token_id} has non-completed state: {state.status}"
 
         # Verify artifacts exist
         artifacts = recorder.get_artifacts(result.run_id)
@@ -440,7 +456,9 @@ class TestEngineIntegration:
                 if row["value"] % 2 == 0:
                     return GateResult(
                         row=row,
-                        action=RoutingAction.route("even"),  # Route label (same as sink name in test)
+                        action=RoutingAction.route(
+                            "even"
+                        ),  # Route label (same as sink name in test)
                     )
                 return GateResult(row=row, action=RoutingAction.continue_())
 
@@ -459,7 +477,11 @@ class TestEngineIntegration:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path=f"memory://{self.name}", size_bytes=len(rows), content_hash=f"hash_{self.name}")
+                return ArtifactDescriptor.for_file(
+                    path=f"memory://{self.name}",
+                    size_bytes=len(rows),
+                    content_hash=f"hash_{self.name}",
+                )
 
             def close(self):
                 pass
@@ -495,7 +517,9 @@ class TestEngineIntegration:
         assert len(gate_nodes) == 1
         gate_node = gate_nodes[0]
 
-        sink_node_ids = {n.node_id for n in nodes if n.node_type in (NodeType.SINK.value, "sink")}
+        sink_node_ids = {
+            n.node_id for n in nodes if n.node_type in (NodeType.SINK.value, "sink")
+        }
 
         # Check every row/token
         rows = recorder.get_rows(result.run_id)
@@ -520,7 +544,9 @@ class TestEngineIntegration:
 
                 # Token must reach a sink
                 sink_states = [s for s in states if s.node_id in sink_node_ids]
-                assert len(sink_states) >= 1, f"Token {token.token_id} never reached sink"
+                assert (
+                    len(sink_states) >= 1
+                ), f"Token {token.token_id} never reached sink"
 
         # 2 tokens were routed (even numbers)
         assert routed_count == 2
@@ -597,7 +623,9 @@ class TestNoSilentAuditLoss:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -700,7 +728,9 @@ class TestNoSilentAuditLoss:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -864,7 +894,9 @@ class TestAuditTrailCompleteness:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -938,7 +970,9 @@ class TestAuditTrailCompleteness:
 
             def evaluate(self, row, ctx):
                 if row["value"] > 50:
-                    return GateResult(row=row, action=RoutingAction.route("high"))  # Route label
+                    return GateResult(
+                        row=row, action=RoutingAction.route("high")
+                    )  # Route label
                 return GateResult(row=row, action=RoutingAction.continue_())
 
         class CollectSink:
@@ -963,7 +997,9 @@ class TestAuditTrailCompleteness:
             def close(self):
                 pass
 
-        source = ListSource([{"value": 10}, {"value": 60}, {"value": 30}, {"value": 90}])
+        source = ListSource(
+            [{"value": 10}, {"value": 60}, {"value": 30}, {"value": 90}]
+        )
         gate = SplitGate()
         default_sink = CollectSink("default_output")
         high_sink = CollectSink("high_output")

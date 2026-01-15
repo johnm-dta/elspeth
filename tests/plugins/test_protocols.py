@@ -47,7 +47,9 @@ class TestSourceProtocol:
 
         # IMPORTANT: Verify protocol conformance at runtime
         # This is why we use @runtime_checkable
-        assert isinstance(source, SourceProtocol), "Source must conform to SourceProtocol"
+        assert isinstance(
+            source, SourceProtocol
+        ), "Source must conform to SourceProtocol"
 
         ctx = PluginContext(run_id="test", config={})
 
@@ -91,10 +93,12 @@ class TestTransformProtocol:
                 self.config = config
 
             def process(self, row: dict, ctx: PluginContext) -> TransformResult:
-                return TransformResult.success({
-                    "value": row["value"],
-                    "doubled": row["value"] * 2,
-                })
+                return TransformResult.success(
+                    {
+                        "value": row["value"],
+                        "doubled": row["value"] * 2,
+                    }
+                )
 
             def on_register(self, ctx: PluginContext) -> None:
                 pass
@@ -108,7 +112,9 @@ class TestTransformProtocol:
         transform = DoubleTransform({})
 
         # IMPORTANT: Verify protocol conformance at runtime
-        assert isinstance(transform, TransformProtocol), "Must conform to TransformProtocol"
+        assert isinstance(
+            transform, TransformProtocol
+        ), "Must conform to TransformProtocol"
 
         ctx = PluginContext(run_id="test", config={})
 
@@ -237,7 +243,9 @@ class TestAggregationProtocol:
         agg = SumAggregation({"batch_size": 2})
 
         # IMPORTANT: Verify protocol conformance at runtime
-        assert isinstance(agg, AggregationProtocol), "Must conform to AggregationProtocol"
+        assert isinstance(
+            agg, AggregationProtocol
+        ), "Must conform to AggregationProtocol"
 
         ctx = PluginContext(run_id="test", config={})
 
@@ -283,7 +291,11 @@ class TestCoalesceProtocol:
             name = "quorum_merge"
             policy = CoalescePolicy.QUORUM
             quorum_threshold = 2  # At least 2 branches must arrive
-            expected_branches: ClassVar[list[str]] = ["branch_a", "branch_b", "branch_c"]
+            expected_branches: ClassVar[list[str]] = [
+                "branch_a",
+                "branch_b",
+                "branch_c",
+            ]
             output_schema = OutputSchema
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
@@ -306,7 +318,9 @@ class TestCoalesceProtocol:
         coalesce = QuorumCoalesce({})
 
         # IMPORTANT: Verify protocol conformance at runtime
-        assert isinstance(coalesce, CoalesceProtocol), "Must conform to CoalesceProtocol"
+        assert isinstance(
+            coalesce, CoalesceProtocol
+        ), "Must conform to CoalesceProtocol"
 
         assert coalesce.quorum_threshold == 2
         assert len(coalesce.expected_branches) == 3

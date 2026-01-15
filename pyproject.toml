@@ -147,6 +147,8 @@ warn_unused_configs = true
 warn_unreachable = true
 show_error_codes = true
 plugins = ["pydantic.mypy"]
+# Allow unused ignores - needed for pre-commit which runs in isolated env
+warn_unused_ignores = false
 
 [[tool.mypy.overrides]]
 module = [

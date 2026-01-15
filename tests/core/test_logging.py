@@ -30,7 +30,9 @@ class TestLoggingConfig:
 
         assert callable(configure_logging)
 
-    def test_logger_outputs_structured(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_logger_outputs_structured(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """Logger outputs structured JSON."""
         from elspeth.core.logging import configure_logging, get_logger
 

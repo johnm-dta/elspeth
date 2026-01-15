@@ -58,9 +58,7 @@ class PurgeManager:
     from the PayloadStore while preserving audit hashes in Landscape.
     """
 
-    def __init__(
-        self, db: "LandscapeDB", payload_store: PayloadStoreProtocol
-    ) -> None:
+    def __init__(self, db: "LandscapeDB", payload_store: PayloadStoreProtocol) -> None:
         """Initialize PurgeManager.
 
         Args:
@@ -96,7 +94,9 @@ class PurgeManager:
         query = (
             select(rows_table.c.source_data_ref)
             .distinct()
-            .select_from(rows_table.join(runs_table, rows_table.c.run_id == runs_table.c.run_id))
+            .select_from(
+                rows_table.join(runs_table, rows_table.c.run_id == runs_table.c.run_id)
+            )
             .where(
                 and_(
                     runs_table.c.status == "completed",

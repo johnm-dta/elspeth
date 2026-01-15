@@ -26,7 +26,6 @@ from typing import Any
 
 import yaml
 
-
 # =============================================================================
 # Data Structures
 # =============================================================================
@@ -59,7 +58,9 @@ class Finding:
     @property
     def canonical_key(self) -> str:
         """Generate the canonical key for allowlist matching."""
-        symbol_part = ":".join(self.symbol_context) if self.symbol_context else "_module_"
+        symbol_part = (
+            ":".join(self.symbol_context) if self.symbol_context else "_module_"
+        )
         return f"{self.file_path}:{self.rule_id}:{symbol_part}:line={self.line}"
 
     def suggested_allowlist_entry(self) -> dict[str, Any]:
@@ -231,12 +232,18 @@ class BugHidingVisitor(ast.NodeVisitor):
         if node.type is None:
             # bare except:
             is_broad = True
-        elif isinstance(node.type, ast.Name) and node.type.id in ("Exception", "BaseException"):
+        elif isinstance(node.type, ast.Name) and node.type.id in (
+            "Exception",
+            "BaseException",
+        ):
             is_broad = True
         elif isinstance(node.type, ast.Tuple):
             # except (Exception, ...):
             for elt in node.type.elts:
-                if isinstance(elt, ast.Name) and elt.id in ("Exception", "BaseException"):
+                if isinstance(elt, ast.Name) and elt.id in (
+                    "Exception",
+                    "BaseException",
+                ):
                     is_broad = True
                     break
 
@@ -298,7 +305,9 @@ def scan_directory(
         relative = py_file.relative_to(root)
         skip = False
         for pattern in exclude_patterns:
-            if relative.match(pattern) or str(relative).startswith(pattern.rstrip("*/")):
+            if relative.match(pattern) or str(relative).startswith(
+                pattern.rstrip("*/")
+            ):
                 skip = True
                 break
         if skip:
@@ -336,7 +345,10 @@ def load_allowlist(path: Path) -> Allowlist:
             try:
                 expires_date = datetime.strptime(expires_str, "%Y-%m-%d").date()
             except ValueError:
-                print(f"Warning: Invalid date format for expires: {expires_str}", file=sys.stderr)
+                print(
+                    f"Warning: Invalid date format for expires: {expires_str}",
+                    file=sys.stderr,
+                )
 
         entries.append(
             AllowlistEntry(
@@ -407,10 +419,12 @@ def report_json(
                 for f in violations
             ],
             "stale_allowlist_entries": [
-                {"key": e.key, "owner": e.owner, "reason": e.reason} for e in stale_entries
+                {"key": e.key, "owner": e.owner, "reason": e.reason}
+                for e in stale_entries
             ],
             "expired_allowlist_entries": [
-                {"key": e.key, "owner": e.owner, "expires": str(e.expires)} for e in expired_entries
+                {"key": e.key, "owner": e.owner, "expires": str(e.expires)}
+                for e in expired_entries
             ],
         },
         indent=2,
@@ -481,7 +495,12 @@ def run_check(args: argparse.Namespace) -> int:
     allowlist_path = args.allowlist
     if allowlist_path is None:
         # Default: config/cicd/no_bug_hiding.yaml relative to repo root
-        allowlist_path = Path(__file__).parent.parent.parent / "config" / "cicd" / "no_bug_hiding.yaml"
+        allowlist_path = (
+            Path(__file__).parent.parent.parent
+            / "config"
+            / "cicd"
+            / "no_bug_hiding.yaml"
+        )
 
     allowlist = load_allowlist(allowlist_path)
 
@@ -496,7 +515,9 @@ def run_check(args: argparse.Namespace) -> int:
 
     # Check for stale/expired allowlist entries
     stale_entries = allowlist.get_stale_entries() if allowlist.fail_on_stale else []
-    expired_entries = allowlist.get_expired_entries() if allowlist.fail_on_expired else []
+    expired_entries = (
+        allowlist.get_expired_entries() if allowlist.fail_on_expired else []
+    )
 
     # Report results
     has_errors = bool(violations or stale_entries or expired_entries)

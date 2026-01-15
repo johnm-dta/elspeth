@@ -195,7 +195,9 @@ class CheckpointSettings(BaseModel):
 
     enabled: bool = True
     frequency: Literal["every_row", "every_n", "aggregation_only"] = "every_row"
-    checkpoint_interval: int | None = Field(default=None, gt=0)  # Required if frequency == "every_n"
+    checkpoint_interval: int | None = Field(
+        default=None, gt=0
+    )  # Required if frequency == "every_n"
     aggregation_boundaries: bool = True  # Always checkpoint at aggregation flush
 
     @model_validator(mode="after")
@@ -229,7 +231,8 @@ class PayloadStoreSettings(BaseModel):
 
     backend: str = Field(default="filesystem", description="Storage backend type")
     base_path: Path = Field(
-        default=Path(".elspeth/payloads"), description="Base path for filesystem backend"
+        default=Path(".elspeth/payloads"),
+        description="Base path for filesystem backend",
     )
     retention_days: int = Field(
         default=90, gt=0, description="Payload retention in days"
@@ -315,7 +318,9 @@ class ElspethSettings(BaseModel):
 
     @field_validator("sinks")
     @classmethod
-    def validate_sinks_not_empty(cls, v: dict[str, SinkSettings]) -> dict[str, SinkSettings]:
+    def validate_sinks_not_empty(
+        cls, v: dict[str, SinkSettings]
+    ) -> dict[str, SinkSettings]:
         """At least one sink is required."""
         if not v:
             raise ValueError("At least one sink is required")
@@ -353,7 +358,7 @@ def load_settings(config_path: Path) -> ElspethSettings:
         envvar_prefix="ELSPETH",
         settings_files=[str(config_path)],
         environments=False,  # No [default]/[production] sections
-        load_dotenv=False,   # Don't auto-load .env
+        load_dotenv=False,  # Don't auto-load .env
         merge_enabled=True,  # Deep merge nested dicts
     )
 
@@ -381,4 +386,3 @@ def resolve_config(settings: ElspethSettings) -> dict[str, Any]:
         Dict representation suitable for JSON serialization
     """
     return settings.model_dump(mode="json")
-

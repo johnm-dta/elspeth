@@ -31,13 +31,13 @@ class RowOutcome(Enum):
     No silent drops.
     """
 
-    COMPLETED = "completed"           # Reached output sink
-    ROUTED = "routed"                 # Sent to named sink by gate (move mode)
-    FORKED = "forked"                 # Split into child tokens (parent terminates)
+    COMPLETED = "completed"  # Reached output sink
+    ROUTED = "routed"  # Sent to named sink by gate (move mode)
+    FORKED = "forked"  # Split into child tokens (parent terminates)
     CONSUMED_IN_BATCH = "consumed_in_batch"  # Fed into aggregation
-    COALESCED = "coalesced"           # Merged with other tokens
-    QUARANTINED = "quarantined"       # Failed, stored for investigation
-    FAILED = "failed"                 # Failed, not recoverable
+    COALESCED = "coalesced"  # Merged with other tokens
+    QUARANTINED = "quarantined"  # Failed, stored for investigation
+    FAILED = "failed"  # Failed, not recoverable
 
 
 def _freeze_dict(d: dict[str, Any] | None) -> Mapping[str, Any]:

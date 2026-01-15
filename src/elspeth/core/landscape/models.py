@@ -88,7 +88,9 @@ class Token:
     fork_group_id: str | None = None
     join_group_id: str | None = None
     branch_name: str | None = None
-    step_in_pipeline: int | None = None  # Step where this token was created (fork/coalesce)
+    step_in_pipeline: int | None = (
+        None  # Step where this token was created (fork/coalesce)
+    )
 
 
 @dataclass

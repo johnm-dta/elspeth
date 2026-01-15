@@ -237,4 +237,3 @@ sequenceDiagram
 
   O->>LR: complete_run(status=completed|failed)
 ```
-

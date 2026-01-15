@@ -1,7 +1,6 @@
 """Tests for CSV source plugin."""
 
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 

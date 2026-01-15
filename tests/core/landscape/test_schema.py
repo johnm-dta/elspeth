@@ -99,9 +99,19 @@ class TestPhase3ASchemaAdditions:
 
         table_names = set(metadata.tables.keys())
         expected = {
-            "runs", "nodes", "edges", "rows", "tokens", "token_parents",
-            "node_states", "routing_events", "calls", "batches",
-            "batch_members", "batch_outputs", "artifacts",
+            "runs",
+            "nodes",
+            "edges",
+            "rows",
+            "tokens",
+            "token_parents",
+            "node_states",
+            "routing_events",
+            "calls",
+            "batches",
+            "batch_members",
+            "batch_outputs",
+            "artifacts",
         }
         assert expected.issubset(table_names), f"Missing: {expected - table_names}"
 

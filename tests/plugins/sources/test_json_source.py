@@ -121,9 +121,7 @@ class TestJSONSource:
         with pytest.raises(FileNotFoundError):
             list(source.load(ctx))
 
-    def test_non_array_json_raises(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_non_array_json_raises(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Non-array JSON raises ValueError."""
         from elspeth.plugins.sources.json_source import JSONSource
 

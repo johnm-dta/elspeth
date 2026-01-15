@@ -33,7 +33,9 @@ class TestTransformExecutor:
             name = "double"
             node_id = node.node_id
 
-            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success({"value": row["value"] * 2})
 
         transform = DoubleTransform()
@@ -93,7 +95,9 @@ class TestTransformExecutor:
             name = "failing"
             node_id = node.node_id
 
-            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.error({"message": "validation failed"})
 
         transform = FailingTransform()
@@ -148,7 +152,9 @@ class TestTransformExecutor:
             name = "exploding"
             node_id = node.node_id
 
-            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 raise RuntimeError("kaboom!")
 
         transform = ExplodingTransform()
@@ -207,7 +213,9 @@ class TestTransformExecutor:
             name = "enricher"
             node_id = node.node_id
 
-            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success({**row, "enriched": True})
 
         transform = EnrichTransform()
@@ -265,7 +273,9 @@ class TestTransformExecutor:
             name = "identity"
             node_id = node.node_id
 
-            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success(row)
 
         transform = IdentityTransform()
@@ -518,7 +528,9 @@ class TestGateExecutor:
         ctx = PluginContext(run_id=run.run_id, config={})
 
         # Empty route resolution map - label not configured
-        executor = GateExecutor(recorder, SpanFactory(), edge_map={}, route_resolution_map={})
+        executor = GateExecutor(
+            recorder, SpanFactory(), edge_map={}, route_resolution_map={}
+        )
 
         token = TokenInfo(
             row_id="row-1",

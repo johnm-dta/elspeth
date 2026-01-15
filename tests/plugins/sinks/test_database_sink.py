@@ -36,9 +36,7 @@ class TestDatabaseSink:
         assert DatabaseSink.name == "database"
         assert hasattr(DatabaseSink, "input_schema")
 
-    def test_write_creates_table(
-        self, db_url: str, ctx: PluginContext
-    ) -> None:
+    def test_write_creates_table(self, db_url: str, ctx: PluginContext) -> None:
         """write() creates table and inserts rows."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
@@ -65,9 +63,7 @@ class TestDatabaseSink:
         """Rows are batched for efficiency."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {"url": db_url, "table": "output", "batch_size": 2}
-        )
+        sink = DatabaseSink({"url": db_url, "table": "output", "batch_size": 2})
 
         # Write 5 rows with batch size 2
         for i in range(5):

@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from elspeth.engine.orchestrator import PipelineConfig
 
 
-def _build_test_graph(config: PipelineConfig) -> "ExecutionGraph":
+def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
     """Build a simple graph for testing (temporary until from_config is wired).
 
     Creates a linear graph matching the PipelineConfig structure:
@@ -127,10 +127,12 @@ class TestOrchestrator:
                 pass
 
             def process(self, row, ctx):
-                return TransformResult.success({
-                    "value": row["value"],
-                    "doubled": row["value"] * 2,
-                })
+                return TransformResult.success(
+                    {
+                        "value": row["value"],
+                        "doubled": row["value"] * 2,
+                    }
+                )
 
         class CollectSink:
             name = "collect"
@@ -146,7 +148,9 @@ class TestOrchestrator:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -212,7 +216,9 @@ class TestOrchestrator:
                 if row["value"] > 50:
                     return GateResult(
                         row=row,
-                        action=RoutingAction.route("high"),  # Route label (same as sink name in test)
+                        action=RoutingAction.route(
+                            "high"
+                        ),  # Route label (same as sink name in test)
                     )
                 return GateResult(row=row, action=RoutingAction.continue_())
 
@@ -230,7 +236,9 @@ class TestOrchestrator:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -315,7 +323,9 @@ class TestOrchestratorAuditTrail:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -409,7 +419,9 @@ class TestOrchestratorErrorHandling:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -516,7 +528,9 @@ class TestOrchestratorMultipleTransforms:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -586,7 +600,9 @@ class TestOrchestratorEmptyPipeline:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -662,7 +678,9 @@ class TestOrchestratorEmptyPipeline:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -752,7 +770,9 @@ class TestOrchestratorInvalidRouting:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -880,7 +900,9 @@ class TestOrchestratorAcceptsGraph:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -937,13 +959,17 @@ class TestOrchestratorOutputSinkRouting:
         mock_results_sink = MagicMock()
         mock_results_sink.name = "csv"
         mock_results_sink.write = MagicMock(
-            return_value=ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
+            return_value=ArtifactDescriptor.for_file(
+                path="memory", size_bytes=0, content_hash="abc123"
+            )
         )
 
         mock_errors_sink = MagicMock()
         mock_errors_sink.name = "csv"
         mock_errors_sink.write = MagicMock(
-            return_value=ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
+            return_value=ArtifactDescriptor.for_file(
+                path="memory", size_bytes=0, content_hash="abc123"
+            )
         )
 
         pipeline_config = PipelineConfig(
@@ -961,8 +987,12 @@ class TestOrchestratorOutputSinkRouting:
         # Row should go to "results" sink, not "default"
         assert result.rows_processed == 1
         assert result.rows_succeeded == 1
-        assert mock_results_sink.write.called, "results sink should receive completed rows"
-        assert not mock_errors_sink.write.called, "errors sink should not receive completed rows"
+        assert (
+            mock_results_sink.write.called
+        ), "results sink should receive completed rows"
+        assert (
+            not mock_errors_sink.write.called
+        ), "errors sink should not receive completed rows"
 
 
 class TestOrchestratorGateRouting:
@@ -1013,7 +1043,9 @@ class TestOrchestratorGateRouting:
         mock_gate.name = "test_gate"
         mock_gate.evaluate.return_value = GateResult(
             row={"id": 1, "score": 0.2},
-            action=RoutingAction.route("suspicious", reason={"score": "low"}),  # Uses route label
+            action=RoutingAction.route(
+                "suspicious", reason={"score": "low"}
+            ),  # Uses route label
         )
 
         # Mock sinks - must return proper artifact info from write()
@@ -1042,7 +1074,9 @@ class TestOrchestratorGateRouting:
         assert result.rows_processed == 1
         assert result.rows_routed == 1
         assert mock_flagged.write.called, "flagged sink should receive routed row"
-        assert not mock_results.write.called, "results sink should not receive routed row"
+        assert (
+            not mock_results.write.called
+        ), "results sink should not receive routed row"
 
 
 class TestLifecycleHooks:
@@ -1167,7 +1201,9 @@ class TestLifecycleHooks:
         orchestrator.run(config, graph=graph)
 
         # on_complete should be called last (among transform lifecycle calls)
-        transform_calls = [c for c in call_order if c in ["on_start", "process", "on_complete"]]
+        transform_calls = [
+            c for c in call_order if c in ["on_start", "process", "on_complete"]
+        ]
         assert transform_calls[-1] == "on_complete"
         # All processing should happen before on_complete
         assert call_order.count("process") == 2
@@ -1289,7 +1325,9 @@ class TestOrchestratorLandscapeExport:
                     self.captured_rows.extend(row)
                 else:
                     self.captured_rows.append(row)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def flush(self):
                 pass
@@ -1405,7 +1443,9 @@ class TestOrchestratorLandscapeExport:
                     self.captured_rows.extend(row)
                 else:
                     self.captured_rows.append(row)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def flush(self):
                 pass
@@ -1515,7 +1555,9 @@ class TestOrchestratorLandscapeExport:
 
             def write(self, rows, ctx):
                 self.captured_rows.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def flush(self):
                 pass
@@ -1560,7 +1602,9 @@ class TestOrchestratorLandscapeExport:
         orchestrator = Orchestrator(db)
 
         # Ensure ELSPETH_SIGNING_KEY is not set
-        env_without_key = {k: v for k, v in os.environ.items() if k != "ELSPETH_SIGNING_KEY"}
+        env_without_key = {
+            k: v for k, v in os.environ.items() if k != "ELSPETH_SIGNING_KEY"
+        }
         with (
             patch.dict(os.environ, env_without_key, clear=True),
             pytest.raises(ValueError, match="ELSPETH_SIGNING_KEY"),
@@ -1614,7 +1658,9 @@ class TestOrchestratorLandscapeExport:
 
             def write(self, rows, ctx):
                 self.captured_rows.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def flush(self):
                 pass
@@ -1723,17 +1769,17 @@ class TestSourceLifecycleHooks:
 
         # on_start should be called BEFORE load
         assert "source_on_start" in call_order, "Source on_start should be called"
-        assert call_order.index("source_on_start") < call_order.index("source_load"), (
-            "Source on_start should be called before load"
-        )
+        assert call_order.index("source_on_start") < call_order.index(
+            "source_load"
+        ), "Source on_start should be called before load"
         # on_complete should be called AFTER load and BEFORE close
         assert "source_on_complete" in call_order, "Source on_complete should be called"
-        assert call_order.index("source_on_complete") > call_order.index("source_load"), (
-            "Source on_complete should be called after load"
-        )
-        assert call_order.index("source_on_complete") < call_order.index("source_close"), (
-            "Source on_complete should be called before close"
-        )
+        assert call_order.index("source_on_complete") > call_order.index(
+            "source_load"
+        ), "Source on_complete should be called after load"
+        assert call_order.index("source_on_complete") < call_order.index(
+            "source_close"
+        ), "Source on_complete should be called before close"
 
 
 class TestSinkLifecycleHooks:
@@ -1763,7 +1809,9 @@ class TestSinkLifecycleHooks:
 
             def write(self, rows, ctx):
                 call_order.append("sink_write")
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash="abc123"
+                )
 
             def close(self):
                 call_order.append("sink_close")
@@ -1796,14 +1844,14 @@ class TestSinkLifecycleHooks:
 
         # on_start should be called before write
         assert "sink_on_start" in call_order, "Sink on_start should be called"
-        assert call_order.index("sink_on_start") < call_order.index("sink_write"), (
-            "Sink on_start should be called before write"
-        )
+        assert call_order.index("sink_on_start") < call_order.index(
+            "sink_write"
+        ), "Sink on_start should be called before write"
         # on_complete should be called after write, before close
         assert "sink_on_complete" in call_order, "Sink on_complete should be called"
-        assert call_order.index("sink_on_complete") > call_order.index("sink_write"), (
-            "Sink on_complete should be called after write"
-        )
+        assert call_order.index("sink_on_complete") > call_order.index(
+            "sink_write"
+        ), "Sink on_complete should be called after write"
 
     def test_sink_on_complete_called_even_on_error(self) -> None:
         """Sink on_complete should be called even when run fails."""
@@ -1815,7 +1863,6 @@ class TestSinkLifecycleHooks:
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-        from elspeth.plugins.results import TransformResult
 
         completed: list[str] = []
 
@@ -1842,7 +1889,9 @@ class TestSinkLifecycleHooks:
                 completed.append("sink_on_complete")
 
             def write(self, rows, ctx):
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash="abc123"
+                )
 
             def close(self):
                 pass
@@ -1973,7 +2022,9 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -2016,7 +2067,9 @@ class TestOrchestratorCheckpointing:
         db = LandscapeDB.in_memory()
         checkpoint_mgr = CheckpointManager(db)
         # Checkpoint every 3 rows
-        settings = CheckpointSettings(enabled=True, frequency="every_n", checkpoint_interval=3)
+        settings = CheckpointSettings(
+            enabled=True, frequency="every_n", checkpoint_interval=3
+        )
 
         class ValueSchema(PluginSchema):
             value: int
@@ -2065,7 +2118,9 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -2152,7 +2207,9 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -2247,7 +2304,9 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -2346,7 +2405,9 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -2433,7 +2494,9 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -2521,7 +2584,9 @@ class TestOrchestratorConfigRecording:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -2602,7 +2667,9 @@ class TestOrchestratorConfigRecording:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -2706,7 +2773,9 @@ class TestNodeMetadataFromPlugin:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -2724,7 +2793,9 @@ class TestNodeMetadataFromPlugin:
         # Build graph
         graph = ExecutionGraph()
         graph.add_node("source", node_type="source", plugin_name="versioned_source")
-        graph.add_node("transform", node_type="transform", plugin_name="versioned_transform")
+        graph.add_node(
+            "transform", node_type="transform", plugin_name="versioned_transform"
+        )
         graph.add_node("sink", node_type="sink", plugin_name="versioned_sink")
         graph.add_edge("source", "transform", label="continue", mode="move")
         graph.add_edge("transform", "sink", label="continue", mode="move")
@@ -2745,21 +2816,21 @@ class TestNodeMetadataFromPlugin:
 
         # Verify source has correct version
         source_node = nodes_by_name["versioned_source"]
-        assert source_node.plugin_version == "3.7.2", (
-            f"Source plugin_version should be '3.7.2', got '{source_node.plugin_version}'"
-        )
+        assert (
+            source_node.plugin_version == "3.7.2"
+        ), f"Source plugin_version should be '3.7.2', got '{source_node.plugin_version}'"
 
         # Verify transform has correct version
         transform_node = nodes_by_name["versioned_transform"]
-        assert transform_node.plugin_version == "2.5.0", (
-            f"Transform plugin_version should be '2.5.0', got '{transform_node.plugin_version}'"
-        )
+        assert (
+            transform_node.plugin_version == "2.5.0"
+        ), f"Transform plugin_version should be '2.5.0', got '{transform_node.plugin_version}'"
 
         # Verify sink has correct version
         sink_node = nodes_by_name["versioned_sink"]
-        assert sink_node.plugin_version == "4.1.0", (
-            f"Sink plugin_version should be '4.1.0', got '{sink_node.plugin_version}'"
-        )
+        assert (
+            sink_node.plugin_version == "4.1.0"
+        ), f"Sink plugin_version should be '4.1.0', got '{sink_node.plugin_version}'"
 
     def test_node_metadata_records_determinism(self) -> None:
         """Node registration should record plugin determinism.
@@ -2828,7 +2899,9 @@ class TestNodeMetadataFromPlugin:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
 
             def close(self):
                 pass
@@ -2846,7 +2919,9 @@ class TestNodeMetadataFromPlugin:
         # Build graph
         graph = ExecutionGraph()
         graph.add_node("source", node_type="source", plugin_name="test_source")
-        graph.add_node("transform", node_type="transform", plugin_name="nondeterministic_transform")
+        graph.add_node(
+            "transform", node_type="transform", plugin_name="nondeterministic_transform"
+        )
         graph.add_node("sink", node_type="sink", plugin_name="test_sink")
         graph.add_edge("source", "transform", label="continue", mode="move")
         graph.add_edge("transform", "sink", label="continue", mode="move")
@@ -2862,9 +2937,11 @@ class TestNodeMetadataFromPlugin:
         nodes = recorder.get_nodes(run_result.run_id)
 
         # Find the transform node
-        transform_node = next(n for n in nodes if n.plugin_name == "nondeterministic_transform")
+        transform_node = next(
+            n for n in nodes if n.plugin_name == "nondeterministic_transform"
+        )
 
         # Verify determinism is recorded correctly
-        assert transform_node.determinism == "nondeterministic", (
-            f"Transform determinism should be 'nondeterministic', got '{transform_node.determinism}'"
-        )
+        assert (
+            transform_node.determinism == "nondeterministic"
+        ), f"Transform determinism should be 'nondeterministic', got '{transform_node.determinism}'"

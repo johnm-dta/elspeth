@@ -85,6 +85,7 @@ class TestOrchestrator:
 
     def test_run_simple_pipeline(self) -> None:
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -145,7 +146,7 @@ class TestOrchestrator:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -170,6 +171,7 @@ class TestOrchestrator:
 
     def test_run_with_gate_routing(self) -> None:
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import GateResult, RoutingAction
         from elspeth.plugins.schemas import PluginSchema
@@ -228,7 +230,7 @@ class TestOrchestrator:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -259,6 +261,7 @@ class TestOrchestratorAuditTrail:
     def test_run_records_landscape_entries(self) -> None:
         """Verify that run creates proper audit trail."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -312,7 +315,7 @@ class TestOrchestratorAuditTrail:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -353,6 +356,7 @@ class TestOrchestratorErrorHandling:
     def test_run_marks_failed_on_transform_exception(self) -> None:
         """If a transform raises, run status should be failed in Landscape."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.schemas import PluginSchema
 
@@ -405,7 +409,7 @@ class TestOrchestratorErrorHandling:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -444,6 +448,7 @@ class TestOrchestratorMultipleTransforms:
     def test_run_multiple_transforms_in_sequence(self) -> None:
         """Test that multiple transforms execute in order."""
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -511,7 +516,7 @@ class TestOrchestratorMultipleTransforms:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -542,6 +547,7 @@ class TestOrchestratorEmptyPipeline:
     def test_run_no_transforms(self) -> None:
         """Test pipeline with source directly to sink."""
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.schemas import PluginSchema
 
@@ -580,7 +586,7 @@ class TestOrchestratorEmptyPipeline:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -605,6 +611,7 @@ class TestOrchestratorEmptyPipeline:
     def test_run_empty_source(self) -> None:
         """Test pipeline with no rows from source."""
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -655,7 +662,7 @@ class TestOrchestratorEmptyPipeline:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -684,6 +691,7 @@ class TestOrchestratorInvalidRouting:
     def test_gate_routing_to_unknown_sink_raises_error(self) -> None:
         """Gate routing to non-existent sink must fail loudly, not silently."""
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.executors import MissingEdgeError
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import GateResult, RoutingAction
@@ -744,7 +752,7 @@ class TestOrchestratorInvalidRouting:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -845,6 +853,7 @@ class TestOrchestratorAcceptsGraph:
     def test_orchestrator_run_requires_graph(self) -> None:
         """Orchestrator.run() raises ValueError if graph is None."""
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.schemas import PluginSchema
 
@@ -871,7 +880,7 @@ class TestOrchestratorAcceptsGraph:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -903,6 +912,7 @@ class TestOrchestratorOutputSinkRouting:
         )
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 
         db = LandscapeDB.in_memory()
@@ -927,13 +937,13 @@ class TestOrchestratorOutputSinkRouting:
         mock_results_sink = MagicMock()
         mock_results_sink.name = "csv"
         mock_results_sink.write = MagicMock(
-            return_value={"path": "memory", "size_bytes": 0, "content_hash": "abc123"}
+            return_value=ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
         )
 
         mock_errors_sink = MagicMock()
         mock_errors_sink.name = "csv"
         mock_errors_sink.write = MagicMock(
-            return_value={"path": "memory", "size_bytes": 0, "content_hash": "abc123"}
+            return_value=ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
         )
 
         pipeline_config = PipelineConfig(
@@ -970,6 +980,7 @@ class TestOrchestratorGateRouting:
         )
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import GateResult, RoutingAction
 
@@ -1008,19 +1019,15 @@ class TestOrchestratorGateRouting:
         # Mock sinks - must return proper artifact info from write()
         mock_results = MagicMock()
         mock_results.name = "csv"
-        mock_results.write.return_value = {
-            "path": "memory",
-            "size_bytes": 0,
-            "content_hash": "abc123",
-        }
+        mock_results.write.return_value = ArtifactDescriptor.for_file(
+            path="memory", size_bytes=0, content_hash="abc123"
+        )
 
         mock_flagged = MagicMock()
         mock_flagged.name = "csv"
-        mock_flagged.write.return_value = {
-            "path": "memory",
-            "size_bytes": 0,
-            "content_hash": "abc123",
-        }
+        mock_flagged.write.return_value = ArtifactDescriptor.for_file(
+            path="memory", size_bytes=0, content_hash="abc123"
+        )
 
         pipeline_config = PipelineConfig(
             source=mock_source,
@@ -1047,6 +1054,7 @@ class TestLifecycleHooks:
 
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
 
@@ -1072,11 +1080,9 @@ class TestLifecycleHooks:
         transform = TrackedTransform()
         mock_sink = MagicMock()
         mock_sink.name = "csv"
-        mock_sink.write.return_value = {
-            "path": "memory",
-            "size_bytes": 0,
-            "content_hash": "abc123",
-        }
+        mock_sink.write.return_value = ArtifactDescriptor.for_file(
+            path="memory", size_bytes=0, content_hash="abc123"
+        )
 
         config = PipelineConfig(
             source=mock_source,
@@ -1108,6 +1114,7 @@ class TestLifecycleHooks:
 
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
 
@@ -1136,11 +1143,9 @@ class TestLifecycleHooks:
         transform = TrackedTransform()
         mock_sink = MagicMock()
         mock_sink.name = "csv"
-        mock_sink.write.return_value = {
-            "path": "memory",
-            "size_bytes": 0,
-            "content_hash": "abc123",
-        }
+        mock_sink.write.return_value = ArtifactDescriptor.for_file(
+            path="memory", size_bytes=0, content_hash="abc123"
+        )
 
         config = PipelineConfig(
             source=mock_source,
@@ -1241,6 +1246,7 @@ class TestOrchestratorLandscapeExport:
         )
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.schemas import PluginSchema
 
@@ -1283,7 +1289,7 @@ class TestOrchestratorLandscapeExport:
                     self.captured_rows.extend(row)
                 else:
                     self.captured_rows.append(row)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def flush(self):
                 pass
@@ -1358,6 +1364,7 @@ class TestOrchestratorLandscapeExport:
         )
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.schemas import PluginSchema
 
@@ -1398,7 +1405,7 @@ class TestOrchestratorLandscapeExport:
                     self.captured_rows.extend(row)
                 else:
                     self.captured_rows.append(row)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def flush(self):
                 pass
@@ -1471,6 +1478,7 @@ class TestOrchestratorLandscapeExport:
         )
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.schemas import PluginSchema
 
@@ -1507,7 +1515,7 @@ class TestOrchestratorLandscapeExport:
 
             def write(self, rows, ctx):
                 self.captured_rows.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def flush(self):
                 pass
@@ -1569,6 +1577,7 @@ class TestOrchestratorLandscapeExport:
         )
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.schemas import PluginSchema
 
@@ -1605,7 +1614,7 @@ class TestOrchestratorLandscapeExport:
 
             def write(self, rows, ctx):
                 self.captured_rows.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def flush(self):
                 pass
@@ -1662,6 +1671,7 @@ class TestSourceLifecycleHooks:
 
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 
         call_order: list[str] = []
@@ -1689,11 +1699,9 @@ class TestSourceLifecycleHooks:
         source = TrackedSource()
         mock_sink = MagicMock()
         mock_sink.name = "csv"
-        mock_sink.write.return_value = {
-            "path": "memory",
-            "size_bytes": 0,
-            "content_hash": "abc123",
-        }
+        mock_sink.write.return_value = ArtifactDescriptor.for_file(
+            path="memory", size_bytes=0, content_hash="abc123"
+        )
 
         config = PipelineConfig(
             source=source,
@@ -1737,6 +1745,7 @@ class TestSinkLifecycleHooks:
 
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 
         call_order: list[str] = []
@@ -1754,7 +1763,7 @@ class TestSinkLifecycleHooks:
 
             def write(self, rows, ctx):
                 call_order.append("sink_write")
-                return {"path": "memory", "size_bytes": 0, "content_hash": "abc123"}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
             def close(self):
                 call_order.append("sink_close")
@@ -1804,6 +1813,7 @@ class TestSinkLifecycleHooks:
 
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
 
@@ -1832,7 +1842,7 @@ class TestSinkLifecycleHooks:
                 completed.append("sink_on_complete")
 
             def write(self, rows, ctx):
-                return {"path": "memory", "size_bytes": 0, "content_hash": "abc123"}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
             def close(self):
                 pass
@@ -1907,6 +1917,7 @@ class TestOrchestratorCheckpointing:
         from elspeth.core.checkpoint import CheckpointManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -1962,7 +1973,7 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -1997,6 +2008,7 @@ class TestOrchestratorCheckpointing:
         from elspeth.core.checkpoint import CheckpointManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -2053,7 +2065,7 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -2084,6 +2096,7 @@ class TestOrchestratorCheckpointing:
         from elspeth.core.checkpoint import CheckpointManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -2139,7 +2152,7 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -2172,6 +2185,7 @@ class TestOrchestratorCheckpointing:
         from elspeth.core.checkpoint import CheckpointManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -2233,7 +2247,7 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -2276,6 +2290,7 @@ class TestOrchestratorCheckpointing:
         from elspeth.core.checkpoint import CheckpointManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -2331,7 +2346,7 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -2363,6 +2378,7 @@ class TestOrchestratorCheckpointing:
         """Orchestrator works fine without checkpoint manager."""
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -2417,7 +2433,7 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -2451,6 +2467,7 @@ class TestOrchestratorConfigRecording:
         import json
 
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -2504,7 +2521,7 @@ class TestOrchestratorConfigRecording:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -2546,6 +2563,7 @@ class TestOrchestratorConfigRecording:
         import json
 
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.schemas import PluginSchema
 
@@ -2584,7 +2602,7 @@ class TestOrchestratorConfigRecording:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -2629,6 +2647,7 @@ class TestNodeMetadataFromPlugin:
         """
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.enums import Determinism
         from elspeth.plugins.results import TransformResult
@@ -2687,7 +2706,7 @@ class TestNodeMetadataFromPlugin:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -2750,6 +2769,7 @@ class TestNodeMetadataFromPlugin:
         """
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.plugins.enums import Determinism
         from elspeth.plugins.results import TransformResult
@@ -2808,7 +2828,7 @@ class TestNodeMetadataFromPlugin:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass

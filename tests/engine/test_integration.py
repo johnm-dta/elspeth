@@ -133,6 +133,7 @@ class TestEngineIntegration:
         """Full pipeline execution with audit trail verification."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
 
@@ -192,7 +193,7 @@ class TestEngineIntegration:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory://output", "size_bytes": 100, "content_hash": "abc123"}
+                return ArtifactDescriptor.for_file(path="memory://output", size_bytes=100, content_hash="abc123")
 
             def close(self):
                 pass
@@ -250,6 +251,7 @@ class TestEngineIntegration:
         """
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.enums import NodeType
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -317,7 +319,7 @@ class TestEngineIntegration:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory://out", "size_bytes": len(rows), "content_hash": "hash"}
+                return ArtifactDescriptor.for_file(path="memory://out", size_bytes=len(rows), content_hash="hash")
 
             def close(self):
                 pass
@@ -395,6 +397,7 @@ class TestEngineIntegration:
         """
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.enums import NodeType
         from elspeth.plugins.results import GateResult, RoutingAction
         from elspeth.plugins.schemas import PluginSchema
@@ -456,7 +459,7 @@ class TestEngineIntegration:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": f"memory://{self.name}", "size_bytes": len(rows), "content_hash": f"hash_{self.name}"}
+                return ArtifactDescriptor.for_file(path=f"memory://{self.name}", size_bytes=len(rows), content_hash=f"hash_{self.name}")
 
             def close(self):
                 pass
@@ -535,6 +538,7 @@ class TestNoSilentAuditLoss:
         """
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine import MissingEdgeError, Orchestrator, PipelineConfig
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.results import GateResult, RoutingAction
         from elspeth.plugins.schemas import PluginSchema
 
@@ -593,7 +597,7 @@ class TestNoSilentAuditLoss:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -644,6 +648,7 @@ class TestNoSilentAuditLoss:
         """Transform exceptions must propagate, not be silently caught."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.schemas import PluginSchema
 
         db = LandscapeDB.in_memory()
@@ -695,7 +700,7 @@ class TestNoSilentAuditLoss:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -809,6 +814,7 @@ class TestAuditTrailCompleteness:
         """Even with no rows, run must be recorded in audit trail."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
 
@@ -858,7 +864,7 @@ class TestAuditTrailCompleteness:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self):
                 pass
@@ -892,6 +898,7 @@ class TestAuditTrailCompleteness:
         """When multiple sinks receive data, all must record artifacts."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.results import GateResult, RoutingAction
         from elspeth.plugins.schemas import PluginSchema
 
@@ -947,11 +954,11 @@ class TestAuditTrailCompleteness:
 
             def write(self, rows, ctx):
                 self.results.extend(rows)
-                return {
-                    "path": f"memory://{self.name}",
-                    "size_bytes": len(rows) * 10,
-                    "content_hash": f"{self.name}_hash",
-                }
+                return ArtifactDescriptor.for_file(
+                    path=f"memory://{self.name}",
+                    size_bytes=len(rows) * 10,
+                    content_hash=f"{self.name}_hash",
+                )
 
             def close(self):
                 pass

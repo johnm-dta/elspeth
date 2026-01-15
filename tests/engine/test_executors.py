@@ -1337,6 +1337,7 @@ class TestSinkExecutor:
     def test_write_records_artifact(self) -> None:
         """Write tokens to sink records artifact in Landscape."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.executors import SinkExecutor
         from elspeth.engine.spans import SpanFactory
         from elspeth.engine.tokens import TokenInfo
@@ -1360,13 +1361,13 @@ class TestSinkExecutor:
 
             def write(
                 self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> dict[str, Any]:
+            ) -> ArtifactDescriptor:
                 # Simulate writing rows and return artifact info
-                return {
-                    "path": "/tmp/output.csv",
-                    "size_bytes": 1024,
-                    "content_hash": "abc123",
-                }
+                return ArtifactDescriptor.for_file(
+                    path="/tmp/output.csv",
+                    size_bytes=1024,
+                    content_hash="abc123",
+                )
 
         sink = CsvSink()
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -1400,10 +1401,10 @@ class TestSinkExecutor:
 
         # Verify artifact returned with correct info
         assert artifact is not None
-        assert artifact.path_or_uri == "/tmp/output.csv"
+        assert artifact.path_or_uri == "file:///tmp/output.csv"
         assert artifact.size_bytes == 1024
         assert artifact.content_hash == "abc123"
-        assert artifact.artifact_type == "csv_output"
+        assert artifact.artifact_type == "file"
         assert artifact.sink_node_id == sink_node.node_id
 
         # Verify artifact recorded in Landscape
@@ -1537,6 +1538,7 @@ class TestSinkExecutor:
     def test_write_multiple_batches_creates_multiple_artifacts(self) -> None:
         """Multiple sink writes create separate artifacts."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.executors import SinkExecutor
         from elspeth.engine.spans import SpanFactory
         from elspeth.engine.tokens import TokenInfo
@@ -1560,13 +1562,13 @@ class TestSinkExecutor:
 
             def write(
                 self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> dict[str, Any]:
+            ) -> ArtifactDescriptor:
                 self._batch_count += 1
-                return {
-                    "path": f"/tmp/batch_{self._batch_count}.json",
-                    "size_bytes": len(rows) * 100,
-                    "content_hash": f"hash_{self._batch_count}",
-                }
+                return ArtifactDescriptor.for_file(
+                    path=f"/tmp/batch_{self._batch_count}.json",
+                    size_bytes=len(rows) * 100,
+                    content_hash=f"hash_{self._batch_count}",
+                )
 
         sink = BatchSink()
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -1606,8 +1608,8 @@ class TestSinkExecutor:
         assert artifacts[0] is not None
         assert artifacts[1] is not None
         assert artifacts[0].artifact_id != artifacts[1].artifact_id
-        assert artifacts[0].path_or_uri == "/tmp/batch_1.json"
-        assert artifacts[1].path_or_uri == "/tmp/batch_2.json"
+        assert artifacts[0].path_or_uri == "file:///tmp/batch_1.json"
+        assert artifacts[1].path_or_uri == "file:///tmp/batch_2.json"
 
         # Verify both in Landscape
         all_artifacts = recorder.get_artifacts(run.run_id)
@@ -1616,6 +1618,7 @@ class TestSinkExecutor:
     def test_artifact_linked_to_first_state(self) -> None:
         """Artifact is linked to first token's state_id for audit lineage."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.executors import SinkExecutor
         from elspeth.engine.spans import SpanFactory
         from elspeth.engine.tokens import TokenInfo
@@ -1638,8 +1641,10 @@ class TestSinkExecutor:
 
             def write(
                 self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> dict[str, Any]:
-                return {"path": "/tmp/linked.csv", "size_bytes": 512, "content_hash": "xyz"}
+            ) -> ArtifactDescriptor:
+                return ArtifactDescriptor.for_file(
+                    path="/tmp/linked.csv", size_bytes=512, content_hash="xyz"
+                )
 
         sink = LinkedSink()
         ctx = PluginContext(run_id=run.run_id, config={})

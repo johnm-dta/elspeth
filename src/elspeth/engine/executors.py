@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape import LandscapeRecorder
 from elspeth.core.landscape.models import Artifact, NodeState
+from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenInfo
 from elspeth.plugins.context import PluginContext
@@ -644,7 +645,9 @@ class SinkLike(Protocol):
     name: str
     node_id: str
 
-    def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> dict[str, Any]:
+    def write(
+        self, rows: list[dict[str, Any]], ctx: PluginContext
+    ) -> ArtifactDescriptor:
         """Write rows to sink.
 
         Args:
@@ -652,7 +655,7 @@ class SinkLike(Protocol):
             ctx: Plugin context
 
         Returns:
-            Artifact info: {"path": str, "size_bytes": int, "content_hash": str}
+            ArtifactDescriptor with unified artifact info
         """
         ...
 
@@ -767,14 +770,15 @@ class SinkExecutor:
 
         # Register artifact (linked to first state for audit lineage)
         first_state = states[0][1]
+
         artifact = self._recorder.register_artifact(
             run_id=self._run_id,
             state_id=first_state.state_id,
             sink_node_id=sink.node_id,
-            artifact_type=sink.name,
-            path=artifact_info["path"],
-            content_hash=artifact_info["content_hash"],
-            size_bytes=artifact_info["size_bytes"],
+            artifact_type=artifact_info.artifact_type,
+            path=artifact_info.path_or_uri,
+            content_hash=artifact_info.content_hash,
+            size_bytes=artifact_info.size_bytes,
         )
 
         return artifact

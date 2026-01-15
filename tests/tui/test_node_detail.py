@@ -167,3 +167,38 @@ class TestNodeDetailPanel:
         )
         content = panel.render_content()
         assert "1.5 KB" in content
+
+    def test_malformed_error_json_logs_warning(self) -> None:
+        """Malformed error_json is logged but still displayed raw."""
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.tui.widgets.node_detail import NodeDetailPanel
+
+        malformed_json = "not valid json {{{{"
+        node_state = {
+            "state_id": "state-005",
+            "node_id": "node-001",
+            "token_id": "token-001",
+            "plugin_name": "transform",
+            "node_type": "transform",
+            "status": "failed",
+            "input_hash": "abc123",
+            "output_hash": None,
+            "error_json": malformed_json,
+        }
+
+        mock_logger = MagicMock()
+        with patch("structlog.get_logger", return_value=mock_logger):
+            panel = NodeDetailPanel(node_state)
+            content = panel.render_content()
+
+        # Raw JSON still displayed (trust boundary fallback)
+        assert malformed_json in content
+
+        # Warning was logged with context
+        mock_logger.warning.assert_called_once()
+        call_args = mock_logger.warning.call_args
+        assert "Failed to parse error_json" in call_args[0][0]
+        assert call_args[1]["state_id"] == "state-005"
+        assert call_args[1]["error_json_preview"] == malformed_json
+        assert "decode_error" in call_args[1]

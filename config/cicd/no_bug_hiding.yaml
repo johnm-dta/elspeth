@@ -51,115 +51,121 @@ allow_hits:
   # No allowlist entries needed - callers must provide valid data.
 
   # --- NodeDetailPanel displaying node state ---
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=38"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=40"
     owner: "architecture"
     reason: "Trust boundary: displaying node plugin_name that may be missing"
     safety: "Graceful degradation to 'unknown' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=39"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=41"
     owner: "architecture"
     reason: "Trust boundary: displaying node_type that may be missing"
     safety: "Graceful degradation to 'unknown' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=45"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=47"
     owner: "architecture"
     reason: "Trust boundary: displaying state_id that may be missing"
     safety: "Graceful degradation to 'N/A' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=46"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=48"
     owner: "architecture"
     reason: "Trust boundary: displaying node_id that may be missing"
     safety: "Graceful degradation to 'N/A' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=47"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=49"
     owner: "architecture"
     reason: "Trust boundary: displaying token_id that may be missing"
     safety: "Graceful degradation to 'N/A' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=51"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=53"
     owner: "architecture"
     reason: "Trust boundary: displaying status that may be missing"
     safety: "Graceful degradation to 'unknown' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=54"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=56"
     owner: "architecture"
     reason: "Trust boundary: displaying started_at that may be missing"
     safety: "Graceful degradation to 'N/A' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=55"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=57"
     owner: "architecture"
     reason: "Trust boundary: displaying completed_at that may be missing"
     safety: "Graceful degradation to 'N/A' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=56"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=58"
     owner: "architecture"
     reason: "Trust boundary: displaying duration_ms that may be missing"
     safety: "Graceful degradation to None - conditionally displayed"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=63"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=65"
     owner: "architecture"
     reason: "Trust boundary: displaying input_hash that may be missing"
     safety: "Graceful degradation to None - conditionally displayed"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=64"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=66"
     owner: "architecture"
     reason: "Trust boundary: displaying output_hash that may be missing"
     safety: "Graceful degradation to None - conditionally displayed"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=71"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=73"
     owner: "architecture"
     reason: "Trust boundary: displaying error_json that may be missing"
     safety: "Graceful degradation to None - error section conditionally shown"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=81"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=83"
     owner: "architecture"
     reason: "Trust boundary: displaying error type from JSON that may be malformed"
     safety: "Graceful degradation to 'unknown' - user sees partial error info"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=82"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=84"
     owner: "architecture"
     reason: "Trust boundary: displaying error message from JSON that may be malformed"
     safety: "Graceful degradation to 'unknown' - user sees partial error info"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=92"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=94"
+    owner: "architecture"
+    reason: "Trust boundary: state_id lookup for logging context"
+    safety: "None is safe - just means unknown state_id in log message"
+    expires: null  # Permanent - intentional design
+
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=105"
     owner: "architecture"
     reason: "Trust boundary: displaying artifact that may be missing"
     safety: "Graceful degradation to None - artifact section conditionally shown"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=96"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=109"
     owner: "architecture"
     reason: "Trust boundary: displaying artifact_id that may be missing"
     safety: "Graceful degradation to 'N/A' - user sees partial artifact info"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=97"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=110"
     owner: "architecture"
     reason: "Trust boundary: displaying path_or_uri that may be missing"
     safety: "Graceful degradation to 'N/A' - user sees partial artifact info"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=98"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=111"
     owner: "architecture"
     reason: "Trust boundary: displaying content_hash that may be missing"
     safety: "Graceful degradation to 'N/A' - user sees partial artifact info"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=99"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=112"
     owner: "architecture"
     reason: "Trust boundary: displaying size_bytes that may be missing"
     safety: "Graceful degradation to None - conditionally displayed"

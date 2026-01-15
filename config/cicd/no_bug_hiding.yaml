@@ -34,13 +34,13 @@ allow_hits:
   # ============================================================
 
   # --- ExplainScreen exception handling ---
-  - key: "tui/screens/explain_screen.py:R4:ExplainScreen:_load_pipeline_structure:line=83"
+  - key: "tui/screens/explain_screen.py:R4:ExplainScreen:_load_pipeline_structure:line=84"
     owner: "architecture"
     reason: "Trust boundary: loading pipeline structure that may fail for corrupt/incomplete runs"
     safety: "Graceful degradation - displays error message in UI instead of crash"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/screens/explain_screen.py:R4:ExplainScreen:_load_node_state:line=145"
+  - key: "tui/screens/explain_screen.py:R4:ExplainScreen:_load_node_state:line=146"
     owner: "architecture"
     reason: "Trust boundary: loading node state that may fail for incomplete audit trails"
     safety: "Graceful degradation - displays error message in UI instead of crash"

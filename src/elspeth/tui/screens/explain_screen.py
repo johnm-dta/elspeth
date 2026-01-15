@@ -4,6 +4,7 @@ from typing import Any
 
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.plugins.enums import NodeType
 from elspeth.tui.types import LineageData
 from elspeth.tui.widgets.lineage_tree import LineageTree
 from elspeth.tui.widgets.node_detail import NodeDetailPanel
@@ -58,9 +59,9 @@ class ExplainScreen:
             nodes = recorder.get_nodes(self._run_id)
 
             # Organize nodes by type
-            source_nodes = [n for n in nodes if n.node_type == "source"]
-            transform_nodes = [n for n in nodes if n.node_type == "transform"]
-            sink_nodes = [n for n in nodes if n.node_type == "sink"]
+            source_nodes = [n for n in nodes if n.node_type == NodeType.SOURCE]
+            transform_nodes = [n for n in nodes if n.node_type == NodeType.TRANSFORM]
+            sink_nodes = [n for n in nodes if n.node_type == NodeType.SINK]
 
             self._lineage_data = {
                 "run_id": self._run_id,

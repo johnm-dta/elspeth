@@ -15,7 +15,7 @@ from elspeth.plugins.schemas import PluginSchema
 class PassThroughSchema(PluginSchema):
     """Dynamic schema - accepts any fields."""
 
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic class-level config
 
 
 class PassThrough(BaseTransform):

@@ -58,7 +58,7 @@ class CSVSink(BaseSink):
         if self._file is None:
             # Lazy initialization - discover fieldnames from first row
             self._fieldnames = list(row.keys())
-            self._file = open(self._path, "w", encoding=self._encoding, newline="")
+            self._file = open(self._path, "w", encoding=self._encoding, newline="")  # noqa: SIM115 - lifecycle managed by class
             self._writer = csv.DictWriter(
                 self._file,
                 fieldnames=self._fieldnames,

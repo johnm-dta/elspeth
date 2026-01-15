@@ -5,7 +5,8 @@ This maintains the "no silent drops" invariant - filtered rows are explicitly
 routed to a discard sink for audit trail completeness.
 """
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from pydantic import model_validator
 
@@ -19,7 +20,7 @@ from elspeth.plugins.schemas import PluginSchema
 class FilterGateSchema(PluginSchema):
     """Dynamic schema - accepts filter gate config."""
 
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic class-level config
 
 
 # Supported comparison operators and their evaluation functions
@@ -177,17 +178,23 @@ class FilterGate(BaseGate):
             if self._allow_missing:
                 return GateResult(
                     row=row,
-                    action=RoutingAction.route("pass", reason={
-                        "field": self._field,
-                        "result": "missing_field_allowed",
-                    }),
+                    action=RoutingAction.route(
+                        "pass",
+                        reason={
+                            "field": self._field,
+                            "result": "missing_field_allowed",
+                        },
+                    ),
                 )
             return GateResult(
                 row=row,
-                action=RoutingAction.route("discard", reason={
-                    "field": self._field,
-                    "result": "filtered_missing_field",
-                }),
+                action=RoutingAction.route(
+                    "discard",
+                    reason={
+                        "field": self._field,
+                        "result": "filtered_missing_field",
+                    },
+                ),
             )
 
         # Evaluate the comparison

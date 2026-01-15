@@ -6,6 +6,8 @@ Renames, selects, and reorganizes row fields.
 import copy
 from typing import Any
 
+from pydantic import Field
+
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.context import PluginContext
@@ -16,13 +18,13 @@ from elspeth.plugins.schemas import PluginSchema
 class FieldMapperSchema(PluginSchema):
     """Dynamic schema - fields determined by mapping."""
 
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic class-level config
 
 
 class FieldMapperConfig(PluginConfig):
     """Configuration for field mapper transform."""
 
-    mapping: dict[str, str] = {}
+    mapping: dict[str, str] = Field(default_factory=dict)
     select_only: bool = False
     strict: bool = False
 

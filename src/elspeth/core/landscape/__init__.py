@@ -19,7 +19,11 @@ Model Classes:
 
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.exporter import LandscapeExporter
-from elspeth.core.landscape.formatters import CSVFormatter, ExportFormatter, JSONFormatter
+from elspeth.core.landscape.formatters import (
+    CSVFormatter,
+    ExportFormatter,
+    JSONFormatter,
+)
 from elspeth.core.landscape.lineage import LineageResult, explain
 from elspeth.core.landscape.models import (
     Artifact,

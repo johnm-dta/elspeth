@@ -15,7 +15,7 @@ from elspeth.plugins.schemas import PluginSchema
 class ThresholdGateSchema(PluginSchema):
     """Dynamic schema - accepts threshold gate config."""
 
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic class-level config
 
 
 class ThresholdGateConfig(PluginConfig):
@@ -85,11 +85,11 @@ class ThresholdGate(BaseGate):
         if isinstance(value, str) and self._cast:
             try:
                 value = float(value)
-            except ValueError:
+            except ValueError as err:
                 raise TypeError(
                     f"Field '{self._field}' must be numeric, got non-numeric string: '{value}'"
-                )
-        elif not isinstance(value, (int, float)):
+                ) from err
+        elif not isinstance(value, int | float):
             raise TypeError(
                 f"Field '{self._field}' must be numeric, got {type(value).__name__}"
             )

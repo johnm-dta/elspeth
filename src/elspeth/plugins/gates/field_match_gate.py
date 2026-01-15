@@ -16,7 +16,7 @@ from elspeth.plugins.schemas import PluginSchema
 class FieldMatchGateSchema(PluginSchema):
     """Dynamic schema - accepts field match gate config."""
 
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic class-level config
 
 
 class FieldMatchGateConfig(PluginConfig):
@@ -112,10 +112,13 @@ class FieldMatchGate(BaseGate):
                 raise ValueError(f"Required field '{self._field}' not found in row")
             return GateResult(
                 row=row,
-                action=RoutingAction.route("missing_field", reason={
-                    "field": self._field,
-                    "result": "missing_field",
-                }),
+                action=RoutingAction.route(
+                    "missing_field",
+                    reason={
+                        "field": self._field,
+                        "result": "missing_field",
+                    },
+                ),
             )
 
         # Convert to string for matching

@@ -67,7 +67,7 @@ class JSONSink(BaseSink):
     def _write_jsonl(self, row: dict[str, Any]) -> None:
         """Write a single row as JSONL."""
         if self._file is None:
-            self._file = open(self._path, "w", encoding=self._encoding)
+            self._file = open(self._path, "w", encoding=self._encoding)  # noqa: SIM115 - lifecycle managed by class
 
         json.dump(row, self._file)
         self._file.write("\n")
@@ -77,7 +77,7 @@ class JSONSink(BaseSink):
         if self._format == "json" and self._rows:
             # Write buffered rows as JSON array
             if self._file is None:
-                self._file = open(self._path, "w", encoding=self._encoding)
+                self._file = open(self._path, "w", encoding=self._encoding)  # noqa: SIM115 - lifecycle managed by class
             self._file.seek(0)
             self._file.truncate()
             json.dump(self._rows, self._file, indent=self._indent)

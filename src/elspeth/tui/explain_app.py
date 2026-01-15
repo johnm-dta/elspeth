@@ -10,6 +10,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer, Header, Static
 
+from elspeth.tui.constants import WidgetIDs
+
 
 class ExplainApp(App[None]):
     """Interactive TUI for exploring run lineage.
@@ -19,22 +21,22 @@ class ExplainApp(App[None]):
     """
 
     TITLE = "ELSPETH Explain"
-    CSS = """
-    Screen {
+    CSS = f"""
+    Screen {{
         layout: grid;
         grid-size: 2;
         grid-columns: 1fr 2fr;
-    }
+    }}
 
-    #lineage-tree {
+    #{WidgetIDs.LINEAGE_TREE} {{
         height: 100%;
         border: solid green;
-    }
+    }}
 
-    #detail-panel {
+    #{WidgetIDs.DETAIL_PANEL} {{
         height: 100%;
         border: solid blue;
-    }
+    }}
     """
 
     BINDINGS = [  # noqa: RUF012 - Textual pattern
@@ -58,8 +60,8 @@ class ExplainApp(App[None]):
     def compose(self) -> ComposeResult:
         """Create child widgets."""
         yield Header()
-        yield Static("Lineage Tree (placeholder)", id="lineage-tree")
-        yield Static("Detail Panel (placeholder)", id="detail-panel")
+        yield Static("Lineage Tree (placeholder)", id=WidgetIDs.LINEAGE_TREE)
+        yield Static("Detail Panel (placeholder)", id=WidgetIDs.DETAIL_PANEL)
         yield Footer()
 
     def action_refresh(self) -> None:

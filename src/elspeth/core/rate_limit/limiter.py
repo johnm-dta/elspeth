@@ -247,9 +247,10 @@ class RateLimiter:
                 # pyrate-limiter has a race condition that causes AssertionError
                 # during cleanup - this is benign but noisy
                 with _suppressed_lock:
-                    _suppressed_threads[leaker.name] = (
-                        _suppressed_threads.get(leaker.name, 0) + 1
-                    )
+                    # Initialize to 0 if not present, then increment
+                    if leaker.name not in _suppressed_threads:
+                        _suppressed_threads[leaker.name] = 0
+                    _suppressed_threads[leaker.name] += 1
 
         # Dispose all buckets from their limiters
         # This deregisters them from the leaker thread

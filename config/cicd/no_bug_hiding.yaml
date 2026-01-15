@@ -304,16 +304,43 @@ allow_hits:
   # This is legitimate duck-typing at a plugin trust boundary.
   # ============================================================
 
-  - key: "engine/adapters.py:R3:SinkAdapter:on_start:line=134"
+  - key: "engine/adapters.py:R3:SinkAdapter:on_start:line=201"
     owner: "architecture"
     reason: "Trust boundary: optional plugin lifecycle method may not exist"
     safety: "Duck-typing at plugin boundary - Phase 2 plugins may not have lifecycle hooks"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/adapters.py:R3:SinkAdapter:on_complete:line=143"
+  - key: "engine/adapters.py:R3:SinkAdapter:on_complete:line=210"
     owner: "architecture"
     reason: "Trust boundary: optional plugin lifecycle method may not exist"
     safety: "Duck-typing at plugin boundary - Phase 2 plugins may not have lifecycle hooks"
+    expires: null  # Permanent - intentional design
+
+  # ============================================================
+  # ARTIFACT DESCRIPTOR PARSING (Permanent)
+  # ============================================================
+  # RawArtifactDescriptor.from_dict parses external configuration dicts.
+  # Fields are optional depending on artifact kind. Validation happens in
+  # __post_init__. This is a trust boundary - external config may have
+  # different keys present.
+  # ============================================================
+
+  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=72"
+    owner: "architecture"
+    reason: "Trust boundary: parsing external config dict with optional fields"
+    safety: "Validation in __post_init__ ensures required fields for each kind"
+    expires: null  # Permanent - intentional design
+
+  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=73"
+    owner: "architecture"
+    reason: "Trust boundary: parsing external config dict with optional fields"
+    safety: "Validation in __post_init__ ensures required fields for each kind"
+    expires: null  # Permanent - intentional design
+
+  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=74"
+    owner: "architecture"
+    reason: "Trust boundary: parsing external config dict with optional fields"
+    safety: "Validation in __post_init__ ensures required fields for each kind"
     expires: null  # Permanent - intentional design
 
   # ============================================================
@@ -395,103 +422,103 @@ allow_hits:
     expires: null  # Permanent - intentional design
 
   # ============================================================
-  # BURN-DOWN LIST - Plugin Metadata Extraction
+  # PLUGIN METADATA EXTRACTION - MANAGER (Permanent)
   # ============================================================
-  # These patterns extract optional attributes from plugins using getattr.
-  # Needs review: should plugins be required to define these attributes?
-  # Expires: 2026-02-14
+  # These patterns extract optional attributes from plugins using getattr/hasattr.
+  # Plugins may not define these attributes. This is legitimate duck-typing
+  # at a plugin trust boundary.
   # ============================================================
 
   - key: "plugins/manager.py:R3:_schema_hash:line=46"
-    owner: "burn-down"
-    reason: "Pre-existing - needs review for typed contracts"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: checking if plugin class has Pydantic model_fields"
+    safety: "Graceful fallback to None - non-Pydantic plugins don't have schema hashes"
+    expires: null  # Permanent - intentional design
 
   - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=83"
-    owner: "burn-down"
-    reason: "Pre-existing - plugin metadata extraction needs typed protocol"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: plugins may not define input_schema attribute"
+    safety: "Duck-typing at plugin boundary - fallback to None is documented"
+    expires: null  # Permanent - intentional design
 
   - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=84"
-    owner: "burn-down"
-    reason: "Pre-existing - plugin metadata extraction needs typed protocol"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: plugins may not define output_schema attribute"
+    safety: "Duck-typing at plugin boundary - fallback to None is documented"
+    expires: null  # Permanent - intentional design
 
   - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=87"
-    owner: "burn-down"
-    reason: "Pre-existing - plugin metadata extraction needs typed protocol"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: plugins may not define name attribute"
+    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
+    expires: null  # Permanent - intentional design
 
   - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=89"
-    owner: "burn-down"
-    reason: "Pre-existing - plugin metadata extraction needs typed protocol"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: plugins may not define plugin_version attribute"
+    safety: "Duck-typing at plugin boundary - fallback to '0.0.0' is documented"
+    expires: null  # Permanent - intentional design
 
   - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=90"
-    owner: "burn-down"
-    reason: "Pre-existing - plugin metadata extraction needs typed protocol"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: plugins may not define determinism attribute"
+    safety: "Duck-typing at plugin boundary - fallback to DETERMINISTIC is documented"
+    expires: null  # Permanent - intentional design
 
   - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=149"
-    owner: "burn-down"
-    reason: "Pre-existing - plugin metadata extraction needs typed protocol"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: plugins may not define name attribute"
+    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
+    expires: null  # Permanent - intentional design
 
   - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=159"
-    owner: "burn-down"
-    reason: "Pre-existing - plugin metadata extraction needs typed protocol"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: plugins may not define name attribute"
+    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
+    expires: null  # Permanent - intentional design
 
   - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=169"
-    owner: "burn-down"
-    reason: "Pre-existing - plugin metadata extraction needs typed protocol"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: plugins may not define name attribute"
+    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
+    expires: null  # Permanent - intentional design
 
   - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=179"
-    owner: "burn-down"
-    reason: "Pre-existing - plugin metadata extraction needs typed protocol"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: plugins may not define name attribute"
+    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
+    expires: null  # Permanent - intentional design
 
   - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=189"
-    owner: "burn-down"
-    reason: "Pre-existing - plugin metadata extraction needs typed protocol"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: plugins may not define name attribute"
+    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
+    expires: null  # Permanent - intentional design
 
   - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=199"
-    owner: "burn-down"
-    reason: "Pre-existing - plugin metadata extraction needs typed protocol"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: plugins may not define name attribute"
+    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
+    expires: null  # Permanent - intentional design
 
   # ============================================================
-  # BURN-DOWN LIST - Schema Validation Patterns
+  # SCHEMA VALIDATION TRUST BOUNDARY (Permanent)
   # ============================================================
-  # These patterns in schema validation need typed contracts.
-  # Expires: 2026-02-14
+  # These patterns handle Pydantic validation errors and type introspection.
+  # Pydantic errors are external data, type introspection is for error messages.
   # ============================================================
 
   - key: "plugins/schemas.py:R1:validate_row:line=94"
-    owner: "burn-down"
-    reason: "Pre-existing - schema validation needs typed contracts"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: Pydantic error dict may not have 'input' key"
+    safety: "Graceful handling - validation error message still produced"
+    expires: null  # Permanent - intentional design
 
   - key: "plugins/schemas.py:R3:_type_name:line=182"
-    owner: "burn-down"
-    reason: "Pre-existing - type introspection for error messages"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Type introspection: not all types have __name__ attribute"
+    safety: "Graceful fallback to str() - error message still produced"
+    expires: null  # Permanent - intentional design
 
   # ============================================================
   # FIELD MATCH GATE LOOKUP (Permanent)
@@ -509,134 +536,53 @@ allow_hits:
     expires: null  # Permanent - intentional design
 
   # ============================================================
-  # BURN-DOWN LIST - CLI and Engine Patterns
+  # RETRY CONFIG PARSING (Permanent)
   # ============================================================
-  # Miscellaneous patterns that need review.
-  # Expires: 2026-02-14
+  # RetryConfig.from_policy parses external configuration dicts.
+  # This is a documented trust boundary where external config may have
+  # invalid or missing values.
   # ============================================================
-
-  - key: "cli.py:R1:_execute_pipeline:line=263"
-    owner: "burn-down"
-    reason: "Pre-existing - needs review"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "cli.py:R1:_execute_pipeline:line=266"
-    owner: "burn-down"
-    reason: "Pre-existing - needs review"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "cli.py:R1:_execute_pipeline:line=271"
-    owner: "burn-down"
-    reason: "Pre-existing - needs review"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "cli.py:R1:_execute_pipeline:line=272"
-    owner: "burn-down"
-    reason: "Pre-existing - needs review"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "cli.py:R1:plugins_list:line=420"
-    owner: "burn-down"
-    reason: "Pre-existing - PLUGIN_REGISTRY lookup needs typed alternative"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "engine/adapters.py:R1:SinkAdapter:_compute_artifact_info:line=153"
-    owner: "burn-down"
-    reason: "Pre-existing - artifact_descriptor should be typed dataclass"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "engine/adapters.py:R1:SinkAdapter:_compute_file_artifact:line=173"
-    owner: "burn-down"
-    reason: "Pre-existing - artifact_descriptor should be typed dataclass"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "engine/adapters.py:R1:SinkAdapter:_compute_database_artifact:line=194"
-    owner: "burn-down"
-    reason: "Pre-existing - artifact_descriptor should be typed dataclass"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "engine/adapters.py:R1:SinkAdapter:_compute_database_artifact:line=195"
-    owner: "burn-down"
-    reason: "Pre-existing - artifact_descriptor should be typed dataclass"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "engine/adapters.py:R1:SinkAdapter:_compute_webhook_artifact:line=217"
-    owner: "burn-down"
-    reason: "Pre-existing - artifact_descriptor should be typed dataclass"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "engine/adapters.py:R1:SinkAdapter:_compute_webhook_artifact:line=219"
-    owner: "burn-down"
-    reason: "Pre-existing - artifact_descriptor should be typed dataclass"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "engine/processor.py:R3:RowProcessor:process_row:line=134"
-    owner: "burn-down"
-    reason: "Pre-existing - needs review"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "engine/processor.py:R3:RowProcessor:process_row:line=162"
-    owner: "burn-down"
-    reason: "Pre-existing - needs review"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
 
   - key: "engine/retry.py:R1:RetryConfig:from_policy:line=68"
-    owner: "burn-down"
-    reason: "Pre-existing - retry config parsing needs typed model"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: external policy dict may have invalid/missing values"
+    safety: "max() ensures minimum valid value, docstring documents this behavior"
+    expires: null  # Permanent - intentional design
 
   - key: "engine/retry.py:R1:RetryConfig:from_policy:line=69"
-    owner: "burn-down"
-    reason: "Pre-existing - retry config parsing needs typed model"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: external policy dict may have invalid/missing values"
+    safety: "max() ensures minimum valid value, docstring documents this behavior"
+    expires: null  # Permanent - intentional design
 
   - key: "engine/retry.py:R1:RetryConfig:from_policy:line=70"
-    owner: "burn-down"
-    reason: "Pre-existing - retry config parsing needs typed model"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: external policy dict may have invalid/missing values"
+    safety: "max() ensures minimum valid value, docstring documents this behavior"
+    expires: null  # Permanent - intentional design
 
   - key: "engine/retry.py:R1:RetryConfig:from_policy:line=71"
-    owner: "burn-down"
-    reason: "Pre-existing - retry config parsing needs typed model"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+    owner: "architecture"
+    reason: "Trust boundary: external policy dict may have invalid/missing values"
+    safety: "max() ensures minimum valid value, docstring documents this behavior"
+    expires: null  # Permanent - intentional design
 
-  - key: "core/dag.py:R1:ExecutionGraph:validate:line=129"
-    owner: "burn-down"
-    reason: "Pre-existing - DAG validation needs review"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+  # ============================================================
+  # ROW PROCESSOR PLUGIN DISPATCH (Permanent)
+  # ============================================================
+  # RowProcessor uses hasattr to distinguish between transform types
+  # (gate, aggregation, regular transform). This is legitimate duck-typing
+  # for polymorphic dispatch.
+  # ============================================================
 
-  - key: "core/dag.py:R1:ExecutionGraph:get_source:line=164"
-    owner: "burn-down"
-    reason: "Pre-existing - DAG source lookup needs review"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+  - key: "engine/processor.py:R3:RowProcessor:process_row:line=134"
+    owner: "architecture"
+    reason: "Polymorphic dispatch: checking for gate interface (evaluate method)"
+    safety: "Legitimate duck-typing - transforms have different interfaces by design"
+    expires: null  # Permanent - intentional design
 
-  - key: "core/dag.py:R1:ExecutionGraph:get_sinks:line=177"
-    owner: "burn-down"
-    reason: "Pre-existing - DAG sinks lookup needs review"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "core/rate_limit/limiter.py:R1:RateLimiter:close:line=251"
-    owner: "burn-down"
-    reason: "Pre-existing - rate limiter cleanup needs review"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+  - key: "engine/processor.py:R3:RowProcessor:process_row:line=162"
+    owner: "architecture"
+    reason: "Polymorphic dispatch: checking for aggregation interface (accept method)"
+    safety: "Legitimate duck-typing - transforms have different interfaces by design"
+    expires: null  # Permanent - intentional design

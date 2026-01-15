@@ -8,10 +8,70 @@ These adapters bridge the gap.
 
 import hashlib
 import os
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol
 
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.engine.artifacts import ArtifactDescriptor
+
+
+@dataclass(frozen=True)
+class RawArtifactDescriptor:
+    """Typed input descriptor for SinkAdapter construction.
+
+    This is validated at construction time to ensure all required fields
+    are present. Internal methods can then use direct attribute access.
+
+    Note: response_code for webhooks is not included here because it's
+    set dynamically after requests complete, not at construction time.
+    """
+
+    kind: Literal["file", "database", "webhook"]
+    # File artifacts
+    path: str | None = None
+    # Database artifacts
+    url: str | None = None
+    table: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate that required fields are present for each kind."""
+        if self.kind == "file":
+            if self.path is None:
+                raise ValueError("File artifact requires 'path'")
+        elif self.kind == "database":
+            if self.url is None:
+                raise ValueError("Database artifact requires 'url'")
+            if self.table is None:
+                raise ValueError("Database artifact requires 'table'")
+        elif self.kind == "webhook" and self.url is None:
+            raise ValueError("Webhook artifact requires 'url'")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RawArtifactDescriptor":
+        """Create from a dict, validating required fields.
+
+        Args:
+            data: Dict with 'kind' and kind-specific fields
+
+        Returns:
+            Validated RawArtifactDescriptor
+
+        Raises:
+            ValueError: If 'kind' is missing or invalid, or required fields missing
+        """
+        if "kind" not in data:
+            raise ValueError("artifact_descriptor must include 'kind'")
+
+        kind = data["kind"]
+        if kind not in ("file", "database", "webhook"):
+            raise ValueError(f"Unknown artifact kind: {kind}")
+
+        return cls(
+            kind=kind,
+            path=data.get("path"),
+            url=data.get("url"),
+            table=data.get("table"),
+        )
 
 
 class RowWiseSinkProtocol(Protocol):
@@ -63,13 +123,19 @@ class SinkAdapter:
             sink: Phase 2 sink implementing write(row, ctx) -> None
             plugin_name: Type of sink plugin (csv, json, database)
             sink_name: Instance name from config (output, flagged, etc.)
-            artifact_descriptor: Describes the artifact identity by kind
+            artifact_descriptor: Describes the artifact identity by kind.
+                Must include 'kind' (file|database|webhook) and kind-specific fields.
+
+        Raises:
+            ValueError: If artifact_descriptor is missing required fields
         """
         self._sink = sink
         self.plugin_name = plugin_name
         self.sink_name = sink_name
         self.node_id: str = ""  # Set by Orchestrator during registration
-        self._artifact_descriptor = artifact_descriptor
+        # Validate at construction - this fails fast if required fields missing
+        self._artifact_descriptor = RawArtifactDescriptor.from_dict(artifact_descriptor)
+        self._response_code: int = 0  # Set dynamically for webhook artifacts
         self._rows_written: int = 0
         self._last_batch_rows: list[dict[str, Any]] = []  # For hash computation
 
@@ -150,27 +216,21 @@ class SinkAdapter:
             ArtifactDescriptor with unified format for all sink types.
             All types have: artifact_type, path_or_uri, content_hash, size_bytes
         """
-        kind = self._artifact_descriptor.get("kind", "unknown")
+        # Direct attribute access - kind is validated at construction
+        kind = self._artifact_descriptor.kind
 
         if kind == "file":
             return self._compute_file_artifact()
         elif kind == "database":
             return self._compute_database_artifact()
-        elif kind == "webhook":
+        else:  # kind == "webhook"
             return self._compute_webhook_artifact()
-        else:
-            # Unknown kind - compute hash from rows and return generic descriptor
-            payload = canonical_json(self._last_batch_rows)
-            return ArtifactDescriptor(
-                artifact_type="file",  # Fallback to file type
-                path_or_uri=f"unknown://{kind}",
-                content_hash=stable_hash(self._last_batch_rows),
-                size_bytes=len(payload.encode("utf-8")),
-            )
 
     def _compute_file_artifact(self) -> ArtifactDescriptor:
         """Compute artifact info for file-based sinks."""
-        path = self._artifact_descriptor.get("path", "")
+        # Direct attribute access - path is validated as non-None for file kind
+        path = self._artifact_descriptor.path
+        assert path is not None  # Validated by RawArtifactDescriptor.__post_init__
         size_bytes = 0
         content_hash = ""
 
@@ -191,8 +251,11 @@ class SinkAdapter:
         serialized payload BEFORE insertion. This proves what was sent
         even if the database modifies the data later.
         """
-        url = self._artifact_descriptor.get("url", "")
-        table = self._artifact_descriptor.get("table", "")
+        # Direct attribute access - url/table validated as non-None for database kind
+        url = self._artifact_descriptor.url
+        table = self._artifact_descriptor.table
+        assert url is not None  # Validated by RawArtifactDescriptor.__post_init__
+        assert table is not None  # Validated by RawArtifactDescriptor.__post_init__
 
         # Compute hash from canonical JSON of rows being written
         payload = canonical_json(self._last_batch_rows)
@@ -214,9 +277,11 @@ class SinkAdapter:
         serialized request payload BEFORE sending. This proves what was
         sent even if the external service doesn't log the request.
         """
-        url = self._artifact_descriptor.get("url", "")
-        # Response code may be set by the sink after the request completes
-        response_code = self._artifact_descriptor.get("response_code", 0)
+        # Direct attribute access - url validated as non-None for webhook kind
+        url = self._artifact_descriptor.url
+        assert url is not None  # Validated by RawArtifactDescriptor.__post_init__
+        # Response code is set dynamically via set_response_code() after requests
+        response_code = self._response_code
 
         # Compute hash from canonical JSON of rows being sent
         payload = canonical_json(self._last_batch_rows)
@@ -229,6 +294,16 @@ class SinkAdapter:
             request_size=request_size,
             response_code=response_code,
         )
+
+    def set_response_code(self, code: int) -> None:
+        """Set the HTTP response code for webhook artifacts.
+
+        Called by webhook sinks after a request completes.
+
+        Args:
+            code: HTTP response code (e.g., 200, 201, 500)
+        """
+        self._response_code = code
 
     @staticmethod
     def _hash_file_chunked(path: str, chunk_size: int = 65536) -> str:

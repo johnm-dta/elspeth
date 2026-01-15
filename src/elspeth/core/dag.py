@@ -123,10 +123,11 @@ class ExecutionGraph:
                 raise GraphValidationError("Graph contains a cycle") from None
 
         # Check for exactly one source
+        # All nodes have "info" - added via add_node(), direct access is safe
         sources = [
             node_id
             for node_id, data in self._graph.nodes(data=True)
-            if data.get("info") and data["info"].node_type == "source"
+            if data["info"].node_type == "source"
         ]
         if len(sources) != 1:
             raise GraphValidationError(
@@ -158,10 +159,11 @@ class ExecutionGraph:
         Returns:
             The source node ID, or None if not exactly one source exists.
         """
+        # All nodes have "info" - added via add_node(), direct access is safe
         sources = [
             node_id
             for node_id, data in self._graph.nodes(data=True)
-            if data.get("info") and data["info"].node_type == "source"
+            if data["info"].node_type == "source"
         ]
         return sources[0] if len(sources) == 1 else None
 
@@ -171,10 +173,11 @@ class ExecutionGraph:
         Returns:
             List of sink node IDs.
         """
+        # All nodes have "info" - added via add_node(), direct access is safe
         return [
             node_id
             for node_id, data in self._graph.nodes(data=True)
-            if data.get("info") and data["info"].node_type == "sink"
+            if data["info"].node_type == "sink"
         ]
 
     def get_node_info(self, node_id: str) -> NodeInfo:

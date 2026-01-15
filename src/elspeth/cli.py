@@ -259,17 +259,20 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> dict[st
         raw_sink: BaseSink
         artifact_descriptor: dict[str, Any]
         if sink_plugin == "csv":
+            # CSVSink validates path in __init__, so direct access is safe
             raw_sink = CSVSink(sink_options)
-            artifact_descriptor = {"kind": "file", "path": sink_options.get("path", "")}
+            artifact_descriptor = {"kind": "file", "path": sink_options["path"]}
         elif sink_plugin == "json":
+            # JSONSink validates path in __init__, so direct access is safe
             raw_sink = JSONSink(sink_options)
-            artifact_descriptor = {"kind": "file", "path": sink_options.get("path", "")}
+            artifact_descriptor = {"kind": "file", "path": sink_options["path"]}
         elif sink_plugin == "database":
+            # DatabaseSink validates url/table in __init__, so direct access is safe
             raw_sink = DatabaseSink(sink_options)
             artifact_descriptor = {
                 "kind": "database",
-                "url": sink_options.get("url", ""),
-                "table": sink_options.get("table", ""),
+                "url": sink_options["url"],
+                "table": sink_options["table"],
             }
         else:
             raise ValueError(f"Unknown sink plugin: {sink_plugin}")
@@ -417,12 +420,14 @@ def plugins_list(
     types_to_show = [plugin_type] if plugin_type else list(PLUGIN_REGISTRY.keys())
 
     for ptype in types_to_show:
-        plugins = PLUGIN_REGISTRY.get(ptype, [])
+        # types_to_show only contains keys from PLUGIN_REGISTRY (either filtered by validated plugin_type
+        # or directly from PLUGIN_REGISTRY.keys()), so direct access is safe
+        plugins = PLUGIN_REGISTRY[ptype]
         if plugins:
             typer.echo(f"\n{ptype.upper()}S:")
             for name, description in plugins:
                 typer.echo(f"  {name:12} - {description}")
-        elif ptype in valid_types:
+        else:
             typer.echo(f"\n{ptype.upper()}S:")
             typer.echo("  (none available)")
 

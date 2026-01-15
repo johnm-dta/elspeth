@@ -50,7 +50,7 @@ class TestSinkAdapter:
             mock,
             plugin_name="mock",
             sink_name="output",
-            artifact_descriptor={"kind": "test"},
+            artifact_descriptor={"kind": "file", "path": "/tmp/test.csv"},
         )
 
         assert adapter.name == "output"
@@ -66,7 +66,7 @@ class TestSinkAdapter:
             mock,
             plugin_name="mock",
             sink_name="output",
-            artifact_descriptor={"kind": "test"},
+            artifact_descriptor={"kind": "file", "path": "/tmp/test.csv"},
         )
 
         rows = [{"id": 1}, {"id": 2}, {"id": 3}]
@@ -107,7 +107,7 @@ class TestSinkAdapter:
             mock,
             plugin_name="mock",
             sink_name="output",
-            artifact_descriptor={"kind": "test"},
+            artifact_descriptor={"kind": "file", "path": "/tmp/test.csv"},
         )
 
         adapter.write([{"id": 1}, {"id": 2}], ctx)
@@ -124,7 +124,7 @@ class TestSinkAdapter:
             mock,
             plugin_name="mock",
             sink_name="output",
-            artifact_descriptor={"kind": "test"},
+            artifact_descriptor={"kind": "file", "path": "/tmp/test.csv"},
         )
 
         adapter.close()

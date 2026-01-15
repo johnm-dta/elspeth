@@ -1,5 +1,11 @@
 """Tests for explain command TUI integration."""
 
+from elspeth.tui.screens.explain_screen import (
+    LoadedState,
+    LoadingFailedState,
+    UninitializedState,
+)
+
 
 class TestExplainScreen:
     """Tests for ExplainScreen component."""
@@ -64,7 +70,7 @@ class TestExplainScreen:
         lineage = screen.get_lineage_data()
 
         assert lineage is not None
-        assert lineage.get("run_id") == run.run_id
+        assert lineage["run_id"] == run.run_id
 
     def test_tree_selection_updates_detail_panel(self) -> None:
         """Selecting a node in tree updates detail panel."""
@@ -121,3 +127,93 @@ class TestExplainScreen:
 
         assert "csv_source" in content
         assert "csv_sink" in content
+
+
+class TestExplainScreenStateModel:
+    """Tests for the discriminated union state model."""
+
+    def test_uninitialized_state_without_db(self) -> None:
+        """Screen without db/run_id enters UninitializedState."""
+        from elspeth.tui.screens.explain_screen import ExplainScreen
+
+        screen = ExplainScreen()
+        assert isinstance(screen.state, UninitializedState)
+
+    def test_uninitialized_state_with_partial_config(self) -> None:
+        """Screen with only db (no run_id) enters UninitializedState."""
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.tui.screens.explain_screen import ExplainScreen
+
+        db = LandscapeDB.in_memory()
+        screen = ExplainScreen(db=db)  # No run_id
+        assert isinstance(screen.state, UninitializedState)
+
+    def test_loaded_state_with_valid_data(self) -> None:
+        """Screen with valid db/run_id enters LoadedState."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.tui.screens.explain_screen import ExplainScreen
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        screen = ExplainScreen(db=db, run_id=run.run_id)
+        assert isinstance(screen.state, LoadedState)
+        assert screen.state.run_id == run.run_id
+        assert screen.state.db is db
+
+    def test_loaded_state_has_lineage_data(self) -> None:
+        """LoadedState contains lineage_data and tree."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.tui.screens.explain_screen import ExplainScreen
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        screen = ExplainScreen(db=db, run_id=run.run_id)
+        assert isinstance(screen.state, LoadedState)
+        assert screen.state.lineage_data is not None
+        assert screen.state.tree is not None
+
+    def test_loaded_state_with_empty_data_on_nonexistent_run(self) -> None:
+        """Screen with non-existent run_id enters LoadedState with empty data.
+
+        When a run_id doesn't exist in the database, get_nodes() returns an
+        empty list (no exception). The screen successfully loads into LoadedState
+        but with placeholder data (source name "unknown", empty transforms/sinks).
+        """
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.tui.screens.explain_screen import ExplainScreen
+
+        db = LandscapeDB.in_memory()
+        # Use a non-existent run_id
+        screen = ExplainScreen(db=db, run_id="non-existent-run-id")
+        # Enters LoadedState with empty/placeholder data
+        assert isinstance(screen.state, LoadedState)
+        assert screen.state.lineage_data["source"]["name"] == "unknown"
+        assert screen.state.lineage_data["transforms"] == []
+        assert screen.state.lineage_data["sinks"] == []
+
+    def test_state_exhaustive_matching(self) -> None:
+        """Demonstrate exhaustive pattern matching on states."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.tui.screens.explain_screen import ExplainScreen, ScreenStateType
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        screen = ExplainScreen(db=db, run_id=run.run_id)
+
+        # Pattern matching covers all cases
+        match screen.state:
+            case UninitializedState():
+                result = "uninitialized"
+            case LoadingFailedState(run_id=rid):
+                result = f"failed:{rid}"
+            case LoadedState(run_id=rid, lineage_data=data):
+                result = f"loaded:{rid}:{data['run_id']}"
+
+        assert result.startswith("loaded:")
+        assert screen.state.state_type == ScreenStateType.LOADED

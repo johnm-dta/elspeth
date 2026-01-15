@@ -1,5 +1,11 @@
-"""Explain screen for lineage visualization."""
+"""Explain screen for lineage visualization.
 
+Uses discriminated union pattern to represent screen states.
+Invalid state combinations are prevented at the type level.
+"""
+
+from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Any
 
 from elspeth.core.landscape import LandscapeDB
@@ -10,6 +16,54 @@ from elspeth.tui.widgets.lineage_tree import LineageTree
 from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
 
+class ScreenStateType(Enum):
+    """Discriminator for screen state types."""
+
+    UNINITIALIZED = auto()  # No data source configured
+    LOADING_FAILED = auto()  # Data source configured but loading failed
+    LOADED = auto()  # Data loaded successfully
+
+
+@dataclass(frozen=True)
+class UninitializedState:
+    """Screen has no data source configured.
+
+    This is the default state when created without db/run_id.
+    """
+
+    state_type: ScreenStateType = ScreenStateType.UNINITIALIZED
+
+
+@dataclass(frozen=True)
+class LoadingFailedState:
+    """Data source configured but loading failed.
+
+    Preserves db and run_id so retry is possible.
+    """
+
+    db: LandscapeDB
+    run_id: str
+    state_type: ScreenStateType = ScreenStateType.LOADING_FAILED
+
+
+@dataclass(frozen=True)
+class LoadedState:
+    """Data loaded successfully.
+
+    All required data is present and validated.
+    """
+
+    db: LandscapeDB
+    run_id: str
+    lineage_data: LineageData
+    tree: LineageTree
+    state_type: ScreenStateType = ScreenStateType.LOADED
+
+
+# Discriminated union type - exhaustive pattern matching possible
+ScreenState = UninitializedState | LoadingFailedState | LoadedState
+
+
 class ExplainScreen:
     """Screen for visualizing pipeline lineage.
 
@@ -17,12 +71,21 @@ class ExplainScreen:
     an interactive exploration of run lineage.
 
     Layout:
-        ┌─────────────────┬──────────────────┐
-        │                 │                  │
-        │  Lineage Tree   │   Detail Panel   │
-        │                 │                  │
-        │                 │                  │
-        └─────────────────┴──────────────────┘
+        +------------------+------------------+
+        |                  |                  |
+        |  Lineage Tree    |   Detail Panel   |
+        |                  |                  |
+        |                  |                  |
+        +------------------+------------------+
+
+    State Model:
+        The screen uses a discriminated union to represent its state.
+        Invalid state combinations (e.g., lineage_data without db)
+        cannot exist - they're unrepresentable in the type system.
+
+        - UninitializedState: No data source
+        - LoadingFailedState: Data source exists but loading failed
+        - LoadedState: Data loaded successfully
     """
 
     def __init__(
@@ -35,36 +98,50 @@ class ExplainScreen:
         Args:
             db: Landscape database connection
             run_id: Run ID to explain
+
+        The screen starts in UninitializedState if no db/run_id provided,
+        otherwise attempts to load data and enters LoadedState or LoadingFailedState.
         """
-        self._db = db
-        self._run_id = run_id
-        self._lineage_data: LineageData | None = None
+        # Selected node is tracked separately - it's a UI concern, not data state
         self._selected_node_id: str | None = None
 
-        # Initialize widgets
-        self._tree: LineageTree | None = None
+        # Detail panel always exists, displays None state when nothing selected
         self._detail_panel = NodeDetailPanel(None)
 
-        # Load data if available
-        if db and run_id:
-            self._load_pipeline_structure()
+        # Determine initial state based on inputs
+        if db is None or run_id is None:
+            self._state: ScreenState = UninitializedState()
+        else:
+            self._state = self._load_pipeline_structure(db, run_id)
 
-    def _load_pipeline_structure(self) -> None:
-        """Load pipeline structure from database."""
-        if not self._db or not self._run_id:
-            return
+    @property
+    def state(self) -> ScreenState:
+        """Current screen state for pattern matching."""
+        return self._state
 
+    def _load_pipeline_structure(
+        self, db: LandscapeDB, run_id: str
+    ) -> LoadedState | LoadingFailedState:
+        """Load pipeline structure from database.
+
+        Args:
+            db: Database connection
+            run_id: Run ID to load
+
+        Returns:
+            LoadedState on success, LoadingFailedState on failure.
+        """
         try:
-            recorder = LandscapeRecorder(self._db)
-            nodes = recorder.get_nodes(self._run_id)
+            recorder = LandscapeRecorder(db)
+            nodes = recorder.get_nodes(run_id)
 
             # Organize nodes by type
             source_nodes = [n for n in nodes if n.node_type == NodeType.SOURCE]
             transform_nodes = [n for n in nodes if n.node_type == NodeType.TRANSFORM]
             sink_nodes = [n for n in nodes if n.node_type == NodeType.SINK]
 
-            self._lineage_data = {
-                "run_id": self._run_id,
+            lineage_data: LineageData = {
+                "run_id": run_id,
                 "source": {
                     "name": source_nodes[0].plugin_name if source_nodes else "unknown",
                     "node_id": source_nodes[0].node_id if source_nodes else None,
@@ -80,11 +157,16 @@ class ExplainScreen:
                 ],
                 "tokens": [],  # Tokens loaded separately when needed
             }
-            self._tree = LineageTree(self._lineage_data)
+            tree = LineageTree(lineage_data)
+            return LoadedState(
+                db=db,
+                run_id=run_id,
+                lineage_data=lineage_data,
+                tree=tree,
+            )
         except Exception:
             # Handle missing run or other errors gracefully
-            self._lineage_data = None
-            self._tree = None
+            return LoadingFailedState(db=db, run_id=run_id)
 
     def get_widget_types(self) -> list[str]:
         """Get list of widget types in this screen.
@@ -98,9 +180,29 @@ class ExplainScreen:
         """Get current lineage data.
 
         Returns:
-            Lineage data dict or None
+            Lineage data dict or None if not in LoadedState
         """
-        return self._lineage_data
+        match self._state:
+            case LoadedState(lineage_data=data):
+                return data
+            case _:
+                return None
+
+    def _get_db(self) -> LandscapeDB | None:
+        """Get database connection if available."""
+        match self._state:
+            case LoadedState(db=db) | LoadingFailedState(db=db):
+                return db
+            case _:
+                return None
+
+    def _get_run_id(self) -> str | None:
+        """Get run ID if available."""
+        match self._state:
+            case LoadedState(run_id=rid) | LoadingFailedState(run_id=rid):
+                return rid
+            case _:
+                return None
 
     def on_tree_select(self, node_id: str) -> None:
         """Handle tree node selection.
@@ -110,28 +212,31 @@ class ExplainScreen:
         """
         self._selected_node_id = node_id
 
-        # Load node state from database if available
-        if self._db and self._run_id and node_id:
-            node_state = self._load_node_state(node_id)
+        # Load node state from database if in a state with db access
+        db = self._get_db()
+        run_id = self._get_run_id()
+        if db and run_id and node_id:
+            node_state = self._load_node_state(db, run_id, node_id)
             self._detail_panel.update_state(node_state)
         else:
             self._detail_panel.update_state(None)
 
-    def _load_node_state(self, node_id: str) -> dict[str, Any] | None:
+    def _load_node_state(
+        self, db: LandscapeDB, run_id: str, node_id: str
+    ) -> dict[str, Any] | None:
         """Load node state from database.
 
         Args:
+            db: Database connection
+            run_id: Run ID
             node_id: Node ID to load
 
         Returns:
             Node state dict or None
         """
-        if not self._db:
-            return None
-
         try:
-            recorder = LandscapeRecorder(self._db)
-            nodes = recorder.get_nodes(self._run_id or "")
+            recorder = LandscapeRecorder(db)
+            nodes = recorder.get_nodes(run_id)
 
             # Find the node
             for node in nodes:
@@ -162,16 +267,23 @@ class ExplainScreen:
         """
         lines = []
         lines.append("=" * 60)
-        lines.append(f"  ELSPETH Lineage Explorer - Run: {self._run_id or '(none)'}")
+
+        # Get run_id for display based on state
+        run_id_display = self._get_run_id() or "(none)"
+        lines.append(f"  ELSPETH Lineage Explorer - Run: {run_id_display}")
         lines.append("=" * 60)
         lines.append("")
 
-        if self._tree:
-            lines.append("--- Lineage Tree ---")
-            for node in self._tree.get_tree_nodes():
-                indent = "  " * node["depth"]
-                lines.append(f"{indent}{node['label']}")
-            lines.append("")
+        # Render tree if in loaded state
+        match self._state:
+            case LoadedState(tree=tree):
+                lines.append("--- Lineage Tree ---")
+                for node in tree.get_tree_nodes():
+                    indent = "  " * node["depth"]
+                    lines.append(f"{indent}{node['label']}")
+                lines.append("")
+            case _:
+                pass  # No tree to render
 
         lines.append("--- Node Details ---")
         lines.append(self._detail_panel.render_content())

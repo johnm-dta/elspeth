@@ -347,22 +347,25 @@ class Orchestrator:
         for node_id in execution_order:
             node_info = graph.get_node_info(node_id)
 
-            # Get plugin metadata from actual plugin instance (with defaults)
-            # Uses getattr + isinstance to safely extract attributes from duck-typed plugins
-            plugin = node_to_plugin.get(node_id)
-            plugin_version = "0.0.0"
-            determinism: Determinism | str = Determinism.DETERMINISTIC
+            # Direct access - if node_id is in execution_order (from graph.topological_order()),
+            # it MUST be in node_to_plugin (built from the same graph's source, transforms, sinks).
+            # A KeyError here indicates a bug in graph construction or node_to_plugin building.
+            plugin = node_to_plugin[node_id]
 
-            if plugin is not None:
-                # Extract plugin_version if defined and valid
-                raw_version = getattr(plugin, "plugin_version", None)
-                if isinstance(raw_version, str):
-                    plugin_version = raw_version
+            # Extract plugin metadata with type validation at plugin trust boundary.
+            # plugin_version: Required for transforms/gates/aggregations/sinks per protocols.py,
+            # but NOT required for sources (SourceProtocol doesn't define it).
+            raw_version = getattr(plugin, "plugin_version", None)
+            plugin_version = raw_version if isinstance(raw_version, str) else "0.0.0"
 
-                # Extract determinism if defined and valid (Determinism enum or string)
-                raw_determinism = getattr(plugin, "determinism", None)
-                if isinstance(raw_determinism, Determinism | str):
-                    determinism = raw_determinism
+            # determinism: Most plugins are deterministic, so default is legitimate.
+            # Type check filters invalid values (e.g., MagicMock in tests).
+            raw_determinism = getattr(plugin, "determinism", None)
+            determinism: Determinism | str = (
+                raw_determinism
+                if isinstance(raw_determinism, Determinism | str)
+                else Determinism.DETERMINISTIC
+            )
 
             recorder.register_node(
                 run_id=run_id,

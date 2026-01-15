@@ -1,10 +1,16 @@
 # src/elspeth/core/__init__.py
-"""Core infrastructure: Landscape, Canonical, Configuration, DAG, Logging."""
+"""Core infrastructure: Landscape, Canonical, Configuration, Checkpoint, DAG, Logging."""
 
 from elspeth.core.canonical import (
     CANONICAL_VERSION,
     canonical_json,
     stable_hash,
+)
+from elspeth.core.checkpoint import (
+    CheckpointManager,
+    RecoveryManager,
+    ResumeCheck,
+    ResumePoint,
 )
 from elspeth.core.config import (
     ConcurrencySettings,
@@ -34,6 +40,7 @@ from elspeth.core.payload_store import (
 
 __all__ = [
     "CANONICAL_VERSION",
+    "CheckpointManager",
     "ConcurrencySettings",
     "DatabaseSettings",
     "DatasourceSettings",
@@ -45,6 +52,9 @@ __all__ = [
     "NodeInfo",
     "PayloadStore",
     "PayloadStoreSettings",
+    "RecoveryManager",
+    "ResumeCheck",
+    "ResumePoint",
     "RetrySettings",
     "RowPluginSettings",
     "SinkSettings",

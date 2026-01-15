@@ -26,6 +26,9 @@ from elspeth.plugins.base import (
     BaseTransform,
 )
 
+# Config base classes
+from elspeth.plugins.config_base import PathConfig, PluginConfig, PluginConfigError
+
 # Context
 from elspeth.plugins.context import PluginContext
 
@@ -99,6 +102,10 @@ __all__ = [  # noqa: RUF022  # Grouped by category for readability
     "BaseSink",
     "BaseSource",
     "BaseTransform",
+    # Config base classes
+    "PathConfig",
+    "PluginConfig",
+    "PluginConfigError",
     # Manager
     "PluginManager",
     "PluginSpec",

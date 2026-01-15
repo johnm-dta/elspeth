@@ -142,7 +142,7 @@ class NodeStateStatus(str, Enum):
     FAILED = "failed"
 
 
-@dataclass
+@dataclass(frozen=True)
 class NodeStateOpen:
     """A node state that is currently being processed.
 
@@ -168,7 +168,7 @@ class NodeStateOpen:
     context_before_json: str | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class NodeStateCompleted:
     """A node state that completed successfully.
 
@@ -196,7 +196,7 @@ class NodeStateCompleted:
     context_after_json: str | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class NodeStateFailed:
     """A node state that failed during processing.
 

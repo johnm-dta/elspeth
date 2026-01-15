@@ -39,6 +39,7 @@ from elspeth.core.landscape.models import (
     Row,
     RowLineage,
     Run,
+    RunStatus,
     Token,
     TokenParent,
 )
@@ -91,6 +92,7 @@ __all__ = [
     "RowDataState",
     "RowLineage",
     "Run",
+    "RunStatus",
     "Token",
     "TokenParent",
     "artifacts_table",

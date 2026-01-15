@@ -13,7 +13,19 @@ These models define the schema for tracking:
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Literal
+
+
+class RunStatus(str, Enum):
+    """Status for pipeline runs.
+
+    RUNNING is intermediate, COMPLETED/FAILED are terminal.
+    """
+
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 @dataclass

@@ -60,6 +60,152 @@ class TestLandscapeRecorderRuns:
         assert retrieved.run_id == run.run_id
 
 
+class TestLandscapeRecorderRunStatusValidation:
+    """Run status validation against RunStatus enum."""
+
+    def test_begin_run_with_enum_status(self) -> None:
+        """Test that RunStatus enum is accepted."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.models import RunStatus
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(
+            config={},
+            canonical_version="v1",
+            status=RunStatus.RUNNING,
+        )
+
+        assert run.status == "running"
+
+    def test_begin_run_with_valid_string_status(self) -> None:
+        """Test that valid string status is accepted and coerced."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(
+            config={},
+            canonical_version="v1",
+            status="running",
+        )
+
+        assert run.status == "running"
+
+    def test_begin_run_with_invalid_status_raises(self) -> None:
+        """Test that invalid status string raises ValueError."""
+        import pytest
+
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        with pytest.raises(ValueError, match="runnign"):  # Note typo
+            recorder.begin_run(
+                config={},
+                canonical_version="v1",
+                status="runnign",  # Typo! Should fail fast
+            )
+
+    def test_complete_run_with_enum_status(self) -> None:
+        """Test that RunStatus enum is accepted for complete_run."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.models import RunStatus
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        completed = recorder.complete_run(run.run_id, status=RunStatus.COMPLETED)
+
+        assert completed.status == "completed"
+
+    def test_complete_run_with_valid_string_status(self) -> None:
+        """Test that valid string status is accepted for complete_run."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        completed = recorder.complete_run(run.run_id, status="failed")
+
+        assert completed.status == "failed"
+
+    def test_complete_run_with_invalid_status_raises(self) -> None:
+        """Test that invalid status string raises ValueError for complete_run."""
+        import pytest
+
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        with pytest.raises(ValueError, match="compleed"):  # Note typo
+            recorder.complete_run(run.run_id, status="compleed")  # Typo!
+
+    def test_list_runs_with_enum_status_filter(self) -> None:
+        """Test that RunStatus enum is accepted for list_runs filter."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.models import RunStatus
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Create runs with different statuses
+        run1 = recorder.begin_run(config={"n": 1}, canonical_version="v1")
+        run2 = recorder.begin_run(config={"n": 2}, canonical_version="v1")
+        recorder.complete_run(run2.run_id, status=RunStatus.COMPLETED)
+
+        # Filter by enum
+        running_runs = recorder.list_runs(status=RunStatus.RUNNING)
+        assert len(running_runs) == 1
+        assert running_runs[0].run_id == run1.run_id
+
+    def test_list_runs_with_valid_string_status_filter(self) -> None:
+        """Test that valid string status is accepted for list_runs filter."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Create runs
+        recorder.begin_run(config={"n": 1}, canonical_version="v1")  # running
+        run2 = recorder.begin_run(config={"n": 2}, canonical_version="v1")
+        recorder.complete_run(run2.run_id, status="completed")
+
+        # Filter by string
+        completed_runs = recorder.list_runs(status="completed")
+        assert len(completed_runs) == 1
+        assert completed_runs[0].run_id == run2.run_id
+
+    def test_list_runs_with_invalid_status_filter_raises(self) -> None:
+        """Test that invalid status string raises ValueError for list_runs."""
+        import pytest
+
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        with pytest.raises(ValueError, match="completd"):  # Note typo
+            recorder.list_runs(status="completd")  # Typo!
+
+
 class TestLandscapeRecorderNodes:
     """Node and edge registration."""
 

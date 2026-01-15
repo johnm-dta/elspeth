@@ -13,11 +13,11 @@ Coordinates:
 import os
 from contextlib import suppress
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+from elspeth.core.landscape.models import RunStatus
 from elspeth.engine.processor import RowProcessor
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
@@ -32,17 +32,6 @@ TransformLike = BaseTransform | BaseGate | BaseAggregation
 if TYPE_CHECKING:
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.config import CheckpointSettings, ElspethSettings
-
-
-class RunStatus(str, Enum):
-    """Status for pipeline runs.
-
-    RUNNING is intermediate, COMPLETED/FAILED are terminal.
-    """
-
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
 
 
 @dataclass

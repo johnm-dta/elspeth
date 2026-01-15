@@ -30,6 +30,7 @@ from elspeth.core.landscape.models import (
     Row,
     RowLineage,
     Run,
+    RunStatus,
     Token,
     TokenParent,
 )
@@ -126,6 +127,7 @@ class LandscapeRecorder:
         *,
         run_id: str | None = None,
         reproducibility_grade: str | None = None,
+        status: RunStatus | str = RunStatus.RUNNING,
     ) -> Run:
         """Begin a new pipeline run.
 
@@ -134,10 +136,17 @@ class LandscapeRecorder:
             canonical_version: Version of canonical hash algorithm
             run_id: Optional run ID (generated if not provided)
             reproducibility_grade: Optional grade (FULL_REPRODUCIBLE, etc.)
+            status: Initial run status (defaults to RUNNING)
 
         Returns:
             Run model with generated run_id
+
+        Raises:
+            ValueError: If status string is not a valid RunStatus value
         """
+        # Validate and coerce status enum early - fail fast on typos
+        status_enum = _coerce_enum(status, RunStatus)
+
         run_id = run_id or _generate_id()
         settings_json = canonical_json(config)
         config_hash = stable_hash(config)
@@ -149,7 +158,7 @@ class LandscapeRecorder:
             config_hash=config_hash,
             settings_json=settings_json,
             canonical_version=canonical_version,
-            status="running",
+            status=status_enum.value,  # Store string in DB
             reproducibility_grade=reproducibility_grade,
         )
 
@@ -171,7 +180,7 @@ class LandscapeRecorder:
     def complete_run(
         self,
         run_id: str,
-        status: str,
+        status: RunStatus | str,
         *,
         reproducibility_grade: str | None = None,
     ) -> Run:
@@ -179,12 +188,17 @@ class LandscapeRecorder:
 
         Args:
             run_id: Run to complete
-            status: Final status (completed, failed)
+            status: Final status (completed, failed) - must be valid RunStatus
             reproducibility_grade: Optional final grade
 
         Returns:
             Updated Run model
+
+        Raises:
+            ValueError: If status string is not a valid RunStatus value
         """
+        # Validate and coerce status enum early - fail fast on typos
+        status_enum = _coerce_enum(status, RunStatus)
         now = _now()
 
         with self._db.connection() as conn:
@@ -192,7 +206,7 @@ class LandscapeRecorder:
                 runs_table.update()
                 .where(runs_table.c.run_id == run_id)
                 .values(
-                    status=status,
+                    status=status_enum.value,  # Store string in DB
                     completed_at=now,
                     reproducibility_grade=reproducibility_grade,
                 )
@@ -236,7 +250,7 @@ class LandscapeRecorder:
             export_sink=row.export_sink,
         )
 
-    def list_runs(self, *, status: str | None = None) -> list[Run]:
+    def list_runs(self, *, status: RunStatus | str | None = None) -> list[Run]:
         """List all runs in the database.
 
         Args:
@@ -244,11 +258,16 @@ class LandscapeRecorder:
 
         Returns:
             List of Run models, ordered by started_at (newest first)
+
+        Raises:
+            ValueError: If status string is not a valid RunStatus value
         """
         query = select(runs_table).order_by(runs_table.c.started_at.desc())
 
-        if status:
-            query = query.where(runs_table.c.status == status)
+        if status is not None:
+            # Validate and coerce status enum - fail fast on typos
+            status_enum = _coerce_enum(status, RunStatus)
+            query = query.where(runs_table.c.status == status_enum.value)
 
         with self._db.connection() as conn:
             result = conn.execute(query)

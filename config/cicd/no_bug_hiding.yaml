@@ -346,19 +346,19 @@ allow_hits:
   # whole cleanup process.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R3:Orchestrator:_cleanup_transforms:line=164"
+  - key: "engine/orchestrator.py:R3:Orchestrator:_cleanup_transforms:line=165"
     owner: "architecture"
     reason: "Trust boundary: old plugins may not implement close() method"
     safety: "Duck-typing at plugin boundary - graceful skip for legacy plugins"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=166"
+  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=167"
     owner: "architecture"
     reason: "Best-effort cleanup: one plugin failure shouldn't prevent others from cleanup"
     safety: "Logged with warning, other plugins still get close() called"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R2:Orchestrator:_cleanup_transforms:line=170"
+  - key: "engine/orchestrator.py:R2:Orchestrator:_cleanup_transforms:line=171"
     owner: "architecture"
     reason: "Trust boundary: plugin may not have name attribute"
     safety: "Fallback to str() for log message - never raises"
@@ -372,19 +372,19 @@ allow_hits:
   # legitimate duck-typing at a plugin trust boundary.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_execute_run:line=298"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_execute_run:line=299"
     owner: "architecture"
     reason: "Trust boundary: node_to_plugin map lookup returns None for missing nodes"
     safety: "Explicitly checked: if plugin is not None then extract metadata"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=304"
+  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=305"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define plugin_version attribute"
     safety: "Duck-typing at plugin boundary - fallback to '0.0.0' is documented behavior"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=309"
+  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=310"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define determinism attribute"
     safety: "Duck-typing at plugin boundary - fallback to DETERMINISTIC is documented"
@@ -398,7 +398,7 @@ allow_hits:
   # clear error message instead of an AttributeError.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R3:Orchestrator:_export_csv_multifile:line=601"
+  - key: "engine/orchestrator.py:R3:Orchestrator:_export_csv_multifile:line=602"
     owner: "architecture"
     reason: "Trust boundary: CSV export requires path-based sink, validate before use"
     safety: "Explicit error raised if sink doesn't have _path - fails fast with clear message"
@@ -411,7 +411,7 @@ allow_hits:
   # variables. This is explicitly checked and raises if missing when required.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=533"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=534"
     owner: "architecture"
     reason: "Standard pattern: optional environment variable with explicit check"
     safety: "Raises ValueError with clear message if signing enabled but key missing"
@@ -596,13 +596,13 @@ allow_hits:
   # for polymorphic dispatch.
   # ============================================================
 
-  - key: "engine/processor.py:R3:RowProcessor:process_row:line=132"
+  - key: "engine/processor.py:R3:RowProcessor:process_row:line=133"
     owner: "architecture"
     reason: "Polymorphic dispatch: checking for gate interface (evaluate method)"
     safety: "Legitimate duck-typing - transforms have different interfaces by design"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/processor.py:R3:RowProcessor:process_row:line=160"
+  - key: "engine/processor.py:R3:RowProcessor:process_row:line=161"
     owner: "architecture"
     reason: "Polymorphic dispatch: checking for aggregation interface (accept method)"
     safety: "Legitimate duck-typing - transforms have different interfaces by design"

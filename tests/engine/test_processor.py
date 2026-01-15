@@ -3,6 +3,8 @@
 
 from typing import Any
 
+from elspeth.plugins.results import RowOutcome
+
 
 class TestRowProcessor:
     """Row processing through pipeline."""
@@ -76,7 +78,7 @@ class TestRowProcessor:
 
         # 10 * 2 = 20, 20 + 1 = 21
         assert result.final_data == {"value": 21}
-        assert result.outcome == "completed"
+        assert result.outcome == RowOutcome.COMPLETED
 
     def test_process_single_transform(self) -> None:
         """Single transform processes correctly."""
@@ -130,7 +132,7 @@ class TestRowProcessor:
         )
 
         assert result.final_data == {"name": "test", "enriched": True}
-        assert result.outcome == "completed"
+        assert result.outcome == RowOutcome.COMPLETED
         # Check identity preserved
         assert result.token_id is not None
         assert result.row_id is not None
@@ -170,7 +172,7 @@ class TestRowProcessor:
         )
 
         assert result.final_data == {"passthrough": True}
-        assert result.outcome == "completed"
+        assert result.outcome == RowOutcome.COMPLETED
 
     def test_transform_error_returns_failed(self) -> None:
         """Transform returning error status causes failed outcome."""
@@ -227,7 +229,7 @@ class TestRowProcessor:
             ctx=ctx,
         )
 
-        assert result.outcome == "failed"
+        assert result.outcome == RowOutcome.FAILED
         # Original data preserved on failure
         assert result.final_data == {"value": -5}
 
@@ -301,7 +303,7 @@ class TestRowProcessorGates:
         )
 
         assert result.final_data == {"value": 42, "final": True}
-        assert result.outcome == "completed"
+        assert result.outcome == RowOutcome.COMPLETED
 
     def test_gate_route_to_sink(self) -> None:
         """Gate routing via route label returns routed outcome with sink name."""
@@ -378,7 +380,7 @@ class TestRowProcessorGates:
             ctx=ctx,
         )
 
-        assert result.outcome == "routed"
+        assert result.outcome == RowOutcome.ROUTED
         assert result.sink_name == "high_values"
         assert result.final_data == {"value": 150}
 
@@ -470,7 +472,7 @@ class TestRowProcessorGates:
         )
 
         # In linear pipeline mode, fork returns "forked" - caller handles children
-        assert result.outcome == "forked"
+        assert result.outcome == RowOutcome.FORKED
         assert result.final_data == {"value": 42}
 
 
@@ -534,7 +536,7 @@ class TestRowProcessorAggregation:
             ctx=ctx,
         )
 
-        assert result.outcome == "consumed"
+        assert result.outcome == RowOutcome.CONSUMED_IN_BATCH
 
     def test_aggregation_trigger_flushes(self) -> None:
         """Aggregation trigger causes flush to be called."""
@@ -601,7 +603,7 @@ class TestRowProcessorAggregation:
             transforms=[aggregation],
             ctx=ctx,
         )
-        assert result1.outcome == "consumed"
+        assert result1.outcome == RowOutcome.CONSUMED_IN_BATCH
         assert len(flush_called) == 0
 
         # Second row - triggers
@@ -611,7 +613,7 @@ class TestRowProcessorAggregation:
             transforms=[aggregation],
             ctx=ctx,
         )
-        assert result2.outcome == "consumed"
+        assert result2.outcome == RowOutcome.CONSUMED_IN_BATCH
         assert len(flush_called) == 1  # Flush was called
 
 
@@ -724,7 +726,7 @@ class TestRowProcessorTokenIdentity:
             ctx=ctx,
         )
 
-        assert result.outcome == "completed"
+        assert result.outcome == RowOutcome.COMPLETED
 
         # Verify node states recorded with correct step indices
         states = recorder.get_node_states_for_token(result.token_id)

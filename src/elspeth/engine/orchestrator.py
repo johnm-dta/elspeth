@@ -22,6 +22,7 @@ from elspeth.engine.processor import RowProcessor
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.enums import NodeType
+from elspeth.plugins.results import RowOutcome
 
 if TYPE_CHECKING:
     from elspeth.core.checkpoint import CheckpointManager
@@ -424,7 +425,7 @@ class Orchestrator:
                         else source_id
                     )
 
-                    if result.outcome == "completed":
+                    if result.outcome == RowOutcome.COMPLETED:
                         rows_succeeded += 1
                         pending_tokens[output_sink_name].append(result.token)
                         # Checkpoint after successful row processing
@@ -433,7 +434,7 @@ class Orchestrator:
                             token_id=result.token.token_id,
                             node_id=last_node_id,
                         )
-                    elif result.outcome == "routed":
+                    elif result.outcome == RowOutcome.ROUTED:
                         rows_routed += 1
                         if result.sink_name and result.sink_name in config.sinks:
                             pending_tokens[result.sink_name].append(result.token)
@@ -450,12 +451,12 @@ class Orchestrator:
                                 f"Available sinks: {list(config.sinks.keys())}"
                             )
                         else:
-                            # sink_name is None but outcome is "routed" - should not happen
+                            # sink_name is None but outcome is ROUTED - should not happen
                             raise RuntimeError(
-                                f"Row outcome is 'routed' but sink_name is None "
+                                f"Row outcome is ROUTED but sink_name is None "
                                 f"for token {result.token.token_id}"
                             )
-                    elif result.outcome == "failed":
+                    elif result.outcome == RowOutcome.FAILED:
                         rows_failed += 1
 
             # Write to sinks using SinkExecutor

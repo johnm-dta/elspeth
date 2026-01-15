@@ -21,6 +21,7 @@ from elspeth.engine.executors import (
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenInfo, TokenManager
 from elspeth.plugins.context import PluginContext
+from elspeth.plugins.results import RowOutcome
 
 
 @dataclass
@@ -29,8 +30,8 @@ class RowResult:
 
     token: TokenInfo  # Preserve full token identity, not just IDs
     final_data: dict[str, Any]
-    outcome: str  # completed, routed, forked, consumed, failed
-    sink_name: str | None = None  # Set when outcome is "routed"
+    outcome: RowOutcome  # Terminal state from RowOutcome enum
+    sink_name: str | None = None  # Set when outcome is ROUTED
 
     @property
     def token_id(self) -> str:
@@ -145,16 +146,16 @@ class RowProcessor:
                         return RowResult(
                             token=current_token,
                             final_data=current_token.row_data,
-                            outcome="routed",
+                            outcome=RowOutcome.ROUTED,
                             sink_name=outcome.sink_name,
                         )
                     elif outcome.result.action.kind == "fork_to_paths":
                         # NOTE: For full DAG support, we'd push child_tokens to a work queue
-                        # and continue processing them. For now, return "forked".
+                        # and continue processing them. For now, return FORKED.
                         return RowResult(
                             token=current_token,
                             final_data=current_token.row_data,
-                            outcome="forked",
+                            outcome=RowOutcome.FORKED,
                         )
 
                 elif hasattr(transform, "accept"):
@@ -177,7 +178,7 @@ class RowProcessor:
                     return RowResult(
                         token=current_token,
                         final_data=current_token.row_data,
-                        outcome="consumed",
+                        outcome=RowOutcome.CONSUMED_IN_BATCH,
                     )
 
                 else:
@@ -193,11 +194,11 @@ class RowProcessor:
                         return RowResult(
                             token=current_token,
                             final_data=current_token.row_data,
-                            outcome="failed",
+                            outcome=RowOutcome.FAILED,
                         )
 
             return RowResult(
                 token=current_token,
                 final_data=current_token.row_data,
-                outcome="completed",
+                outcome=RowOutcome.COMPLETED,
             )

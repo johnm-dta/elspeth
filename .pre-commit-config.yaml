@@ -29,3 +29,12 @@ repos:
           - pandas-stubs>=2.2
           - types-networkx>=3.2
         args: [--config-file=pyproject.toml]
+
+  - repo: local
+    hooks:
+      - id: no-bug-hiding
+        name: No Bug-Hiding Patterns
+        entry: uv run python scripts/cicd/no_bug_hiding.py check --root src/elspeth
+        language: system
+        types: [python]
+        pass_filenames: false

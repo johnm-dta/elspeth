@@ -134,6 +134,31 @@ class Orchestrator:
         if self._checkpoint_manager is not None:
             self._checkpoint_manager.delete_checkpoints(run_id)
 
+    def _cleanup_transforms(self, config: PipelineConfig) -> None:
+        """Call close() on all transforms and gates.
+
+        Called in finally block to ensure cleanup happens even on failure.
+        Logs but doesn't raise if individual cleanup fails.
+
+        The hasattr check is acceptable here because old plugins might not
+        have close() yet (graceful degradation at plugin trust boundary).
+        """
+        import structlog
+
+        logger = structlog.get_logger()
+
+        for transform in config.transforms:
+            try:
+                if hasattr(transform, "close"):
+                    transform.close()
+            except Exception as e:
+                # Log but don't raise - cleanup should be best-effort
+                logger.warning(
+                    "Transform cleanup failed",
+                    transform=getattr(transform, "name", str(transform)),
+                    error=str(e),
+                )
+
     def run(
         self,
         config: PipelineConfig,
@@ -213,6 +238,9 @@ class Orchestrator:
             if not run_completed:
                 recorder.complete_run(run.run_id, status="failed")
             raise
+        finally:
+            # Always clean up transforms, even on failure
+            self._cleanup_transforms(config)
 
     def _execute_run(
         self,

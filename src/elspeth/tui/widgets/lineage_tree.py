@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+from elspeth.tui.types import LineageData
+
 
 @dataclass
 class TreeNode:
@@ -30,13 +32,19 @@ class LineageTree:
 
     The tree shows the flow of data through the pipeline,
     with tokens as leaves showing which rows went where.
+
+    Data Contract:
+        This widget requires valid LineageData. Callers must ensure
+        data conforms to the contract BEFORE passing it here. Missing
+        or malformed fields will raise KeyError, not silently degrade.
     """
 
-    def __init__(self, lineage_data: dict[str, Any]) -> None:
+    def __init__(self, lineage_data: LineageData) -> None:
         """Initialize with lineage data.
 
         Args:
-            lineage_data: Dict containing run_id, source, transforms, sinks, tokens
+            lineage_data: LineageData containing run_id, source, transforms,
+                          sinks, tokens. All fields are required.
         """
         self._data = lineage_data
         self._root = self._build_tree()
@@ -44,24 +52,16 @@ class LineageTree:
     def _build_tree(self) -> TreeNode:
         """Build tree structure from lineage data.
 
-        Trust boundary: lineage_data comes from Landscape and may have missing
-        or malformed fields for failed/partial runs. All field access uses
-        graceful defaults.
-
         Returns:
             Root TreeNode
         """
-        run_id = self._data.get("run_id", "unknown")
+        run_id = self._data["run_id"]
         root = TreeNode(label=f"Run: {run_id}", node_type="run")
 
-        # Add source - handle None or non-dict gracefully
-        source = self._data.get("source") or {}
-        if isinstance(source, dict):
-            source_name = source.get("name", "unknown")
-            source_node_id = source.get("node_id")
-        else:
-            source_name = str(source)
-            source_node_id = None
+        # Add source
+        source = self._data["source"]
+        source_name = source["name"]
+        source_node_id = source["node_id"]
         source_node = TreeNode(
             label=f"Source: {source_name}",
             node_id=source_node_id,
@@ -69,17 +69,13 @@ class LineageTree:
         )
         root.children.append(source_node)
 
-        # Build transform chain - handle None or non-list gracefully
-        transforms = self._data.get("transforms") or []
+        # Build transform chain
+        transforms = self._data["transforms"]
         current_parent = source_node
 
         for transform in transforms:
-            if isinstance(transform, dict):
-                transform_name = transform.get("name", "unknown")
-                transform_node_id = transform.get("node_id")
-            else:
-                transform_name = str(transform) if transform else "unknown"
-                transform_node_id = None
+            transform_name = transform["name"]
+            transform_node_id = transform["node_id"]
             transform_node = TreeNode(
                 label=f"Transform: {transform_name}",
                 node_id=transform_node_id,
@@ -89,20 +85,12 @@ class LineageTree:
             current_parent = transform_node
 
         # Add sinks as children of last transform (or source if no transforms)
-        sinks = self._data.get("sinks") or []
+        sinks = self._data["sinks"]
         sink_nodes: dict[str, TreeNode] = {}
 
         for sink in sinks:
-            if isinstance(sink, dict):
-                sink_name = sink.get("name", "unknown")
-                raw_sink_node_id = sink.get("node_id")
-                # Only use node_id if it's a hashable string
-                sink_node_id = (
-                    raw_sink_node_id if isinstance(raw_sink_node_id, str) else None
-                )
-            else:
-                sink_name = str(sink) if sink else "unknown"
-                sink_node_id = None
+            sink_name = sink["name"]
+            sink_node_id = sink["node_id"]
             sink_node = TreeNode(
                 label=f"Sink: {sink_name}",
                 node_id=sink_node_id,
@@ -113,23 +101,18 @@ class LineageTree:
                 sink_nodes[sink_node_id] = sink_node
 
         # Add tokens under their terminal nodes
-        tokens = self._data.get("tokens") or []
+        tokens = self._data["tokens"]
         for token in tokens:
-            if isinstance(token, dict):
-                token_id = token.get("token_id", "unknown")
-                row_id = token.get("row_id", "unknown")
-                path = token.get("path") or []
-            else:
-                token_id = str(token) if token else "unknown"
-                row_id = "unknown"
-                path = []
+            token_id = token["token_id"]
+            row_id = token["row_id"]
+            path = token["path"]
             token_node = TreeNode(
                 label=f"Token: {token_id} (row: {row_id})",
-                node_id=token_id if isinstance(token_id, str) else None,
+                node_id=token_id,
                 node_type="token",
             )
             # Find which sink this token ended at
-            if path and isinstance(path, list) and len(path) > 0:
+            if path and len(path) > 0:
                 terminal_node_id = path[-1]
                 if terminal_node_id in sink_nodes:
                     sink_nodes[terminal_node_id].children.append(token_node)

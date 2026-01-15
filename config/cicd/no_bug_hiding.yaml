@@ -34,102 +34,21 @@ allow_hits:
   # ============================================================
 
   # --- ExplainScreen exception handling ---
-  - key: "tui/screens/explain_screen.py:R4:ExplainScreen:_load_pipeline_structure:line=82"
+  - key: "tui/screens/explain_screen.py:R4:ExplainScreen:_load_pipeline_structure:line=83"
     owner: "architecture"
     reason: "Trust boundary: loading pipeline structure that may fail for corrupt/incomplete runs"
     safety: "Graceful degradation - displays error message in UI instead of crash"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/screens/explain_screen.py:R4:ExplainScreen:_load_node_state:line=144"
+  - key: "tui/screens/explain_screen.py:R4:ExplainScreen:_load_node_state:line=145"
     owner: "architecture"
     reason: "Trust boundary: loading node state that may fail for incomplete audit trails"
     safety: "Graceful degradation - displays error message in UI instead of crash"
     expires: null  # Permanent - intentional design
 
-  # --- LineageTree displaying Landscape data ---
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=54"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape run_id that may be missing"
-    safety: "Graceful degradation to 'unknown' - user sees partial data"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=58"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape source that may be empty"
-    safety: "Graceful degradation to empty dict - user sees partial tree"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=60"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape source name that may be missing"
-    safety: "Graceful degradation to 'unknown' - user sees partial data"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=61"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape node_id that may be missing"
-    safety: "Graceful degradation to None - tree node still renders"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=73"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape transforms list that may be empty"
-    safety: "Graceful degradation to empty list - tree renders without transforms"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=78"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape transform name that may be missing"
-    safety: "Graceful degradation to 'unknown' - user sees partial data"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=79"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape transform node_id that may be missing"
-    safety: "Graceful degradation to None - tree node still renders"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=92"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape sinks list that may be empty"
-    safety: "Graceful degradation to empty list - tree renders without sinks"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=97"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape sink name that may be missing"
-    safety: "Graceful degradation to 'unknown' - user sees partial data"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=98"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape sink node_id that may be missing"
-    safety: "Graceful degradation to None - tree node still renders"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=116"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape tokens list that may be empty"
-    safety: "Graceful degradation to empty list - tree renders without tokens"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=119"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape token_id that may be missing"
-    safety: "Graceful degradation to 'unknown' - user sees partial data"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=120"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape row_id that may be missing"
-    safety: "Graceful degradation to 'unknown' - user sees partial data"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=121"
-    owner: "architecture"
-    reason: "Trust boundary: displaying Landscape token path that may be empty"
-    safety: "Graceful degradation to empty list - token renders without path"
-    expires: null  # Permanent - intentional design
+  # --- LineageTree ---
+  # LineageTree now uses strict LineageData TypedDict contract (Task 10).
+  # No allowlist entries needed - callers must provide valid data.
 
   # --- NodeDetailPanel displaying node state ---
   - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=38"

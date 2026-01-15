@@ -4,6 +4,7 @@ from typing import Any
 
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.tui.types import LineageData
 from elspeth.tui.widgets.lineage_tree import LineageTree
 from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
@@ -36,7 +37,7 @@ class ExplainScreen:
         """
         self._db = db
         self._run_id = run_id
-        self._lineage_data: dict[str, Any] | None = None
+        self._lineage_data: LineageData | None = None
         self._selected_node_id: str | None = None
 
         # Initialize widgets
@@ -92,7 +93,7 @@ class ExplainScreen:
         """
         return ["LineageTree", "NodeDetailPanel"]
 
-    def get_lineage_data(self) -> dict[str, Any] | None:
+    def get_lineage_data(self) -> LineageData | None:
         """Get current lineage data.
 
         Returns:

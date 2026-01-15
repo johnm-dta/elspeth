@@ -41,7 +41,9 @@ class Run:
     completed_at: datetime | None = None
     reproducibility_grade: str | None = None
     # Export tracking - separate from run status
-    export_status: str | None = None  # pending, completed, failed
+    # TODO: Convert export_status to ExportStatus enum (pending, completed, failed)
+    # following the RunStatus pattern. Also update set_export_status() in recorder.py.
+    export_status: str | None = None
     export_error: str | None = None
     exported_at: datetime | None = None
     export_format: str | None = None  # csv, json

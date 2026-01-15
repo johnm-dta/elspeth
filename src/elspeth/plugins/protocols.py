@@ -180,7 +180,8 @@ class GateProtocol(Protocol):
             output_schema = OutputSchema
 
             def evaluate(self, row: dict, ctx: PluginContext) -> GateResult:
-                if row.get("suspicious"):
+                # Direct field access - schema guarantees field exists
+                if row["suspicious"]:
                     return GateResult(
                         row=row,
                         action=RoutingAction.route("review"),  # Resolved via routes config

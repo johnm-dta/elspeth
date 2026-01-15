@@ -14,11 +14,15 @@
 
 ## Phase 1: Critical Issues (6 hours)
 
-### Task 1: Create RowDataState Enum and RowDataResult Type
+### Task 1: Create RowDataState Enum and RowDataResult Type ✅ DONE
+
+**Status:** Already implemented. File exists at `src/elspeth/core/landscape/row_data.py` with:
+- `RowDataState` enum with all 5 states
+- `RowDataResult` frozen dataclass with `__post_init__` validation
 
 **Files:**
-- Create: `src/elspeth/core/landscape/row_data.py`
-- Test: `tests/core/landscape/test_row_data.py`
+- ✅ Exists: `src/elspeth/core/landscape/row_data.py`
+- ✅ Exists: `tests/core/landscape/test_row_data.py`
 
 **Step 1: Write failing test for RowDataState enum**
 
@@ -190,7 +194,7 @@ EOF
 ### Task 2: Update get_row_data() to Return RowDataResult
 
 **Files:**
-- Modify: `src/elspeth/core/landscape/recorder.py:1472-1497`
+- Modify: `src/elspeth/core/landscape/recorder.py:1478-1505`
 - Test: `tests/core/landscape/test_recorder.py` (add new tests)
 
 **Step 1: Write failing test for new get_row_data() signature**
@@ -633,7 +637,7 @@ EOF
 ### Task 5: Add RunStatus Enum and Update RunResult
 
 **Files:**
-- Modify: `src/elspeth/engine/orchestrator.py:41-50`
+- Modify: `src/elspeth/engine/orchestrator.py:40-50`
 - Test: `tests/engine/test_orchestrator.py`
 
 **Step 1: Write failing test**
@@ -734,7 +738,7 @@ EOF
 ### Task 6: Use RowOutcome Enum in RowResult
 
 **Files:**
-- Modify: `src/elspeth/engine/processor.py:27-33`
+- Modify: `src/elspeth/engine/processor.py:26-33`
 - Test: `tests/engine/test_processor.py`
 
 **Step 1: Write failing test**
@@ -815,7 +819,7 @@ EOF
 ### Task 7: Replace hasattr Duck Typing with isinstance
 
 **Files:**
-- Modify: `src/elspeth/engine/processor.py:132-180`
+- Modify: `src/elspeth/engine/processor.py:131-183`
 - Test: `tests/engine/test_processor.py`
 
 **Step 1: Write test for type-safe plugin detection**
@@ -933,7 +937,7 @@ EOF
 ### Task 8: Add Type Hints to PipelineConfig
 
 **Files:**
-- Modify: `src/elspeth/engine/orchestrator.py:30-37`
+- Modify: `src/elspeth/engine/orchestrator.py:30-38`
 - Test: Run mypy
 
 **Step 1: Update PipelineConfig with proper types**
@@ -995,8 +999,10 @@ EOF
 ### Task 9: Fix Plugin Manager Defensive getattr
 
 **Files:**
-- Modify: `src/elspeth/plugins/manager.py:83-90`
+- Modify: `src/elspeth/plugins/manager.py:71-92`
 - Test: `tests/plugins/test_manager.py`
+
+**Note:** The class is named `PluginSpec`, not `PluginSpec`.
 
 **Step 1: Write test for required attributes**
 
@@ -1004,12 +1010,12 @@ EOF
 # tests/plugins/test_manager_validation.py
 """Tests for plugin manager attribute validation."""
 import pytest
-from elspeth.plugins.manager import PluginManager, PluginSchema
+from elspeth.plugins.manager import PluginManager, PluginSpec
 from elspeth.plugins.enums import NodeType
 
 
-class TestPluginSchemaValidation:
-    """Tests for PluginSchema.from_plugin() validation."""
+class TestPluginSpecValidation:
+    """Tests for PluginSpec.from_plugin() validation."""
 
     def test_missing_name_raises(self):
         """Plugin without name attribute should raise ValueError."""
@@ -1018,7 +1024,7 @@ class TestPluginSchemaValidation:
             # Missing: name
 
         with pytest.raises(ValueError, match="must define 'name' attribute"):
-            PluginSchema.from_plugin(BadPlugin, NodeType.TRANSFORM)
+            PluginSpec.from_plugin(BadPlugin, NodeType.TRANSFORM)
 
     def test_missing_version_raises(self):
         """Plugin without plugin_version should raise ValueError."""
@@ -1027,7 +1033,7 @@ class TestPluginSchemaValidation:
             # Missing: plugin_version
 
         with pytest.raises(ValueError, match="must define 'plugin_version' attribute"):
-            PluginSchema.from_plugin(BadPlugin, NodeType.TRANSFORM)
+            PluginSpec.from_plugin(BadPlugin, NodeType.TRANSFORM)
 
     def test_valid_plugin_succeeds(self):
         """Plugin with required attributes should succeed."""
@@ -1035,9 +1041,9 @@ class TestPluginSchemaValidation:
             name = "good"
             plugin_version = "1.0.0"
 
-        schema = PluginSchema.from_plugin(GoodPlugin, NodeType.TRANSFORM)
-        assert schema.name == "good"
-        assert schema.version == "1.0.0"
+        spec = PluginSpec.from_plugin(GoodPlugin, NodeType.TRANSFORM)
+        assert spec.name == "good"
+        assert spec.version == "1.0.0"
 ```
 
 **Step 2: Run test to verify it fails**
@@ -1052,7 +1058,7 @@ Expected: FAIL (silent fallback instead of error)
 # Update from_plugin() method (around line 83)
 
 @classmethod
-def from_plugin(cls, plugin_cls: type, node_type: NodeType) -> "PluginSchema":
+def from_plugin(cls, plugin_cls: type, node_type: NodeType) -> "PluginSpec":
     """Create schema from plugin class.
 
     Required attributes (will raise if missing):
@@ -1115,7 +1121,7 @@ git add src/elspeth/plugins/manager.py tests/plugins/test_manager_validation.py
 git commit -m "$(cat <<'EOF'
 fix(plugins): require name and version attributes on plugins
 
-PluginSchema.from_plugin() now raises ValueError if plugin class
+PluginSpec.from_plugin() now raises ValueError if plugin class
 is missing required 'name' or 'plugin_version' attributes, instead
 of silently falling back to __name__ or "0.0.0".
 
@@ -1361,7 +1367,7 @@ git commit -m "feat(checkpoint): add ResumeCheck dataclass for tuple return"
 ### Task 13: Fix Protocol Docstring Example (MED-006)
 
 **Files:**
-- Modify: `src/elspeth/plugins/protocols.py:164-170`
+- Modify: `src/elspeth/plugins/protocols.py:165`
 
 **Step 1: Update example to use direct access**
 
@@ -1385,28 +1391,10 @@ git commit -m "docs(plugins): fix GateProtocol example to use direct field acces
 
 ---
 
-### Task 14: Export resolve_config from core (MED-009)
+### Task 14: Export resolve_config from core (MED-009) ❌ N/A
 
-**Files:**
-- Modify: `src/elspeth/core/__init__.py`
-
-**Step 1: Add resolve_config to exports**
-
-```python
-# In core/__init__.py
-from elspeth.core.config import resolve_config
-
-__all__ = [
-    # ... existing ...
-    "resolve_config",
-]
-```
-
-**Step 2: Commit**
-
-```bash
-git commit -m "fix(core): export resolve_config from core package"
-```
+**Status:** REMOVED - `resolve_config` function does not exist in `core/config.py`.
+The config module only exports `load_settings`. This task was based on a stale audit finding.
 
 ---
 

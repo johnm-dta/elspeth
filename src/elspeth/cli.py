@@ -4,6 +4,7 @@
 Entry point for the elspeth CLI tool.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -383,25 +384,47 @@ plugins_app = typer.Typer(help="Plugin management commands.")
 app.add_typer(plugins_app, name="plugins")
 
 
+@dataclass(frozen=True)
+class PluginInfo:
+    """Metadata for a registered plugin.
+
+    Attributes:
+        name: The plugin identifier used in configuration files.
+        description: Human-readable description of the plugin's purpose.
+    """
+
+    name: str
+    description: str
+
+
 # Registry of built-in plugins (static for Phase 4)
-PLUGIN_REGISTRY = {
+PLUGIN_REGISTRY: dict[str, list[PluginInfo]] = {
     "source": [
-        ("csv", "Load rows from CSV files"),
-        ("json", "Load rows from JSON/JSONL files"),
+        PluginInfo(name="csv", description="Load rows from CSV files"),
+        PluginInfo(name="json", description="Load rows from JSON/JSONL files"),
     ],
     "transform": [
-        ("passthrough", "Pass rows through unchanged"),
-        ("field_mapper", "Rename, select, and reorganize fields"),
+        PluginInfo(name="passthrough", description="Pass rows through unchanged"),
+        PluginInfo(
+            name="field_mapper", description="Rename, select, and reorganize fields"
+        ),
     ],
     "gate": [
-        ("threshold_gate", "Route rows based on numeric threshold"),
-        ("field_match_gate", "Route rows based on field value matching"),
-        ("filter_gate", "Filter rows based on field conditions"),
+        PluginInfo(
+            name="threshold_gate", description="Route rows based on numeric threshold"
+        ),
+        PluginInfo(
+            name="field_match_gate",
+            description="Route rows based on field value matching",
+        ),
+        PluginInfo(
+            name="filter_gate", description="Filter rows based on field conditions"
+        ),
     ],
     "sink": [
-        ("csv", "Write rows to CSV files"),
-        ("json", "Write rows to JSON/JSONL files"),
-        ("database", "Write rows to database tables"),
+        PluginInfo(name="csv", description="Write rows to CSV files"),
+        PluginInfo(name="json", description="Write rows to JSON/JSONL files"),
+        PluginInfo(name="database", description="Write rows to database tables"),
     ],
 }
 
@@ -431,8 +454,8 @@ def plugins_list(
         plugins = PLUGIN_REGISTRY[ptype]
         if plugins:
             typer.echo(f"\n{ptype.upper()}S:")
-            for name, description in plugins:
-                typer.echo(f"  {name:12} - {description}")
+            for plugin in plugins:
+                typer.echo(f"  {plugin.name:12} - {plugin.description}")
         else:
             typer.echo(f"\n{ptype.upper()}S:")
             typer.echo("  (none available)")

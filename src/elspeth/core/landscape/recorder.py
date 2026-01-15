@@ -120,6 +120,15 @@ def _row_to_node_state(row: Any) -> NodeState:
         )
     elif status == NodeStateStatus.COMPLETED:
         # Completed states must have output_hash, completed_at, duration_ms
+        # Validate required fields - None indicates audit integrity violation
+        if row.output_hash is None:
+            raise ValueError(
+                f"COMPLETED state {row.state_id} has NULL output_hash - audit integrity violation"
+            )
+        if row.duration_ms is None:
+            raise ValueError(
+                f"COMPLETED state {row.state_id} has NULL duration_ms - audit integrity violation"
+            )
         return NodeStateCompleted(
             state_id=row.state_id,
             token_id=row.token_id,
@@ -129,13 +138,19 @@ def _row_to_node_state(row: Any) -> NodeState:
             status=NodeStateStatus.COMPLETED,
             input_hash=row.input_hash,
             started_at=row.started_at,
-            output_hash=row.output_hash or "",  # Should never be None for completed
+            output_hash=row.output_hash,
             completed_at=row.completed_at,
-            duration_ms=row.duration_ms or 0.0,  # Should never be None for completed
+            duration_ms=row.duration_ms,
             context_before_json=row.context_before_json,
             context_after_json=row.context_after_json,
         )
     else:  # FAILED
+        # Failed states must have duration_ms (error_json and output_hash are optional)
+        # Validate required fields - None indicates audit integrity violation
+        if row.duration_ms is None:
+            raise ValueError(
+                f"FAILED state {row.state_id} has NULL duration_ms - audit integrity violation"
+            )
         return NodeStateFailed(
             state_id=row.state_id,
             token_id=row.token_id,
@@ -146,7 +161,7 @@ def _row_to_node_state(row: Any) -> NodeState:
             input_hash=row.input_hash,
             started_at=row.started_at,
             completed_at=row.completed_at,
-            duration_ms=row.duration_ms or 0.0,  # Should never be None for failed
+            duration_ms=row.duration_ms,
             error_json=row.error_json,
             output_hash=row.output_hash,
             context_before_json=row.context_before_json,

@@ -636,7 +636,12 @@ class TestLandscapeExporterSigning:
                         input_data={"x": i * j},
                     )
                     recorder.complete_node_state(
-                        state.state_id, status="completed", duration_ms=5.0
+                        state.state_id,
+                        status="completed",
+                        output_data={
+                            "result": i * j + k
+                        },  # Required for COMPLETED states
+                        duration_ms=5.0,
                     )
 
                     # Multiple routing events (tests get_routing_events ordering)

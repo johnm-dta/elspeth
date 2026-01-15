@@ -20,9 +20,14 @@ from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 from elspeth.engine.processor import RowProcessor
 from elspeth.engine.spans import SpanFactory
+from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.enums import NodeType
+from elspeth.plugins.protocols import SinkProtocol, SourceProtocol
 from elspeth.plugins.results import RowOutcome
+
+# Type alias for transform-like plugins
+TransformLike = BaseTransform | BaseGate | BaseAggregation
 
 if TYPE_CHECKING:
     from elspeth.core.checkpoint import CheckpointManager
@@ -42,11 +47,15 @@ class RunStatus(str, Enum):
 
 @dataclass
 class PipelineConfig:
-    """Configuration for a pipeline run."""
+    """Configuration for a pipeline run.
 
-    source: Any  # SourceProtocol
-    transforms: list[Any]  # List of transform/gate plugins
-    sinks: dict[str, Any]  # sink_name -> SinkProtocol
+    All plugin fields are now properly typed for IDE support and
+    static type checking.
+    """
+
+    source: SourceProtocol
+    transforms: list[TransformLike]
+    sinks: dict[str, SinkProtocol]
     config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -348,7 +357,9 @@ class Orchestrator:
         output_sink_name = graph.get_output_sink()
 
         # Set node_id on source plugin
-        config.source.node_id = source_id
+        # NOTE: node_id is set dynamically by Orchestrator, not defined in protocols
+        # See class docstring for rationale
+        config.source.node_id = source_id  # type: ignore[attr-defined]
 
         # Set node_id on transforms using graph's transform_id_map
         for seq, transform in enumerate(config.transforms):
@@ -357,7 +368,7 @@ class Orchestrator:
                     f"Transform at sequence {seq} not found in graph. "
                     f"Graph has mappings for sequences: {list(transform_id_map.keys())}"
                 )
-            transform.node_id = transform_id_map[seq]
+            transform.node_id = transform_id_map[seq]  # type: ignore[union-attr]
 
         # Set node_id on sinks using explicit mapping
         for sink_name, sink in config.sinks.items():
@@ -366,7 +377,7 @@ class Orchestrator:
                     f"Sink '{sink_name}' not found in graph. "
                     f"Available sinks: {list(sink_id_map.keys())}"
                 )
-            sink.node_id = sink_id_map[sink_name]
+            sink.node_id = sink_id_map[sink_name]  # type: ignore[attr-defined]
 
         # Create context
         # Note: landscape field uses Any type since PluginContext.LandscapeRecorder
@@ -420,7 +431,7 @@ class Orchestrator:
                     # Determine the last node that processed this row
                     # (used for checkpoint to know where to resume from)
                     last_node_id = (
-                        config.transforms[-1].node_id
+                        config.transforms[-1].node_id  # type: ignore[union-attr]
                         if config.transforms
                         else source_id
                     )
@@ -466,8 +477,10 @@ class Orchestrator:
             for sink_name, tokens in pending_tokens.items():
                 if tokens and sink_name in config.sinks:
                     sink = config.sinks[sink_name]
+                    # NOTE: PipelineConfig.sinks is typed as SinkProtocol for API clarity,
+                    # but at runtime receives SinkAdapter instances (SinkLike interface)
                     sink_executor.write(
-                        sink=sink,
+                        sink=sink,  # type: ignore[arg-type]
                         tokens=tokens,
                         ctx=ctx,
                         step_in_pipeline=step,

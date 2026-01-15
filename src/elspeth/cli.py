@@ -309,10 +309,14 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> dict[st
             transforms.append(transform_class(plugin_options))
 
     # Build PipelineConfig with resolved configuration for audit
+    # NOTE: Type ignores needed because:
+    # - Source plugins implement SourceProtocol structurally but mypy doesn't recognize it
+    # - list is invariant so list[BaseTransform | BaseGate] != list[TransformLike]
+    # - SinkAdapter implements SinkLike which differs from SinkProtocol
     pipeline_config = PipelineConfig(
-        source=source,
-        transforms=transforms,
-        sinks=sinks,
+        source=source,  # type: ignore[arg-type]
+        transforms=transforms,  # type: ignore[arg-type]
+        sinks=sinks,  # type: ignore[arg-type]
         config=resolve_config(config),
     )
 

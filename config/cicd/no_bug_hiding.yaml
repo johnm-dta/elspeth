@@ -346,19 +346,19 @@ allow_hits:
   # whole cleanup process.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R3:Orchestrator:_cleanup_transforms:line=165"
+  - key: "engine/orchestrator.py:R3:Orchestrator:_cleanup_transforms:line=174"
     owner: "architecture"
     reason: "Trust boundary: old plugins may not implement close() method"
     safety: "Duck-typing at plugin boundary - graceful skip for legacy plugins"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=167"
+  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=176"
     owner: "architecture"
     reason: "Best-effort cleanup: one plugin failure shouldn't prevent others from cleanup"
     safety: "Logged with warning, other plugins still get close() called"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R2:Orchestrator:_cleanup_transforms:line=171"
+  - key: "engine/orchestrator.py:R2:Orchestrator:_cleanup_transforms:line=180"
     owner: "architecture"
     reason: "Trust boundary: plugin may not have name attribute"
     safety: "Fallback to str() for log message - never raises"
@@ -372,19 +372,19 @@ allow_hits:
   # legitimate duck-typing at a plugin trust boundary.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_execute_run:line=299"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_execute_run:line=308"
     owner: "architecture"
     reason: "Trust boundary: node_to_plugin map lookup returns None for missing nodes"
     safety: "Explicitly checked: if plugin is not None then extract metadata"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=305"
+  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=314"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define plugin_version attribute"
     safety: "Duck-typing at plugin boundary - fallback to '0.0.0' is documented behavior"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=310"
+  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=319"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define determinism attribute"
     safety: "Duck-typing at plugin boundary - fallback to DETERMINISTIC is documented"
@@ -398,7 +398,7 @@ allow_hits:
   # clear error message instead of an AttributeError.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R3:Orchestrator:_export_csv_multifile:line=602"
+  - key: "engine/orchestrator.py:R3:Orchestrator:_export_csv_multifile:line=615"
     owner: "architecture"
     reason: "Trust boundary: CSV export requires path-based sink, validate before use"
     safety: "Explicit error raised if sink doesn't have _path - fails fast with clear message"
@@ -411,7 +411,7 @@ allow_hits:
   # variables. This is explicitly checked and raises if missing when required.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=534"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=547"
     owner: "architecture"
     reason: "Standard pattern: optional environment variable with explicit check"
     safety: "Raises ValueError with clear message if signing enabled but key missing"

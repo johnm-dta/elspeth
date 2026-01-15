@@ -7,6 +7,7 @@ import copy
 from typing import Any
 
 from elspeth.plugins.base import BaseTransform
+from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import TransformResult
 from elspeth.plugins.schemas import PluginSchema
@@ -16,6 +17,14 @@ class FieldMapperSchema(PluginSchema):
     """Dynamic schema - fields determined by mapping."""
 
     model_config = {"extra": "allow"}
+
+
+class FieldMapperConfig(PluginConfig):
+    """Configuration for field mapper transform."""
+
+    mapping: dict[str, str] = {}
+    select_only: bool = False
+    strict: bool = False
 
 
 class FieldMapper(BaseTransform):
@@ -35,9 +44,10 @@ class FieldMapper(BaseTransform):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._mapping: dict[str, str] = config.get("mapping", {})
-        self._select_only: bool = config.get("select_only", False)
-        self._strict: bool = config.get("strict", False)
+        cfg = FieldMapperConfig.from_dict(config)
+        self._mapping: dict[str, str] = cfg.mapping
+        self._select_only: bool = cfg.select_only
+        self._strict: bool = cfg.strict
 
     def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
         """Apply field mapping to row.

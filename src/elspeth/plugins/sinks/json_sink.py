@@ -5,10 +5,10 @@ Writes rows to JSON files. Supports JSON array and JSONL formats.
 """
 
 import json
-from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
 from elspeth.plugins.base import BaseSink
+from elspeth.plugins.config_base import PathConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.schemas import PluginSchema
 
@@ -17,6 +17,14 @@ class JSONInputSchema(PluginSchema):
     """Dynamic schema - accepts any row structure."""
 
     model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic pattern
+
+
+class JSONSinkConfig(PathConfig):
+    """Configuration for JSON sink plugin."""
+
+    format: Literal["json", "jsonl"] | None = None
+    indent: int | None = None
+    encoding: str = "utf-8"
 
 
 class JSONSink(BaseSink):
@@ -34,12 +42,13 @@ class JSONSink(BaseSink):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._path = Path(config["path"])
-        self._encoding = config.get("encoding", "utf-8")
-        self._indent = config.get("indent")
+        cfg = JSONSinkConfig.from_dict(config)
+        self._path = cfg.resolved_path()
+        self._encoding = cfg.encoding
+        self._indent = cfg.indent
 
         # Auto-detect format from extension if not specified
-        fmt = config.get("format")
+        fmt = cfg.format
         if fmt is None:
             fmt = "jsonl" if self._path.suffix == ".jsonl" else "json"
         self._format = fmt

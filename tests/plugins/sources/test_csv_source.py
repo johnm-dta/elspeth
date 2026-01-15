@@ -93,3 +93,31 @@ class TestCSVSource:
         source = CSVSource({"path": "/nonexistent/file.csv"})
         with pytest.raises(FileNotFoundError):
             list(source.load(ctx))
+
+
+class TestCSVSourceConfigValidation:
+    """Test CSVSource config validation."""
+
+    def test_missing_path_raises_error(self) -> None:
+        """Empty config raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        with pytest.raises(PluginConfigError, match="path"):
+            CSVSource({})
+
+    def test_empty_path_raises_error(self) -> None:
+        """Empty path string raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        with pytest.raises(PluginConfigError, match="path cannot be empty"):
+            CSVSource({"path": ""})
+
+    def test_unknown_field_raises_error(self) -> None:
+        """Unknown config field raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        with pytest.raises(PluginConfigError, match="Extra inputs"):
+            CSVSource({"path": "/tmp/test.csv", "unknown_field": "value"})

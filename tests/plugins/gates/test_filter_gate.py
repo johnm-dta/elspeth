@@ -110,10 +110,11 @@ class TestFilterGateValidation:
     """Test FilterGate validation errors."""
 
     def test_multiple_operators_raises_error(self) -> None:
-        """Specifying multiple operators raises ValueError."""
+        """Specifying multiple operators raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
         from elspeth.plugins.gates.filter_gate import FilterGate
 
-        with pytest.raises(ValueError, match="Multiple comparison operators"):
+        with pytest.raises(PluginConfigError, match="Multiple comparison operators"):
             FilterGate({
                 "field": "score",
                 "greater_than": 0.5,
@@ -121,10 +122,11 @@ class TestFilterGateValidation:
             })
 
     def test_no_operator_raises_error(self) -> None:
-        """Specifying no operator raises ValueError."""
+        """Specifying no operator raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
         from elspeth.plugins.gates.filter_gate import FilterGate
 
-        with pytest.raises(ValueError, match="No comparison operator specified"):
+        with pytest.raises(PluginConfigError, match="No comparison operator specified"):
             FilterGate({
                 "field": "score",
             })

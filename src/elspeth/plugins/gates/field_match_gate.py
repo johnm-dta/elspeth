@@ -4,9 +4,10 @@ Routes rows based on field value matching (exact, regex, or list membership).
 """
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from elspeth.plugins.base import BaseGate
+from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import GateResult, RoutingAction
 from elspeth.plugins.schemas import PluginSchema
@@ -16,6 +17,17 @@ class FieldMatchGateSchema(PluginSchema):
     """Dynamic schema - accepts field match gate config."""
 
     model_config = {"extra": "allow"}
+
+
+class FieldMatchGateConfig(PluginConfig):
+    """Configuration for field match gate plugin."""
+
+    field: str
+    matches: dict[str, str]
+    mode: Literal["exact", "regex"] = "exact"
+    default_label: str = "no_match"
+    strict: bool = False
+    case_insensitive: bool = False
 
 
 class FieldMatchGate(BaseGate):
@@ -51,12 +63,13 @@ class FieldMatchGate(BaseGate):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._field: str = config["field"]
-        self._matches: dict[str, str] = config["matches"]
-        self._mode: str = config.get("mode", "exact")
-        self._default_label: str = config.get("default_label", "no_match")
-        self._strict: bool = config.get("strict", False)
-        self._case_insensitive: bool = config.get("case_insensitive", False)
+        cfg = FieldMatchGateConfig.from_dict(config)
+        self._field: str = cfg.field
+        self._matches: dict[str, str] = cfg.matches
+        self._mode: str = cfg.mode
+        self._default_label: str = cfg.default_label
+        self._strict: bool = cfg.strict
+        self._case_insensitive: bool = cfg.case_insensitive
 
         # Pre-process matches based on mode
         if self._mode == "regex":

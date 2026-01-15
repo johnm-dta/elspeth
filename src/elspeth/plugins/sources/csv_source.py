@@ -5,12 +5,12 @@ Loads rows from CSV files using pandas for robust parsing.
 """
 
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from elspeth.plugins.base import BaseSource
+from elspeth.plugins.config_base import PathConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.schemas import PluginSchema
 
@@ -19,6 +19,14 @@ class CSVOutputSchema(PluginSchema):
     """Dynamic schema - CSV columns are determined at runtime."""
 
     model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic pattern
+
+
+class CSVSourceConfig(PathConfig):
+    """Configuration for CSV source plugin."""
+
+    delimiter: str = ","
+    encoding: str = "utf-8"
+    skip_rows: int = 0
 
 
 class CSVSource(BaseSource):
@@ -36,10 +44,11 @@ class CSVSource(BaseSource):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._path = Path(config["path"])
-        self._delimiter = config.get("delimiter", ",")
-        self._encoding = config.get("encoding", "utf-8")
-        self._skip_rows = config.get("skip_rows", 0)
+        cfg = CSVSourceConfig.from_dict(config)
+        self._path = cfg.resolved_path()
+        self._delimiter = cfg.delimiter
+        self._encoding = cfg.encoding
+        self._skip_rows = cfg.skip_rows
         self._dataframe: pd.DataFrame | None = None
 
     def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:

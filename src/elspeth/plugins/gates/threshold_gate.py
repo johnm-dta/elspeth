@@ -6,6 +6,7 @@ Routes rows based on numeric threshold comparison.
 from typing import Any
 
 from elspeth.plugins.base import BaseGate
+from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import GateResult, RoutingAction
 from elspeth.plugins.schemas import PluginSchema
@@ -15,6 +16,15 @@ class ThresholdGateSchema(PluginSchema):
     """Dynamic schema - accepts threshold gate config."""
 
     model_config = {"extra": "allow"}
+
+
+class ThresholdGateConfig(PluginConfig):
+    """Configuration for threshold gate plugin."""
+
+    field: str
+    threshold: float
+    inclusive: bool = False
+    cast: bool = True
 
 
 class ThresholdGate(BaseGate):
@@ -45,10 +55,11 @@ class ThresholdGate(BaseGate):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._field: str = config["field"]
-        self._threshold: float = config["threshold"]
-        self._inclusive: bool = config.get("inclusive", False)
-        self._cast: bool = config.get("cast", True)  # Cast strings to numbers by default
+        cfg = ThresholdGateConfig.from_dict(config)
+        self._field: str = cfg.field
+        self._threshold: float = cfg.threshold
+        self._inclusive: bool = cfg.inclusive
+        self._cast: bool = cfg.cast
 
     def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
         """Evaluate threshold and return routing decision.

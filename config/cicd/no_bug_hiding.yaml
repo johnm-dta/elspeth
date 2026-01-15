@@ -475,10 +475,9 @@ allow_hits:
     expires: "2026-02-14"
 
   # ============================================================
-  # BURN-DOWN LIST - Plugin Config Parsing
+  # BURN-DOWN LIST - Schema Validation Patterns
   # ============================================================
-  # These patterns use dict.get() to parse plugin configuration.
-  # Needs remediation: should use typed Pydantic models for config (Task 3.3).
+  # These patterns in schema validation need typed contracts.
   # Expires: 2026-02-14
   # ============================================================
 
@@ -494,149 +493,20 @@ allow_hits:
     safety: "Pending remediation"
     expires: "2026-02-14"
 
-  - key: "plugins/gates/field_match_gate.py:R1:FieldMatchGate:__init__:line=56"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+  # ============================================================
+  # FIELD MATCH GATE LOOKUP (Permanent)
+  # ============================================================
+  # The _find_matching_label method returns Optional[str] by design.
+  # When looking up user-provided values in the matches dict, returning
+  # None is the correct response for "no match found". This is not
+  # bug-hiding but legitimate Optional return type semantics.
+  # ============================================================
 
-  - key: "plugins/gates/field_match_gate.py:R1:FieldMatchGate:__init__:line=57"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/gates/field_match_gate.py:R1:FieldMatchGate:__init__:line=58"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/gates/field_match_gate.py:R1:FieldMatchGate:__init__:line=59"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/gates/field_match_gate.py:R1:FieldMatchGate:_find_matching_label:line=152"
-    owner: "burn-down"
-    reason: "Pre-existing - field matching logic needs review"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/gates/threshold_gate.py:R1:ThresholdGate:__init__:line=50"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/gates/threshold_gate.py:R1:ThresholdGate:__init__:line=51"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/gates/filter_gate.py:R1:FilterGate:__init__:line=74"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sinks/database_sink.py:R1:DatabaseSink:__init__:line=43"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sinks/database_sink.py:R1:DatabaseSink:__init__:line=44"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sinks/csv_sink.py:R1:CSVSink:__init__:line=38"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sinks/csv_sink.py:R1:CSVSink:__init__:line=39"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sinks/json_sink.py:R1:JSONSink:__init__:line=38"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sinks/json_sink.py:R1:JSONSink:__init__:line=39"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sinks/json_sink.py:R1:JSONSink:__init__:line=42"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/transforms/field_mapper.py:R1:FieldMapper:__init__:line=38"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/transforms/field_mapper.py:R1:FieldMapper:__init__:line=39"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/transforms/field_mapper.py:R1:FieldMapper:__init__:line=40"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sources/json_source.py:R1:JSONSource:__init__:line=39"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sources/json_source.py:R1:JSONSource:__init__:line=40"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sources/json_source.py:R1:JSONSource:__init__:line=43"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sources/csv_source.py:R1:CSVSource:__init__:line=40"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sources/csv_source.py:R1:CSVSource:__init__:line=41"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
-
-  - key: "plugins/sources/csv_source.py:R1:CSVSource:__init__:line=42"
-    owner: "burn-down"
-    reason: "Pre-existing - needs typed Pydantic config (Task 3.3)"
-    safety: "Pending remediation"
-    expires: "2026-02-14"
+  - key: "plugins/gates/field_match_gate.py:R1:FieldMatchGate:_find_matching_label:line=165"
+    owner: "architecture"
+    reason: "Intentional Optional API: returns None when value not in matches dict"
+    safety: "Caller checks return value - None triggers default_label path"
+    expires: null  # Permanent - intentional design
 
   # ============================================================
   # BURN-DOWN LIST - CLI and Engine Patterns

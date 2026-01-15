@@ -165,3 +165,35 @@ class TestThresholdGate:
         # Reason should explain why the routing decision was made
         assert "threshold" in result.action.reason
         assert result.action.reason["value"] == 75
+
+
+class TestThresholdGateConfigValidation:
+    """Test ThresholdGate config validation."""
+
+    def test_missing_field_raises_error(self) -> None:
+        """Missing field raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.gates.threshold_gate import ThresholdGate
+
+        with pytest.raises(PluginConfigError, match="field"):
+            ThresholdGate({"threshold": 50})
+
+    def test_missing_threshold_raises_error(self) -> None:
+        """Missing threshold raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.gates.threshold_gate import ThresholdGate
+
+        with pytest.raises(PluginConfigError, match="threshold"):
+            ThresholdGate({"field": "score"})
+
+    def test_unknown_field_raises_error(self) -> None:
+        """Unknown config field raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.gates.threshold_gate import ThresholdGate
+
+        with pytest.raises(PluginConfigError, match="Extra inputs"):
+            ThresholdGate({
+                "field": "score",
+                "threshold": 50,
+                "unknown_field": "value",
+            })

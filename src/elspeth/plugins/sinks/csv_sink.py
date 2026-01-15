@@ -6,10 +6,10 @@ Writes rows to CSV files.
 
 import csv
 from collections.abc import Sequence
-from pathlib import Path
 from typing import IO, Any
 
 from elspeth.plugins.base import BaseSink
+from elspeth.plugins.config_base import PathConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.schemas import PluginSchema
 
@@ -18,6 +18,13 @@ class CSVInputSchema(PluginSchema):
     """Dynamic schema - accepts any row structure."""
 
     model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic pattern
+
+
+class CSVSinkConfig(PathConfig):
+    """Configuration for CSV sink plugin."""
+
+    delimiter: str = ","
+    encoding: str = "utf-8"
 
 
 class CSVSink(BaseSink):
@@ -34,9 +41,10 @@ class CSVSink(BaseSink):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._path = Path(config["path"])
-        self._delimiter = config.get("delimiter", ",")
-        self._encoding = config.get("encoding", "utf-8")
+        cfg = CSVSinkConfig.from_dict(config)
+        self._path = cfg.resolved_path()
+        self._delimiter = cfg.delimiter
+        self._encoding = cfg.encoding
 
         self._file: IO[str] | None = None
         self._writer: csv.DictWriter[str] | None = None

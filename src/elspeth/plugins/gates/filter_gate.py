@@ -5,9 +5,12 @@ This maintains the "no silent drops" invariant - filtered rows are explicitly
 routed to a discard sink for audit trail completeness.
 """
 
-from typing import Any
+from typing import Any, Callable
+
+from pydantic import model_validator
 
 from elspeth.plugins.base import BaseGate
+from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import GateResult, RoutingAction
 from elspeth.plugins.schemas import PluginSchema
@@ -17,6 +20,91 @@ class FilterGateSchema(PluginSchema):
     """Dynamic schema - accepts filter gate config."""
 
     model_config = {"extra": "allow"}
+
+
+# Supported comparison operators and their evaluation functions
+_OPERATORS: dict[str, tuple[str, Callable[[Any, Any], bool]]] = {
+    "greater_than": (">", lambda v, t: v > t),
+    "less_than": ("<", lambda v, t: v < t),
+    "greater_than_or_equal": (">=", lambda v, t: v >= t),
+    "less_than_or_equal": ("<=", lambda v, t: v <= t),
+    "equals": ("==", lambda v, t: v == t),
+    "not_equals": ("!=", lambda v, t: v != t),
+}
+
+
+class FilterGateConfig(PluginConfig):
+    """Configuration for filter gate plugin."""
+
+    field: str
+    allow_missing: bool = False
+
+    # Comparison operators - exactly one must be provided
+    greater_than: float | int | None = None
+    less_than: float | int | None = None
+    greater_than_or_equal: float | int | None = None
+    less_than_or_equal: float | int | None = None
+    equals: Any = None
+    not_equals: Any = None
+
+    @model_validator(mode="after")
+    def validate_exactly_one_operator(self) -> "FilterGateConfig":
+        """Ensure exactly one comparison operator is specified."""
+        operators_present = self._get_operators_present()
+
+        if len(operators_present) == 0:
+            raise ValueError(
+                f"No comparison operator specified. Use one of: "
+                f"{', '.join(_OPERATORS.keys())}"
+            )
+        if len(operators_present) > 1:
+            raise ValueError(
+                f"Multiple comparison operators specified: "
+                f"{' and '.join(operators_present)}"
+            )
+        return self
+
+    def _get_operators_present(self) -> list[str]:
+        """Return list of operator names that have non-None values."""
+        # Direct attribute access - no getattr with default
+        present = []
+        if self.greater_than is not None:
+            present.append("greater_than")
+        if self.less_than is not None:
+            present.append("less_than")
+        if self.greater_than_or_equal is not None:
+            present.append("greater_than_or_equal")
+        if self.less_than_or_equal is not None:
+            present.append("less_than_or_equal")
+        if self.equals is not None:
+            present.append("equals")
+        if self.not_equals is not None:
+            present.append("not_equals")
+        return present
+
+    def get_operator(self) -> tuple[str, Any]:
+        """Return the operator name and threshold value.
+
+        Must be called after validation - assumes exactly one operator is set.
+
+        Returns:
+            Tuple of (operator_name, threshold_value)
+        """
+        # Direct attribute access - checked in order
+        if self.greater_than is not None:
+            return ("greater_than", self.greater_than)
+        if self.less_than is not None:
+            return ("less_than", self.less_than)
+        if self.greater_than_or_equal is not None:
+            return ("greater_than_or_equal", self.greater_than_or_equal)
+        if self.less_than_or_equal is not None:
+            return ("less_than_or_equal", self.less_than_or_equal)
+        if self.equals is not None:
+            return ("equals", self.equals)
+        if self.not_equals is not None:
+            return ("not_equals", self.not_equals)
+        # Should never reach here after validation
+        raise ValueError("No operator specified")
 
 
 class FilterGate(BaseGate):
@@ -58,44 +146,17 @@ class FilterGate(BaseGate):
     input_schema = FilterGateSchema
     output_schema = FilterGateSchema
 
-    # Supported comparison operators and their evaluation functions
-    _OPERATORS: dict[str, tuple[str, Any]] = {
-        "greater_than": (">", lambda v, t: v > t),
-        "less_than": ("<", lambda v, t: v < t),
-        "greater_than_or_equal": (">=", lambda v, t: v >= t),
-        "less_than_or_equal": ("<=", lambda v, t: v <= t),
-        "equals": ("==", lambda v, t: v == t),
-        "not_equals": ("!=", lambda v, t: v != t),
-    }
+    # Expose operators for evaluate method
+    _OPERATORS = _OPERATORS
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._field: str = config["field"]
-        self._allow_missing: bool = config.get("allow_missing", False)
+        cfg = FilterGateConfig.from_dict(config)
+        self._field: str = cfg.field
+        self._allow_missing: bool = cfg.allow_missing
 
-        # Find which operator is specified
-        found_operator: str | None = None
-        found_threshold: Any = None
-
-        for op_name in self._OPERATORS:
-            if op_name in config:
-                if found_operator is not None:
-                    raise ValueError(
-                        f"Multiple comparison operators specified: "
-                        f"{found_operator} and {op_name}"
-                    )
-                found_operator = op_name
-                found_threshold = config[op_name]
-
-        if found_operator is None:
-            raise ValueError(
-                f"No comparison operator specified. Use one of: "
-                f"{', '.join(self._OPERATORS.keys())}"
-            )
-
-        # After validation, these are guaranteed non-None
-        self._operator_name: str = found_operator
-        self._threshold: Any = found_threshold
+        # Get the validated operator (already validated by config)
+        self._operator_name, self._threshold = cfg.get_operator()
 
     def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
         """Evaluate filter condition and return routing decision.

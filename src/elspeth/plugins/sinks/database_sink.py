@@ -4,12 +4,13 @@
 Writes rows to a database table using SQLAlchemy Core.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import Column, MetaData, String, Table, create_engine, insert
 from sqlalchemy.engine import Engine
 
 from elspeth.plugins.base import BaseSink
+from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.schemas import PluginSchema
 
@@ -18,6 +19,15 @@ class DatabaseInputSchema(PluginSchema):
     """Dynamic schema - accepts any row structure."""
 
     model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic pattern
+
+
+class DatabaseSinkConfig(PluginConfig):
+    """Configuration for database sink plugin."""
+
+    url: str
+    table: str
+    batch_size: int = 100
+    if_exists: Literal["append", "replace"] = "append"
 
 
 class DatabaseSink(BaseSink):
@@ -38,10 +48,11 @@ class DatabaseSink(BaseSink):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self._url = config["url"]
-        self._table_name = config["table"]
-        self._batch_size = config.get("batch_size", 100)
-        self._if_exists = config.get("if_exists", "append")
+        cfg = DatabaseSinkConfig.from_dict(config)
+        self._url = cfg.url
+        self._table_name = cfg.table
+        self._batch_size = cfg.batch_size
+        self._if_exists = cfg.if_exists
 
         self._engine: Engine | None = None
         self._table: Table | None = None

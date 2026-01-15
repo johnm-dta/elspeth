@@ -51,13 +51,24 @@
 
 ## Proposed Fix
 - Code changes (modules/files):
-  - `src/elspeth/engine/executors.py`: branch on `artifact_info["kind"]` (or presence of keys) and map to `path_or_uri`, `content_hash`, `size_bytes` appropriately.
-  - `src/elspeth/engine/adapters.py`: for non-file sinks, provide `path`, `content_hash`, `size_bytes` with sensible defaults (e.g., `path=url`, `content_hash=""`, `size_bytes=0`) to satisfy Landscape schema.
-- Config or schema changes: none (unless schema expands for non-file artifacts).
+  - Define an explicit Artifact contract at the sink boundary (best‑practice, audit‑safe):
+    - Introduce an `ArtifactResult`/`ArtifactDescriptor` dataclass used by all sinks and adapters with required fields: `artifact_type`, `path_or_uri`, `content_hash`, `size_bytes`, and optional `metadata` for kind‑specific details.
+    - `src/elspeth/engine/executors.py`: compute `content_hash` and `size_bytes` from the canonicalized sink input payload when the sink does not provide a stronger, authoritative digest. This avoids “fake defaults” and keeps all artifacts auditable, even for non‑file sinks.
+    - `src/elspeth/engine/adapters.py`: return a fully populated `ArtifactDescriptor` (not a raw dict) and never emit partial keys; adapters should map sink identity into a canonical URI scheme:
+      - files: `file:///path/to/output.csv`
+      - databases: `db://<dsn>/<table>`
+      - webhooks: `webhook://<url>`
+    - `src/elspeth/core/landscape/recorder.py`: enforce the artifact contract (fail fast if missing `path_or_uri` or `content_hash`) instead of accepting placeholders.
+  - Optional (recommended for long‑term auditability): add an `artifact_meta_json` column to store sink‑specific identity details without overloading `path_or_uri`.
+- Config or schema changes: only if adding `artifact_meta_json` (otherwise keep schema and enforce required fields).
 - Tests to add/update:
-  - Add a test that uses the database sink and asserts run completes and artifact is registered.
+  - End‑to‑end test for database and webhook sinks ensuring:
+    - `path_or_uri` uses the canonical scheme,
+    - `content_hash` is non‑empty and stable for the same payload,
+    - audit records are present without runtime exceptions.
+  - Unit tests for ArtifactDescriptor serialization and canonical hashing.
 - Risks or migration steps:
-  - Decide how to represent non-file artifact identity in `path_or_uri` (URL vs table notation).
+  - Requires clarifying whether `content_hash` represents *payload* (recommended) vs *storage bytes* (file‑only). If file sinks need file‑byte hash, document and/or add `artifact_meta_json` to store both without ambiguity.
 
 ## Architectural Deviations
 - Spec or doc reference (e.g., docs/design/architecture.md#L...): `docs/design/subsystems/00-overview.md` (artifacts table schema requires `path_or_uri`, `content_hash`, `size_bytes`).

@@ -52,13 +52,19 @@
 
 ## Proposed Fix
 - Code changes (modules/files):
-  - `src/elspeth/engine/orchestrator.py`: use plugin instances (source/transforms/sinks) to supply `plugin_version`, `determinism`, and schema hashes when calling `register_node`.
-  - Optionally extend `ExecutionGraph` to carry plugin metadata so registration is accurate.
+  - Treat plugin metadata as a first-class compile-time artifact, not a runtime patch:
+    - `src/elspeth/plugins/manager.py`: expose a public helper or `PluginSpec.from_plugin(...)` for metadata resolution (version, determinism, schema hashes) so the CLI and engine share a single source of truth.
+    - `src/elspeth/core/dag.py`: extend `NodeInfo` to carry `plugin_version`, `determinism`, and a stable `schema_hash` computed from input/output schema hashes; populate these in `ExecutionGraph.from_config(...)` using the plugin registry.
+    - `src/elspeth/engine/orchestrator.py`: register nodes from `NodeInfo` (no hard-coded defaults), ensuring the audit trail matches the validated execution graph.
+    - `src/elspeth/plugins/protocols.py` and `src/elspeth/plugins/base.py`: add `plugin_version` and `determinism` to `SourceProtocol`/`BaseSource` to avoid source nodes becoming an audit exception.
+  - Avoid any runtime fallback or hard-coded values; if metadata is missing, fail fast during graph compilation.
 - Config or schema changes: none.
 - Tests to add/update:
-  - Add a test to assert `plugin_version` and `determinism` stored in `nodes` match plugin attributes.
+  - Orchestrator test asserting `nodes.plugin_version`, `nodes.determinism`, and `nodes.schema_hash` match plugin class metadata for source, transform, gate, and sink.
+  - Registry test to assert schema hash composition is stable and deterministic.
 - Risks or migration steps:
-  - Ensure adapters expose underlying plugin metadata consistently (e.g., `SinkAdapter`).
+  - Requires wiring a plugin registry into graph compilation; keep this as the single metadata resolution path.
+  - Ensure adapters (e.g., `SinkAdapter`) surface plugin identity without masking the underlying plugin class metadata.
 
 ## Architectural Deviations
 - Spec or doc reference (e.g., docs/design/architecture.md#L...): `docs/design/architecture.md:249` (audit trail captures plugin instances with metadata).

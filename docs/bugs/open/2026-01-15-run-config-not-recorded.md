@@ -51,13 +51,20 @@
 
 ## Proposed Fix
 - Code changes (modules/files):
-  - `src/elspeth/cli.py`: set `PipelineConfig.config` to the resolved config (e.g., `config.model_dump()` or equivalent normalized dict).
-  - Optionally update `Orchestrator.run` to use `settings` as fallback when `config.config` is empty.
-- Config or schema changes: none.
+  - Treat the resolved config as a first-class audit artifact, not an optional field:
+    - Add a single resolver in `src/elspeth/core/config.py` (or a new `core/config_resolve.py`) that returns a canonical, fully resolved run config dict plus its hash. This is the only supported entry point for building `runs.settings_json`.
+    - The resolver must apply the secret-handling policy (HMAC fingerprints, no raw secrets) before serialization, so the stored config is audit-safe by default.
+    - `src/elspeth/engine/orchestrator.py`: require a resolved config to begin a run; fail fast if missing instead of falling back to `{}`.
+    - `src/elspeth/cli.py`: use the resolver output to populate `PipelineConfig.config` and pass the same resolved dict to the orchestrator. Avoid any implicit or silent defaults.
+  - Optional (if we want stronger auditability): persist config provenance (settings file path, env var keys used) alongside the resolved config, but only if the schema allows it.
+- Config or schema changes: none (unless adding provenance fields; then update the runs table explicitly).
 - Tests to add/update:
-  - Add a test that runs the orchestrator with config and asserts `runs.settings_json` includes expected keys.
+  - Assert `runs.settings_json` equals the canonicalized resolved config.
+  - Assert secrets are redacted/fingerprinted in `settings_json`.
+  - Negative test: orchestrator refuses to start when resolved config is missing.
 - Risks or migration steps:
-  - Ensure sensitive values are redacted before storing if necessary.
+  - Ensure redaction is deterministic and part of the canonicalization step so hashes remain stable.
+  - Avoid storing raw secrets under any circumstance, even in debug paths.
 
 ## Architectural Deviations
 - Spec or doc reference (e.g., docs/design/architecture.md#L...): `docs/design/architecture.md:249` and `docs/design/architecture.md:271` (runs store resolved config).

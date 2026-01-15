@@ -54,12 +54,21 @@
 
 ## Proposed Fix
 - Code changes (modules/files):
-  - `src/elspeth/engine/orchestrator.py`: call `on_start` for source and sinks before processing; call `on_complete` for source and sinks in the `finally` block before `close()`.
-- Config or schema changes: none.
+  - Make lifecycle management an explicit, enforced contract (no ad‑hoc `hasattr` checks):
+    - `src/elspeth/plugins/protocols.py`: require `on_start`/`on_complete` on Source/Sink/Transform protocols (with default no‑ops in Base*), so missing hooks are a plugin contract violation, not silently ignored.
+    - `src/elspeth/engine/orchestrator.py`: centralize lifecycle handling in a `LifecycleManager` that:
+      - calls `on_start` in deterministic order (source → transforms → sinks),
+      - calls `on_complete` in reverse order (sinks → transforms → source) even on failure,
+      - records hook failures explicitly and marks the run failed (do not suppress errors).
+    - If a hook raises, capture the error details and include them in the run completion record (requires recorder support) rather than dropping exceptions.
+  - Optional (recommended for auditability): add a `run_events` or `error_json` field on runs to store lifecycle hook failures with timestamp and plugin identity.
+- Config or schema changes: only if adding run‑level error storage (`runs.error_json` or `run_events` table).
 - Tests to add/update:
-  - Add tests in `tests/engine/test_orchestrator.py` to assert source/sink hooks are called (including on error).
+  - Assert lifecycle call order and that `on_complete` runs on failure.
+  - Assert hook exceptions fail the run and are persisted in audit records.
 - Risks or migration steps:
-  - Ensure hook invocation order remains deterministic (source, transforms, sinks).
+  - Enforcing hooks as mandatory may break third‑party plugins that omit them; provide a clear validation error at plugin registration time.
+  - If adding run‑level error storage, migrate schema and update export logic to include lifecycle failures.
 
 ## Architectural Deviations
 - Spec or doc reference (e.g., docs/design/architecture.md#L...): `docs/design/requirements.md` (PLG-003: plugin instance lifecycle management).

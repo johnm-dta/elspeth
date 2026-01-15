@@ -10,6 +10,9 @@ import hashlib
 import os
 from typing import Any, Protocol
 
+from elspeth.core.canonical import canonical_json, stable_hash
+from elspeth.engine.artifacts import ArtifactDescriptor
+
 
 class RowWiseSinkProtocol(Protocol):
     """Protocol for Phase 2 row-wise sinks."""
@@ -68,6 +71,7 @@ class SinkAdapter:
         self.node_id: str = ""  # Set by Orchestrator during registration
         self._artifact_descriptor = artifact_descriptor
         self._rows_written: int = 0
+        self._last_batch_rows: list[dict[str, Any]] = []  # For hash computation
 
     @property
     def name(self) -> str:
@@ -79,7 +83,7 @@ class SinkAdapter:
         """Return total number of rows written through this adapter."""
         return self._rows_written
 
-    def write(self, rows: list[dict[str, Any]], ctx: Any) -> dict[str, Any]:
+    def write(self, rows: list[dict[str, Any]], ctx: Any) -> ArtifactDescriptor:
         """Write rows using the wrapped sink's row-wise interface.
 
         Loops over rows, calling sink.write() for each, then flushes.
@@ -90,8 +94,11 @@ class SinkAdapter:
             ctx: Plugin context
 
         Returns:
-            Artifact info dict (structure depends on artifact kind)
+            ArtifactDescriptor with unified artifact info for any sink type
         """
+        # Store batch for hash computation (database/webhook sinks need this)
+        self._last_batch_rows = list(rows)
+
         # Loop over rows, calling Phase 2 row-wise write
         for row in rows:
             self._sink.write(row, ctx)
@@ -136,15 +143,12 @@ class SinkAdapter:
         if hasattr(self._sink, "on_complete"):
             self._sink.on_complete(ctx)
 
-    def _compute_artifact_info(self) -> dict[str, Any]:
+    def _compute_artifact_info(self) -> ArtifactDescriptor:
         """Compute artifact metadata based on descriptor kind.
 
         Returns:
-            Dict with artifact identity and optional content hash.
-            Structure depends on kind:
-            - file: {kind, path, size_bytes, content_hash}
-            - database: {kind, url, table} (no content hash)
-            - webhook: {kind, url} (no content hash)
+            ArtifactDescriptor with unified format for all sink types.
+            All types have: artifact_type, path_or_uri, content_hash, size_bytes
         """
         kind = self._artifact_descriptor.get("kind", "unknown")
 
@@ -155,10 +159,16 @@ class SinkAdapter:
         elif kind == "webhook":
             return self._compute_webhook_artifact()
         else:
-            # Unknown kind - return descriptor as-is
-            return dict(self._artifact_descriptor)
+            # Unknown kind - compute hash from rows and return generic descriptor
+            payload = canonical_json(self._last_batch_rows)
+            return ArtifactDescriptor(
+                artifact_type="file",  # Fallback to file type
+                path_or_uri=f"unknown://{kind}",
+                content_hash=stable_hash(self._last_batch_rows),
+                size_bytes=len(payload.encode("utf-8")),
+            )
 
-    def _compute_file_artifact(self) -> dict[str, Any]:
+    def _compute_file_artifact(self) -> ArtifactDescriptor:
         """Compute artifact info for file-based sinks."""
         path = self._artifact_descriptor.get("path", "")
         size_bytes = 0
@@ -168,33 +178,57 @@ class SinkAdapter:
             size_bytes = os.path.getsize(path)
             content_hash = self._hash_file_chunked(path)
 
-        return {
-            "kind": "file",
-            "path": path,
-            "size_bytes": size_bytes,
-            "content_hash": content_hash,
-        }
+        return ArtifactDescriptor.for_file(
+            path=path,
+            content_hash=content_hash,
+            size_bytes=size_bytes,
+        )
 
-    def _compute_database_artifact(self) -> dict[str, Any]:
+    def _compute_database_artifact(self) -> ArtifactDescriptor:
         """Compute artifact info for database sinks.
 
-        Database artifacts use the table identity, not content hashes.
-        The audit trail links to the table; row-level integrity is the DB's job.
+        For audit integrity, database artifacts compute a hash from the
+        serialized payload BEFORE insertion. This proves what was sent
+        even if the database modifies the data later.
         """
-        return {
-            "kind": "database",
-            "url": self._artifact_descriptor.get("url", ""),
-            "table": self._artifact_descriptor.get("table", ""),
-            # No content_hash - database is the source of truth
-        }
+        url = self._artifact_descriptor.get("url", "")
+        table = self._artifact_descriptor.get("table", "")
 
-    def _compute_webhook_artifact(self) -> dict[str, Any]:
-        """Compute artifact info for webhook sinks."""
-        return {
-            "kind": "webhook",
-            "url": self._artifact_descriptor.get("url", ""),
-            # No content_hash - webhook response should be in calls table
-        }
+        # Compute hash from canonical JSON of rows being written
+        payload = canonical_json(self._last_batch_rows)
+        content_hash = stable_hash(self._last_batch_rows)
+        payload_size = len(payload.encode("utf-8"))
+
+        return ArtifactDescriptor.for_database(
+            url=url,
+            table=table,
+            content_hash=content_hash,
+            payload_size=payload_size,
+            row_count=len(self._last_batch_rows),
+        )
+
+    def _compute_webhook_artifact(self) -> ArtifactDescriptor:
+        """Compute artifact info for webhook sinks.
+
+        For audit integrity, webhook artifacts compute a hash from the
+        serialized request payload BEFORE sending. This proves what was
+        sent even if the external service doesn't log the request.
+        """
+        url = self._artifact_descriptor.get("url", "")
+        # Response code may be set by the sink after the request completes
+        response_code = self._artifact_descriptor.get("response_code", 0)
+
+        # Compute hash from canonical JSON of rows being sent
+        payload = canonical_json(self._last_batch_rows)
+        content_hash = stable_hash(self._last_batch_rows)
+        request_size = len(payload.encode("utf-8"))
+
+        return ArtifactDescriptor.for_webhook(
+            url=url,
+            content_hash=content_hash,
+            request_size=request_size,
+            response_code=response_code,
+        )
 
     @staticmethod
     def _hash_file_chunked(path: str, chunk_size: int = 65536) -> str:

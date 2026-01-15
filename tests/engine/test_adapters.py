@@ -131,6 +131,70 @@ class TestSinkAdapter:
 
         assert mock._closed
 
+    def test_sink_adapter_artifact_kind_file(self) -> None:
+        """artifact_kind returns 'file' for file-based sinks."""
+        from elspeth.engine.adapters import SinkAdapter
+
+        mock = MockSink()
+        adapter = SinkAdapter(
+            mock,
+            plugin_name="csv",
+            sink_name="output",
+            artifact_descriptor={"kind": "file", "path": "/tmp/output.csv"},
+        )
+
+        assert adapter.artifact_kind == "file"
+
+    def test_sink_adapter_artifact_kind_database(self) -> None:
+        """artifact_kind returns 'database' for database sinks."""
+        from elspeth.engine.adapters import SinkAdapter
+
+        mock = MockSink()
+        adapter = SinkAdapter(
+            mock,
+            plugin_name="database",
+            sink_name="output",
+            artifact_descriptor={
+                "kind": "database",
+                "url": "sqlite:///test.db",
+                "table": "results",
+            },
+        )
+
+        assert adapter.artifact_kind == "database"
+
+    def test_sink_adapter_artifact_path_file(self) -> None:
+        """artifact_path returns path for file-based sinks."""
+        from elspeth.engine.adapters import SinkAdapter
+
+        mock = MockSink()
+        adapter = SinkAdapter(
+            mock,
+            plugin_name="csv",
+            sink_name="output",
+            artifact_descriptor={"kind": "file", "path": "/data/output.csv"},
+        )
+
+        assert adapter.artifact_path == "/data/output.csv"
+
+    def test_sink_adapter_artifact_path_database(self) -> None:
+        """artifact_path returns None for database sinks."""
+        from elspeth.engine.adapters import SinkAdapter
+
+        mock = MockSink()
+        adapter = SinkAdapter(
+            mock,
+            plugin_name="database",
+            sink_name="output",
+            artifact_descriptor={
+                "kind": "database",
+                "url": "sqlite:///test.db",
+                "table": "results",
+            },
+        )
+
+        assert adapter.artifact_path is None
+
 
 class TestArtifactDescriptor:
     """Tests for ArtifactDescriptor dataclass."""

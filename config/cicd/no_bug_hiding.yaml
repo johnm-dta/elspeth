@@ -217,13 +217,13 @@ allow_hits:
   # This is legitimate duck-typing at a plugin trust boundary.
   # ============================================================
 
-  - key: "engine/adapters.py:R3:SinkAdapter:on_start:line=200"
+  - key: "engine/adapters.py:R3:SinkAdapter:on_start:line=214"
     owner: "architecture"
     reason: "Trust boundary: optional plugin lifecycle method may not exist"
     safety: "Duck-typing at plugin boundary - Phase 2 plugins may not have lifecycle hooks"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/adapters.py:R3:SinkAdapter:on_complete:line=209"
+  - key: "engine/adapters.py:R3:SinkAdapter:on_complete:line=223"
     owner: "architecture"
     reason: "Trust boundary: optional plugin lifecycle method may not exist"
     safety: "Duck-typing at plugin boundary - Phase 2 plugins may not have lifecycle hooks"
@@ -307,20 +307,6 @@ allow_hits:
     owner: "architecture"
     reason: "Trust boundary: plugins may not define determinism attribute"
     safety: "Duck-typing at plugin boundary - fallback to DETERMINISTIC is documented"
-    expires: null  # Permanent - intentional design
-
-  # ============================================================
-  # EXPORT SINK TYPE CHECKING (Permanent)
-  # ============================================================
-  # CSV multifile export needs to extract the path from the sink, but not
-  # all sink types have a _path attribute. This hasattr check provides a
-  # clear error message instead of an AttributeError.
-  # ============================================================
-
-  - key: "engine/orchestrator.py:R3:Orchestrator:_export_csv_multifile:line=615"
-    owner: "architecture"
-    reason: "Trust boundary: CSV export requires path-based sink, validate before use"
-    safety: "Explicit error raised if sink doesn't have _path - fails fast with clear message"
     expires: null  # Permanent - intentional design
 
   # ============================================================

@@ -567,14 +567,20 @@ class Orchestrator:
         # but export writes records individually)
         from elspeth.engine.adapters import SinkAdapter
 
-        raw_sink = sink._sink if isinstance(sink, SinkAdapter) else sink
+        # Extract artifact path from SinkAdapter using public API before unwrapping
+        artifact_path: str | None = None
+        if isinstance(sink, SinkAdapter):
+            artifact_path = sink.artifact_path
+            raw_sink = sink._sink
+        else:
+            raw_sink = sink
 
         if export_config.format == "csv":
             # Multi-file CSV export: one file per record type
             self._export_csv_multifile(
                 exporter=exporter,
                 run_id=run_id,
-                sink=raw_sink,
+                artifact_path=artifact_path,
                 sign=export_config.sign,
                 ctx=ctx,
             )
@@ -589,35 +595,37 @@ class Orchestrator:
         self,
         exporter: Any,  # LandscapeExporter (avoid circular import in type hint)
         run_id: str,
-        sink: Any,  # BaseSink
+        artifact_path: str | None,
         sign: bool,
         ctx: PluginContext,
     ) -> None:
         """Export audit trail as multiple CSV files (one per record type).
 
-        Creates a directory at the sink's configured path, then writes
+        Creates a directory at the artifact path, then writes
         separate CSV files for each record type (run.csv, nodes.csv, etc.).
 
         Args:
             exporter: LandscapeExporter instance
             run_id: The completed run ID
-            sink: The configured export sink (used for path extraction)
+            artifact_path: Path from SinkAdapter.artifact_path (file sinks only)
             sign: Whether to sign records
             ctx: Plugin context for sink operations
+
+        Raises:
+            ValueError: If artifact_path is None (non-file sink used for CSV export)
         """
         import csv
         from pathlib import Path
 
         from elspeth.core.landscape.formatters import CSVFormatter
 
-        # Get the sink's configured path and convert to directory
-        # The sink was configured with a file path, we'll use it as directory
-        if not hasattr(sink, "_path"):
+        # Validate that we have a file-based sink path
+        if artifact_path is None:
             raise ValueError(
-                "CSV export requires a sink with a '_path' attribute (e.g., CSVSink)"
+                "CSV export requires a file-based sink with a configured path"
             )
 
-        export_dir = Path(sink._path)
+        export_dir = Path(artifact_path)
         if export_dir.suffix:
             # Remove file extension if present, treat as directory
             export_dir = export_dir.with_suffix("")

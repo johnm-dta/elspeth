@@ -149,6 +149,20 @@ class SinkAdapter:
         """Return total number of rows written through this adapter."""
         return self._rows_written
 
+    @property
+    def artifact_kind(self) -> Literal["file", "database", "webhook"]:
+        """Return the artifact type (file, database, or webhook)."""
+        return self._artifact_descriptor.kind
+
+    @property
+    def artifact_path(self) -> str | None:
+        """Return the artifact path for file-type sinks.
+
+        Returns:
+            The file path for file-type sinks, None for other types.
+        """
+        return self._artifact_descriptor.path
+
     def write(self, rows: list[dict[str, Any]], ctx: Any) -> ArtifactDescriptor:
         """Write rows using the wrapped sink's row-wise interface.
 

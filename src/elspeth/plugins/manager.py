@@ -72,21 +72,55 @@ class PluginSpec:
     def from_plugin(cls, plugin_cls: type, node_type: NodeType) -> "PluginSpec":
         """Create spec from plugin class with schema hashes.
 
+        Required attributes (will raise if missing):
+        - name: str
+        - plugin_version: str
+
+        Optional attributes (have legitimate defaults):
+        - determinism: defaults to DETERMINISTIC
+        - input_schema: defaults to None
+        - output_schema: defaults to None
+
         Args:
             plugin_cls: Plugin class to extract metadata from
             node_type: Type of node this plugin represents
 
         Returns:
             PluginSpec with extracted metadata
+
+        Raises:
+            ValueError: If plugin is missing required 'name' or 'plugin_version' attributes
         """
+        # Required: name
+        try:
+            name = plugin_cls.name  # type: ignore[attr-defined]
+        except AttributeError:
+            raise ValueError(
+                f"Plugin {plugin_cls.__name__} must define 'name' attribute. "
+                f"Add: name = 'your_plugin_name' to the class."
+            ) from None
+
+        # Required: plugin_version
+        try:
+            version = plugin_cls.plugin_version  # type: ignore[attr-defined]
+        except AttributeError:
+            raise ValueError(
+                f"Plugin {plugin_cls.__name__} must define 'plugin_version' attribute. "
+                f"Add: plugin_version = '1.0.0' to the class."
+            ) from None
+
+        # Optional: determinism (legitimate default - most are deterministic)
+        determinism = getattr(plugin_cls, "determinism", Determinism.DETERMINISTIC)
+
+        # Optional: schemas (None is valid - means any schema accepted)
         input_schema = getattr(plugin_cls, "input_schema", None)
         output_schema = getattr(plugin_cls, "output_schema", None)
 
         return cls(
-            name=getattr(plugin_cls, "name", plugin_cls.__name__),
+            name=name,
             node_type=node_type,
-            version=getattr(plugin_cls, "plugin_version", "0.0.0"),
-            determinism=getattr(plugin_cls, "determinism", Determinism.DETERMINISTIC),
+            version=version,
+            determinism=determinism,
             input_schema_hash=_schema_hash(input_schema),
             output_schema_hash=_schema_hash(output_schema),
         )

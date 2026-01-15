@@ -145,17 +145,20 @@ class TestPluginSpec:
         assert spec.determinism == Determinism.DETERMINISTIC
 
     def test_spec_defaults(self) -> None:
+        """Optional attributes (determinism, schemas) have defaults."""
         from elspeth.plugins.enums import Determinism, NodeType
         from elspeth.plugins.manager import PluginSpec
 
         class MinimalTransform:
             name = "minimal"
-            # No determinism or version attributes
+            plugin_version = "1.0.0"
+            # No determinism or schema attributes - should use defaults
 
         spec = PluginSpec.from_plugin(MinimalTransform, NodeType.TRANSFORM)
 
         assert spec.determinism == Determinism.DETERMINISTIC
-        assert spec.version == "0.0.0"
+        assert spec.input_schema_hash is None
+        assert spec.output_schema_hash is None
 
 
 class TestDuplicateNameValidation:

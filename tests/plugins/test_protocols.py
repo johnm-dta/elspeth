@@ -100,6 +100,9 @@ class TestTransformProtocol:
                     }
                 )
 
+            def close(self) -> None:
+                pass
+
             def on_register(self, ctx: PluginContext) -> None:
                 pass
 
@@ -156,6 +159,9 @@ class TestGateProtocol:
                         ),
                     )
                 return GateResult(row=row, action=RoutingAction.route("below"))
+
+            def close(self) -> None:
+                pass
 
             def on_register(self, ctx: PluginContext) -> None:
                 pass

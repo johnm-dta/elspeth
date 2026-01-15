@@ -92,6 +92,11 @@ class TransformProtocol(Protocol):
     Transforms process one row and emit one row (possibly modified).
     They are stateless between rows.
 
+    Lifecycle:
+        - __init__(config): Called once at pipeline construction
+        - process(row, ctx): Called for each row
+        - close(): Called at pipeline completion for cleanup
+
     Example:
         class EnrichTransform:
             name = "enrich"
@@ -131,6 +136,14 @@ class TransformProtocol(Protocol):
         """
         ...
 
+    def close(self) -> None:
+        """Clean up resources after pipeline completion.
+
+        Called once after all rows have been processed. Use for closing
+        connections, flushing buffers, or releasing external resources.
+        """
+        ...
+
     # === Optional Lifecycle Hooks ===
 
     def on_register(self, ctx: "PluginContext") -> None:
@@ -154,6 +167,11 @@ class GateProtocol(Protocol):
     - Continue to next transform
     - Route to a named sink
     - Fork to multiple parallel paths
+
+    Lifecycle:
+        - __init__(config): Called once at pipeline construction
+        - evaluate(row, ctx): Called for each row
+        - close(): Called at pipeline completion for cleanup
 
     Example:
         class SafetyGate:
@@ -195,6 +213,14 @@ class GateProtocol(Protocol):
 
         Returns:
             GateResult with (possibly modified) row and routing action
+        """
+        ...
+
+    def close(self) -> None:
+        """Clean up resources after pipeline completion.
+
+        Called once after all rows have been processed. Use for closing
+        connections, flushing buffers, or releasing external resources.
         """
         ...
 

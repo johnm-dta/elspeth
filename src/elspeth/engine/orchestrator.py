@@ -228,20 +228,56 @@ class Orchestrator:
         - Edges via get_edges()
         - Explicit ID mappings via get_sink_id_map() and get_transform_id_map()
         """
+        from elspeth.plugins.enums import Determinism
 
         # Get execution order from graph
         execution_order = graph.topological_order()
 
-        # Register nodes with Landscape using graph's node IDs
+        # Build node_id -> plugin instance mapping for metadata extraction
+        # Source: single plugin from config.source
+        source_id = graph.get_source()
+        transform_id_map = graph.get_transform_id_map()
+        sink_id_map = graph.get_sink_id_map()
+
+        node_to_plugin: dict[str, Any] = {}
+        if source_id is not None:
+            node_to_plugin[source_id] = config.source
+        for seq, transform in enumerate(config.transforms):
+            if seq in transform_id_map:
+                node_to_plugin[transform_id_map[seq]] = transform
+        for sink_name, sink in config.sinks.items():
+            if sink_name in sink_id_map:
+                node_to_plugin[sink_id_map[sink_name]] = sink
+
+        # Register nodes with Landscape using graph's node IDs and actual plugin metadata
         for node_id in execution_order:
             node_info = graph.get_node_info(node_id)
+
+            # Get plugin metadata from actual plugin instance (with defaults)
+            # Uses getattr + isinstance to safely extract attributes from duck-typed plugins
+            plugin = node_to_plugin.get(node_id)
+            plugin_version = "0.0.0"
+            determinism: Determinism | str = Determinism.DETERMINISTIC
+
+            if plugin is not None:
+                # Extract plugin_version if defined and valid
+                raw_version = getattr(plugin, "plugin_version", None)
+                if isinstance(raw_version, str):
+                    plugin_version = raw_version
+
+                # Extract determinism if defined and valid (Determinism enum or string)
+                raw_determinism = getattr(plugin, "determinism", None)
+                if isinstance(raw_determinism, (Determinism, str)):
+                    determinism = raw_determinism
+
             recorder.register_node(
                 run_id=run_id,
                 node_id=node_id,  # Use graph's ID
                 plugin_name=node_info.plugin_name,
                 node_type=NodeType(node_info.node_type),  # Already lowercase
-                plugin_version="1.0.0",
+                plugin_version=plugin_version,
                 config=node_info.config,
+                determinism=determinism,
             )
 
         # Register edges from graph - key by (from_node, label) for lookup

@@ -2612,3 +2612,239 @@ class TestOrchestratorConfigRecording:
         # settings_json is stored as a JSON string
         settings = json.loads(run_record.settings_json)
         assert settings == {}
+
+
+class TestNodeMetadataFromPlugin:
+    """Test that node registration uses actual plugin metadata.
+
+    BUG: All nodes were registered with hardcoded plugin_version="1.0.0"
+    instead of reading from the actual plugin class attributes.
+    """
+
+    def test_node_metadata_records_plugin_version(self) -> None:
+        """Node registration should use actual plugin metadata.
+
+        Verifies that the node's plugin_version in Landscape matches
+        the plugin class's plugin_version attribute.
+        """
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.enums import Determinism
+        from elspeth.plugins.results import TransformResult
+        from elspeth.plugins.schemas import PluginSchema
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "versioned_source"
+            output_schema = ValueSchema
+            plugin_version = "3.7.2"  # Custom version
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+
+            def on_start(self, ctx):
+                pass
+
+            def load(self, ctx):
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class VersionedTransform:
+            name = "versioned_transform"
+            input_schema = ValueSchema
+            output_schema = ValueSchema
+            plugin_version = "2.5.0"  # Custom version (not 1.0.0)
+            determinism = Determinism.NONDETERMINISTIC
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
+            def process(self, row, ctx):
+                return TransformResult.success(row)
+
+        class VersionedSink:
+            name = "versioned_sink"
+            plugin_version = "4.1.0"  # Custom version
+
+            def __init__(self):
+                self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
+            def write(self, rows, ctx):
+                self.results.extend(rows)
+                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+
+            def close(self):
+                pass
+
+        source = ListSource([{"value": 42}])
+        transform = VersionedTransform()
+        sink = VersionedSink()
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[transform],
+            sinks={"default": sink},
+        )
+
+        # Build graph
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="versioned_source")
+        graph.add_node("transform", node_type="transform", plugin_name="versioned_transform")
+        graph.add_node("sink", node_type="sink", plugin_name="versioned_sink")
+        graph.add_edge("source", "transform", label="continue", mode="move")
+        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph._transform_id_map = {0: "transform"}
+        graph._sink_id_map = {"default": "sink"}
+        graph._output_sink = "default"
+
+        orchestrator = Orchestrator(db)
+        run_result = orchestrator.run(config, graph=graph)
+
+        # Query Landscape to verify node metadata
+        recorder = LandscapeRecorder(db)
+        nodes = recorder.get_nodes(run_result.run_id)
+        assert len(nodes) == 3  # source, transform, sink
+
+        # Create lookup by plugin_name
+        nodes_by_name = {n.plugin_name: n for n in nodes}
+
+        # Verify source has correct version
+        source_node = nodes_by_name["versioned_source"]
+        assert source_node.plugin_version == "3.7.2", (
+            f"Source plugin_version should be '3.7.2', got '{source_node.plugin_version}'"
+        )
+
+        # Verify transform has correct version
+        transform_node = nodes_by_name["versioned_transform"]
+        assert transform_node.plugin_version == "2.5.0", (
+            f"Transform plugin_version should be '2.5.0', got '{transform_node.plugin_version}'"
+        )
+
+        # Verify sink has correct version
+        sink_node = nodes_by_name["versioned_sink"]
+        assert sink_node.plugin_version == "4.1.0", (
+            f"Sink plugin_version should be '4.1.0', got '{sink_node.plugin_version}'"
+        )
+
+    def test_node_metadata_records_determinism(self) -> None:
+        """Node registration should record plugin determinism.
+
+        Verifies that nondeterministic plugins are recorded correctly
+        in the Landscape for reproducibility tracking.
+        """
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.enums import Determinism
+        from elspeth.plugins.results import TransformResult
+        from elspeth.plugins.schemas import PluginSchema
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "test_source"
+            output_schema = ValueSchema
+            plugin_version = "1.0.0"
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+
+            def on_start(self, ctx):
+                pass
+
+            def load(self, ctx):
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class NonDeterministicTransform:
+            name = "nondeterministic_transform"
+            input_schema = ValueSchema
+            output_schema = ValueSchema
+            plugin_version = "1.0.0"
+            determinism = Determinism.NONDETERMINISTIC  # Explicit nondeterministic
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
+            def process(self, row, ctx):
+                return TransformResult.success(row)
+
+        class CollectSink:
+            name = "test_sink"
+            plugin_version = "1.0.0"
+
+            def __init__(self):
+                self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
+            def write(self, rows, ctx):
+                self.results.extend(rows)
+                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+
+            def close(self):
+                pass
+
+        source = ListSource([{"value": 42}])
+        transform = NonDeterministicTransform()
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[transform],
+            sinks={"default": sink},
+        )
+
+        # Build graph
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="test_source")
+        graph.add_node("transform", node_type="transform", plugin_name="nondeterministic_transform")
+        graph.add_node("sink", node_type="sink", plugin_name="test_sink")
+        graph.add_edge("source", "transform", label="continue", mode="move")
+        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph._transform_id_map = {0: "transform"}
+        graph._sink_id_map = {"default": "sink"}
+        graph._output_sink = "default"
+
+        orchestrator = Orchestrator(db)
+        run_result = orchestrator.run(config, graph=graph)
+
+        # Query Landscape to verify determinism recorded
+        recorder = LandscapeRecorder(db)
+        nodes = recorder.get_nodes(run_result.run_id)
+
+        # Find the transform node
+        transform_node = next(n for n in nodes if n.plugin_name == "nondeterministic_transform")
+
+        # Verify determinism is recorded correctly
+        assert transform_node.determinism == "nondeterministic", (
+            f"Transform determinism should be 'nondeterministic', got '{transform_node.determinism}'"
+        )

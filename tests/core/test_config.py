@@ -794,3 +794,83 @@ class TestRateLimitSettings:
 
         with pytest.raises(ValidationError):
             RateLimitSettings(default_requests_per_minute=-1)
+
+
+class TestResolveConfig:
+    """Tests for resolve_config function."""
+
+    def test_resolve_config_returns_dict(self) -> None:
+        """resolve_config converts ElspethSettings to dict."""
+        from elspeth.core.config import ElspethSettings, resolve_config
+
+        settings = ElspethSettings(
+            datasource={"plugin": "csv", "options": {"path": "input.csv"}},
+            sinks={"output": {"plugin": "csv", "options": {"path": "output.csv"}}},
+            output_sink="output",
+        )
+
+        resolved = resolve_config(settings)
+
+        assert isinstance(resolved, dict)
+        assert "datasource" in resolved
+        assert resolved["datasource"]["plugin"] == "csv"
+        assert "output_sink" in resolved
+        assert resolved["output_sink"] == "output"
+
+    def test_resolve_config_includes_defaults(self) -> None:
+        """resolve_config includes default values for audit completeness."""
+        from elspeth.core.config import ElspethSettings, resolve_config
+
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+        )
+
+        resolved = resolve_config(settings)
+
+        # Should include defaults
+        assert "landscape" in resolved
+        assert resolved["landscape"]["enabled"] is True
+        assert "concurrency" in resolved
+        assert resolved["concurrency"]["max_workers"] == 4
+        assert "retry" in resolved
+        assert resolved["retry"]["max_attempts"] == 3
+
+    def test_resolve_config_json_serializable(self) -> None:
+        """resolve_config output is JSON-serializable for Landscape storage."""
+        import json
+
+        from elspeth.core.config import ElspethSettings, resolve_config
+
+        settings = ElspethSettings(
+            datasource={"plugin": "csv", "options": {"path": "input.csv"}},
+            sinks={"output": {"plugin": "csv", "options": {"path": "output.csv"}}},
+            output_sink="output",
+        )
+
+        resolved = resolve_config(settings)
+
+        # Should not raise - must be JSON serializable
+        json_str = json.dumps(resolved)
+        assert isinstance(json_str, str)
+        assert len(json_str) > 0
+
+    def test_resolve_config_preserves_row_plugins(self) -> None:
+        """resolve_config includes row_plugins configuration."""
+        from elspeth.core.config import ElspethSettings, resolve_config
+
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            row_plugins=[
+                {"plugin": "field_mapper", "type": "transform", "options": {"mapping": {"a": "b"}}},
+            ],
+        )
+
+        resolved = resolve_config(settings)
+
+        assert "row_plugins" in resolved
+        assert len(resolved["row_plugins"]) == 1
+        assert resolved["row_plugins"][0]["plugin"] == "field_mapper"

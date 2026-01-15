@@ -367,3 +367,18 @@ def load_settings(config_path: Path) -> ElspethSettings:
     }
     return ElspethSettings(**raw_config)
 
+
+def resolve_config(settings: ElspethSettings) -> dict[str, Any]:
+    """Convert validated settings to a dict for audit storage.
+
+    This is the resolved configuration that gets stored in Landscape
+    for reproducibility. It includes all settings (explicit + defaults).
+
+    Args:
+        settings: Validated ElspethSettings instance
+
+    Returns:
+        Dict representation suitable for JSON serialization
+    """
+    return settings.model_dump(mode="json")
+

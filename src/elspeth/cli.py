@@ -11,7 +11,7 @@ import typer
 from pydantic import ValidationError
 
 from elspeth import __version__
-from elspeth.core.config import ElspethSettings, load_settings
+from elspeth.core.config import ElspethSettings, load_settings, resolve_config
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
 app = typer.Typer(
@@ -303,11 +303,12 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> dict[st
             transform_class = TRANSFORM_PLUGINS[plugin_name]
             transforms.append(transform_class(plugin_options))
 
-    # Build PipelineConfig
+    # Build PipelineConfig with resolved configuration for audit
     pipeline_config = PipelineConfig(
         source=source,
         transforms=transforms,
         sinks=sinks,
+        config=resolve_config(config),
     )
 
     # Build execution graph from config

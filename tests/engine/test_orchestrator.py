@@ -2441,3 +2441,174 @@ class TestOrchestratorCheckpointing:
 
         assert result.status == "completed"
         assert result.rows_processed == 1
+
+
+class TestOrchestratorConfigRecording:
+    """Test that runs record the resolved configuration."""
+
+    def test_run_records_resolved_config(self) -> None:
+        """Run should record the full resolved configuration in Landscape."""
+        import json
+
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import TransformResult
+        from elspeth.plugins.schemas import PluginSchema
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "test_source"
+            output_schema = ValueSchema
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+
+            def on_start(self, ctx):
+                pass
+
+            def load(self, ctx):
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class IdentityTransform:
+            name = "identity"
+            input_schema = ValueSchema
+            output_schema = ValueSchema
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
+            def process(self, row, ctx):
+                return TransformResult.success(row)
+
+        class CollectSink:
+            name = "test_sink"
+
+            def __init__(self):
+                self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
+            def write(self, rows, ctx):
+                self.results.extend(rows)
+                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+
+            def close(self):
+                pass
+
+        source = ListSource([{"value": 42}])
+        transform = IdentityTransform()
+        sink = CollectSink()
+
+        # Create config WITH resolved configuration dict
+        resolved_config = {
+            "datasource": {"plugin": "csv", "options": {"path": "test.csv"}},
+            "sinks": {"default": {"plugin": "csv"}},
+            "output_sink": "default",
+        }
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[transform],
+            sinks={"default": sink},
+            config=resolved_config,  # Pass the resolved config
+        )
+
+        orchestrator = Orchestrator(db)
+        run_result = orchestrator.run(config, graph=_build_test_graph(config))
+
+        # Query Landscape to verify config was recorded
+        recorder = LandscapeRecorder(db)
+        run_record = recorder.get_run(run_result.run_id)
+
+        assert run_record is not None
+        # settings_json is stored as a JSON string, parse it
+        settings = json.loads(run_record.settings_json)
+        assert settings != {}
+        assert "datasource" in settings
+        assert settings["datasource"]["plugin"] == "csv"
+
+    def test_run_with_empty_config_records_empty(self) -> None:
+        """Run with no config passed should record empty dict (current behavior)."""
+        import json
+
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.schemas import PluginSchema
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "test_source"
+            output_schema = ValueSchema
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+
+            def on_start(self, ctx):
+                pass
+
+            def load(self, ctx):
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class CollectSink:
+            name = "test_sink"
+
+            def __init__(self):
+                self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
+            def write(self, rows, ctx):
+                self.results.extend(rows)
+                return {"path": "memory", "size_bytes": 0, "content_hash": ""}
+
+            def close(self):
+                pass
+
+        source = ListSource([{"value": 42}])
+        sink = CollectSink()
+
+        # No config passed - should default to empty dict
+        config = PipelineConfig(
+            source=source,
+            transforms=[],
+            sinks={"default": sink},
+            # config not passed - defaults to {}
+        )
+
+        orchestrator = Orchestrator(db)
+        run_result = orchestrator.run(config, graph=_build_test_graph(config))
+
+        # Query Landscape to verify empty config was recorded
+        recorder = LandscapeRecorder(db)
+        run_record = recorder.get_run(run_result.run_id)
+
+        assert run_record is not None
+        # This test documents that empty config is recorded when not provided
+        # settings_json is stored as a JSON string
+        settings = json.loads(run_record.settings_json)
+        assert settings == {}

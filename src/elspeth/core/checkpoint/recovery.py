@@ -16,7 +16,7 @@ from sqlalchemy.engine import Row
 
 from elspeth.core.checkpoint.manager import CheckpointManager
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.models import Checkpoint
+from elspeth.core.landscape.models import Checkpoint, RunStatus
 from elspeth.core.landscape.schema import rows_table, runs_table
 
 
@@ -99,12 +99,12 @@ class RecoveryManager:
         if run is None:
             return ResumeCheck(can_resume=False, reason=f"Run {run_id} not found")
 
-        if run.status == "completed":
+        if run.status == RunStatus.COMPLETED:
             return ResumeCheck(
                 can_resume=False, reason="Run already completed successfully"
             )
 
-        if run.status == "running":
+        if run.status == RunStatus.RUNNING:
             return ResumeCheck(can_resume=False, reason="Run is still in progress")
 
         checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)

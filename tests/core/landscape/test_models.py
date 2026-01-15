@@ -8,7 +8,7 @@ class TestRunModel:
     """Run table model."""
 
     def test_create_run(self) -> None:
-        from elspeth.core.landscape.models import Run
+        from elspeth.core.landscape.models import Run, RunStatus
 
         run = Run(
             run_id="run-001",
@@ -16,10 +16,10 @@ class TestRunModel:
             config_hash="abc123",
             settings_json="{}",
             canonical_version="sha256-rfc8785-v1",
-            status="running",
+            status=RunStatus.RUNNING,
         )
         assert run.run_id == "run-001"
-        assert run.status == "running"
+        assert run.status == RunStatus.RUNNING
 
 
 class TestNodeModel:

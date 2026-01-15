@@ -342,11 +342,13 @@ class TestOrchestratorAuditTrail:
         run_result = orchestrator.run(config, graph=_build_test_graph(config))
 
         # Query Landscape to verify audit trail
+        from elspeth.core.landscape.models import RunStatus
+
         recorder = LandscapeRecorder(db)
         run = recorder.get_run(run_result.run_id)
 
         assert run is not None
-        assert run.status == "completed"
+        assert run.status == RunStatus.COMPLETED
 
         # Verify nodes were registered
         nodes = recorder.get_nodes(run_result.run_id)
@@ -438,14 +440,16 @@ class TestOrchestratorErrorHandling:
 
         # Verify run was marked as failed in Landscape audit trail
         # Query for all runs and find the one that was created
+        from elspeth.core.landscape.models import RunStatus
+
         recorder = LandscapeRecorder(db)
         runs = recorder.list_runs()
         assert len(runs) == 1, "Expected exactly one run in Landscape"
 
         failed_run = runs[0]
-        assert failed_run.status == "failed", (
-            f"Landscape audit trail must record status='failed', "
-            f"got status='{failed_run.status}'"
+        assert failed_run.status == RunStatus.FAILED, (
+            f"Landscape audit trail must record status=FAILED, "
+            f"got status={failed_run.status!r}"
         )
 
 

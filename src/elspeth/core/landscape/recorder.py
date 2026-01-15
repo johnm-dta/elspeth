@@ -158,7 +158,7 @@ class LandscapeRecorder:
             config_hash=config_hash,
             settings_json=settings_json,
             canonical_version=canonical_version,
-            status=status_enum.value,  # Store string in DB
+            status=status_enum,  # Store enum; str subclass works with DB
             reproducibility_grade=reproducibility_grade,
         )
 
@@ -241,7 +241,7 @@ class LandscapeRecorder:
             config_hash=row.config_hash,
             settings_json=row.settings_json,
             canonical_version=row.canonical_version,
-            status=row.status,
+            status=RunStatus(row.status),  # Coerce DB string to enum
             reproducibility_grade=row.reproducibility_grade,
             export_status=row.export_status,
             export_error=row.export_error,
@@ -281,7 +281,7 @@ class LandscapeRecorder:
                 config_hash=row.config_hash,
                 settings_json=row.settings_json,
                 canonical_version=row.canonical_version,
-                status=row.status,
+                status=RunStatus(row.status),  # Coerce DB string to enum
                 reproducibility_grade=row.reproducibility_grade,
                 export_status=row.export_status,
                 export_error=row.export_error,

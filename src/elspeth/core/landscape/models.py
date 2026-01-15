@@ -37,7 +37,7 @@ class Run:
     config_hash: str
     settings_json: str
     canonical_version: str
-    status: str  # running, completed, failed
+    status: RunStatus
     completed_at: datetime | None = None
     reproducibility_grade: str | None = None
     # Export tracking - separate from run status

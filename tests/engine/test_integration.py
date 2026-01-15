@@ -229,10 +229,12 @@ class TestEngineIntegration:
         assert all(r["processed"] for r in sink.results)
 
         # Verify audit trail
+        from elspeth.core.landscape.models import RunStatus
+
         recorder = LandscapeRecorder(db)
         run = recorder.get_run(result.run_id)
         assert run is not None
-        assert run.status == "completed"
+        assert run.status == RunStatus.COMPLETED
 
         # Verify nodes registered
         nodes = recorder.get_nodes(result.run_id)
@@ -736,10 +738,12 @@ class TestNoSilentAuditLoss:
             orchestrator.run(config, graph=_build_test_graph(config))
 
         # Run must be marked as failed in audit trail
+        from elspeth.core.landscape.models import RunStatus
+
         recorder = LandscapeRecorder(db)
         runs = recorder.list_runs()
         assert len(runs) == 1
-        assert runs[0].status == "failed"
+        assert runs[0].status == RunStatus.FAILED
 
     def test_sink_exception_propagates(self) -> None:
         """Sink exceptions must propagate, not be silently caught."""
@@ -812,10 +816,12 @@ class TestNoSilentAuditLoss:
             orchestrator.run(config, graph=_build_test_graph(config))
 
         # Run must be marked as failed in audit trail
+        from elspeth.core.landscape.models import RunStatus
+
         recorder = LandscapeRecorder(db)
         runs = recorder.list_runs()
         assert len(runs) == 1
-        assert runs[0].status == "failed"
+        assert runs[0].status == RunStatus.FAILED
 
 
 class TestAuditTrailCompleteness:

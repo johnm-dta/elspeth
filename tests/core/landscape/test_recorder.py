@@ -7,6 +7,7 @@ class TestLandscapeRecorderRuns:
 
     def test_begin_run(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -18,11 +19,12 @@ class TestLandscapeRecorderRuns:
         )
 
         assert run.run_id is not None
-        assert run.status == "running"
+        assert run.status == RunStatus.RUNNING
         assert run.started_at is not None
 
     def test_complete_run_success(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -31,11 +33,12 @@ class TestLandscapeRecorderRuns:
         run = recorder.begin_run(config={}, canonical_version="v1")
         completed = recorder.complete_run(run.run_id, status="completed")
 
-        assert completed.status == "completed"
+        assert completed.status == RunStatus.COMPLETED
         assert completed.completed_at is not None
 
     def test_complete_run_failed(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -44,7 +47,7 @@ class TestLandscapeRecorderRuns:
         run = recorder.begin_run(config={}, canonical_version="v1")
         completed = recorder.complete_run(run.run_id, status="failed")
 
-        assert completed.status == "failed"
+        assert completed.status == RunStatus.FAILED
 
     def test_get_run(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
@@ -78,11 +81,12 @@ class TestLandscapeRecorderRunStatusValidation:
             status=RunStatus.RUNNING,
         )
 
-        assert run.status == "running"
+        assert run.status == RunStatus.RUNNING
 
     def test_begin_run_with_valid_string_status(self) -> None:
         """Test that valid string status is accepted and coerced."""
         from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -94,7 +98,7 @@ class TestLandscapeRecorderRunStatusValidation:
             status="running",
         )
 
-        assert run.status == "running"
+        assert run.status == RunStatus.RUNNING
 
     def test_begin_run_with_invalid_status_raises(self) -> None:
         """Test that invalid status string raises ValueError."""
@@ -125,11 +129,12 @@ class TestLandscapeRecorderRunStatusValidation:
         run = recorder.begin_run(config={}, canonical_version="v1")
         completed = recorder.complete_run(run.run_id, status=RunStatus.COMPLETED)
 
-        assert completed.status == "completed"
+        assert completed.status == RunStatus.COMPLETED
 
     def test_complete_run_with_valid_string_status(self) -> None:
         """Test that valid string status is accepted for complete_run."""
         from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -138,7 +143,7 @@ class TestLandscapeRecorderRunStatusValidation:
         run = recorder.begin_run(config={}, canonical_version="v1")
         completed = recorder.complete_run(run.run_id, status="failed")
 
-        assert completed.status == "failed"
+        assert completed.status == RunStatus.FAILED
 
     def test_complete_run_with_invalid_status_raises(self) -> None:
         """Test that invalid status string raises ValueError for complete_run."""
@@ -2015,6 +2020,7 @@ class TestReproducibilityGradeComputation:
     def test_finalize_run_sets_grade(self) -> None:
         """finalize_run() computes grade and completes the run."""
         from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
         from elspeth.core.landscape.reproducibility import ReproducibilityGrade
         from elspeth.plugins.enums import Determinism
@@ -2043,7 +2049,7 @@ class TestReproducibilityGradeComputation:
 
         completed_run = recorder.finalize_run(run.run_id, status="completed")
 
-        assert completed_run.status == "completed"
+        assert completed_run.status == RunStatus.COMPLETED
         assert completed_run.completed_at is not None
         assert (
             completed_run.reproducibility_grade

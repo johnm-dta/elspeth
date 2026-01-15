@@ -20,6 +20,23 @@ from elspeth.core.landscape.models import Checkpoint
 from elspeth.core.landscape.schema import rows_table, runs_table
 
 
+@dataclass(frozen=True)
+class ResumeCheck:
+    """Result of checking if a run can be resumed.
+
+    Replaces tuple[bool, str | None] return type from can_resume().
+    """
+
+    can_resume: bool
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.can_resume and self.reason is not None:
+            raise ValueError("can_resume=True should not have a reason")
+        if not self.can_resume and self.reason is None:
+            raise ValueError("can_resume=False must have a reason explaining why")
+
+
 @dataclass
 class ResumePoint:
     """Information needed to resume a run.
@@ -47,8 +64,8 @@ class RecoveryManager:
     Usage:
         recovery = RecoveryManager(db, checkpoint_manager)
 
-        can_resume, reason = recovery.can_resume(run_id)
-        if can_resume:
+        check = recovery.can_resume(run_id)
+        if check.can_resume:
             resume_point = recovery.get_resume_point(run_id)
             # Pass resume_point to Orchestrator.resume()
     """
@@ -63,7 +80,7 @@ class RecoveryManager:
         self._db = db
         self._checkpoint_manager = checkpoint_manager
 
-    def can_resume(self, run_id: str) -> tuple[bool, str | None]:
+    def can_resume(self, run_id: str) -> ResumeCheck:
         """Check if a run can be resumed.
 
         A run can be resumed if:
@@ -75,25 +92,28 @@ class RecoveryManager:
             run_id: The run to check
 
         Returns:
-            Tuple of (can_resume, reason_if_not).
-            If can_resume is True, reason is None.
-            If can_resume is False, reason explains why.
+            ResumeCheck with can_resume=True if resumable,
+            or can_resume=False with reason explaining why not.
         """
         run = self._get_run(run_id)
         if run is None:
-            return False, f"Run {run_id} not found"
+            return ResumeCheck(can_resume=False, reason=f"Run {run_id} not found")
 
         if run.status == "completed":
-            return False, "Run already completed successfully"
+            return ResumeCheck(
+                can_resume=False, reason="Run already completed successfully"
+            )
 
         if run.status == "running":
-            return False, "Run is still in progress"
+            return ResumeCheck(can_resume=False, reason="Run is still in progress")
 
         checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
         if checkpoint is None:
-            return False, "No checkpoint found for recovery"
+            return ResumeCheck(
+                can_resume=False, reason="No checkpoint found for recovery"
+            )
 
-        return True, None
+        return ResumeCheck(can_resume=True)
 
     def get_resume_point(self, run_id: str) -> ResumePoint | None:
         """Get the resume point for a failed run.
@@ -111,8 +131,8 @@ class RecoveryManager:
         Returns:
             ResumePoint if run can be resumed, None otherwise
         """
-        can_resume, _ = self.can_resume(run_id)
-        if not can_resume:
+        check = self.can_resume(run_id)
+        if not check.can_resume:
             return None
 
         checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)

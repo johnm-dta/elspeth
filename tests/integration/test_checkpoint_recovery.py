@@ -51,8 +51,8 @@ class TestCheckpointRecoveryIntegration:
         assert checkpoint.sequence_number > 0
 
         # 3. Verify can resume
-        can_resume, reason = recovery_mgr.can_resume(run_id)
-        assert can_resume is True, f"Cannot resume: {reason}"
+        check = recovery_mgr.can_resume(run_id)
+        assert check.can_resume is True, f"Cannot resume: {check.reason}"
 
         # 4. Get resume point
         resume_point = recovery_mgr.get_resume_point(run_id)

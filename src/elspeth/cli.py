@@ -647,10 +647,10 @@ def resume(
         recovery_manager = RecoveryManager(db, checkpoint_manager)
 
         # Check if run can be resumed
-        can_resume_run, reason = recovery_manager.can_resume(run_id)
+        check = recovery_manager.can_resume(run_id)
 
-        if not can_resume_run:
-            typer.echo(f"Cannot resume run {run_id}: {reason}", err=True)
+        if not check.can_resume:
+            typer.echo(f"Cannot resume run {run_id}: {check.reason}", err=True)
             raise typer.Exit(1)
 
         # Get resume point information

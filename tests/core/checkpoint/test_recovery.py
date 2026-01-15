@@ -154,37 +154,41 @@ class TestRecoveryProtocol:
     def test_can_resume_returns_true_for_failed_run_with_checkpoint(
         self, recovery_manager, failed_run_with_checkpoint
     ) -> None:
-        can_resume, reason = recovery_manager.can_resume(failed_run_with_checkpoint)
-        assert can_resume is True
-        assert reason is None
+        check = recovery_manager.can_resume(failed_run_with_checkpoint)
+        assert check.can_resume is True
+        assert check.reason is None
 
     def test_can_resume_returns_false_for_completed_run(
         self, recovery_manager, completed_run
     ) -> None:
-        can_resume, reason = recovery_manager.can_resume(completed_run)
-        assert can_resume is False
-        assert "completed" in reason.lower()
+        check = recovery_manager.can_resume(completed_run)
+        assert check.can_resume is False
+        assert check.reason is not None
+        assert "completed" in check.reason.lower()
 
     def test_can_resume_returns_false_without_checkpoint(
         self, recovery_manager, failed_run_no_checkpoint
     ) -> None:
-        can_resume, reason = recovery_manager.can_resume(failed_run_no_checkpoint)
-        assert can_resume is False
-        assert "no checkpoint" in reason.lower()
+        check = recovery_manager.can_resume(failed_run_no_checkpoint)
+        assert check.can_resume is False
+        assert check.reason is not None
+        assert "no checkpoint" in check.reason.lower()
 
     def test_can_resume_returns_false_for_running_run(
         self, recovery_manager, running_run
     ) -> None:
-        can_resume, reason = recovery_manager.can_resume(running_run)
-        assert can_resume is False
-        assert "in progress" in reason.lower()
+        check = recovery_manager.can_resume(running_run)
+        assert check.can_resume is False
+        assert check.reason is not None
+        assert "in progress" in check.reason.lower()
 
     def test_can_resume_returns_false_for_nonexistent_run(
         self, recovery_manager
     ) -> None:
-        can_resume, reason = recovery_manager.can_resume("nonexistent-run")
-        assert can_resume is False
-        assert "not found" in reason.lower()
+        check = recovery_manager.can_resume("nonexistent-run")
+        assert check.can_resume is False
+        assert check.reason is not None
+        assert "not found" in check.reason.lower()
 
     def test_get_resume_point(
         self, recovery_manager, failed_run_with_checkpoint
@@ -416,3 +420,45 @@ class TestGetUnprocessedRows:
         unprocessed = recovery_manager.get_unprocessed_rows("nonexistent-run-id")
 
         assert unprocessed == []
+
+
+class TestResumeCheck:
+    """Tests for ResumeCheck dataclass."""
+
+    def test_can_resume_true(self) -> None:
+        """can_resume=True should have no reason."""
+        from elspeth.core.checkpoint.recovery import ResumeCheck
+
+        check = ResumeCheck(can_resume=True)
+        assert check.can_resume is True
+        assert check.reason is None
+
+    def test_can_resume_false_with_reason(self) -> None:
+        """can_resume=False must have a reason."""
+        from elspeth.core.checkpoint.recovery import ResumeCheck
+
+        check = ResumeCheck(can_resume=False, reason="Run completed")
+        assert check.can_resume is False
+        assert check.reason == "Run completed"
+
+    def test_can_resume_true_with_reason_raises(self) -> None:
+        """can_resume=True with reason should raise."""
+        from elspeth.core.checkpoint.recovery import ResumeCheck
+
+        with pytest.raises(ValueError, match="should not have a reason"):
+            ResumeCheck(can_resume=True, reason="unexpected")
+
+    def test_can_resume_false_without_reason_raises(self) -> None:
+        """can_resume=False without reason should raise."""
+        from elspeth.core.checkpoint.recovery import ResumeCheck
+
+        with pytest.raises(ValueError, match="must have a reason"):
+            ResumeCheck(can_resume=False)
+
+    def test_frozen(self) -> None:
+        """ResumeCheck should be immutable."""
+        from elspeth.core.checkpoint.recovery import ResumeCheck
+
+        check = ResumeCheck(can_resume=True)
+        with pytest.raises(AttributeError):
+            check.can_resume = False  # type: ignore

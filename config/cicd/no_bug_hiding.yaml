@@ -47,91 +47,85 @@ allow_hits:
     expires: null  # Permanent - intentional design
 
   # --- LineageTree displaying Landscape data ---
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=50"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=54"
     owner: "architecture"
     reason: "Trust boundary: displaying Landscape run_id that may be missing"
     safety: "Graceful degradation to 'unknown' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=54"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=58"
     owner: "architecture"
     reason: "Trust boundary: displaying Landscape source that may be empty"
     safety: "Graceful degradation to empty dict - user sees partial tree"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=56"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=60"
     owner: "architecture"
     reason: "Trust boundary: displaying Landscape source name that may be missing"
     safety: "Graceful degradation to 'unknown' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=57"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=61"
     owner: "architecture"
     reason: "Trust boundary: displaying Landscape node_id that may be missing"
     safety: "Graceful degradation to None - tree node still renders"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=63"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=73"
     owner: "architecture"
     reason: "Trust boundary: displaying Landscape transforms list that may be empty"
     safety: "Graceful degradation to empty list - tree renders without transforms"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=68"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=78"
     owner: "architecture"
     reason: "Trust boundary: displaying Landscape transform name that may be missing"
     safety: "Graceful degradation to 'unknown' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=69"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=79"
     owner: "architecture"
     reason: "Trust boundary: displaying Landscape transform node_id that may be missing"
     safety: "Graceful degradation to None - tree node still renders"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=76"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=92"
     owner: "architecture"
     reason: "Trust boundary: displaying Landscape sinks list that may be empty"
     safety: "Graceful degradation to empty list - tree renders without sinks"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=81"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=97"
     owner: "architecture"
     reason: "Trust boundary: displaying Landscape sink name that may be missing"
     safety: "Graceful degradation to 'unknown' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=82"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=98"
     owner: "architecture"
     reason: "Trust boundary: displaying Landscape sink node_id that may be missing"
     safety: "Graceful degradation to None - tree node still renders"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=86"
-    owner: "architecture"
-    reason: "Trust boundary: checking if sink node_id exists before adding to parent"
-    safety: "Graceful degradation - orphan sinks still render in tree"
-    expires: null  # Permanent - intentional design
-
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=90"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=116"
     owner: "architecture"
     reason: "Trust boundary: displaying Landscape tokens list that may be empty"
     safety: "Graceful degradation to empty list - tree renders without tokens"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=93"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=119"
     owner: "architecture"
-    reason: "Trust boundary: displaying Landscape token_id/row_id that may be missing"
+    reason: "Trust boundary: displaying Landscape token_id that may be missing"
     safety: "Graceful degradation to 'unknown' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=94"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=120"
     owner: "architecture"
-    reason: "Trust boundary: displaying Landscape token node_id that may be missing"
-    safety: "Graceful degradation to None - tree node still renders"
+    reason: "Trust boundary: displaying Landscape row_id that may be missing"
+    safety: "Graceful degradation to 'unknown' - user sees partial data"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=98"
+  - key: "tui/widgets/lineage_tree.py:R1:LineageTree:_build_tree:line=121"
     owner: "architecture"
     reason: "Trust boundary: displaying Landscape token path that may be empty"
     safety: "Graceful degradation to empty list - token renders without path"
@@ -204,49 +198,49 @@ allow_hits:
     safety: "Graceful degradation to None - conditionally displayed"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=70"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=71"
     owner: "architecture"
     reason: "Trust boundary: displaying error_json that may be missing"
     safety: "Graceful degradation to None - error section conditionally shown"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=75"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=81"
     owner: "architecture"
     reason: "Trust boundary: displaying error type from JSON that may be malformed"
     safety: "Graceful degradation to 'unknown' - user sees partial error info"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=76"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=82"
     owner: "architecture"
     reason: "Trust boundary: displaying error message from JSON that may be malformed"
     safety: "Graceful degradation to 'unknown' - user sees partial error info"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=82"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=92"
     owner: "architecture"
     reason: "Trust boundary: displaying artifact that may be missing"
     safety: "Graceful degradation to None - artifact section conditionally shown"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=85"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=96"
     owner: "architecture"
     reason: "Trust boundary: displaying artifact_id that may be missing"
     safety: "Graceful degradation to 'N/A' - user sees partial artifact info"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=86"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=97"
     owner: "architecture"
     reason: "Trust boundary: displaying path_or_uri that may be missing"
     safety: "Graceful degradation to 'N/A' - user sees partial artifact info"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=87"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=98"
     owner: "architecture"
     reason: "Trust boundary: displaying content_hash that may be missing"
     safety: "Graceful degradation to 'N/A' - user sees partial artifact info"
     expires: null  # Permanent - intentional design
 
-  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=88"
+  - key: "tui/widgets/node_detail.py:R1:NodeDetailPanel:render_content:line=99"
     owner: "architecture"
     reason: "Trust boundary: displaying size_bytes that may be missing"
     safety: "Graceful degradation to None - conditionally displayed"
@@ -304,13 +298,13 @@ allow_hits:
   # This is legitimate duck-typing at a plugin trust boundary.
   # ============================================================
 
-  - key: "engine/adapters.py:R3:SinkAdapter:on_start:line=201"
+  - key: "engine/adapters.py:R3:SinkAdapter:on_start:line=200"
     owner: "architecture"
     reason: "Trust boundary: optional plugin lifecycle method may not exist"
     safety: "Duck-typing at plugin boundary - Phase 2 plugins may not have lifecycle hooks"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/adapters.py:R3:SinkAdapter:on_complete:line=210"
+  - key: "engine/adapters.py:R3:SinkAdapter:on_complete:line=209"
     owner: "architecture"
     reason: "Trust boundary: optional plugin lifecycle method may not exist"
     safety: "Duck-typing at plugin boundary - Phase 2 plugins may not have lifecycle hooks"
@@ -325,6 +319,12 @@ allow_hits:
   # different keys present.
   # ============================================================
 
+  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=71"
+    owner: "architecture"
+    reason: "Trust boundary: parsing external config dict with optional fields"
+    safety: "Validation in __post_init__ ensures required fields for each kind"
+    expires: null  # Permanent - intentional design
+
   - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=72"
     owner: "architecture"
     reason: "Trust boundary: parsing external config dict with optional fields"
@@ -332,12 +332,6 @@ allow_hits:
     expires: null  # Permanent - intentional design
 
   - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=73"
-    owner: "architecture"
-    reason: "Trust boundary: parsing external config dict with optional fields"
-    safety: "Validation in __post_init__ ensures required fields for each kind"
-    expires: null  # Permanent - intentional design
-
-  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=74"
     owner: "architecture"
     reason: "Trust boundary: parsing external config dict with optional fields"
     safety: "Validation in __post_init__ ensures required fields for each kind"

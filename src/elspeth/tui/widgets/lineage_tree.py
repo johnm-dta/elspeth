@@ -44,59 +44,92 @@ class LineageTree:
     def _build_tree(self) -> TreeNode:
         """Build tree structure from lineage data.
 
+        Trust boundary: lineage_data comes from Landscape and may have missing
+        or malformed fields for failed/partial runs. All field access uses
+        graceful defaults.
+
         Returns:
             Root TreeNode
         """
         run_id = self._data.get("run_id", "unknown")
         root = TreeNode(label=f"Run: {run_id}", node_type="run")
 
-        # Add source
-        source = self._data.get("source", {})
+        # Add source - handle None or non-dict gracefully
+        source = self._data.get("source") or {}
+        if isinstance(source, dict):
+            source_name = source.get("name", "unknown")
+            source_node_id = source.get("node_id")
+        else:
+            source_name = str(source)
+            source_node_id = None
         source_node = TreeNode(
-            label=f"Source: {source.get('name', 'unknown')}",
-            node_id=source.get("node_id"),
+            label=f"Source: {source_name}",
+            node_id=source_node_id,
             node_type="source",
         )
         root.children.append(source_node)
 
-        # Build transform chain
-        transforms = self._data.get("transforms", [])
+        # Build transform chain - handle None or non-list gracefully
+        transforms = self._data.get("transforms") or []
         current_parent = source_node
 
         for transform in transforms:
+            if isinstance(transform, dict):
+                transform_name = transform.get("name", "unknown")
+                transform_node_id = transform.get("node_id")
+            else:
+                transform_name = str(transform) if transform else "unknown"
+                transform_node_id = None
             transform_node = TreeNode(
-                label=f"Transform: {transform.get('name', 'unknown')}",
-                node_id=transform.get("node_id"),
+                label=f"Transform: {transform_name}",
+                node_id=transform_node_id,
                 node_type="transform",
             )
             current_parent.children.append(transform_node)
             current_parent = transform_node
 
         # Add sinks as children of last transform (or source if no transforms)
-        sinks = self._data.get("sinks", [])
+        sinks = self._data.get("sinks") or []
         sink_nodes: dict[str, TreeNode] = {}
 
         for sink in sinks:
+            if isinstance(sink, dict):
+                sink_name = sink.get("name", "unknown")
+                raw_sink_node_id = sink.get("node_id")
+                # Only use node_id if it's a hashable string
+                sink_node_id = (
+                    raw_sink_node_id if isinstance(raw_sink_node_id, str) else None
+                )
+            else:
+                sink_name = str(sink) if sink else "unknown"
+                sink_node_id = None
             sink_node = TreeNode(
-                label=f"Sink: {sink.get('name', 'unknown')}",
-                node_id=sink.get("node_id"),
+                label=f"Sink: {sink_name}",
+                node_id=sink_node_id,
                 node_type="sink",
             )
             current_parent.children.append(sink_node)
-            if sink.get("node_id"):
-                sink_nodes[sink["node_id"]] = sink_node
+            if sink_node_id:
+                sink_nodes[sink_node_id] = sink_node
 
         # Add tokens under their terminal nodes
-        tokens = self._data.get("tokens", [])
+        tokens = self._data.get("tokens") or []
         for token in tokens:
+            if isinstance(token, dict):
+                token_id = token.get("token_id", "unknown")
+                row_id = token.get("row_id", "unknown")
+                path = token.get("path") or []
+            else:
+                token_id = str(token) if token else "unknown"
+                row_id = "unknown"
+                path = []
             token_node = TreeNode(
-                label=f"Token: {token.get('token_id', 'unknown')} (row: {token.get('row_id', 'unknown')})",
-                node_id=token.get("token_id"),
+                label=f"Token: {token_id} (row: {row_id})",
+                node_id=token_id if isinstance(token_id, str) else None,
                 node_type="token",
             )
             # Find which sink this token ended at
-            path = token.get("path", [])
-            if path:
+            if path and isinstance(path, list) and len(path) > 0:
                 terminal_node_id = path[-1]
                 if terminal_node_id in sink_nodes:
                     sink_nodes[terminal_node_id].children.append(token_node)
@@ -123,14 +156,16 @@ class LineageTree:
             depth: Current depth level
             result: List to append to
         """
-        result.append({
-            "label": node.label,
-            "node_id": node.node_id,
-            "node_type": node.node_type,
-            "depth": depth,
-            "has_children": len(node.children) > 0,
-            "expanded": node.expanded,
-        })
+        result.append(
+            {
+                "label": node.label,
+                "node_id": node.node_id,
+                "node_type": node.node_type,
+                "depth": depth,
+                "has_children": len(node.children) > 0,
+                "expanded": node.expanded,
+            }
+        )
 
         if node.expanded:
             for child in node.children:

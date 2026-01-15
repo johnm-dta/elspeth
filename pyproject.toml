@@ -157,8 +157,20 @@ module = [
     "deepdiff.*",
     "textual.*",
     "opentelemetry.*",
+    "hypothesis.*",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+# Test files use hypothesis decorators that don't have type stubs
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+module = "elspeth.tui.*"
+# TUI uses textual which has incomplete type stubs
+# App[None] inheritance triggers "Class cannot subclass value of type Any"
+disallow_subclassing_any = false
 
 # === Pytest Configuration ===
 [tool.pytest.ini_options]

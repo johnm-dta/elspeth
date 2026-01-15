@@ -67,27 +67,41 @@ class NodeDetailPanel:
         lines.append("")
 
         # Error (if present)
+        # Trust boundary: error_json may be malformed or wrong type from Landscape
         error_json = self._state.get("error_json")
         if error_json:
             lines.append("Error:")
             try:
-                error = json.loads(error_json)
-                lines.append(f"  Type:    {error.get('type', 'unknown')}")
-                lines.append(f"  Message: {error.get('message', 'unknown')}")
+                if not isinstance(error_json, str):
+                    # Non-string error_json - display as-is
+                    lines.append(f"  {error_json}")
+                else:
+                    error = json.loads(error_json)
+                    if isinstance(error, dict):
+                        lines.append(f"  Type:    {error.get('type', 'unknown')}")
+                        lines.append(f"  Message: {error.get('message', 'unknown')}")
+                    else:
+                        # Parsed but not a dict (e.g., JSON string/number)
+                        lines.append(f"  {error}")
             except json.JSONDecodeError:
                 lines.append(f"  {error_json}")
             lines.append("")
 
         # Artifact (if sink)
+        # Trust boundary: artifact may be malformed or wrong type from Landscape
         artifact = self._state.get("artifact")
         if artifact:
             lines.append("Artifact:")
-            lines.append(f"  ID:      {artifact.get('artifact_id', 'N/A')}")
-            lines.append(f"  Path:    {artifact.get('path_or_uri', 'N/A')}")
-            lines.append(f"  Hash:    {artifact.get('content_hash', 'N/A')}")
-            size_bytes = artifact.get("size_bytes")
-            if size_bytes is not None:
-                lines.append(f"  Size:    {self._format_size(size_bytes)}")
+            if isinstance(artifact, dict):
+                lines.append(f"  ID:      {artifact.get('artifact_id', 'N/A')}")
+                lines.append(f"  Path:    {artifact.get('path_or_uri', 'N/A')}")
+                lines.append(f"  Hash:    {artifact.get('content_hash', 'N/A')}")
+                size_bytes = artifact.get("size_bytes")
+                if size_bytes is not None and isinstance(size_bytes, int | float):
+                    lines.append(f"  Size:    {self._format_size(int(size_bytes))}")
+            else:
+                # Non-dict artifact - display as-is
+                lines.append(f"  {artifact}")
             lines.append("")
 
         return "\n".join(lines)

@@ -2945,3 +2945,430 @@ class TestNodeMetadataFromPlugin:
         assert (
             transform_node.determinism == "nondeterministic"
         ), f"Transform determinism should be 'nondeterministic', got '{transform_node.determinism}'"
+
+
+class TestRouteValidation:
+    """Test that route destinations are validated at initialization.
+
+    MED-003: Route validation should happen BEFORE any rows are processed,
+    not during row processing. This prevents partial runs where config errors
+    are discovered after processing some rows.
+    """
+
+    def test_valid_routes_pass_validation(self) -> None:
+        """Valid route configurations should pass validation without error."""
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import GateResult, RoutingAction
+        from elspeth.plugins.schemas import PluginSchema
+
+        db = LandscapeDB.in_memory()
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "test_source"
+            output_schema = RowSchema
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+
+            def on_start(self, ctx):
+                pass
+
+            def load(self, ctx):
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class RoutingGate(BaseGate):
+            name = "routing_gate"
+            input_schema = RowSchema
+            output_schema = RowSchema
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def evaluate(self, row, ctx):
+                if row["value"] > 50:
+                    return GateResult(
+                        row=row,
+                        action=RoutingAction.route("quarantine"),
+                    )
+                return GateResult(row=row, action=RoutingAction.continue_())
+
+        class CollectSink:
+            name = "collect"
+
+            def __init__(self):
+                self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
+            def write(self, rows, ctx):
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
+
+            def close(self):
+                pass
+
+        source = ListSource([{"value": 10}, {"value": 100}])
+        gate = RoutingGate()
+        default_sink = CollectSink()
+        quarantine_sink = CollectSink()
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[gate],
+            sinks={"default": default_sink, "quarantine": quarantine_sink},
+        )
+
+        # Build graph with valid routes
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="test_source")
+        graph.add_node("gate", node_type="gate", plugin_name="routing_gate")
+        graph.add_node("sink_default", node_type="sink", plugin_name="collect")
+        graph.add_node("sink_quarantine", node_type="sink", plugin_name="collect")
+        graph.add_edge("source", "gate", label="continue", mode="move")
+        graph.add_edge("gate", "sink_default", label="continue", mode="move")
+        graph.add_edge("gate", "sink_quarantine", label="quarantine", mode="move")
+        graph._transform_id_map = {0: "gate"}
+        graph._sink_id_map = {
+            "default": "sink_default",
+            "quarantine": "sink_quarantine",
+        }
+        graph._output_sink = "default"
+        # Valid route: quarantine -> quarantine (existing sink)
+        graph._route_resolution_map = {("gate", "quarantine"): "quarantine"}
+
+        orchestrator = Orchestrator(db)
+        # Should not raise - routes are valid
+        result = orchestrator.run(config, graph=graph)
+
+        assert result.status == "completed"
+        assert len(default_sink.results) == 1  # value=10 continues
+        assert len(quarantine_sink.results) == 1  # value=100 routed
+
+    def test_invalid_route_destination_fails_at_init(self) -> None:
+        """Route to non-existent sink should fail before processing any rows."""
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import (
+            Orchestrator,
+            PipelineConfig,
+            RouteValidationError,
+        )
+        from elspeth.plugins.results import GateResult, RoutingAction
+        from elspeth.plugins.schemas import PluginSchema
+
+        db = LandscapeDB.in_memory()
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "test_source"
+            output_schema = RowSchema
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+                self.load_called = False
+
+            def on_start(self, ctx):
+                pass
+
+            def load(self, ctx):
+                self.load_called = True
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class RoutingGate(BaseGate):
+            name = "safety_gate"
+            input_schema = RowSchema
+            output_schema = RowSchema
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def evaluate(self, row, ctx):
+                if row["value"] > 50:
+                    return GateResult(
+                        row=row,
+                        action=RoutingAction.route("quarantine"),
+                    )
+                return GateResult(row=row, action=RoutingAction.continue_())
+
+        class CollectSink:
+            name = "collect"
+
+            def __init__(self):
+                self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
+            def write(self, rows, ctx):
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
+
+            def close(self):
+                pass
+
+        source = ListSource([{"value": 10}, {"value": 100}])
+        gate = RoutingGate()
+        default_sink = CollectSink()
+        # Note: NO quarantine sink provided!
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[gate],
+            sinks={"default": default_sink},  # Only default, no quarantine
+        )
+
+        # Build graph with route to non-existent sink
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="test_source")
+        graph.add_node("gate", node_type="gate", plugin_name="safety_gate")
+        graph.add_node("sink_default", node_type="sink", plugin_name="collect")
+        graph.add_edge("source", "gate", label="continue", mode="move")
+        graph.add_edge("gate", "sink_default", label="continue", mode="move")
+        graph._transform_id_map = {0: "gate"}
+        graph._sink_id_map = {"default": "sink_default"}
+        graph._output_sink = "default"
+        # Invalid route: quarantine -> quarantine (sink doesn't exist!)
+        graph._route_resolution_map = {("gate", "quarantine"): "quarantine"}
+
+        orchestrator = Orchestrator(db)
+
+        # Should fail at initialization with clear error message
+        with pytest.raises(RouteValidationError) as exc_info:
+            orchestrator.run(config, graph=graph)
+
+        # Verify error message contains helpful information
+        error_msg = str(exc_info.value)
+        assert "safety_gate" in error_msg  # Gate name
+        assert "quarantine" in error_msg  # Invalid destination
+        assert "default" in error_msg  # Available sinks
+
+        # Verify no rows were processed
+        assert (
+            not source.load_called
+        ), "Source should not be loaded on validation failure"
+        assert len(default_sink.results) == 0, "No rows should be written on failure"
+
+    def test_error_message_includes_route_label(self) -> None:
+        """Error message should include the route label for debugging."""
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import (
+            Orchestrator,
+            PipelineConfig,
+            RouteValidationError,
+        )
+        from elspeth.plugins.results import GateResult, RoutingAction
+        from elspeth.plugins.schemas import PluginSchema
+
+        db = LandscapeDB.in_memory()
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "test_source"
+            output_schema = RowSchema
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+
+            def on_start(self, ctx):
+                pass
+
+            def load(self, ctx):
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class RoutingGate(BaseGate):
+            name = "threshold_gate"
+            input_schema = RowSchema
+            output_schema = RowSchema
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def evaluate(self, row, ctx):
+                return GateResult(row=row, action=RoutingAction.route("above"))
+
+        class CollectSink:
+            name = "collect"
+
+            def __init__(self):
+                self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
+            def write(self, rows, ctx):
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
+
+            def close(self):
+                pass
+
+        source = ListSource([{"value": 10}])
+        gate = RoutingGate()
+        default_sink = CollectSink()
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[gate],
+            sinks={"default": default_sink, "errors": CollectSink()},
+        )
+
+        # Build graph with route "above" -> "high_scores" (sink doesn't exist)
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="test_source")
+        graph.add_node("gate", node_type="gate", plugin_name="threshold_gate")
+        graph.add_node("sink_default", node_type="sink", plugin_name="collect")
+        graph.add_node("sink_errors", node_type="sink", plugin_name="collect")
+        graph.add_edge("source", "gate", label="continue", mode="move")
+        graph.add_edge("gate", "sink_default", label="continue", mode="move")
+        graph._transform_id_map = {0: "gate"}
+        graph._sink_id_map = {"default": "sink_default", "errors": "sink_errors"}
+        graph._output_sink = "default"
+        # Route label "above" resolves to sink "high_scores" which doesn't exist
+        graph._route_resolution_map = {("gate", "above"): "high_scores"}
+
+        orchestrator = Orchestrator(db)
+
+        with pytest.raises(RouteValidationError) as exc_info:
+            orchestrator.run(config, graph=graph)
+
+        error_msg = str(exc_info.value)
+        # Should include route label
+        assert "above" in error_msg
+        # Should include destination
+        assert "high_scores" in error_msg
+        # Should include available sinks
+        assert "default" in error_msg
+        assert "errors" in error_msg
+        # Should include gate name
+        assert "threshold_gate" in error_msg
+
+    def test_continue_routes_are_not_validated_as_sinks(self) -> None:
+        """Routes that resolve to 'continue' should not be validated as sinks."""
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import GateResult, RoutingAction
+        from elspeth.plugins.schemas import PluginSchema
+
+        db = LandscapeDB.in_memory()
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        class ListSource:
+            name = "test_source"
+            output_schema = RowSchema
+
+            def __init__(self, data: list[dict]) -> None:
+                self._data = data
+
+            def on_start(self, ctx):
+                pass
+
+            def load(self, ctx):
+                yield from self._data
+
+            def close(self):
+                pass
+
+        class RoutingGate(BaseGate):
+            name = "filter_gate"
+            input_schema = RowSchema
+            output_schema = RowSchema
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def evaluate(self, row, ctx):
+                # Route label "pass" resolves to "continue" in config
+                return GateResult(row=row, action=RoutingAction.route("pass"))
+
+        class CollectSink:
+            name = "collect"
+
+            def __init__(self):
+                self.results = []
+
+            def on_start(self, ctx):
+                pass
+
+            def on_complete(self, ctx):
+                pass
+
+            def write(self, rows, ctx):
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
+
+            def close(self):
+                pass
+
+        source = ListSource([{"value": 10}])
+        gate = RoutingGate()
+        default_sink = CollectSink()
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[gate],
+            sinks={"default": default_sink},
+        )
+
+        # Build graph where "pass" route resolves to "continue" (not a sink)
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="test_source")
+        graph.add_node("gate", node_type="gate", plugin_name="filter_gate")
+        graph.add_node("sink_default", node_type="sink", plugin_name="collect")
+        graph.add_edge("source", "gate", label="continue", mode="move")
+        graph.add_edge("gate", "sink_default", label="continue", mode="move")
+        graph._transform_id_map = {0: "gate"}
+        graph._sink_id_map = {"default": "sink_default"}
+        graph._output_sink = "default"
+        # Route "pass" resolves to "continue" - should NOT be validated as a sink
+        graph._route_resolution_map = {("gate", "pass"): "continue"}
+
+        orchestrator = Orchestrator(db)
+        # Should not raise - "continue" is a valid routing target
+        result = orchestrator.run(config, graph=graph)
+
+        assert result.status == "completed"
+        assert result.rows_processed == 1

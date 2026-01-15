@@ -60,6 +60,17 @@ class RunResult:
     rows_routed: int
 
 
+class RouteValidationError(Exception):
+    """Raised when route configuration is invalid.
+
+    This error is raised at pipeline initialization, before any rows are
+    processed. It indicates a configuration problem that would cause
+    failures during processing.
+    """
+
+    pass
+
+
 class Orchestrator:
     """Orchestrates full pipeline runs.
 
@@ -168,6 +179,50 @@ class Orchestrator:
                     "Transform cleanup failed",
                     transform=getattr(transform, "name", str(transform)),
                     error=str(e),
+                )
+
+    def _validate_route_destinations(
+        self,
+        route_resolution_map: dict[tuple[str, str], str],
+        available_sinks: set[str],
+        transform_id_map: dict[int, str],
+        transforms: list[TransformLike],
+    ) -> None:
+        """Validate all route destinations reference existing sinks.
+
+        Called at pipeline initialization, BEFORE any rows are processed.
+        This catches config errors early instead of failing mid-run.
+
+        Args:
+            route_resolution_map: Maps (gate_node_id, route_label) -> destination
+            available_sinks: Set of sink names from PipelineConfig
+            transform_id_map: Maps transform sequence -> node_id
+            transforms: List of transform plugins
+
+        Raises:
+            RouteValidationError: If any route references a non-existent sink
+        """
+        # Build reverse lookup: node_id -> gate name
+        node_id_to_gate_name: dict[str, str] = {}
+        for seq, transform in enumerate(transforms):
+            if isinstance(transform, BaseGate):
+                node_id = transform_id_map.get(seq)
+                if node_id is not None:
+                    node_id_to_gate_name[node_id] = transform.name
+
+        # Check each route destination
+        for (gate_node_id, route_label), destination in route_resolution_map.items():
+            # "continue" means proceed to next transform, not a sink
+            if destination == "continue":
+                continue
+
+            # destination should be a sink name
+            if destination not in available_sinks:
+                gate_name = node_id_to_gate_name.get(gate_node_id, gate_node_id)
+                raise RouteValidationError(
+                    f"Gate '{gate_name}' can route to '{destination}' "
+                    f"(via route label '{route_label}') but no sink named "
+                    f"'{destination}' exists. Available sinks: {sorted(available_sinks)}"
                 )
 
     def run(
@@ -337,6 +392,15 @@ class Orchestrator:
         # Get route resolution map - maps (gate_node, label) -> "continue" | sink_name
         route_resolution_map = graph.get_route_resolution_map()
 
+        # Validate all route destinations BEFORE processing any rows
+        # This catches config errors early instead of after partial processing
+        self._validate_route_destinations(
+            route_resolution_map=route_resolution_map,
+            available_sinks=set(config.sinks.keys()),
+            transform_id_map=transform_id_map,
+            transforms=config.transforms,
+        )
+
         # Get explicit node ID mappings from graph
         source_id = graph.get_source()
         if source_id is None:
@@ -436,26 +500,22 @@ class Orchestrator:
                         )
                     elif result.outcome == RowOutcome.ROUTED:
                         rows_routed += 1
-                        if result.sink_name and result.sink_name in config.sinks:
-                            pending_tokens[result.sink_name].append(result.token)
-                            # Checkpoint after successful routing
-                            self._maybe_checkpoint(
-                                run_id=run_id,
-                                token_id=result.token.token_id,
-                                node_id=last_node_id,
-                            )
-                        elif result.sink_name:
-                            # Gate routed to non-existent sink - configuration error
-                            raise ValueError(
-                                f"Gate routed to unknown sink '{result.sink_name}'. "
-                                f"Available sinks: {list(config.sinks.keys())}"
-                            )
-                        else:
-                            # sink_name is None but outcome is ROUTED - should not happen
+                        # sink_name is guaranteed valid by _validate_route_destinations()
+                        # which runs before any rows are processed
+                        if result.sink_name is None:
+                            # This indicates a bug in GateExecutor - ROUTED outcome
+                            # should always have a sink_name set
                             raise RuntimeError(
                                 f"Row outcome is ROUTED but sink_name is None "
                                 f"for token {result.token.token_id}"
                             )
+                        pending_tokens[result.sink_name].append(result.token)
+                        # Checkpoint after successful routing
+                        self._maybe_checkpoint(
+                            run_id=run_id,
+                            token_id=result.token.token_id,
+                            node_id=last_node_id,
+                        )
                     elif result.outcome == RowOutcome.FAILED:
                         rows_failed += 1
 

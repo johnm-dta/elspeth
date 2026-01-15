@@ -32,7 +32,12 @@ from elspeth.engine.executors import (
     SinkExecutor,
     TransformExecutor,
 )
-from elspeth.engine.orchestrator import Orchestrator, PipelineConfig, RunResult
+from elspeth.engine.orchestrator import (
+    Orchestrator,
+    PipelineConfig,
+    RouteValidationError,
+    RunResult,
+)
 from elspeth.engine.processor import RowProcessor, RowResult
 from elspeth.engine.retry import MaxRetriesExceeded, RetryConfig, RetryManager
 from elspeth.engine.spans import SpanFactory
@@ -47,6 +52,7 @@ __all__ = [
     "PipelineConfig",
     "RetryConfig",
     "RetryManager",
+    "RouteValidationError",
     "RowProcessor",
     "RowResult",
     "RunResult",

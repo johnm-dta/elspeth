@@ -545,11 +545,27 @@ class AggregationExecutor:
                 self._member_counts[aggregation._batch_id] = ordinal + 1
                 result.batch_id = aggregation._batch_id
 
+                # Output for accepted rows: the input row + batch membership metadata
+                # This records exactly what was accepted and where it went
+                accept_output = {
+                    "row": token.row_data,
+                    "batch_id": aggregation._batch_id,
+                    "ordinal": ordinal,
+                }
+            else:
+                # Output for rejected rows: the input row + rejection indicator
+                # This records what was rejected and why (no batch_id)
+                accept_output = {
+                    "row": token.row_data,
+                    "accepted": False,
+                }
+
             # Complete node state - always "completed" for successful accept
             # Terminal state CONSUMED_IN_BATCH is derived from batch_members
             self._recorder.complete_node_state(
                 state_id=state.state_id,
                 status="completed" if result.accepted else "rejected",
+                output_data=accept_output,
                 duration_ms=duration_ms,
             )
             return result
@@ -759,10 +775,17 @@ class SinkExecutor:
                 raise
 
         # Complete all token states - status="completed" means they reached terminal
-        for _, state in states:
+        # Output is the row data that was written to the sink, plus artifact reference
+        for token, state in states:
+            sink_output = {
+                "row": token.row_data,
+                "artifact_path": artifact_info.path_or_uri,
+                "content_hash": artifact_info.content_hash,
+            }
             self._recorder.complete_node_state(
                 state_id=state.state_id,
                 status="completed",
+                output_data=sink_output,
                 duration_ms=duration_ms,
             )
 

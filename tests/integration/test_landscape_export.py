@@ -257,7 +257,10 @@ class TestSignedExportDeterminism:
                 input_data={"x": i},
             )
             recorder.complete_node_state(
-                state.state_id, status="completed", duration_ms=5.0
+                state.state_id,
+                status="completed",
+                output_data={"result": i * 20},
+                duration_ms=5.0,
             )
 
         recorder.complete_run(run.run_id, status="completed")

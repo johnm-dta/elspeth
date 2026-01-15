@@ -5,6 +5,8 @@ from typing import Any
 
 import structlog
 
+logger = structlog.get_logger(__name__)
+
 
 class NodeDetailPanel:
     """Panel displaying detailed information about a selected node.
@@ -88,7 +90,6 @@ class NodeDetailPanel:
             except json.JSONDecodeError as e:
                 # Trust boundary: error_json from Landscape DB may be malformed.
                 # Log for debugging but display raw - don't crash the TUI.
-                logger = structlog.get_logger(__name__)
                 logger.warning(
                     "Failed to parse error_json from Landscape",
                     state_id=self._state.get("state_id"),

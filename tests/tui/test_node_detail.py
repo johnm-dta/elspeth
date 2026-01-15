@@ -188,7 +188,7 @@ class TestNodeDetailPanel:
         }
 
         mock_logger = MagicMock()
-        with patch("structlog.get_logger", return_value=mock_logger):
+        with patch("elspeth.tui.widgets.node_detail.logger", mock_logger):
             panel = NodeDetailPanel(node_state)
             content = panel.render_content()
 

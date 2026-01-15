@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape import LandscapeRecorder
-from elspeth.core.landscape.models import Artifact, NodeState
+from elspeth.core.landscape.models import Artifact, NodeState, RoutingSpec
 from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenInfo
@@ -418,7 +418,7 @@ class GateExecutor:
                 edge_id = self._edge_map.get((node_id, dest))
                 if edge_id is None:
                     raise MissingEdgeError(node_id=node_id, label=dest)
-                routes.append({"edge_id": edge_id, "mode": action.mode})
+                routes.append(RoutingSpec(edge_id=edge_id, mode=action.mode.value))
 
             self._recorder.record_routing_events(
                 state_id=state_id,

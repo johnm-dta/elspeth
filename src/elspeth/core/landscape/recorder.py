@@ -26,6 +26,7 @@ from elspeth.core.landscape.models import (
     Node,
     NodeState,
     RoutingEvent,
+    RoutingSpec,
     Row,
     RowLineage,
     Run,
@@ -938,7 +939,7 @@ class LandscapeRecorder:
     def record_routing_events(
         self,
         state_id: str,
-        routes: list[dict[str, str]],
+        routes: list[RoutingSpec],
         reason: dict[str, Any] | None = None,
     ) -> list[RoutingEvent]:
         """Record multiple routing events (fork/multi-destination).
@@ -947,7 +948,7 @@ class LandscapeRecorder:
 
         Args:
             state_id: Node state that made the routing decision
-            routes: List of {"edge_id": str, "mode": str}
+            routes: List of RoutingSpec objects specifying edge_id and mode
             reason: Shared reason for all routes
 
         Returns:
@@ -964,10 +965,10 @@ class LandscapeRecorder:
                 event = RoutingEvent(
                     event_id=event_id,
                     state_id=state_id,
-                    edge_id=route["edge_id"],
+                    edge_id=route.edge_id,
                     routing_group_id=routing_group_id,
                     ordinal=ordinal,
-                    mode=route["mode"],
+                    mode=route.mode,
                     reason_hash=reason_hash,
                     reason_ref=None,
                     created_at=now,

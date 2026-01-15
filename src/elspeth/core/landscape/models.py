@@ -13,6 +13,7 @@ These models define the schema for tracking:
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 
 @dataclass
@@ -63,6 +64,21 @@ class Edge:
     label: str  # "continue", route name, etc.
     default_mode: str  # "move" or "copy"
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class RoutingSpec:
+    """Specification for a routing decision.
+
+    Replaces dict[str, str] parameter in record_routing_events().
+    """
+
+    edge_id: str
+    mode: Literal["move", "copy"]
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("move", "copy"):
+            raise ValueError(f"Invalid mode: {self.mode!r}. Must be 'move' or 'copy'.")
 
 
 @dataclass

@@ -179,37 +179,37 @@ allow_hits:
   # names is intentional, not a bug-hiding pattern.
   # ============================================================
 
-  - key: "plugins/manager.py:R1:PluginManager:get_source_by_name:line=293"
+  - key: "plugins/manager.py:R1:PluginManager:get_source_by_name:line=297"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_transform_by_name:line=297"
+  - key: "plugins/manager.py:R1:PluginManager:get_transform_by_name:line=301"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_gate_by_name:line=301"
+  - key: "plugins/manager.py:R1:PluginManager:get_gate_by_name:line=305"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_aggregation_by_name:line=305"
+  - key: "plugins/manager.py:R1:PluginManager:get_aggregation_by_name:line=309"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_coalesce_by_name:line=309"
+  - key: "plugins/manager.py:R1:PluginManager:get_coalesce_by_name:line=313"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_sink_by_name:line=313"
+  - key: "plugins/manager.py:R1:PluginManager:get_sink_by_name:line=317"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
@@ -401,37 +401,37 @@ allow_hits:
     expires: null  # Permanent - intentional design
 
   # PluginManager._refresh_caches - uses getattr for name fallback to __name__
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=197"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=201"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=207"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=211"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=217"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=221"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=227"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=231"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=237"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=241"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=247"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=251"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"

@@ -158,6 +158,8 @@ class PluginManager:
 
         Call this once at startup to make built-in plugins discoverable.
         """
+        from elspeth.plugins.aggregations.hookimpl import builtin_aggregations
+        from elspeth.plugins.coalesces.hookimpl import builtin_coalesces
         from elspeth.plugins.gates.hookimpl import builtin_gates
         from elspeth.plugins.sinks.hookimpl import builtin_sinks
         from elspeth.plugins.sources.hookimpl import builtin_sources
@@ -166,6 +168,8 @@ class PluginManager:
         self.register(builtin_sources)
         self.register(builtin_transforms)
         self.register(builtin_gates)
+        self.register(builtin_aggregations)
+        self.register(builtin_coalesces)
         self.register(builtin_sinks)
 
     def register(self, plugin: Any) -> None:

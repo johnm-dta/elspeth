@@ -82,6 +82,28 @@ class TestBuiltinPluginDiscovery:
         assert manager.get_sink_by_name("json") is not None
         assert manager.get_sink_by_name("database") is not None
 
+    def test_builtin_aggregations_registered(self) -> None:
+        """Aggregation hookimpl is registered (returns empty list)."""
+        manager = PluginManager()
+        manager.register_builtin_plugins()
+
+        # Should not raise - hook is registered
+        aggregations = manager.get_aggregations()
+        assert isinstance(aggregations, list)
+        # Currently empty, but hook is active
+        assert aggregations == []
+
+    def test_builtin_coalesces_registered(self) -> None:
+        """Coalesce hookimpl is registered (returns empty list)."""
+        manager = PluginManager()
+        manager.register_builtin_plugins()
+
+        # Should not raise - hook is registered
+        coalesces = manager.get_coalesces()
+        assert isinstance(coalesces, list)
+        # Currently empty, but hook is active
+        assert coalesces == []
+
     def test_register_builtin_plugins_idempotent(self) -> None:
         """Calling register_builtin_plugins twice raises duplicate error."""
         manager = PluginManager()

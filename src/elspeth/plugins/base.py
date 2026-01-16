@@ -41,6 +41,7 @@ class BaseTransform(ABC):
     name: str
     input_schema: type[PluginSchema]
     output_schema: type[PluginSchema]
+    node_id: str | None = None  # Set by orchestrator after registration
 
     # Metadata for Phase 3 audit/reproducibility
     determinism: Determinism = Determinism.DETERMINISTIC
@@ -112,6 +113,7 @@ class BaseGate(ABC):
     name: str
     input_schema: type[PluginSchema]
     output_schema: type[PluginSchema]
+    node_id: str | None = None  # Set by orchestrator after registration
 
     # Metadata for Phase 3 audit/reproducibility
     determinism: Determinism = Determinism.DETERMINISTIC
@@ -186,6 +188,7 @@ class BaseAggregation(ABC):
     name: str
     input_schema: type[PluginSchema]
     output_schema: type[PluginSchema]
+    node_id: str | None = None  # Set by orchestrator after registration
 
     # Metadata for Phase 3 audit/reproducibility
     determinism: Determinism = Determinism.DETERMINISTIC
@@ -256,6 +259,7 @@ class BaseSink(ABC):
     name: str
     input_schema: type[PluginSchema]
     idempotent: bool = False
+    node_id: str | None = None  # Set by orchestrator after registration
 
     # Metadata for Phase 3 audit/reproducibility
     determinism: Determinism = Determinism.DETERMINISTIC
@@ -317,6 +321,7 @@ class BaseSource(ABC):
 
     name: str
     output_schema: type[PluginSchema]
+    node_id: str | None = None  # Set by orchestrator after registration
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""

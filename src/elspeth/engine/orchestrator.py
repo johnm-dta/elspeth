@@ -80,15 +80,9 @@ class Orchestrator:
     5. Write to sinks
     6. Complete run
 
-    NOTE on node_id: Plugin protocols don't define node_id as an attribute.
     The Orchestrator sets node_id on each plugin instance AFTER registering
-    it with Landscape:
-
-        node = recorder.register_node(...)
-        transform.node_id = node.node_id  # Set by Orchestrator
-
-    This allows executors to access node_id without requiring plugins
-    to know their node_id at construction time.
+    it with Landscape. This is part of the plugin protocol contract - all
+    plugins define node_id: str | None and the orchestrator populates it.
     """
 
     def __init__(
@@ -409,9 +403,8 @@ class Orchestrator:
         output_sink_name = graph.get_output_sink()
 
         # Set node_id on source plugin
-        # NOTE: node_id is set dynamically by Orchestrator, not defined in protocols
-        # See class docstring for rationale
-        config.source.node_id = source_id  # type: ignore[attr-defined]
+        # node_id is now part of the plugin protocol contract
+        config.source.node_id = source_id
 
         # Set node_id on transforms using graph's transform_id_map
         for seq, transform in enumerate(config.transforms):
@@ -420,7 +413,7 @@ class Orchestrator:
                     f"Transform at sequence {seq} not found in graph. "
                     f"Graph has mappings for sequences: {list(transform_id_map.keys())}"
                 )
-            transform.node_id = transform_id_map[seq]  # type: ignore[union-attr]
+            transform.node_id = transform_id_map[seq]
 
         # Set node_id on sinks using explicit mapping
         for sink_name, sink in config.sinks.items():
@@ -429,7 +422,7 @@ class Orchestrator:
                     f"Sink '{sink_name}' not found in graph. "
                     f"Available sinks: {list(sink_id_map.keys())}"
                 )
-            sink.node_id = sink_id_map[sink_name]  # type: ignore[attr-defined]
+            sink.node_id = sink_id_map[sink_name]
 
         # Create context
         # Note: landscape field uses Any type since PluginContext.LandscapeRecorder
@@ -482,11 +475,16 @@ class Orchestrator:
 
                     # Determine the last node that processed this row
                     # (used for checkpoint to know where to resume from)
+                    # node_id is guaranteed set - we assigned it above (lines 422)
+                    # source_id is guaranteed set - validated at lines 404-406
                     last_node_id = (
-                        config.transforms[-1].node_id  # type: ignore[union-attr]
+                        config.transforms[-1].node_id
                         if config.transforms
                         else source_id
                     )
+                    assert (
+                        last_node_id is not None
+                    )  # Set by orchestrator before processing
 
                     if result.outcome == RowOutcome.COMPLETED:
                         rows_succeeded += 1

@@ -51,6 +51,7 @@ class SourceProtocol(Protocol):
 
     name: str
     output_schema: type["PluginSchema"]
+    node_id: str | None  # Set by orchestrator after registration
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
@@ -111,6 +112,7 @@ class TransformProtocol(Protocol):
     name: str
     input_schema: type["PluginSchema"]
     output_schema: type["PluginSchema"]
+    node_id: str | None  # Set by orchestrator after registration
 
     # Metadata for Phase 3 audit/reproducibility
     determinism: Determinism
@@ -192,6 +194,7 @@ class GateProtocol(Protocol):
     name: str
     input_schema: type["PluginSchema"]
     output_schema: type["PluginSchema"]
+    node_id: str | None  # Set by orchestrator after registration
 
     # Metadata for Phase 3 audit/reproducibility
     determinism: Determinism
@@ -281,6 +284,7 @@ class AggregationProtocol(Protocol):
     name: str
     input_schema: type["PluginSchema"]
     output_schema: type["PluginSchema"]
+    node_id: str | None  # Set by orchestrator after registration
 
     # Metadata for Phase 3 audit/reproducibility
     determinism: Determinism
@@ -395,6 +399,7 @@ class CoalesceProtocol(Protocol):
     quorum_threshold: int | None  # Required if policy == QUORUM
     expected_branches: list[str]
     output_schema: type["PluginSchema"]
+    node_id: str | None  # Set by orchestrator after registration
 
     # Metadata for Phase 3 audit/reproducibility
     determinism: Determinism
@@ -462,6 +467,7 @@ class SinkProtocol(Protocol):
     name: str
     input_schema: type["PluginSchema"]
     idempotent: bool  # Can this sink handle retries safely?
+    node_id: str | None  # Set by orchestrator after registration
 
     # Metadata for Phase 3 audit/reproducibility
     determinism: Determinism

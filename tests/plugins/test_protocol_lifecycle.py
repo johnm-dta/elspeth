@@ -28,6 +28,7 @@ class TestTransformProtocolLifecycle:
             name = "test"
             input_schema = InputSchema
             output_schema = OutputSchema
+            node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
@@ -75,6 +76,7 @@ class TestGateProtocolLifecycle:
             name = "test_gate"
             input_schema = RowSchema
             output_schema = RowSchema
+            node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 

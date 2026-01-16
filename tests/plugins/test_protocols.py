@@ -26,6 +26,7 @@ class TestSourceProtocol:
 
             name = "my_source"
             output_schema = OutputSchema
+            node_id: str | None = None  # Set by orchestrator
 
             def __init__(self, config: dict) -> None:
                 self.config = config
@@ -86,6 +87,7 @@ class TestTransformProtocol:
             name = "double"
             input_schema = InputSchema
             output_schema = OutputSchema
+            node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
@@ -143,6 +145,7 @@ class TestGateProtocol:
             name = "threshold"
             input_schema = RowSchema
             output_schema = RowSchema
+            node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
@@ -211,6 +214,7 @@ class TestAggregationProtocol:
             name = "sum"
             input_schema = InputSchema
             output_schema = OutputSchema
+            node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
@@ -303,6 +307,7 @@ class TestCoalesceProtocol:
                 "branch_c",
             ]
             output_schema = OutputSchema
+            node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
@@ -349,6 +354,7 @@ class TestCoalesceProtocol:
             quorum_threshold = None
             expected_branches: ClassVar[list[str]] = ["branch_a", "branch_b"]
             output_schema = OutputSchema
+            node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
@@ -401,6 +407,7 @@ class TestSinkProtocol:
             name = "memory"
             input_schema = InputSchema
             idempotent = True
+            node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
             rows: ClassVar[list[dict]] = []

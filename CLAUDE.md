@@ -29,6 +29,56 @@ ELSPETH is built for **high-stakes accountability**. The audit trail must withst
 
 This is more storage than minimal, but it means `explain()` queries are simple and complete.
 
+## Data Manifesto: Our Data vs Their Data
+
+ELSPETH has two fundamentally different data zones with opposite trust models:
+
+### Our Data (Audit Database / Landscape)
+
+**Must be 100% pristine at all times.** We wrote it, we own it, we trust it completely.
+
+- Bad data in the audit trail = **crash immediately**
+- No coercion, no defaults, no silent recovery
+- If we read garbage from our own database, something catastrophic happened (bug in our code, database corruption, tampering)
+- Every field must be exactly what we expect - wrong type = crash, NULL where unexpected = crash, invalid enum value = crash
+
+**Why:** The audit trail is the legal record. Silently coercing bad data is evidence tampering. If an auditor asks "why did row 42 get routed here?" and we give a confident wrong answer because we coerced garbage into a valid-looking value, we've committed fraud.
+
+### Their Data (Sources, Sinks, Transform Outputs)
+
+**Can be literal trash.** We don't control what users feed us or what transforms produce.
+
+- Malformed CSV rows, NULLs everywhere, wrong types, unexpected JSON structures
+- **Validate at the boundary, record what we got, continue processing**
+- Quarantine bad rows, don't crash the pipeline
+- The audit trail records "row 42 was quarantined because field X was NULL" - that's a valid audit outcome
+
+**Why:** User data is a trust boundary. A CSV with garbage in row 500 shouldn't crash the entire pipeline - we record the problem, quarantine the row, and keep processing the other 10,000 rows.
+
+### The Boundary
+
+```text
+THEIR DATA (zero trust)              OUR DATA (full trust)
+
+┌─────────────────────┐              ┌─────────────────────────────┐
+│ Source Plugin       │              │                             │
+│ - Validate          │──────────────│  Audit Database (Landscape) │
+│ - Quarantine bad    │   writes     │  - Strict types             │
+│ - Record issues     │   pristine   │  - Crash on anomaly         │
+└─────────────────────┘   data       │  - No coercion ever         │
+                                     │                             │
+┌─────────────────────┐              │                             │
+│ Transform Output    │              │                             │
+│ - Could be garbage  │──────────────│  If we wrote garbage here,  │
+│ - We record as-is   │   record     │  that's OUR bug to fix      │
+│ - Hash the content  │   what we    │                             │
+└─────────────────────┘   observed   └─────────────────────────────┘
+```
+
+**Rule of thumb:**
+- Reading from Landscape tables? Crash on any anomaly.
+- Reading from Source/Transform output? Validate, record, continue.
+
 ## Core Architecture
 
 ### The SDA Model

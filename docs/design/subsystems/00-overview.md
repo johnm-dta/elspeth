@@ -107,7 +107,7 @@ CREATE TABLE nodes (
     plugin_name TEXT NOT NULL,
     node_type TEXT NOT NULL,               -- source, transform, gate, aggregation, coalesce, sink
     plugin_version TEXT NOT NULL,
-    determinism TEXT NOT NULL DEFAULT 'unknown',  -- pure, io_read, io_write, external_call, non_deterministic, unknown
+    determinism TEXT NOT NULL,  -- deterministic, seeded, io_read, io_write, external_call, non_deterministic
     config_hash TEXT NOT NULL,
     config_json TEXT NOT NULL,
     schema_hash TEXT,                      -- Input/output schema fingerprint

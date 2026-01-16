@@ -1,5 +1,7 @@
 """Tests for lineage tree widget."""
 
+from elspeth.tui.types import LineageData, NodeInfo, SourceInfo, TokenDisplayInfo
+
 
 class TestLineageTreeWidget:
     """Tests for LineageTree widget."""
@@ -15,25 +17,22 @@ class TestLineageTreeWidget:
         from elspeth.tui.widgets.lineage_tree import LineageTree
 
         # Sample lineage structure
-        lineage_data = {
+        lineage_data: LineageData = {
             "run_id": "run-001",
-            "source": {
-                "name": "csv_source",
-                "node_id": "node-001",
-            },
+            "source": SourceInfo(name="csv_source", node_id="node-001"),
             "transforms": [
-                {"name": "passthrough", "node_id": "node-002"},
-                {"name": "filter", "node_id": "node-003"},
+                NodeInfo(name="passthrough", node_id="node-002"),
+                NodeInfo(name="filter", node_id="node-003"),
             ],
             "sinks": [
-                {"name": "output", "node_id": "node-004"},
+                NodeInfo(name="output", node_id="node-004"),
             ],
             "tokens": [
-                {
-                    "token_id": "token-001",
-                    "row_id": "row-001",
-                    "path": ["node-001", "node-002", "node-003", "node-004"],
-                },
+                TokenDisplayInfo(
+                    token_id="token-001",
+                    row_id="row-001",
+                    path=["node-001", "node-002", "node-003", "node-004"],
+                ),
             ],
         }
 
@@ -44,17 +43,17 @@ class TestLineageTreeWidget:
         """Widget builds correct tree structure from lineage."""
         from elspeth.tui.widgets.lineage_tree import LineageTree
 
-        lineage_data = {
+        lineage_data: LineageData = {
             "run_id": "run-001",
-            "source": {"name": "csv_source", "node_id": "node-001"},
-            "transforms": [{"name": "filter", "node_id": "node-002"}],
-            "sinks": [{"name": "output", "node_id": "node-003"}],
+            "source": SourceInfo(name="csv_source", node_id="node-001"),
+            "transforms": [NodeInfo(name="filter", node_id="node-002")],
+            "sinks": [NodeInfo(name="output", node_id="node-003")],
             "tokens": [
-                {
-                    "token_id": "token-001",
-                    "row_id": "row-001",
-                    "path": ["node-001", "node-002", "node-003"],
-                },
+                TokenDisplayInfo(
+                    token_id="token-001",
+                    row_id="row-001",
+                    path=["node-001", "node-002", "node-003"],
+                ),
             ],
         }
 
@@ -71,11 +70,11 @@ class TestLineageTreeWidget:
         """Widget handles pipeline with no transforms."""
         from elspeth.tui.widgets.lineage_tree import LineageTree
 
-        lineage_data = {
+        lineage_data: LineageData = {
             "run_id": "run-001",
-            "source": {"name": "csv_source", "node_id": "node-001"},
+            "source": SourceInfo(name="csv_source", node_id="node-001"),
             "transforms": [],
-            "sinks": [{"name": "output", "node_id": "node-002"}],
+            "sinks": [NodeInfo(name="output", node_id="node-002")],
             "tokens": [],
         }
 
@@ -86,25 +85,25 @@ class TestLineageTreeWidget:
         """Widget handles tokens that forked to multiple paths."""
         from elspeth.tui.widgets.lineage_tree import LineageTree
 
-        lineage_data = {
+        lineage_data: LineageData = {
             "run_id": "run-001",
-            "source": {"name": "csv_source", "node_id": "node-001"},
-            "transforms": [{"name": "gate", "node_id": "node-002"}],
+            "source": SourceInfo(name="csv_source", node_id="node-001"),
+            "transforms": [NodeInfo(name="gate", node_id="node-002")],
             "sinks": [
-                {"name": "high", "node_id": "node-003"},
-                {"name": "low", "node_id": "node-004"},
+                NodeInfo(name="high", node_id="node-003"),
+                NodeInfo(name="low", node_id="node-004"),
             ],
             "tokens": [
-                {
-                    "token_id": "token-001",
-                    "row_id": "row-001",
-                    "path": ["node-001", "node-002", "node-003"],
-                },
-                {
-                    "token_id": "token-002",
-                    "row_id": "row-002",
-                    "path": ["node-001", "node-002", "node-004"],
-                },
+                TokenDisplayInfo(
+                    token_id="token-001",
+                    row_id="row-001",
+                    path=["node-001", "node-002", "node-003"],
+                ),
+                TokenDisplayInfo(
+                    token_id="token-002",
+                    row_id="row-002",
+                    path=["node-001", "node-002", "node-004"],
+                ),
             ],
         }
 
@@ -120,11 +119,11 @@ class TestLineageTreeWidget:
         """Can toggle node expansion state."""
         from elspeth.tui.widgets.lineage_tree import LineageTree
 
-        lineage_data = {
+        lineage_data: LineageData = {
             "run_id": "run-001",
-            "source": {"name": "csv_source", "node_id": "node-001"},
+            "source": SourceInfo(name="csv_source", node_id="node-001"),
             "transforms": [],
-            "sinks": [{"name": "output", "node_id": "node-002"}],
+            "sinks": [NodeInfo(name="output", node_id="node-002")],
             "tokens": [],
         }
 
@@ -142,11 +141,11 @@ class TestLineageTreeWidget:
         """Can find nodes by their ID."""
         from elspeth.tui.widgets.lineage_tree import LineageTree
 
-        lineage_data = {
+        lineage_data: LineageData = {
             "run_id": "run-001",
-            "source": {"name": "csv_source", "node_id": "node-001"},
-            "transforms": [{"name": "filter", "node_id": "node-002"}],
-            "sinks": [{"name": "output", "node_id": "node-003"}],
+            "source": SourceInfo(name="csv_source", node_id="node-001"),
+            "transforms": [NodeInfo(name="filter", node_id="node-002")],
+            "sinks": [NodeInfo(name="output", node_id="node-003")],
             "tokens": [],
         }
 

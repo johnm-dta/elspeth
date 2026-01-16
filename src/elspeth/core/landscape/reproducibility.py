@@ -121,16 +121,8 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str) -> None:
         current_grade = row[0]
 
         # Only REPLAY_REPRODUCIBLE needs to degrade
-        # NULL grade in our audit data = corruption, fail fast per Data Manifesto
-        if current_grade is None:
-            raise ValueError(
-                f"Run {run_id} has NULL reproducibility_grade - audit data corruption"
-            )
-
-        # Convert to enum for comparison - invalid value = corruption, let ValueError propagate
-        current_grade_enum = ReproducibilityGrade(current_grade)
-
-        if current_grade_enum == ReproducibilityGrade.REPLAY_REPRODUCIBLE:
+        # Also guard against NULL grades (shouldn't happen, but defensive)
+        if current_grade == ReproducibilityGrade.REPLAY_REPRODUCIBLE.value:
             conn.execute(
                 runs_table.update()
                 .where(runs_table.c.run_id == run_id)

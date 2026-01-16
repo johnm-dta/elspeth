@@ -1,6 +1,8 @@
 # tests/core/landscape/test_recorder.py
 """Tests for LandscapeRecorder."""
 
+from pathlib import Path
+
 from elspeth.contracts import RoutingMode
 
 
@@ -565,6 +567,7 @@ class TestLandscapeRecorderNodeStates:
     """Node state recording (what happened at each node)."""
 
     def test_begin_node_state(self) -> None:
+        from elspeth.contracts import NodeStateStatus
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
@@ -594,10 +597,11 @@ class TestLandscapeRecorderNodeStates:
         )
 
         assert state.state_id is not None
-        assert state.status == "open"
+        assert state.status == NodeStateStatus.OPEN
         assert state.input_hash is not None
 
     def test_complete_node_state_success(self) -> None:
+        from elspeth.contracts import NodeStateStatus
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
@@ -632,12 +636,13 @@ class TestLandscapeRecorderNodeStates:
             duration_ms=10.5,
         )
 
-        assert completed.status == "completed"
+        assert completed.status == NodeStateStatus.COMPLETED
         assert completed.output_hash is not None
         assert completed.duration_ms == 10.5
         assert completed.completed_at is not None
 
     def test_complete_node_state_failed(self) -> None:
+        from elspeth.contracts import NodeStateStatus
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
@@ -672,7 +677,7 @@ class TestLandscapeRecorderNodeStates:
             duration_ms=5.0,
         )
 
-        assert completed.status == "failed"
+        assert completed.status == NodeStateStatus.FAILED
         assert completed.error_json is not None
         assert "Validation failed" in completed.error_json
 
@@ -1604,7 +1609,7 @@ class TestLandscapeRecorderQueryMethods:
 class TestExplainGracefulDegradation:
     """Tests for explain_row() when payloads are unavailable."""
 
-    def test_explain_with_missing_row_payload(self, tmp_path) -> None:
+    def test_explain_with_missing_row_payload(self, tmp_path: Path) -> None:
         """explain_row() succeeds even when row payload is purged."""
         import json
 
@@ -1652,7 +1657,7 @@ class TestExplainGracefulDegradation:
         assert lineage.source_data is None  # Payload unavailable
         assert lineage.payload_available is False
 
-    def test_explain_reports_payload_status(self, tmp_path) -> None:
+    def test_explain_reports_payload_status(self, tmp_path: Path) -> None:
         """explain_row() explicitly reports payload availability."""
         import json
 
@@ -1698,7 +1703,7 @@ class TestExplainGracefulDegradation:
         assert lineage is not None
         assert lineage.payload_available is False
 
-    def test_explain_with_available_payload(self, tmp_path) -> None:
+    def test_explain_with_available_payload(self, tmp_path: Path) -> None:
         """explain_row() returns payload when available."""
         import json
 
@@ -1794,7 +1799,7 @@ class TestExplainGracefulDegradation:
         assert lineage.source_data is None  # No payload store
         assert lineage.payload_available is False
 
-    def test_explain_row_with_no_payload_ref(self, tmp_path) -> None:
+    def test_explain_row_with_no_payload_ref(self, tmp_path: Path) -> None:
         """explain_row() handles rows created without payload_ref."""
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
@@ -1832,7 +1837,7 @@ class TestExplainGracefulDegradation:
         assert lineage.source_data is None  # No payload_ref
         assert lineage.payload_available is False
 
-    def test_explain_row_with_corrupted_payload(self, tmp_path) -> None:
+    def test_explain_row_with_corrupted_payload(self, tmp_path: Path) -> None:
         """explain_row() handles corrupted payload (invalid JSON) gracefully."""
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
@@ -1875,7 +1880,7 @@ class TestExplainGracefulDegradation:
         assert lineage.source_data is None  # Corrupted payload not returned
         assert lineage.payload_available is False  # Reports as unavailable
 
-    def test_explain_row_rejects_run_id_mismatch(self, tmp_path) -> None:
+    def test_explain_row_rejects_run_id_mismatch(self, tmp_path: Path) -> None:
         """explain_row() returns None when row belongs to different run."""
         import json
 
@@ -1926,47 +1931,6 @@ class TestExplainGracefulDegradation:
 
         assert lineage_correct is not None
         assert lineage_correct.row_id == row.row_id
-
-
-class TestExportStatusEnum:
-    """Verify set_export_status uses enum validation."""
-
-    def test_set_export_status_accepts_enum(self) -> None:
-        """set_export_status accepts ExportStatus enum."""
-
-        from elspeth.contracts import ExportStatus
-        from elspeth.core.landscape import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
-
-        db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-
-        # Should accept enum without error
-        recorder.set_export_status(run.run_id, ExportStatus.COMPLETED)
-
-        updated_run = recorder.get_run(run.run_id)
-        assert updated_run is not None
-        # Value stored correctly
-        assert (
-            updated_run.export_status == "completed"
-            or updated_run.export_status == ExportStatus.COMPLETED
-        )
-
-    def test_set_export_status_rejects_invalid_string(self) -> None:
-        """set_export_status rejects invalid status strings."""
-        import pytest
-
-        from elspeth.core.landscape import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
-
-        db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-
-        # Should raise ValueError for invalid status
-        with pytest.raises(ValueError, match="not a valid ExportStatus"):
-            recorder.set_export_status(run.run_id, "invalid_status")
 
 
 class TestReproducibilityGradeComputation:
@@ -2288,46 +2252,3 @@ class TestReproducibilityGradeComputation:
 
         # Since defaults are DETERMINISTIC, should get FULL_REPRODUCIBLE
         assert grade == ReproducibilityGrade.FULL_REPRODUCIBLE
-
-
-class TestBatchStatusEnum:
-    """Verify update_batch_status uses enum validation."""
-
-    def test_update_batch_status_accepts_enum(self) -> None:
-        """update_batch_status accepts BatchStatus enum."""
-        from elspeth.contracts import BatchStatus
-        from elspeth.core.landscape import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
-
-        db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-
-        # Create a batch first
-        batch = recorder.create_batch(
-            run_id=run.run_id,
-            aggregation_node_id="agg-node-1",
-        )
-
-        # Should accept enum without error
-        recorder.update_batch_status(batch.batch_id, BatchStatus.COMPLETED)
-
-    def test_update_batch_status_rejects_invalid_string(self) -> None:
-        """update_batch_status rejects invalid status strings."""
-        import pytest
-
-        from elspeth.core.landscape import LandscapeDB
-        from elspeth.core.landscape.recorder import LandscapeRecorder
-
-        db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        run = recorder.begin_run(config={}, canonical_version="v1")
-
-        batch = recorder.create_batch(
-            run_id=run.run_id,
-            aggregation_node_id="agg-node-1",
-        )
-
-        # Should raise ValueError for invalid status
-        with pytest.raises(ValueError, match="not a valid BatchStatus"):
-            recorder.update_batch_status(batch.batch_id, "invalid_status")

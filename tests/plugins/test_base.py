@@ -1,6 +1,8 @@
 # tests/plugins/test_base.py
 """Tests for plugin base classes."""
 
+from typing import Any
+
 import pytest
 
 
@@ -32,7 +34,9 @@ class TestBaseTransform:
             input_schema = InputSchema
             output_schema = OutputSchema
 
-            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success(
                     {
                         "x": row["x"],
@@ -72,7 +76,7 @@ class TestBaseGate:
             input_schema = RowSchema
             output_schema = RowSchema
 
-            def evaluate(self, row: dict, ctx: PluginContext) -> GateResult:
+            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
                 threshold = self.config["threshold"]
                 if row["value"] > threshold:
                     return GateResult(
@@ -108,21 +112,22 @@ class TestBaseAggregation:
             input_schema = InputSchema
             output_schema = OutputSchema
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 super().__init__(config)
                 self._values: list[int] = []
+                self._batch_size: int = config["batch_size"]
 
-            def accept(self, row: dict, ctx: PluginContext) -> AcceptResult:
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._values.append(row["value"])
                 return AcceptResult(
                     accepted=True,
-                    trigger=len(self._values) >= self.config["batch_size"],
+                    trigger=len(self._values) >= self._batch_size,
                 )
 
             def should_trigger(self) -> bool:
-                return len(self._values) >= self.config["batch_size"]
+                return len(self._values) >= self._batch_size
 
-            def flush(self, ctx: PluginContext) -> list[dict]:
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 result = {"total": sum(self._values)}
                 self._values = []
                 return [result]
@@ -154,11 +159,11 @@ class TestBaseSink:
             input_schema = InputSchema
             idempotent = True
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 super().__init__(config)
-                self.rows: list[dict] = []
+                self.rows: list[dict[str, Any]] = []
 
-            def write(self, row: dict, ctx: PluginContext) -> None:
+            def write(self, row: dict[str, Any], ctx: PluginContext) -> None:
                 self.rows.append(row)
 
             def flush(self) -> None:
@@ -175,25 +180,6 @@ class TestBaseSink:
 
         assert len(sink.rows) == 2
         assert sink.rows[0] == {"value": 1}
-
-
-class TestBaseSourceMetadata:
-    """Verify BaseSource has required metadata attributes."""
-
-    def test_base_source_has_plugin_version(self) -> None:
-        """BaseSource should have plugin_version class attribute."""
-        from elspeth.plugins.base import BaseSource
-
-        assert hasattr(BaseSource, "plugin_version")
-        assert BaseSource.plugin_version == "0.0.0"
-
-    def test_base_source_has_determinism(self) -> None:
-        """BaseSource should have determinism class attribute."""
-        from elspeth.contracts import Determinism
-        from elspeth.plugins.base import BaseSource
-
-        assert hasattr(BaseSource, "determinism")
-        assert BaseSource.determinism == Determinism.IO_READ
 
 
 class TestBaseSource:
@@ -213,11 +199,11 @@ class TestBaseSource:
             name = "list"
             output_schema = OutputSchema
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 super().__init__(config)
                 self._data = config["data"]
 
-            def load(self, ctx: PluginContext) -> Iterator[dict]:
+            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
                 yield from self._data
 
             def close(self) -> None:

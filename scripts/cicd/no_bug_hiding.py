@@ -24,7 +24,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 # =============================================================================
 # Data Structures
@@ -161,7 +161,9 @@ class BugHidingVisitor(ast.NodeVisitor):
             return self.source_lines[lineno - 1].strip()
         return "<source unavailable>"
 
-    def _add_finding(self, rule_id: str, node: ast.AST, message: str) -> None:
+    def _add_finding(
+        self, rule_id: str, node: ast.expr | ast.stmt | ast.ExceptHandler, message: str
+    ) -> None:
         """Record a finding."""
         self.findings.append(
             Finding(

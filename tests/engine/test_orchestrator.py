@@ -7,16 +7,59 @@ because the processor uses isinstance() for type-safe plugin detection.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from elspeth.contracts import RoutingMode
+from elspeth.contracts import Determinism, RoutingMode
 from elspeth.plugins.base import BaseGate, BaseTransform
+from elspeth.plugins.schemas import PluginSchema
 
 if TYPE_CHECKING:
+    from elspeth.contracts.results import TransformResult
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
+
+
+# ============================================================================
+# Test Fixture Base Classes
+# ============================================================================
+# These provide the required protocol attributes so inline test classes
+# don't need to repeat them.
+
+
+class _TestSchema(PluginSchema):
+    """Minimal schema for test fixtures."""
+
+    pass
+
+
+class _TestSourceBase:
+    """Base class providing SourceProtocol required attributes.
+
+    Note: output_schema is NOT provided here because child classes override it
+    with their own schemas, and mypy's type invariance would flag that as a conflict.
+    Each test class must provide its own output_schema.
+    """
+
+    node_id: str | None = None
+
+
+class _TestSinkBase:
+    """Base class providing SinkProtocol required attributes.
+
+    Note: input_schema is NOT provided here because child classes may override it
+    with their own schemas, and mypy's type invariance would flag that as a conflict.
+    Each test class should provide its own input_schema if needed.
+    """
+
+    idempotent = True
+    node_id: str | None = None
+    determinism = Determinism.DETERMINISTIC
+    plugin_version = "1.0"
+
+    def flush(self) -> None:
+        pass
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
@@ -109,20 +152,20 @@ class TestOrchestrator:
             value: int
             doubled: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = InputSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class DoubleTransform(BaseTransform):
@@ -133,7 +176,7 @@ class TestOrchestrator:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(
                     {
                         "value": row["value"],
@@ -141,25 +184,25 @@ class TestOrchestrator:
                     }
                 )
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []  # Instance attribute, not class attribute
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 1}, {"value": 2}, {"value": 3}])
@@ -192,20 +235,20 @@ class TestOrchestrator:
         class RowSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = RowSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class ThresholdGate(BaseGate):
@@ -216,7 +259,7 @@ class TestOrchestrator:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def evaluate(self, row, ctx):
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
                 if row["value"] > 50:
                     return GateResult(
                         row=row,
@@ -226,25 +269,25 @@ class TestOrchestrator:
                     )
                 return GateResult(row=row, action=RoutingAction.continue_())
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 10}, {"value": 100}, {"value": 30}])
@@ -283,20 +326,20 @@ class TestOrchestratorAuditTrail:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "test_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class IdentityTransform(BaseTransform):
@@ -307,28 +350,28 @@ class TestOrchestratorAuditTrail:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "test_sink"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 42}])
@@ -378,20 +421,20 @@ class TestOrchestratorErrorHandling:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "test_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class ExplodingTransform(BaseTransform):
@@ -402,28 +445,28 @@ class TestOrchestratorErrorHandling:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 raise RuntimeError("Transform exploded!")
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "test_sink"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 42}])
@@ -472,20 +515,20 @@ class TestOrchestratorMultipleTransforms:
         class NumberSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "numbers"
             output_schema = NumberSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class AddOneTransform(BaseTransform):
@@ -496,7 +539,7 @@ class TestOrchestratorMultipleTransforms:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success({"value": row["value"] + 1})
 
         class MultiplyTwoTransform(BaseTransform):
@@ -507,28 +550,28 @@ class TestOrchestratorMultipleTransforms:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success({"value": row["value"] * 2})
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 5}])
@@ -566,41 +609,41 @@ class TestOrchestratorEmptyPipeline:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "direct"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 99}])
@@ -633,17 +676,17 @@ class TestOrchestratorEmptyPipeline:
         class ValueSchema(PluginSchema):
             value: int
 
-        class EmptySource:
+        class EmptySource(_TestSourceBase):
             name = "empty"
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 return iter([])
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class IdentityTransform(BaseTransform):
@@ -654,28 +697,28 @@ class TestOrchestratorEmptyPipeline:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = EmptySource()
@@ -713,20 +756,20 @@ class TestOrchestratorInvalidRouting:
         class RowSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = RowSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class MisroutingGate(BaseGate):
@@ -737,32 +780,32 @@ class TestOrchestratorInvalidRouting:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def evaluate(self, row, ctx):
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
                 # Route to a label that wasn't configured
                 return GateResult(
                     row=row,
                     action=RoutingAction.route("nonexistent_sink"),
                 )
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 42}])
@@ -870,29 +913,29 @@ class TestOrchestratorAcceptsGraph:
         class ValueSchema(PluginSchema):
             value: int
 
-        class DummySource:
+        class DummySource(_TestSourceBase):
             name = "dummy"
             output_schema = ValueSchema
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from []
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
-        class DummySink:
+        class DummySink(_TestSinkBase):
             name = "dummy"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         config = PipelineConfig(
@@ -1039,7 +1082,7 @@ class TestOrchestratorGateRouting:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def evaluate(self, row, ctx):
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
                 return GateResult(
                     row={"id": 1, "score": 0.2},
                     action=RoutingAction.route(
@@ -1107,10 +1150,10 @@ class TestLifecycleHooks:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 call_order.append("on_start")
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 call_order.append("process")
                 return TransformResult.success(row)
 
@@ -1176,14 +1219,14 @@ class TestLifecycleHooks:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 call_order.append("on_start")
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 call_order.append("process")
                 return TransformResult.success(row)
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 call_order.append("on_complete")
 
         db = LandscapeDB.in_memory()
@@ -1251,13 +1294,13 @@ class TestLifecycleHooks:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 raise RuntimeError("intentional failure")
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 completed.append(True)
 
         db = LandscapeDB.in_memory()
@@ -1316,37 +1359,37 @@ class TestOrchestratorLandscapeExport:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             """Sink that captures written rows."""
 
             name = "collect"
 
-            def __init__(self):
-                self.captured_rows: list[dict] = []
+            def __init__(self) -> None:
+                self.captured_rows: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, row, ctx):
+            def write(self, row: Any, ctx: Any) -> ArtifactDescriptor:
                 # Row processing writes batches (lists), export writes single records
                 if isinstance(row, list):
                     self.captured_rows.extend(row)
@@ -1356,10 +1399,10 @@ class TestOrchestratorLandscapeExport:
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def flush(self):
+            def flush(self) -> None:
                 pass
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         # Create in-memory DB
@@ -1436,35 +1479,35 @@ class TestOrchestratorLandscapeExport:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.captured_rows: list[dict] = []
+            def __init__(self) -> None:
+                self.captured_rows: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, row, ctx):
+            def write(self, row: Any, ctx: Any) -> ArtifactDescriptor:
                 # Row processing writes batches (lists), export writes single records
                 if isinstance(row, list):
                     self.captured_rows.extend(row)
@@ -1474,10 +1517,10 @@ class TestOrchestratorLandscapeExport:
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def flush(self):
+            def flush(self) -> None:
                 pass
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         db = LandscapeDB.in_memory()
@@ -1552,44 +1595,44 @@ class TestOrchestratorLandscapeExport:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.captured_rows: list[dict] = []
+            def __init__(self) -> None:
+                self.captured_rows: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.captured_rows.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def flush(self):
+            def flush(self) -> None:
                 pass
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         db = LandscapeDB.in_memory()
@@ -1655,44 +1698,44 @@ class TestOrchestratorLandscapeExport:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.captured_rows: list[dict] = []
+            def __init__(self) -> None:
+                self.captured_rows: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.captured_rows.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def flush(self):
+            def flush(self) -> None:
                 pass
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         db = LandscapeDB.in_memory()
@@ -1749,22 +1792,23 @@ class TestSourceLifecycleHooks:
 
         call_order: list[str] = []
 
-        class TrackedSource:
+        class TrackedSource(_TestSourceBase):
             """Source that tracks lifecycle calls."""
 
             name = "tracked_source"
+            output_schema = _TestSchema
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 call_order.append("source_on_start")
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 call_order.append("source_load")
                 yield {"value": 1}
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 call_order.append("source_on_complete")
 
-            def close(self):
+            def close(self) -> None:
                 call_order.append("source_close")
 
         db = LandscapeDB.in_memory()
@@ -1823,24 +1867,24 @@ class TestSinkLifecycleHooks:
 
         call_order: list[str] = []
 
-        class TrackedSink:
+        class TrackedSink(_TestSinkBase):
             """Sink that tracks lifecycle calls."""
 
             name = "tracked_sink"
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 call_order.append("sink_on_start")
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 call_order.append("sink_on_complete")
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 call_order.append("sink_write")
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash="abc123"
                 )
 
-            def close(self):
+            def close(self) -> None:
                 call_order.append("sink_close")
 
         db = LandscapeDB.in_memory()
@@ -1906,30 +1950,30 @@ class TestSinkLifecycleHooks:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 raise RuntimeError("intentional failure")
 
-        class TrackedSink:
+        class TrackedSink(_TestSinkBase):
             name = "tracked_sink"
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 completed.append("sink_on_complete")
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash="abc123"
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         db = LandscapeDB.in_memory()
@@ -2014,20 +2058,20 @@ class TestOrchestratorCheckpointing:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class IdentityTransform(BaseTransform):
@@ -2038,28 +2082,28 @@ class TestOrchestratorCheckpointing:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 1}, {"value": 2}, {"value": 3}])
@@ -2107,20 +2151,20 @@ class TestOrchestratorCheckpointing:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class IdentityTransform(BaseTransform):
@@ -2131,28 +2175,28 @@ class TestOrchestratorCheckpointing:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         # 7 rows: should checkpoint at rows 3, 6 (sequence 3, 6)
@@ -2193,20 +2237,20 @@ class TestOrchestratorCheckpointing:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class IdentityTransform(BaseTransform):
@@ -2217,28 +2261,28 @@ class TestOrchestratorCheckpointing:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 1}, {"value": 2}])
@@ -2281,20 +2325,20 @@ class TestOrchestratorCheckpointing:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class FailOnThirdTransform(BaseTransform):
@@ -2302,35 +2346,35 @@ class TestOrchestratorCheckpointing:
             input_schema = ValueSchema
             output_schema = ValueSchema
 
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__({})
                 self.count = 0
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 self.count += 1
                 if self.count == 3:
                     raise RuntimeError("Intentional failure on third row")
                 return TransformResult.success(row)
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 1}, {"value": 2}, {"value": 3}])
@@ -2383,20 +2427,20 @@ class TestOrchestratorCheckpointing:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class IdentityTransform(BaseTransform):
@@ -2407,28 +2451,28 @@ class TestOrchestratorCheckpointing:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 1}, {"value": 2}])
@@ -2469,20 +2513,20 @@ class TestOrchestratorCheckpointing:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "list_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class IdentityTransform(BaseTransform):
@@ -2493,28 +2537,28 @@ class TestOrchestratorCheckpointing:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 1}])
@@ -2556,20 +2600,20 @@ class TestOrchestratorConfigRecording:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "test_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class IdentityTransform(BaseTransform):
@@ -2580,28 +2624,28 @@ class TestOrchestratorConfigRecording:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "test_sink"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 42}])
@@ -2650,41 +2694,41 @@ class TestOrchestratorConfigRecording:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "test_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "test_sink"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 42}])
@@ -2738,21 +2782,21 @@ class TestNodeMetadataFromPlugin:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "versioned_source"
             output_schema = ValueSchema
             plugin_version = "3.7.2"  # Custom version
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class VersionedTransform(BaseTransform):
@@ -2765,29 +2809,29 @@ class TestNodeMetadataFromPlugin:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-        class VersionedSink:
+        class VersionedSink(_TestSinkBase):
             name = "versioned_sink"
             plugin_version = "4.1.0"  # Custom version
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 42}])
@@ -2861,21 +2905,21 @@ class TestNodeMetadataFromPlugin:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "test_source"
             output_schema = ValueSchema
             plugin_version = "1.0.0"
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class NonDeterministicTransform(BaseTransform):
@@ -2888,29 +2932,29 @@ class TestNodeMetadataFromPlugin:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "test_sink"
             plugin_version = "1.0.0"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 42}])
@@ -2976,20 +3020,20 @@ class TestRouteValidation:
         class RowSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "test_source"
             output_schema = RowSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class RoutingGate(BaseGate):
@@ -3000,7 +3044,7 @@ class TestRouteValidation:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def evaluate(self, row, ctx):
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
                 if row["value"] > 50:
                     return GateResult(
                         row=row,
@@ -3008,25 +3052,25 @@ class TestRouteValidation:
                     )
                 return GateResult(row=row, action=RoutingAction.continue_())
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 10}, {"value": 100}])
@@ -3086,22 +3130,22 @@ class TestRouteValidation:
         class RowSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "test_source"
             output_schema = RowSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
                 self.load_called = False
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 self.load_called = True
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class RoutingGate(BaseGate):
@@ -3112,7 +3156,7 @@ class TestRouteValidation:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def evaluate(self, row, ctx):
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
                 if row["value"] > 50:
                     return GateResult(
                         row=row,
@@ -3120,25 +3164,25 @@ class TestRouteValidation:
                     )
                 return GateResult(row=row, action=RoutingAction.continue_())
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 10}, {"value": 100}])
@@ -3201,20 +3245,20 @@ class TestRouteValidation:
         class RowSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "test_source"
             output_schema = RowSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class RoutingGate(BaseGate):
@@ -3225,28 +3269,28 @@ class TestRouteValidation:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def evaluate(self, row, ctx):
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
                 return GateResult(row=row, action=RoutingAction.route("above"))
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 10}])
@@ -3303,20 +3347,20 @@ class TestRouteValidation:
         class RowSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "test_source"
             output_schema = RowSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class RoutingGate(BaseGate):
@@ -3327,29 +3371,29 @@ class TestRouteValidation:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def evaluate(self, row, ctx):
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
                 # Route label "pass" resolves to "continue" in config
                 return GateResult(row=row, action=RoutingAction.route("pass"))
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collect"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 10}])

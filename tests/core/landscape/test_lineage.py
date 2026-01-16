@@ -14,9 +14,8 @@ class TestLineageResult:
 
     def test_lineage_result_fields(self) -> None:
         """LineageResult has expected fields."""
-        from elspeth.contracts import RowLineage
+        from elspeth.contracts import RowLineage, Token
         from elspeth.core.landscape.lineage import LineageResult
-        from elspeth.core.landscape.models import Token
 
         now = datetime.now(UTC)
         result = LineageResult(

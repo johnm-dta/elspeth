@@ -1,5 +1,7 @@
 """Tests for PassThrough transform."""
 
+from typing import Any
+
 import pytest
 
 from elspeth.plugins.context import PluginContext
@@ -47,11 +49,12 @@ class TestPassThrough:
         from elspeth.plugins.transforms.passthrough import PassThrough
 
         transform = PassThrough({})
-        row = {"id": 1, "meta": {"source": "test", "tags": ["a", "b"]}}
+        row: dict[str, Any] = {"id": 1, "meta": {"source": "test", "tags": ["a", "b"]}}
 
         result = transform.process(row, ctx)
 
         assert result.status == "success"
+        assert result.row is not None
         assert result.row == row
         # Nested structures should be deep copied
         assert result.row["meta"] is not row["meta"]
@@ -62,7 +65,7 @@ class TestPassThrough:
         from elspeth.plugins.transforms.passthrough import PassThrough
 
         transform = PassThrough({})
-        row: dict = {}
+        row: dict[str, Any] = {}
 
         result = transform.process(row, ctx)
 

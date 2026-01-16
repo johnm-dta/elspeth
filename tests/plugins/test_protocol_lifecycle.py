@@ -1,6 +1,8 @@
 # tests/plugins/test_protocol_lifecycle.py
 """Tests for plugin lifecycle methods in protocols."""
 
+from typing import Any
+
 from elspeth.contracts import Determinism
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import GateProtocol, TransformProtocol
@@ -32,10 +34,12 @@ class TestTransformProtocolLifecycle:
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 self.closed = False
 
-            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success(row)
 
             def close(self) -> None:
@@ -50,12 +54,15 @@ class TestTransformProtocolLifecycle:
             def on_complete(self, ctx: PluginContext) -> None:
                 pass
 
-        # Should not raise - satisfies protocol
-        transform: TransformProtocol = MyTransform({})
+        # Create instance and verify protocol conformance
+        transform = MyTransform({})
         assert isinstance(transform, TransformProtocol)
 
-        # close() should be callable
-        transform.close()
+        # close() should be callable through protocol
+        transform_as_protocol: TransformProtocol = transform
+        transform_as_protocol.close()
+
+        # Verify close() worked via implementation detail
         assert transform.closed is True
 
 
@@ -80,10 +87,10 @@ class TestGateProtocolLifecycle:
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 self.closed = False
 
-            def evaluate(self, row: dict, ctx: PluginContext) -> GateResult:
+            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
                 return GateResult(row=row, action=RoutingAction.continue_())
 
             def close(self) -> None:
@@ -98,10 +105,13 @@ class TestGateProtocolLifecycle:
             def on_complete(self, ctx: PluginContext) -> None:
                 pass
 
-        # Should not raise - satisfies protocol
-        gate: GateProtocol = MyGate({})
+        # Create instance and verify protocol conformance
+        gate = MyGate({})
         assert isinstance(gate, GateProtocol)
 
-        # close() should be callable
-        gate.close()
+        # close() should be callable through protocol
+        gate_as_protocol: GateProtocol = gate
+        gate_as_protocol.close()
+
+        # Verify close() worked via implementation detail
         assert gate.closed is True

@@ -2,24 +2,26 @@
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
+
+from elspeth.core.checkpoint.manager import CheckpointManager
 
 
 class TestCheckpointManager:
     """Tests for checkpoint creation and loading."""
 
     @pytest.fixture
-    def manager(self, tmp_path):
+    def manager(self, tmp_path: Path) -> CheckpointManager:
         """Create CheckpointManager with test database."""
-        from elspeth.core.checkpoint.manager import CheckpointManager
         from elspeth.core.landscape.database import LandscapeDB
 
         db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")  # Tables auto-created
         return CheckpointManager(db)
 
     @pytest.fixture
-    def setup_run(self, manager):
+    def setup_run(self, manager: CheckpointManager) -> str:
         """Create a run with some tokens for checkpoint tests."""
         from elspeth.core.landscape.schema import (
             nodes_table,
@@ -74,7 +76,9 @@ class TestCheckpointManager:
             conn.commit()
         return "run-001"
 
-    def test_create_checkpoint(self, manager, setup_run) -> None:
+    def test_create_checkpoint(
+        self, manager: CheckpointManager, setup_run: str
+    ) -> None:
         """Can create a checkpoint."""
         checkpoint = manager.create_checkpoint(
             run_id="run-001",
@@ -87,7 +91,9 @@ class TestCheckpointManager:
         assert checkpoint.run_id == "run-001"
         assert checkpoint.sequence_number == 1
 
-    def test_get_latest_checkpoint(self, manager, setup_run) -> None:
+    def test_get_latest_checkpoint(
+        self, manager: CheckpointManager, setup_run: str
+    ) -> None:
         """Can retrieve the latest checkpoint for a run."""
         # Create multiple checkpoints
         manager.create_checkpoint("run-001", "tok-001", "node-001", 1)
@@ -99,12 +105,16 @@ class TestCheckpointManager:
         assert latest is not None
         assert latest.sequence_number == 3
 
-    def test_get_latest_checkpoint_no_checkpoints(self, manager) -> None:
+    def test_get_latest_checkpoint_no_checkpoints(
+        self, manager: CheckpointManager
+    ) -> None:
         """Returns None when no checkpoints exist."""
         latest = manager.get_latest_checkpoint("nonexistent-run")
         assert latest is None
 
-    def test_checkpoint_with_aggregation_state(self, manager, setup_run) -> None:
+    def test_checkpoint_with_aggregation_state(
+        self, manager: CheckpointManager, setup_run: str
+    ) -> None:
         """Can store aggregation state in checkpoint."""
         agg_state = {"buffer": [1, 2, 3], "count": 3}
 
@@ -118,9 +128,12 @@ class TestCheckpointManager:
 
         loaded = manager.get_latest_checkpoint("run-001")
         assert loaded is not None
+        assert loaded.aggregation_state_json is not None
         assert json.loads(loaded.aggregation_state_json) == agg_state
 
-    def test_get_checkpoints_ordered(self, manager, setup_run) -> None:
+    def test_get_checkpoints_ordered(
+        self, manager: CheckpointManager, setup_run: str
+    ) -> None:
         """Get all checkpoints ordered by sequence number."""
         manager.create_checkpoint("run-001", "tok-001", "node-001", 3)
         manager.create_checkpoint("run-001", "tok-001", "node-001", 1)
@@ -131,7 +144,9 @@ class TestCheckpointManager:
         assert len(checkpoints) == 3
         assert [c.sequence_number for c in checkpoints] == [1, 2, 3]
 
-    def test_delete_checkpoints(self, manager, setup_run) -> None:
+    def test_delete_checkpoints(
+        self, manager: CheckpointManager, setup_run: str
+    ) -> None:
         """Delete all checkpoints for a run."""
         manager.create_checkpoint("run-001", "tok-001", "node-001", 1)
         manager.create_checkpoint("run-001", "tok-001", "node-001", 2)
@@ -141,7 +156,9 @@ class TestCheckpointManager:
         assert deleted == 2
         assert manager.get_latest_checkpoint("run-001") is None
 
-    def test_delete_checkpoints_no_checkpoints(self, manager) -> None:
+    def test_delete_checkpoints_no_checkpoints(
+        self, manager: CheckpointManager
+    ) -> None:
         """Delete returns 0 when no checkpoints exist."""
         deleted = manager.delete_checkpoints("nonexistent-run")
         assert deleted == 0

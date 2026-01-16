@@ -12,10 +12,10 @@ class TestTransformExecutor:
     """Transform execution with audit."""
 
     def test_execute_transform_success(self) -> None:
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import TransformResult
 
@@ -75,10 +75,10 @@ class TestTransformExecutor:
         assert result.duration_ms is not None
 
     def test_execute_transform_error(self) -> None:
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import TransformResult
 
@@ -132,10 +132,10 @@ class TestTransformExecutor:
 
     def test_execute_transform_exception_records_failure(self) -> None:
         """Transform raising exception still records audit state."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import TransformResult
 
@@ -188,15 +188,17 @@ class TestTransformExecutor:
         # Verify failure was recorded in landscape
         states = recorder.get_node_states_for_token(token.token_id)
         assert len(states) == 1
-        assert states[0].status == "failed"
-        assert states[0].duration_ms is not None
+        state = states[0]
+        assert state.status == "failed"
+        # Type narrowing: failed status means NodeStateFailed which has duration_ms
+        assert hasattr(state, "duration_ms") and state.duration_ms is not None
 
     def test_execute_transform_updates_token_row_data(self) -> None:
         """Updated token should have new row_data."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import TransformResult
 
@@ -253,10 +255,10 @@ class TestTransformExecutor:
 
     def test_node_state_records_input_and_output(self) -> None:
         """Node state should record both input and output hashes."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import TransformResult
 
@@ -309,9 +311,10 @@ class TestTransformExecutor:
         states = recorder.get_node_states_for_token(token.token_id)
         assert len(states) == 1
         state = states[0]
-        assert state.input_hash is not None
-        assert state.output_hash is not None
         assert state.status == "completed"
+        # Type narrowing: completed status means NodeStateCompleted which has output_hash
+        assert state.input_hash is not None
+        assert hasattr(state, "output_hash") and state.output_hash is not None
         # Same input/output data means same hashes for identity transform
         assert state.input_hash == state.output_hash
 
@@ -321,10 +324,10 @@ class TestGateExecutor:
 
     def test_execute_gate_continue(self) -> None:
         """Gate returns continue action - no routing event recorded."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import GateExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import GateResult, RoutingAction
 
@@ -397,10 +400,10 @@ class TestGateExecutor:
 
     def test_execute_gate_route(self) -> None:
         """Gate routes to sink via route label - routing event recorded."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import GateExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import GateResult, RoutingAction
 
@@ -497,10 +500,10 @@ class TestGateExecutor:
 
     def test_missing_edge_raises_error(self) -> None:
         """Gate routing to unregistered route label raises MissingEdgeError."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import GateExecutor, MissingEdgeError
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import GateResult, RoutingAction
 
@@ -563,10 +566,11 @@ class TestGateExecutor:
 
     def test_execute_gate_fork(self) -> None:
         """Gate forks to multiple paths - routing events and child tokens created."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import GateExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo, TokenManager
+        from elspeth.engine.tokens import TokenManager
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import GateResult, RoutingAction
 
@@ -684,10 +688,10 @@ class TestGateExecutor:
 
     def test_fork_without_token_manager_raises_error(self) -> None:
         """Gate fork without token_manager raises RuntimeError for audit integrity."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import GateExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import GateResult, RoutingAction
 
@@ -780,10 +784,10 @@ class TestGateExecutor:
 
     def test_execute_gate_exception_records_failure(self) -> None:
         """Gate raising exception still records audit state."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import GateExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import GateResult
 
@@ -834,8 +838,10 @@ class TestGateExecutor:
         # Verify failure was recorded in landscape
         states = recorder.get_node_states_for_token(token.token_id)
         assert len(states) == 1
-        assert states[0].status == "failed"
-        assert states[0].duration_ms is not None
+        state = states[0]
+        assert state.status == "failed"
+        # Type narrowing: failed status means NodeStateFailed which has duration_ms
+        assert hasattr(state, "duration_ms") and state.duration_ms is not None
 
 
 class TestAggregationExecutor:
@@ -843,10 +849,10 @@ class TestAggregationExecutor:
 
     def test_accept_creates_batch(self) -> None:
         """First accept creates batch and sets batch_id."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import AggregationExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import AcceptResult
 
@@ -932,10 +938,10 @@ class TestAggregationExecutor:
 
     def test_accept_adds_to_existing_batch(self) -> None:
         """Subsequent accepts add to existing batch."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import AggregationExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import AcceptResult
 
@@ -991,6 +997,7 @@ class TestAggregationExecutor:
         # Accept first token - creates batch
         result1 = executor.accept(aggregation, tokens[0], ctx, step_in_pipeline=1)
         batch_id = result1.batch_id
+        assert batch_id is not None  # First accept always creates batch
 
         # Accept second token - adds to same batch
         result2 = executor.accept(aggregation, tokens[1], ctx, step_in_pipeline=1)
@@ -1009,10 +1016,10 @@ class TestAggregationExecutor:
 
     def test_flush_with_audit(self) -> None:
         """Flush transitions batch and returns outputs."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import AggregationExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import AcceptResult
 
@@ -1051,6 +1058,7 @@ class TestAggregationExecutor:
         executor = AggregationExecutor(recorder, SpanFactory(), run.run_id)
 
         # Accept two rows
+        batch_id: str | None = None
         for i, value in enumerate([10.0, 20.0]):
             token = TokenInfo(
                 row_id=f"row-{i}",
@@ -1070,6 +1078,8 @@ class TestAggregationExecutor:
             if result.trigger:
                 batch_id = result.batch_id
                 break
+
+        assert batch_id is not None  # Trigger condition reached after 2 rows
 
         # Flush the batch
         outputs = executor.flush(
@@ -1137,10 +1147,10 @@ class TestAggregationExecutor:
 
     def test_accept_exception_records_failure(self) -> None:
         """Exception in accept() records failure state."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import AggregationExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import AcceptResult
 
@@ -1190,15 +1200,17 @@ class TestAggregationExecutor:
         # Verify failure was recorded
         states = recorder.get_node_states_for_token(token.token_id)
         assert len(states) == 1
-        assert states[0].status == "failed"
-        assert states[0].duration_ms is not None
+        state = states[0]
+        assert state.status == "failed"
+        # Type narrowing: failed status means NodeStateFailed which has duration_ms
+        assert hasattr(state, "duration_ms") and state.duration_ms is not None
 
     def test_flush_exception_marks_batch_failed(self) -> None:
         """Exception in flush() marks batch as failed."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import AggregationExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import AcceptResult
 
@@ -1245,6 +1257,7 @@ class TestAggregationExecutor:
         # Accept succeeds
         result = executor.accept(aggregation, token, ctx, step_in_pipeline=1)
         batch_id = result.batch_id
+        assert batch_id is not None  # Trigger always fires on first accept
 
         # Flush fails
         with pytest.raises(RuntimeError, match="flush failed"):
@@ -1262,10 +1275,10 @@ class TestAggregationExecutor:
 
     def test_multiple_batches_sequential(self) -> None:
         """After flush, new batch is created for subsequent accepts."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import AggregationExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import AcceptResult
 
@@ -1321,6 +1334,7 @@ class TestAggregationExecutor:
 
             result = executor.accept(aggregation, token, ctx, step_in_pipeline=1)
             if result.trigger:
+                assert result.batch_id is not None  # Batch exists when trigger fires
                 batch_ids.append(result.batch_id)
                 _outputs = executor.flush(
                     aggregation=aggregation,
@@ -1350,11 +1364,11 @@ class TestSinkExecutor:
 
     def test_write_records_artifact(self) -> None:
         """Write tokens to sink records artifact in Landscape."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.executors import SinkExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
 
         db = LandscapeDB.in_memory()
@@ -1371,7 +1385,7 @@ class TestSinkExecutor:
         # Mock sink that writes rows and returns artifact info
         class CsvSink:
             name = "csv_output"
-            node_id = sink_node.node_id
+            node_id: str | None = sink_node.node_id
 
             def write(
                 self, rows: list[dict[str, Any]], ctx: PluginContext
@@ -1430,13 +1444,16 @@ class TestSinkExecutor:
         for token in tokens:
             states = recorder.get_node_states_for_token(token.token_id)
             assert len(states) == 1
-            assert states[0].status == "completed"
-            assert states[0].node_id == sink_node.node_id
-            assert states[0].duration_ms is not None
+            state = states[0]
+            assert state.status == "completed"
+            assert state.node_id == sink_node.node_id
+            # Type narrowing: completed status means NodeStateCompleted which has duration_ms
+            assert hasattr(state, "duration_ms") and state.duration_ms is not None
 
     def test_write_empty_tokens_returns_none(self) -> None:
         """Write with empty tokens returns None without side effects."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.executors import SinkExecutor
         from elspeth.engine.spans import SpanFactory
         from elspeth.plugins.context import PluginContext
@@ -1454,11 +1471,11 @@ class TestSinkExecutor:
 
         class EmptySink:
             name = "empty_sink"
-            node_id = sink_node.node_id
+            node_id: str | None = sink_node.node_id
 
             def write(
                 self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> dict[str, Any]:
+            ) -> ArtifactDescriptor:
                 raise AssertionError("Should not be called for empty tokens")
 
         sink = EmptySink()
@@ -1481,10 +1498,11 @@ class TestSinkExecutor:
 
     def test_write_exception_records_failure(self) -> None:
         """Sink raising exception still records audit state for all tokens."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.executors import SinkExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
 
         db = LandscapeDB.in_memory()
@@ -1500,11 +1518,11 @@ class TestSinkExecutor:
 
         class ExplodingSink:
             name = "exploding_sink"
-            node_id = sink_node.node_id
+            node_id: str | None = sink_node.node_id
 
             def write(
                 self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> dict[str, Any]:
+            ) -> ArtifactDescriptor:
                 raise RuntimeError("disk full!")
 
         sink = ExplodingSink()
@@ -1542,8 +1560,10 @@ class TestSinkExecutor:
         for token in tokens:
             states = recorder.get_node_states_for_token(token.token_id)
             assert len(states) == 1
-            assert states[0].status == "failed"
-            assert states[0].duration_ms is not None
+            state = states[0]
+            assert state.status == "failed"
+            # Type narrowing: failed status means NodeStateFailed which has duration_ms
+            assert hasattr(state, "duration_ms") and state.duration_ms is not None
 
         # Verify no artifact recorded (write failed)
         artifacts = recorder.get_artifacts(run.run_id)
@@ -1551,11 +1571,11 @@ class TestSinkExecutor:
 
     def test_write_multiple_batches_creates_multiple_artifacts(self) -> None:
         """Multiple sink writes create separate artifacts."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.executors import SinkExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
 
         db = LandscapeDB.in_memory()
@@ -1571,7 +1591,7 @@ class TestSinkExecutor:
 
         class BatchSink:
             name = "batch_sink"
-            node_id = sink_node.node_id
+            node_id: str | None = sink_node.node_id
             _batch_count: int = 0
 
             def write(
@@ -1631,11 +1651,11 @@ class TestSinkExecutor:
 
     def test_artifact_linked_to_first_state(self) -> None:
         """Artifact is linked to first token's state_id for audit lineage."""
+        from elspeth.contracts import TokenInfo
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.executors import SinkExecutor
         from elspeth.engine.spans import SpanFactory
-        from elspeth.engine.tokens import TokenInfo
         from elspeth.plugins.context import PluginContext
 
         db = LandscapeDB.in_memory()
@@ -1651,7 +1671,7 @@ class TestSinkExecutor:
 
         class LinkedSink:
             name = "linked_sink"
-            node_id = sink_node.node_id
+            node_id: str | None = sink_node.node_id
 
             def write(
                 self, rows: list[dict[str, Any]], ctx: PluginContext

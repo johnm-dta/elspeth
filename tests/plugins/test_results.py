@@ -63,7 +63,7 @@ class TestRoutingAction:
 
         action = RoutingAction.continue_()
         with pytest.raises(FrozenInstanceError):
-            action.kind = "route_to_sink"
+            action.kind = "route_to_sink"  # type: ignore[misc,assignment]  # Testing frozen
 
     def test_reason_is_immutable(self) -> None:
         """Reason dict should be wrapped as immutable mapping."""
@@ -72,7 +72,7 @@ class TestRoutingAction:
         action = RoutingAction.route("suspicious", reason={"score": 0.9})
         # Should not be able to modify reason
         with pytest.raises(TypeError):
-            action.reason["score"] = 0.5
+            action.reason["score"] = 0.5  # type: ignore[index]  # Testing immutability
 
 
 class TestTransformResult:

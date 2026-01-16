@@ -2,6 +2,7 @@
 """Tests for LandscapeRecorder.get_row_data() with explicit states."""
 
 import json
+from pathlib import Path
 
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.recorder import LandscapeRecorder
@@ -12,7 +13,7 @@ from elspeth.core.payload_store import FilesystemPayloadStore
 class TestGetRowDataExplicitStates:
     """Tests for get_row_data() returning RowDataResult."""
 
-    def test_row_not_found(self, tmp_path) -> None:
+    def test_row_not_found(self, tmp_path: Path) -> None:
         """Returns ROW_NOT_FOUND when row doesn't exist."""
         db = LandscapeDB.in_memory()
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
@@ -24,7 +25,7 @@ class TestGetRowDataExplicitStates:
         assert result.state == RowDataState.ROW_NOT_FOUND
         assert result.data is None
 
-    def test_never_stored(self, tmp_path) -> None:
+    def test_never_stored(self, tmp_path: Path) -> None:
         """Returns NEVER_STORED when source_data_ref is None."""
         db = LandscapeDB.in_memory()
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
@@ -52,7 +53,7 @@ class TestGetRowDataExplicitStates:
         assert result.state == RowDataState.NEVER_STORED
         assert result.data is None
 
-    def test_store_not_configured(self, tmp_path) -> None:
+    def test_store_not_configured(self, tmp_path: Path) -> None:
         """Returns STORE_NOT_CONFIGURED when payload_store is None."""
         db = LandscapeDB.in_memory()
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
@@ -87,7 +88,7 @@ class TestGetRowDataExplicitStates:
         assert result.state == RowDataState.STORE_NOT_CONFIGURED
         assert result.data is None
 
-    def test_purged(self, tmp_path) -> None:
+    def test_purged(self, tmp_path: Path) -> None:
         """Returns PURGED when payload_store raises KeyError."""
         db = LandscapeDB.in_memory()
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")
@@ -121,7 +122,7 @@ class TestGetRowDataExplicitStates:
         assert result.state == RowDataState.PURGED
         assert result.data is None
 
-    def test_available(self, tmp_path) -> None:
+    def test_available(self, tmp_path: Path) -> None:
         """Returns AVAILABLE with data when payload exists."""
         db = LandscapeDB.in_memory()
         payload_store = FilesystemPayloadStore(tmp_path / "payloads")

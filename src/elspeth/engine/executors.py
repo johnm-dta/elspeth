@@ -674,7 +674,7 @@ class SinkLike(Protocol):
     """
 
     name: str
-    node_id: str
+    node_id: str | None  # Set by orchestrator during registration
 
     def write(
         self, rows: list[dict[str, Any]], ctx: PluginContext

@@ -119,16 +119,28 @@ class TestPluginSystemIntegration:
         # Create instances and process
         ctx = PluginContext(run_id="test-001", config={})
 
-        source = manager.get_source_by_name("list")({"values": [10, 50, 100]})
-        transform = manager.get_transform_by_name("double")({})
-        gate = manager.get_gate_by_name("threshold")({"threshold": 100})
-        sink = manager.get_sink_by_name("memory")({})
+        source_cls = manager.get_source_by_name("list")
+        transform_cls = manager.get_transform_by_name("double")
+        gate_cls = manager.get_gate_by_name("threshold")
+        sink_cls = manager.get_sink_by_name("memory")
+
+        assert source_cls is not None
+        assert transform_cls is not None
+        assert gate_cls is not None
+        assert sink_cls is not None
+
+        # Protocols don't define __init__ but concrete classes do
+        source = source_cls({"values": [10, 50, 100]})  # type: ignore[call-arg]
+        transform = transform_cls({})  # type: ignore[call-arg]
+        gate = gate_cls({"threshold": 100})  # type: ignore[call-arg]
+        sink = sink_cls({})  # type: ignore[call-arg]
 
         MemorySink.collected = []  # Reset
 
         for row in source.load(ctx):
             result = transform.process(row, ctx)
             assert result.status == "success"
+            assert result.row is not None  # Success always has row
 
             gate_result = gate.evaluate(result.row, ctx)
 
@@ -183,14 +195,15 @@ class TestPluginSystemIntegration:
             def __init__(self, config: dict[str, Any]) -> None:
                 super().__init__(config)
                 self._values: list[int] = []
+                self._batch_size: int = config["batch_size"]
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._values.append(row["value"])
-                trigger = len(self._values) >= self.config["batch_size"]
+                trigger = len(self._values) >= self._batch_size
                 return AcceptResult(accepted=True, trigger=trigger)
 
             def should_trigger(self) -> bool:
-                return len(self._values) >= self.config["batch_size"]
+                return len(self._values) >= self._batch_size
 
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 if not self._values:

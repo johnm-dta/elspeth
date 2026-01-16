@@ -4,10 +4,12 @@
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from sqlalchemy import Connection, Table
+
 
 def _create_run(
-    conn,
-    runs_table,
+    conn: Connection,
+    runs_table: Table,
     run_id: str,
     *,
     completed_at: datetime | None = None,
@@ -28,8 +30,8 @@ def _create_run(
 
 
 def _create_node(
-    conn,
-    nodes_table,
+    conn: Connection,
+    nodes_table: Table,
     node_id: str,
     run_id: str,
 ) -> None:
@@ -50,8 +52,8 @@ def _create_node(
 
 
 def _create_row(
-    conn,
-    rows_table,
+    conn: Connection,
+    rows_table: Table,
     row_id: str,
     run_id: str,
     node_id: str,

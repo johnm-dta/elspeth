@@ -6,15 +6,20 @@ and recovery work together correctly.
 """
 
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import pytest
+
+from elspeth.core.checkpoint import CheckpointManager
+from elspeth.core.landscape.database import LandscapeDB
 
 
 class TestCheckpointRecoveryIntegration:
     """End-to-end checkpoint/recovery tests."""
 
     @pytest.fixture
-    def test_env(self, tmp_path):
+    def test_env(self, tmp_path: Path) -> dict[str, Any]:
         """Set up test environment with database and payload store."""
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import CheckpointSettings
@@ -36,7 +41,7 @@ class TestCheckpointRecoveryIntegration:
             "checkpoint_settings": checkpoint_settings,
         }
 
-    def test_full_checkpoint_recovery_cycle(self, test_env) -> None:
+    def test_full_checkpoint_recovery_cycle(self, test_env: dict[str, Any]) -> None:
         """Complete cycle: run -> checkpoint -> crash -> recover -> complete."""
         checkpoint_mgr = test_env["checkpoint_manager"]
         recovery_mgr = test_env["recovery_manager"]
@@ -62,7 +67,7 @@ class TestCheckpointRecoveryIntegration:
         unprocessed = recovery_mgr.get_unprocessed_rows(run_id)
         assert len(unprocessed) == 2  # rows 3 and 4
 
-    def test_checkpoint_sequence_ordering(self, test_env) -> None:
+    def test_checkpoint_sequence_ordering(self, test_env: dict[str, Any]) -> None:
         """Verify checkpoints are ordered by sequence number."""
         checkpoint_mgr = test_env["checkpoint_manager"]
         db = test_env["db"]
@@ -98,7 +103,7 @@ class TestCheckpointRecoveryIntegration:
         assert latest is not None
         assert latest.sequence_number == max(c.sequence_number for c in checkpoints)
 
-    def test_recovery_with_aggregation_state(self, test_env) -> None:
+    def test_recovery_with_aggregation_state(self, test_env: dict[str, Any]) -> None:
         """Verify aggregation state is preserved across recovery."""
         checkpoint_mgr = test_env["checkpoint_manager"]
         recovery_mgr = test_env["recovery_manager"]
@@ -129,7 +134,9 @@ class TestCheckpointRecoveryIntegration:
         assert resume_point.aggregation_state["count"] == 2
         assert resume_point.aggregation_state["sum"] == 300
 
-    def test_checkpoint_cleanup_after_completion(self, test_env) -> None:
+    def test_checkpoint_cleanup_after_completion(
+        self, test_env: dict[str, Any]
+    ) -> None:
         """Verify checkpoints are cleaned up after successful run."""
         checkpoint_mgr = test_env["checkpoint_manager"]
         db = test_env["db"]
@@ -148,7 +155,9 @@ class TestCheckpointRecoveryIntegration:
         remaining = checkpoint_mgr.get_checkpoints(run_id)
         assert len(remaining) == 0
 
-    def test_recovery_respects_checkpoint_boundary(self, test_env) -> None:
+    def test_recovery_respects_checkpoint_boundary(
+        self, test_env: dict[str, Any]
+    ) -> None:
         """Verify recovery resumes from correct checkpoint position."""
         checkpoint_mgr = test_env["checkpoint_manager"]
         recovery_mgr = test_env["recovery_manager"]
@@ -166,7 +175,9 @@ class TestCheckpointRecoveryIntegration:
         assert resume_point.node_id == checkpoint.node_id
         assert resume_point.sequence_number == checkpoint.sequence_number
 
-    def test_multiple_runs_independent_checkpoints(self, test_env) -> None:
+    def test_multiple_runs_independent_checkpoints(
+        self, test_env: dict[str, Any]
+    ) -> None:
         """Verify checkpoints are isolated per run."""
         checkpoint_mgr = test_env["checkpoint_manager"]
         db = test_env["db"]
@@ -187,7 +198,13 @@ class TestCheckpointRecoveryIntegration:
         assert len(checkpoint_mgr.get_checkpoints(run_id_1)) == 0
         assert len(checkpoint_mgr.get_checkpoints(run_id_2)) > 0
 
-    def _setup_partial_run(self, db, checkpoint_mgr, *, run_suffix: str = "001") -> str:
+    def _setup_partial_run(
+        self,
+        db: LandscapeDB,
+        checkpoint_mgr: CheckpointManager,
+        *,
+        run_suffix: str = "001",
+    ) -> str:
         """Helper to create a partially-completed run with checkpoints."""
         from elspeth.core.landscape.schema import (
             nodes_table,

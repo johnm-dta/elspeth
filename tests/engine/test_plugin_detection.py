@@ -125,20 +125,23 @@ class TestPluginInheritanceHierarchy:
         from elspeth.plugins.gates.threshold_gate import ThresholdGate
 
         gate = ThresholdGate({"field": "score", "threshold": 0.5})
-        assert not isinstance(gate, BaseTransform)
+        # mypy knows these are incompatible hierarchies - that's what we're verifying
+        assert not isinstance(gate, BaseTransform)  # type: ignore[unreachable]
 
     def test_transform_not_gate(self) -> None:
         """Transforms should NOT be instances of BaseGate."""
         from elspeth.plugins.transforms.passthrough import PassThrough
 
         transform = PassThrough({})
-        assert not isinstance(transform, BaseGate)
+        # mypy knows these are incompatible hierarchies - that's what we're verifying
+        assert not isinstance(transform, BaseGate)  # type: ignore[unreachable]
 
     def test_aggregation_not_transform_or_gate(self) -> None:
         """Aggregations should NOT be instances of BaseTransform or BaseGate."""
         agg = _TestAggregation({"batch_size": 10})
-        assert not isinstance(agg, BaseTransform)
-        assert not isinstance(agg, BaseGate)
+        # mypy knows these are incompatible hierarchies - that's what we're verifying
+        assert not isinstance(agg, BaseTransform)  # type: ignore[unreachable]
+        assert not isinstance(agg, BaseGate)  # type: ignore[unreachable]
 
 
 # Test-only aggregation implementation (no concrete aggregations exist yet)
@@ -162,7 +165,7 @@ class _TestAggregation(BaseAggregation):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self._batch: list[dict[str, Any]] = []
-        self._batch_size = config.get("batch_size", 10)
+        self._batch_size: int = config.get("batch_size", 10)
 
     def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
         self._batch.append(row)

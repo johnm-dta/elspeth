@@ -27,7 +27,6 @@ from elspeth.core.config import (
     ServiceRateLimit,
     SinkSettings,
     load_settings,
-    resolve_config,
 )
 from elspeth.core.dag import (
     ExecutionGraph,
@@ -71,6 +70,5 @@ __all__ = [
     "configure_logging",
     "get_logger",
     "load_settings",
-    "resolve_config",
     "stable_hash",
 ]

@@ -1,6 +1,7 @@
 """Tests for RunStatus enum."""
 
-from elspeth.engine.orchestrator import RunResult, RunStatus
+from elspeth.contracts import RunStatus
+from elspeth.engine.orchestrator import RunResult
 
 
 class TestRunStatus:

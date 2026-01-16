@@ -283,7 +283,7 @@ class TestRateLimitRegistry:
 
     def test_registry_respects_service_config(self) -> None:
         from elspeth.core.config import RateLimitSettings, ServiceRateLimit
-        from elspeth.core.rate_limit import RateLimitRegistry
+        from elspeth.core.rate_limit import RateLimiter, RateLimitRegistry
 
         settings = RateLimitSettings(
             default_requests_per_second=10,
@@ -296,6 +296,9 @@ class TestRateLimitRegistry:
         default_limiter = registry.get_limiter("fast_api")
         slow_limiter = registry.get_limiter("slow_api")
 
+        # Type narrowing: enabled registry returns RateLimiter, not NoOpLimiter
+        assert isinstance(default_limiter, RateLimiter)
+        assert isinstance(slow_limiter, RateLimiter)
         assert default_limiter._requests_per_second == 10
         assert slow_limiter._requests_per_second == 1
 

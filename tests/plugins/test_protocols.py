@@ -2,6 +2,7 @@
 """Tests for plugin protocols."""
 
 from collections.abc import Iterator
+from typing import Any
 
 
 class TestSourceProtocol:
@@ -28,10 +29,10 @@ class TestSourceProtocol:
             output_schema = OutputSchema
             node_id: str | None = None  # Set by orchestrator
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
 
-            def load(self, ctx: PluginContext) -> Iterator[dict]:
+            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
                 for i in range(3):
                     yield {"value": i}
 
@@ -91,10 +92,12 @@ class TestTransformProtocol:
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
 
-            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success(
                     {
                         "value": row["value"],
@@ -149,10 +152,10 @@ class TestGateProtocol:
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 self.threshold = config["threshold"]
 
-            def evaluate(self, row: dict, ctx: PluginContext) -> GateResult:
+            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
                 if row["value"] > self.threshold:
                     return GateResult(
                         row=row,
@@ -218,11 +221,11 @@ class TestAggregationProtocol:
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
-            def __init__(self, config: dict) -> None:
-                self.batch_size = config["batch_size"]
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.batch_size: int = config["batch_size"]
                 self._values: list[int] = []
 
-            def accept(self, row: dict, ctx: PluginContext) -> AcceptResult:
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._values.append(row["value"])
                 trigger = len(self._values) >= self.batch_size
                 return AcceptResult(accepted=True, trigger=trigger)
@@ -230,7 +233,7 @@ class TestAggregationProtocol:
             def should_trigger(self) -> bool:
                 return len(self._values) >= self.batch_size
 
-            def flush(self, ctx: PluginContext) -> list[dict]:
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 result = {
                     "total": sum(self._values),
                     "count": len(self._values),
@@ -287,8 +290,6 @@ class TestCoalesceProtocol:
 
     def test_quorum_requires_threshold(self) -> None:
         """QUORUM policy needs a quorum_threshold."""
-        from typing import ClassVar
-
         from elspeth.contracts import Determinism
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.protocols import CoalescePolicy, CoalesceProtocol
@@ -301,7 +302,7 @@ class TestCoalesceProtocol:
             name = "quorum_merge"
             policy = CoalescePolicy.QUORUM
             quorum_threshold = 2  # At least 2 branches must arrive
-            expected_branches: ClassVar[list[str]] = [
+            expected_branches: list[str] = [
                 "branch_a",
                 "branch_b",
                 "branch_c",
@@ -311,10 +312,12 @@ class TestCoalesceProtocol:
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 pass
 
-            def merge(self, branch_outputs: dict, ctx: PluginContext) -> dict:
+            def merge(
+                self, branch_outputs: dict[str, dict[str, Any]], ctx: PluginContext
+            ) -> dict[str, Any]:
                 return {"combined": "+".join(branch_outputs.keys())}
 
             def on_register(self, ctx: PluginContext) -> None:
@@ -329,17 +332,17 @@ class TestCoalesceProtocol:
         coalesce = QuorumCoalesce({})
 
         # IMPORTANT: Verify protocol conformance at runtime
+        # mypy may report this as unreachable due to structural subtyping analysis
+        # but runtime_checkable protocols DO work at runtime
         assert isinstance(
             coalesce, CoalesceProtocol
-        ), "Must conform to CoalesceProtocol"
+        ), "Must conform to CoalesceProtocol"  # type: ignore[unreachable]
 
-        assert coalesce.quorum_threshold == 2
-        assert len(coalesce.expected_branches) == 3
+        assert coalesce.quorum_threshold == 2  # type: ignore[unreachable]
+        assert len(coalesce.expected_branches) == 3  # type: ignore[unreachable]
 
     def test_coalesce_merge_behavior(self) -> None:
         """Test merge() combines branch outputs correctly."""
-        from typing import ClassVar
-
         from elspeth.contracts import Determinism
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.protocols import CoalescePolicy, CoalesceProtocol
@@ -352,16 +355,18 @@ class TestCoalesceProtocol:
             name = "sum_merge"
             policy = CoalescePolicy.REQUIRE_ALL
             quorum_threshold = None
-            expected_branches: ClassVar[list[str]] = ["branch_a", "branch_b"]
+            expected_branches: list[str] = ["branch_a", "branch_b"]
             output_schema = OutputSchema
             node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 pass
 
-            def merge(self, branch_outputs: dict, ctx: PluginContext) -> dict:
+            def merge(
+                self, branch_outputs: dict[str, dict[str, Any]], ctx: PluginContext
+            ) -> dict[str, Any]:
                 total = sum(out["value"] for out in branch_outputs.values())
                 return {"total": total}
 
@@ -375,9 +380,11 @@ class TestCoalesceProtocol:
                 pass
 
         coalesce = SumCoalesce({})
-        assert isinstance(coalesce, CoalesceProtocol)
+        # mypy may report this as unreachable due to structural subtyping analysis
+        # but runtime_checkable protocols DO work at runtime
+        assert isinstance(coalesce, CoalesceProtocol)  # type: ignore[unreachable]
 
-        ctx = PluginContext(run_id="test", config={})
+        ctx = PluginContext(run_id="test", config={})  # type: ignore[unreachable]
 
         branch_outputs = {
             "branch_a": {"value": 10},
@@ -410,13 +417,13 @@ class TestSinkProtocol:
             node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
-            rows: ClassVar[list[dict]] = []
+            rows: ClassVar[list[dict[str, Any]]] = []
 
-            def __init__(self, config: dict) -> None:
-                self.rows = []
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.instance_rows: list[dict[str, Any]] = []
                 self.config = config
 
-            def write(self, row: dict, ctx: PluginContext) -> None:
+            def write(self, row: dict[str, Any], ctx: PluginContext) -> None:
                 self.rows.append(row)
 
             def flush(self) -> None:
@@ -461,13 +468,14 @@ class TestProtocolMetadata:
     def test_transform_has_determinism_attribute(self) -> None:
         from elspeth.plugins.protocols import TransformProtocol
 
-        # Protocol attributes are tracked in __protocol_attrs__
-        assert "determinism" in TransformProtocol.__protocol_attrs__
+        # Protocol attributes are tracked in __protocol_attrs__ (runtime Protocol internals)
+        assert "determinism" in TransformProtocol.__protocol_attrs__  # type: ignore[attr-defined]
 
     def test_transform_has_version_attribute(self) -> None:
         from elspeth.plugins.protocols import TransformProtocol
 
-        assert "plugin_version" in TransformProtocol.__protocol_attrs__
+        # __protocol_attrs__ is a runtime attribute on @runtime_checkable Protocols
+        assert "plugin_version" in TransformProtocol.__protocol_attrs__  # type: ignore[attr-defined]
 
     def test_deterministic_transform(self) -> None:
         from elspeth.contracts import Determinism
@@ -479,7 +487,9 @@ class TestProtocolMetadata:
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
-            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success(row)
 
         t = MyTransform()
@@ -495,7 +505,9 @@ class TestProtocolMetadata:
             determinism = Determinism.EXTERNAL_CALL
             plugin_version = "0.1.0"
 
-            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success(row)
 
         t = LLMTransform()

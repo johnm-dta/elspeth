@@ -37,7 +37,8 @@ class TestIntegrationAuditFixes:
         # Instantiate a plugin and verify node_id
         csv_source_cls = manager.get_source_by_name("csv")
         assert csv_source_cls is not None
-        source = csv_source_cls({"path": "test.csv"})
+        # Protocols don't define __init__ but concrete classes do
+        source = csv_source_cls({"path": "test.csv"})  # type: ignore[call-arg]
         assert source.node_id is None  # Not yet set
 
         source.node_id = "node-123"
@@ -159,7 +160,8 @@ class TestIntegrationAuditFixes:
         # Test source
         csv_source_cls = manager.get_source_by_name("csv")
         assert csv_source_cls is not None
-        source = csv_source_cls({"path": "test.csv"})
+        # Protocols don't define __init__ but concrete classes do
+        source = csv_source_cls({"path": "test.csv"})  # type: ignore[call-arg]
         assert hasattr(source, "node_id")
         source.node_id = "source-001"
         assert source.node_id == "source-001"
@@ -167,7 +169,8 @@ class TestIntegrationAuditFixes:
         # Test transform
         passthrough_cls = manager.get_transform_by_name("passthrough")
         assert passthrough_cls is not None
-        transform = passthrough_cls({})
+        # Protocols don't define __init__ but concrete classes do
+        transform = passthrough_cls({})  # type: ignore[call-arg]
         assert hasattr(transform, "node_id")
         transform.node_id = "transform-001"
         assert transform.node_id == "transform-001"
@@ -175,7 +178,8 @@ class TestIntegrationAuditFixes:
         # Test gate
         filter_gate_cls = manager.get_gate_by_name("filter_gate")
         assert filter_gate_cls is not None
-        gate = filter_gate_cls({"field": "score", "greater_than": 50})
+        # Protocols don't define __init__ but concrete classes do
+        gate = filter_gate_cls({"field": "score", "greater_than": 50})  # type: ignore[call-arg]
         assert hasattr(gate, "node_id")
         gate.node_id = "gate-001"
         assert gate.node_id == "gate-001"
@@ -183,7 +187,8 @@ class TestIntegrationAuditFixes:
         # Test sink
         csv_sink_cls = manager.get_sink_by_name("csv")
         assert csv_sink_cls is not None
-        sink = csv_sink_cls({"path": "/tmp/test.csv"})
+        # Protocols don't define __init__ but concrete classes do
+        sink = csv_sink_cls({"path": "/tmp/test.csv"})  # type: ignore[call-arg]
         assert hasattr(sink, "node_id")
         sink.node_id = "sink-001"
         assert sink.node_id == "sink-001"

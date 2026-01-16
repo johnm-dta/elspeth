@@ -138,6 +138,7 @@ class TestFieldMapper:
         result = transform.process(row, ctx)
 
         assert result.status == "success"
+        assert result.row is not None
         assert result.row["origin"] == "api"
         assert "meta" in result.row  # Original nested structure preserved
 

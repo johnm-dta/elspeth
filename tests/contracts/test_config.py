@@ -34,4 +34,4 @@ class TestConfigReexports:
         settings = DatasourceSettings(plugin="csv_local")
 
         with pytest.raises(ValidationError):
-            settings.plugin = "other"
+            settings.plugin = "other"  # type: ignore[misc]

@@ -5,3 +5,164 @@ allowed_external_types:
   - "tui/types:TokenDisplayInfo"
   # Plugin execution context - framework infrastructure, not a data contract
   - "plugins/context:PluginContext"
+
+# dict[str, Any] patterns that are intentional
+# Format: "file_path:context:param_name"
+allowed_dict_patterns:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # ROW DATA (THEIR DATA)
+  # User pipeline data is inherently dynamic - we cannot know the schema.
+  # These are wrapped in typed containers (TokenInfo) but the row content itself
+  # can be anything the user's pipeline produces.
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # Engine - row data handling
+  - "src/elspeth/engine/adapters.py:RowWiseSinkProtocol.write:row"
+  - "src/elspeth/engine/adapters.py:SinkAdapter.write:rows (list)"
+  - "src/elspeth/engine/executors.py:TransformLike.process:row"
+  - "src/elspeth/engine/executors.py:GateLike.evaluate:row"
+  - "src/elspeth/engine/executors.py:AggregationLike.accept:row"
+  - "src/elspeth/engine/executors.py:AggregationLike.flush:return (list)"
+  - "src/elspeth/engine/executors.py:AggregationExecutor.flush:return (list)"
+  - "src/elspeth/engine/executors.py:SinkLike.write:rows (list)"
+  - "src/elspeth/engine/tokens.py:TokenManager.create_initial_token:row_data"
+  - "src/elspeth/engine/tokens.py:TokenManager.fork_token:row_data"
+  - "src/elspeth/engine/tokens.py:TokenManager.coalesce_tokens:merged_data"
+  - "src/elspeth/engine/tokens.py:TokenManager.update_row_data:new_data"
+  - "src/elspeth/engine/processor.py:RowProcessor.process_row:row_data"
+
+  # Protocols - row data in plugin interface
+  - "src/elspeth/plugins/protocols.py:TransformProtocol.process:row"
+  - "src/elspeth/plugins/protocols.py:GateProtocol.evaluate:row"
+  - "src/elspeth/plugins/protocols.py:AggregationProtocol.accept:row"
+  - "src/elspeth/plugins/protocols.py:AggregationProtocol.flush:return (list)"
+  - "src/elspeth/plugins/protocols.py:CoalesceProtocol.merge:return"
+  - "src/elspeth/plugins/protocols.py:SinkProtocol.write:row"
+
+  # Base classes - row data in plugin implementations
+  - "src/elspeth/plugins/base.py:BaseTransform.process:row"
+  - "src/elspeth/plugins/base.py:BaseGate.evaluate:row"
+  - "src/elspeth/plugins/base.py:BaseAggregation.accept:row"
+
+  # Gate plugins - row evaluation
+  - "src/elspeth/plugins/gates/field_match_gate.py:FieldMatchGate.evaluate:row"
+  - "src/elspeth/plugins/gates/field_match_gate.py:FieldMatchGate._get_nested:data"
+  - "src/elspeth/plugins/gates/threshold_gate.py:ThresholdGate.evaluate:row"
+  - "src/elspeth/plugins/gates/threshold_gate.py:ThresholdGate._get_nested:data"
+  - "src/elspeth/plugins/gates/filter_gate.py:FilterGate.evaluate:row"
+  - "src/elspeth/plugins/gates/filter_gate.py:FilterGate._get_nested:data"
+
+  # Sink plugins - row output
+  - "src/elspeth/plugins/sinks/database_sink.py:DatabaseSink._ensure_table:row"
+  - "src/elspeth/plugins/sinks/database_sink.py:DatabaseSink.write:row"
+  - "src/elspeth/plugins/sinks/csv_sink.py:CSVSink.write:row"
+  - "src/elspeth/plugins/sinks/json_sink.py:JSONSink.write:row"
+  - "src/elspeth/plugins/sinks/json_sink.py:JSONSink._write_jsonl:row"
+
+  # Transform plugins - row processing
+  - "src/elspeth/plugins/transforms/passthrough.py:PassThrough.process:row"
+  - "src/elspeth/plugins/transforms/field_mapper.py:FieldMapper.process:row"
+  - "src/elspeth/plugins/transforms/field_mapper.py:FieldMapper._get_nested:data"
+
+  # Additional protocol/base flush and write patterns
+  - "src/elspeth/plugins/protocols.py:AggregationProtocol.flush:return (list)"
+  - "src/elspeth/plugins/base.py:BaseAggregation.flush:return (list)"
+  - "src/elspeth/plugins/base.py:BaseSink.write:row"
+  - "src/elspeth/engine/executors.py:AggregationLike.flush:return (list)"
+  - "src/elspeth/engine/executors.py:AggregationExecutor.flush:return (list)"
+  - "src/elspeth/engine/executors.py:SinkLike.write:rows (list)"
+  - "src/elspeth/engine/adapters.py:SinkAdapter.write:rows (list)"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # PLUGIN CONFIG (TRUST BOUNDARY)
+  # Plugin config comes from external YAML and is validated internally by
+  # Pydantic schemas before use. The dict[str, Any] is the input type before
+  # validation - our code validates it into typed Pydantic models.
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # Protocols - config input
+  - "src/elspeth/plugins/protocols.py:SourceProtocol.__init__:config"
+  - "src/elspeth/plugins/protocols.py:TransformProtocol.__init__:config"
+  - "src/elspeth/plugins/protocols.py:GateProtocol.__init__:config"
+  - "src/elspeth/plugins/protocols.py:AggregationProtocol.__init__:config"
+  - "src/elspeth/plugins/protocols.py:CoalesceProtocol.__init__:config"
+  - "src/elspeth/plugins/protocols.py:SinkProtocol.__init__:config"
+
+  # Base classes - config input
+  - "src/elspeth/plugins/base.py:BaseTransform.__init__:config"
+  - "src/elspeth/plugins/base.py:BaseGate.__init__:config"
+  - "src/elspeth/plugins/base.py:BaseAggregation.__init__:config"
+
+  # Plugin implementations - config input
+  - "src/elspeth/plugins/gates/field_match_gate.py:FieldMatchGate.__init__:config"
+  - "src/elspeth/plugins/gates/threshold_gate.py:ThresholdGate.__init__:config"
+  - "src/elspeth/plugins/gates/filter_gate.py:FilterGate.__init__:config"
+  - "src/elspeth/plugins/sinks/database_sink.py:DatabaseSink.__init__:config"
+  - "src/elspeth/plugins/sinks/csv_sink.py:CSVSink.__init__:config"
+  - "src/elspeth/plugins/sinks/json_sink.py:JSONSink.__init__:config"
+  - "src/elspeth/plugins/transforms/passthrough.py:PassThrough.__init__:config"
+  - "src/elspeth/plugins/transforms/field_mapper.py:FieldMapper.__init__:config"
+  - "src/elspeth/plugins/sources/json_source.py:JSONSource.__init__:config"
+  - "src/elspeth/plugins/sources/csv_source.py:CSVSource.__init__:config"
+
+  # Additional base class config inputs
+  - "src/elspeth/plugins/base.py:BaseSink.__init__:config"
+  - "src/elspeth/plugins/base.py:BaseSource.__init__:config"
+  - "src/elspeth/plugins/config_base.py:PluginConfig.from_dict:config"
+
+  # Schema conversion - trust boundary between typed models and row dicts
+  - "src/elspeth/plugins/schemas.py:PluginSchema.to_row:return"
+  - "src/elspeth/plugins/schemas.py:PluginSchema.from_row:row"
+  - "src/elspeth/plugins/schemas.py:validate_row:row"
+
+  # DAG and config - runtime configuration dicts
+  - "src/elspeth/core/dag.py:ExecutionGraph.add_node:config"
+  - "src/elspeth/core/config.py:resolve_config:return"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # AGGREGATION STATE
+  # Aggregation plugins maintain arbitrary state between rows. The state format
+  # is plugin-specific and cannot be typed at the framework level.
+  # ═══════════════════════════════════════════════════════════════════════════
+  - "src/elspeth/core/checkpoint/manager.py:CheckpointManager.create_checkpoint:aggregation_state"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # ENGINE ADAPTER - from_dict factory
+  # RawArtifactDescriptor.from_dict receives dict from serialization layer
+  # ═══════════════════════════════════════════════════════════════════════════
+  - "src/elspeth/engine/adapters.py:RawArtifactDescriptor.from_dict:data"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # LANDSCAPE RECORDER - Audit trail recording
+  # These methods handle dynamic data from pipeline execution
+  # ═══════════════════════════════════════════════════════════════════════════
+  - "src/elspeth/core/landscape/recorder.py:LandscapeRecorder.begin_run:config"
+  - "src/elspeth/core/landscape/recorder.py:LandscapeRecorder.register_node:config"
+  - "src/elspeth/core/landscape/recorder.py:LandscapeRecorder.create_row:data"
+  - "src/elspeth/core/landscape/recorder.py:LandscapeRecorder.begin_node_state:input_data"
+  - "src/elspeth/core/landscape/recorder.py:LandscapeRecorder.begin_node_state:context_before"
+  - "src/elspeth/core/landscape/recorder.py:LandscapeRecorder.complete_node_state:output_data"
+  - "src/elspeth/core/landscape/recorder.py:LandscapeRecorder.complete_node_state:error"
+  - "src/elspeth/core/landscape/recorder.py:LandscapeRecorder.complete_node_state:context_after"
+  - "src/elspeth/core/landscape/recorder.py:LandscapeRecorder.record_routing_event:reason"
+  - "src/elspeth/core/landscape/recorder.py:LandscapeRecorder.record_routing_events:reason"
+
+  # Plugin context - event data recording
+  - "src/elspeth/plugins/context.py:LandscapeRecorder.record_event:data"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # FORMATTERS - Record formatting for export
+  # Formatters work with audit records that have dynamic structure
+  # ═══════════════════════════════════════════════════════════════════════════
+  - "src/elspeth/core/landscape/formatters.py:ExportFormatter.format:record"
+  - "src/elspeth/core/landscape/formatters.py:JSONFormatter.format:record"
+  - "src/elspeth/core/landscape/formatters.py:CSVFormatter.flatten:record"
+  - "src/elspeth/core/landscape/formatters.py:CSVFormatter.flatten:return"
+  - "src/elspeth/core/landscape/formatters.py:CSVFormatter.format:record"
+  - "src/elspeth/core/landscape/formatters.py:CSVFormatter.format:return"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # EXPORTER - Record signing
+  # Exporter works with dynamic audit records
+  # ═══════════════════════════════════════════════════════════════════════════
+  - "src/elspeth/core/landscape/exporter.py:LandscapeExporter._sign_record:record"

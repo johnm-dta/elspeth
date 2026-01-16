@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class TestPipelineSchemaValidator:
     """Tests for optional schema compatibility checking."""
@@ -93,7 +95,7 @@ class TestPipelineSchemaValidator:
 
         class SinkInput(PluginSchema):
             result: str
-            metadata: dict  # Not provided by transform!
+            metadata: dict[str, Any]  # Not provided by transform!
 
         errors = validate_pipeline_schemas(
             source_output=TransformOutput,

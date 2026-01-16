@@ -43,10 +43,14 @@ class TestRowOutcome:
 
     def test_is_not_str_enum(self) -> None:
         """RowOutcome should NOT be a str subclass - it's derived, not stored."""
+        # RowOutcome.COMPLETED should not be equal to string without .value
+        # Note: mypy correctly detects this comparison can never be equal since
+        # RowOutcome is not a (str, Enum). We cast to Any to verify at runtime.
+        from typing import Any, cast
+
         from elspeth.contracts import RowOutcome
 
-        # RowOutcome.COMPLETED should not be equal to string without .value
-        assert RowOutcome.COMPLETED != "completed"
+        assert cast(Any, RowOutcome.COMPLETED) != "completed"
         assert RowOutcome.COMPLETED.value == "completed"
 
     def test_has_all_terminal_states(self) -> None:

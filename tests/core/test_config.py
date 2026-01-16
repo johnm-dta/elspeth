@@ -209,7 +209,7 @@ class TestDatasourceSettings:
 
         ds = DatasourceSettings(plugin="csv")
         with pytest.raises(ValidationError):
-            ds.plugin = "json"
+            ds.plugin = "json"  # type: ignore[misc]
 
 
 class TestRowPluginSettings:
@@ -308,7 +308,7 @@ class TestLandscapeExportSettings:
 
         export = LandscapeExportSettings()
         with pytest.raises(ValidationError):
-            export.enabled = True
+            export.enabled = True  # type: ignore[misc]
 
 
 class TestLandscapeSettings:
@@ -637,7 +637,7 @@ class TestElspethSettingsArchitecture:
 
         # Missing required fields
         with pytest.raises(ValidationError) as exc_info:
-            ElspethSettings()
+            ElspethSettings()  # type: ignore[call-arg]
 
         errors = exc_info.value.errors()
         missing_fields = {e["loc"][0] for e in errors if e["type"] == "missing"}

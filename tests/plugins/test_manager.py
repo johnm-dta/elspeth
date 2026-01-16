@@ -1,6 +1,8 @@
 # tests/plugins/test_manager.py
 """Tests for plugin manager."""
 
+from typing import Any
+
 
 class TestPluginManager:
     """Plugin discovery and registration."""
@@ -30,10 +32,12 @@ class TestPluginManager:
             input_schema = InputSchema
             output_schema = OutputSchema
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 pass
 
-            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success({**row, "y": row["x"] * 2})
 
             def on_register(self, ctx: PluginContext) -> None:
@@ -47,7 +51,7 @@ class TestPluginManager:
 
         class MyPlugin:
             @hookimpl
-            def elspeth_get_transforms(self) -> list:
+            def elspeth_get_transforms(self) -> list[type[MyTransform]]:
                 return [MyTransform]
 
         manager = PluginManager()
@@ -72,10 +76,12 @@ class TestPluginManager:
             input_schema = Schema
             output_schema = Schema
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 pass
 
-            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success(row)
 
             def on_register(self, ctx: PluginContext) -> None:
@@ -92,10 +98,12 @@ class TestPluginManager:
             input_schema = Schema
             output_schema = Schema
 
-            def __init__(self, config: dict) -> None:
+            def __init__(self, config: dict[str, Any]) -> None:
                 pass
 
-            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
                 return TransformResult.success(row)
 
             def on_register(self, ctx: PluginContext) -> None:
@@ -109,7 +117,9 @@ class TestPluginManager:
 
         class MyPlugin:
             @hookimpl
-            def elspeth_get_transforms(self) -> list:
+            def elspeth_get_transforms(
+                self,
+            ) -> list[type[TransformA] | type[TransformB]]:
                 return [TransformA, TransformB]
 
         manager = PluginManager()
@@ -171,7 +181,7 @@ class TestDuplicateNameValidation:
 
         class Plugin1:
             @hookimpl
-            def elspeth_get_transforms(self) -> list:
+            def elspeth_get_transforms(self) -> list[type]:
                 class T1:
                     name = "duplicate_name"
 
@@ -179,7 +189,7 @@ class TestDuplicateNameValidation:
 
         class Plugin2:
             @hookimpl
-            def elspeth_get_transforms(self) -> list:
+            def elspeth_get_transforms(self) -> list[type]:
                 class T2:
                     name = "duplicate_name"
 
@@ -197,14 +207,14 @@ class TestDuplicateNameValidation:
 
         class Plugin:
             @hookimpl
-            def elspeth_get_transforms(self) -> list:
+            def elspeth_get_transforms(self) -> list[type]:
                 class T:
                     name = "processor"
 
                 return [T]
 
             @hookimpl
-            def elspeth_get_sinks(self) -> list:
+            def elspeth_get_sinks(self) -> list[type]:
                 class S:
                     name = "processor"  # Same name, different type
 

@@ -13,16 +13,59 @@ because the processor uses isinstance() for type-safe plugin detection.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from elspeth.contracts import RoutingMode
+from elspeth.contracts import Determinism, RoutingMode
 from elspeth.plugins.base import BaseGate, BaseTransform
+from elspeth.plugins.schemas import PluginSchema
 
 if TYPE_CHECKING:
+    from elspeth.contracts.results import ArtifactDescriptor, TransformResult
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
+
+
+# ============================================================================
+# Test Fixture Base Classes
+# ============================================================================
+# These provide the required protocol attributes so inline test classes
+# don't need to repeat them.
+
+
+class _TestSchema(PluginSchema):
+    """Minimal schema for test fixtures."""
+
+    pass
+
+
+class _TestSourceBase:
+    """Base class providing SourceProtocol required attributes.
+
+    Note: output_schema is NOT provided here because child classes override it
+    with their own schemas, and mypy's type invariance would flag that as a conflict.
+    Each test class must provide its own output_schema.
+    """
+
+    node_id: str | None = None
+
+
+class _TestSinkBase:
+    """Base class providing SinkProtocol required attributes.
+
+    Note: input_schema is NOT provided here because child classes may override it
+    with their own schemas, and mypy's type invariance would flag that as a conflict.
+    Each test class should provide its own input_schema if needed.
+    """
+
+    idempotent = True
+    node_id: str | None = None
+    determinism = Determinism.DETERMINISTIC
+    plugin_version = "1.0"
+
+    def flush(self) -> None:
+        pass
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
@@ -155,20 +198,20 @@ class TestEngineIntegration:
             value: int
             processed: bool
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "test_source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class MarkProcessedTransform(BaseTransform):
@@ -179,7 +222,7 @@ class TestEngineIntegration:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(
                     {
                         "value": row["value"],
@@ -187,25 +230,25 @@ class TestEngineIntegration:
                     }
                 )
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "output_sink"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory://output", size_bytes=100, content_hash="abc123"
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         # Run pipeline
@@ -273,20 +316,20 @@ class TestEngineIntegration:
         class NumberSchema(PluginSchema):
             n: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "numbers"
             output_schema = NumberSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class DoubleTransform(BaseTransform):
@@ -297,7 +340,7 @@ class TestEngineIntegration:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success({"n": row["n"] * 2})
 
         class AddTenTransform(BaseTransform):
@@ -308,28 +351,28 @@ class TestEngineIntegration:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success({"n": row["n"] + 10})
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "collector"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory://out", size_bytes=len(rows), content_hash="hash"
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         # Pipeline with multiple transforms
@@ -425,20 +468,20 @@ class TestEngineIntegration:
         class NumberSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "numbers"
             output_schema = NumberSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class EvenOddGate(BaseGate):
@@ -449,7 +492,7 @@ class TestEngineIntegration:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def evaluate(self, row, ctx):
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
                 if row["value"] % 2 == 0:
                     return GateResult(
                         row=row,
@@ -459,20 +502,20 @@ class TestEngineIntegration:
                     )
                 return GateResult(row=row, action=RoutingAction.continue_())
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name: str
 
             def __init__(self, sink_name: str):
                 self.name = sink_name
-                self.results: list[dict] = []
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path=f"memory://{self.name}",
@@ -480,7 +523,7 @@ class TestEngineIntegration:
                     content_hash=f"hash_{self.name}",
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         # Pipeline with routing gate
@@ -570,20 +613,20 @@ class TestNoSilentAuditLoss:
         class RowSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "source"
             output_schema = RowSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class MisroutingGate(BaseGate):
@@ -594,32 +637,32 @@ class TestNoSilentAuditLoss:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def evaluate(self, row, ctx):
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
                 # Route to "phantom" which is not in route_resolution_map
                 return GateResult(
                     row=row,
                     action=RoutingAction.route("phantom"),
                 )
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "default_sink"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 42}])
@@ -676,20 +719,20 @@ class TestNoSilentAuditLoss:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class ExplodingTransform(BaseTransform):
@@ -700,28 +743,28 @@ class TestNoSilentAuditLoss:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 raise RuntimeError("Intentional explosion")
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "sink"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 1}])
@@ -760,20 +803,20 @@ class TestNoSilentAuditLoss:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class IdentityTransform(BaseTransform):
@@ -784,22 +827,22 @@ class TestNoSilentAuditLoss:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-        class ExplodingSink:
+        class ExplodingSink(_TestSinkBase):
             name = "exploding_sink"
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 raise OSError("Sink explosion")
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource([{"value": 1}])
@@ -843,17 +886,17 @@ class TestAuditTrailCompleteness:
         class ValueSchema(PluginSchema):
             value: int
 
-        class EmptySource:
+        class EmptySource(_TestSourceBase):
             name = "empty"
             output_schema = ValueSchema
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 return iter([])
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class IdentityTransform(BaseTransform):
@@ -864,28 +907,28 @@ class TestAuditTrailCompleteness:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             name = "sink"
 
-            def __init__(self):
-                self.results = []
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="memory", size_bytes=0, content_hash=""
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = EmptySource()
@@ -926,20 +969,20 @@ class TestAuditTrailCompleteness:
         class ValueSchema(PluginSchema):
             value: int
 
-        class ListSource:
+        class ListSource(_TestSourceBase):
             name = "source"
             output_schema = ValueSchema
 
-            def __init__(self, data: list[dict]) -> None:
+            def __init__(self, data: list[dict[str, Any]]) -> None:
                 self._data = data
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx):
+            def load(self, ctx: Any) -> Any:
                 yield from self._data
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         class SplitGate(BaseGate):
@@ -950,25 +993,25 @@ class TestAuditTrailCompleteness:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def evaluate(self, row, ctx):
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
                 if row["value"] > 50:
                     return GateResult(
                         row=row, action=RoutingAction.route("high")
                     )  # Route label
                 return GateResult(row=row, action=RoutingAction.continue_())
 
-        class CollectSink:
+        class CollectSink(_TestSinkBase):
             def __init__(self, sink_name: str):
                 self.name = sink_name
-                self.results: list[dict] = []
+                self.results: list[dict[str, Any]] = []
 
-            def on_start(self, ctx):
+            def on_start(self, ctx: Any) -> None:
                 pass
 
-            def on_complete(self, ctx):
+            def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def write(self, rows, ctx):
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path=f"memory://{self.name}",
@@ -976,7 +1019,7 @@ class TestAuditTrailCompleteness:
                     content_hash=f"{self.name}_hash",
                 )
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         source = ListSource(

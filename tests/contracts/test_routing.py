@@ -108,7 +108,7 @@ class TestRoutingAction:
 
         action = RoutingAction.continue_()
         with pytest.raises(AttributeError):
-            action.kind = "other"  # type: ignore[misc]
+            action.kind = "other"  # type: ignore[misc,assignment]  # Testing frozen
 
 
 class TestRoutingSpec:

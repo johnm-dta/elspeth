@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
-from elspeth.contracts import RoutingMode
+from elspeth.contracts import Determinism, RoutingMode
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.engine.artifacts import ArtifactDescriptor
@@ -91,17 +93,18 @@ class ListSource:
 
     name = "list_source"
     output_schema = ValueSchema
+    node_id: str | None = None  # Required by SourceProtocol
 
-    def __init__(self, data: list[dict]) -> None:
+    def __init__(self, data: list[dict[str, Any]]) -> None:
         self._data = data
 
-    def on_start(self, ctx) -> None:
+    def on_start(self, ctx: Any) -> None:
         pass
 
-    def on_complete(self, ctx) -> None:
+    def on_complete(self, ctx: Any) -> None:
         pass
 
-    def load(self, ctx):
+    def load(self, ctx: Any) -> Any:
         yield from self._data
 
     def close(self) -> None:
@@ -113,7 +116,7 @@ class FailingSource(ListSource):
 
     name = "failing_source"
 
-    def load(self, ctx):
+    def load(self, ctx: Any) -> Any:
         raise RuntimeError("Source failed intentionally")
 
 
@@ -121,19 +124,27 @@ class CollectSink:
     """Test sink that collects results in memory."""
 
     name = "collect"
+    input_schema = ValueSchema  # Required by SinkProtocol
+    idempotent = True  # Required by SinkProtocol
+    node_id: str | None = None  # Required by SinkProtocol
+    determinism = Determinism.DETERMINISTIC  # Required by SinkProtocol
+    plugin_version = "1.0"  # Required by SinkProtocol
 
     def __init__(self) -> None:
-        self.results: list[dict] = []
+        self.results: list[dict[str, Any]] = []
 
-    def on_start(self, ctx) -> None:
+    def on_start(self, ctx: Any) -> None:
         pass
 
-    def on_complete(self, ctx) -> None:
+    def on_complete(self, ctx: Any) -> None:
         pass
 
-    def write(self, rows, ctx):
+    def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
         self.results.extend(rows)
         return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+
+    def flush(self) -> None:
+        pass
 
     def close(self) -> None:
         pass
@@ -151,13 +162,13 @@ class TrackingTransform(BaseTransform):
         self.close_called = False
         self.close_call_count = 0
 
-    def on_start(self, ctx) -> None:
+    def on_start(self, ctx: Any) -> None:
         pass
 
-    def on_complete(self, ctx) -> None:
+    def on_complete(self, ctx: Any) -> None:
         pass
 
-    def process(self, row, ctx):
+    def process(self, row: Any, ctx: Any) -> TransformResult:
         return TransformResult.success(row)
 
     def close(self) -> None:
@@ -186,13 +197,13 @@ class TrackingGate(BaseGate):
         self.close_called = False
         self.close_call_count = 0
 
-    def on_start(self, ctx) -> None:
+    def on_start(self, ctx: Any) -> None:
         pass
 
-    def on_complete(self, ctx) -> None:
+    def on_complete(self, ctx: Any) -> None:
         pass
 
-    def evaluate(self, row, ctx):
+    def evaluate(self, row: Any, ctx: Any) -> GateResult:
         return GateResult(row=row, action=RoutingAction.continue_())
 
     def close(self) -> None:
@@ -302,7 +313,7 @@ class TestOrchestratorCleanup:
             def __init__(self) -> None:
                 super().__init__({})
 
-            def process(self, row, ctx):
+            def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
             # Note: No close() method - this is valid since BaseTransform

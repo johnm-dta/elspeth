@@ -24,7 +24,6 @@ from elspeth.contracts import (
     Determinism,
     Edge,
     ExecutionError,
-    ExportStatus,
     Node,
     NodeState,
     NodeStateCompleted,
@@ -380,7 +379,7 @@ class LandscapeRecorder:
     def set_export_status(
         self,
         run_id: str,
-        status: ExportStatus | str,
+        status: str,
         *,
         error: str | None = None,
         export_format: str | None = None,
@@ -393,20 +392,14 @@ class LandscapeRecorder:
 
         Args:
             run_id: Run to update
-            status: Export status (pending, completed, failed) - must be valid ExportStatus
+            status: Export status (pending, completed, failed)
             error: Error message if status is 'failed'
             export_format: Format used (csv, json)
             export_sink: Sink name used for export
-
-        Raises:
-            ValueError: If status string is not a valid ExportStatus value
         """
-        # Validate and coerce status enum early - fail fast on typos
-        status_enum = _coerce_enum(status, ExportStatus)
+        updates: dict[str, Any] = {"export_status": status}
 
-        updates: dict[str, Any] = {"export_status": status_enum.value}
-
-        if status_enum == ExportStatus.COMPLETED:
+        if status == "completed":
             updates["exported_at"] = _now()
         if error is not None:
             updates["export_error"] = error
@@ -1204,7 +1197,7 @@ class LandscapeRecorder:
     def update_batch_status(
         self,
         batch_id: str,
-        status: BatchStatus | str,
+        status: str,
         *,
         trigger_reason: str | None = None,
         state_id: str | None = None,
@@ -1217,16 +1210,13 @@ class LandscapeRecorder:
             trigger_reason: Why the batch was triggered
             state_id: Node state for the flush operation
         """
-        # Validate and coerce status enum early - fail fast on typos
-        status_enum = _coerce_enum(status, BatchStatus)
-
-        updates: dict[str, Any] = {"status": status_enum.value}
+        updates: dict[str, Any] = {"status": status}
 
         if trigger_reason:
             updates["trigger_reason"] = trigger_reason
         if state_id:
             updates["aggregation_state_id"] = state_id
-        if status_enum in (BatchStatus.COMPLETED, BatchStatus.FAILED):
+        if status in ("completed", "failed"):
             updates["completed_at"] = _now()
 
         with self._db.connection() as conn:

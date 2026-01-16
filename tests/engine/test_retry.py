@@ -14,7 +14,7 @@ class TestRetryManager:
 
         call_count = 0
 
-        def flaky_operation():
+        def flaky_operation() -> str:
             nonlocal call_count
             call_count += 1
             if call_count < 3:
@@ -34,7 +34,7 @@ class TestRetryManager:
 
         manager = RetryManager(RetryConfig(max_attempts=3, base_delay=0.01))
 
-        def failing_operation():
+        def failing_operation() -> None:
             raise TypeError("Not retryable")
 
         with pytest.raises(TypeError):
@@ -48,7 +48,7 @@ class TestRetryManager:
 
         manager = RetryManager(RetryConfig(max_attempts=2, base_delay=0.01))
 
-        def always_fails():
+        def always_fails() -> None:
             raise ValueError("Always fails")
 
         with pytest.raises(MaxRetriesExceeded) as exc_info:
@@ -67,7 +67,7 @@ class TestRetryManager:
 
         call_count = 0
 
-        def flaky_with_tracking():
+        def flaky_with_tracking() -> str:
             nonlocal call_count
             call_count += 1
             if call_count < 2:

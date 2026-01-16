@@ -24,6 +24,7 @@ from elspeth.contracts import (
     Determinism,
     Edge,
     ExecutionError,
+    ExportStatus,
     Node,
     NodeState,
     NodeStateCompleted,
@@ -379,7 +380,7 @@ class LandscapeRecorder:
     def set_export_status(
         self,
         run_id: str,
-        status: str,
+        status: ExportStatus | str,
         *,
         error: str | None = None,
         export_format: str | None = None,
@@ -392,14 +393,20 @@ class LandscapeRecorder:
 
         Args:
             run_id: Run to update
-            status: Export status (pending, completed, failed)
+            status: Export status (pending, completed, failed) - must be valid ExportStatus
             error: Error message if status is 'failed'
             export_format: Format used (csv, json)
             export_sink: Sink name used for export
-        """
-        updates: dict[str, Any] = {"export_status": status}
 
-        if status == "completed":
+        Raises:
+            ValueError: If status string is not a valid ExportStatus value
+        """
+        # Validate and coerce status enum early - fail fast on typos
+        status_enum = _coerce_enum(status, ExportStatus)
+
+        updates: dict[str, Any] = {"export_status": status_enum.value}
+
+        if status_enum == ExportStatus.COMPLETED:
             updates["exported_at"] = _now()
         if error is not None:
             updates["export_error"] = error

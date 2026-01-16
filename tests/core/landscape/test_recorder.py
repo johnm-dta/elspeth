@@ -1928,6 +1928,47 @@ class TestExplainGracefulDegradation:
         assert lineage_correct.row_id == row.row_id
 
 
+class TestExportStatusEnum:
+    """Verify set_export_status uses enum validation."""
+
+    def test_set_export_status_accepts_enum(self) -> None:
+        """set_export_status accepts ExportStatus enum."""
+
+        from elspeth.contracts import ExportStatus
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Should accept enum without error
+        recorder.set_export_status(run.run_id, ExportStatus.COMPLETED)
+
+        updated_run = recorder.get_run(run.run_id)
+        assert updated_run is not None
+        # Value stored correctly
+        assert (
+            updated_run.export_status == "completed"
+            or updated_run.export_status == ExportStatus.COMPLETED
+        )
+
+    def test_set_export_status_rejects_invalid_string(self) -> None:
+        """set_export_status rejects invalid status strings."""
+        import pytest
+
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Should raise ValueError for invalid status
+        with pytest.raises(ValueError, match="not a valid ExportStatus"):
+            recorder.set_export_status(run.run_id, "invalid_status")
+
+
 class TestReproducibilityGradeComputation:
     """Tests for reproducibility grade computation based on node determinism values."""
 

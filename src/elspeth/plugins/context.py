@@ -19,21 +19,8 @@ if TYPE_CHECKING:
     # Using string annotations to avoid import errors in Phase 2
     from opentelemetry.trace import Span, Tracer
 
+    from elspeth.core.landscape.recorder import LandscapeRecorder
     from elspeth.core.payload_store import PayloadStore
-
-
-# Protocol for Landscape recorder (Phase 3)
-# Defined here so plugins can type-hint against it
-class LandscapeRecorder:
-    """Protocol for Landscape audit recording.
-
-    Implemented in Phase 3. Plugins can optionally use this
-    for custom audit events.
-    """
-
-    def record_event(self, event_type: str, data: dict[str, Any]) -> None:
-        """Record a custom audit event."""
-        ...
 
 
 @dataclass
@@ -58,7 +45,8 @@ class PluginContext:
 
     # === Phase 3 Integration Points ===
     # Optional in Phase 2, populated by engine in Phase 3
-    landscape: LandscapeRecorder | None = None
+    # Use string annotations to avoid import errors at runtime
+    landscape: "LandscapeRecorder | None" = None
     tracer: "Tracer | None" = None
     payload_store: "PayloadStore | None" = None
 

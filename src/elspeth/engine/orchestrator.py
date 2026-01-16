@@ -424,13 +424,11 @@ class Orchestrator:
                 )
             sink.node_id = sink_id_map[sink_name]
 
-        # Create context
-        # Note: landscape field uses Any type since PluginContext.LandscapeRecorder
-        # is a protocol placeholder for Phase 2, while we pass the real recorder
+        # Create context with the LandscapeRecorder
         ctx = PluginContext(
             run_id=run_id,
             config=config.config,
-            landscape=recorder,  # type: ignore[arg-type]  # TODO: align PluginContext.landscape type with LandscapeRecorder
+            landscape=recorder,
         )
 
         # Call on_start for all plugins BEFORE processing

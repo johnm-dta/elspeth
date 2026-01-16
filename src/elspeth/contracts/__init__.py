@@ -22,6 +22,7 @@ from elspeth.contracts.enums import (
     RunStatus,
 )
 from elspeth.contracts.identity import TokenInfo
+from elspeth.contracts.routing import EdgeInfo, RoutingAction, RoutingSpec
 
 __all__ = [
     # enums
@@ -38,4 +39,8 @@ __all__ = [
     "RunStatus",
     # identity
     "TokenInfo",
+    # routing
+    "EdgeInfo",
+    "RoutingAction",
+    "RoutingSpec",
 ]

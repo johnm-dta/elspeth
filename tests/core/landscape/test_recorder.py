@@ -788,8 +788,8 @@ class TestLandscapeRecorderRouting:
 
     def test_record_multiple_routing_events(self) -> None:
         """Test recording fork to multiple destinations."""
+        from elspeth.contracts import RoutingMode, RoutingSpec
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.models import RoutingSpec
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -850,8 +850,8 @@ class TestLandscapeRecorderRouting:
         events = recorder.record_routing_events(
             state_id=state.state_id,
             routes=[
-                RoutingSpec(edge_id=edge_a.edge_id, mode="copy"),
-                RoutingSpec(edge_id=edge_b.edge_id, mode="copy"),
+                RoutingSpec(edge_id=edge_a.edge_id, mode=RoutingMode.COPY),
+                RoutingSpec(edge_id=edge_b.edge_id, mode=RoutingMode.COPY),
             ],
             reason={"action": "fork"},
         )

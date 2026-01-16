@@ -348,19 +348,19 @@ allow_hits:
   # entries raise MissingEdgeError with clear diagnostics.
   # ============================================================
 
-  - key: "engine/executors.py:R1:GateExecutor:execute_gate:line=328"
+  - key: "engine/executors.py:R1:GateExecutor:execute_gate:line=327"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=404"
+  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=403"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=418"
+  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=417"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"

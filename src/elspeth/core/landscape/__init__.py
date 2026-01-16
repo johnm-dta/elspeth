@@ -17,7 +17,7 @@ Model Classes:
     Artifact - Output artifacts
 """
 
-from elspeth.contracts import NodeStateStatus, RunStatus
+from elspeth.contracts import NodeStateStatus, RoutingSpec, RunStatus
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.exporter import LandscapeExporter
 from elspeth.core.landscape.formatters import (
@@ -39,7 +39,6 @@ from elspeth.core.landscape.models import (
     NodeStateFailed,
     NodeStateOpen,
     RoutingEvent,
-    RoutingSpec,
     Row,
     RowLineage,
     Run,

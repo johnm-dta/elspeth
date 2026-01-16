@@ -6,15 +6,12 @@ All fields needed for Phase 3 Landscape/OpenTelemetry integration are
 included here, even if not used until Phase 3.
 """
 
-import copy
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import Any, Literal
 
-from elspeth.contracts import RoutingKind, RoutingMode, RowOutcome
+from elspeth.contracts import RoutingAction, RowOutcome
 
-# Re-export RowOutcome as part of public plugin API
+# Re-export types as part of public plugin API
 __all__ = [
     "AcceptResult",
     "GateResult",
@@ -22,84 +19,6 @@ __all__ = [
     "RowOutcome",
     "TransformResult",
 ]
-
-
-def _freeze_dict(d: dict[str, Any] | None) -> Mapping[str, Any]:
-    """Create immutable view of dict with defensive deep copy.
-
-    MappingProxyType only prevents mutation through the proxy.
-    We deep copy to prevent mutation via retained references to
-    the original dict or nested objects.
-    """
-    if d is None:
-        return MappingProxyType({})
-    # Deep copy to prevent mutation of original or nested dicts
-    return MappingProxyType(copy.deepcopy(d))
-
-
-@dataclass(frozen=True)
-class RoutingAction:
-    """What a gate decided to do with a row.
-
-    Fully immutable: frozen dataclass with tuple destinations and
-    MappingProxyType-wrapped reason.
-    """
-
-    kind: RoutingKind
-    destinations: tuple[str, ...]  # Immutable sequence
-    mode: RoutingMode
-    reason: Mapping[str, Any]  # Immutable mapping (MappingProxyType)
-
-    @classmethod
-    def continue_(cls, reason: dict[str, Any] | None = None) -> "RoutingAction":
-        """Row continues to next transform."""
-        return cls(
-            kind=RoutingKind.CONTINUE,
-            destinations=(),
-            mode=RoutingMode.MOVE,
-            reason=_freeze_dict(reason),
-        )
-
-    @classmethod
-    def route(
-        cls,
-        label: str,
-        *,
-        mode: RoutingMode = RoutingMode.MOVE,
-        reason: dict[str, Any] | None = None,
-    ) -> "RoutingAction":
-        """Route row to a destination determined by route label.
-
-        Gates return semantic route labels (e.g., "above", "below", "match").
-        The executor resolves these labels via the plugin's `routes` config
-        to determine the actual destination (sink name or "continue").
-
-        Args:
-            label: Route label that will be resolved via routes config
-            mode: MOVE (default) or COPY
-            reason: Audit trail information about why this route was chosen
-        """
-        return cls(
-            kind=RoutingKind.ROUTE,
-            destinations=(label,),
-            mode=mode,
-            reason=_freeze_dict(reason),
-        )
-
-    @classmethod
-    def fork_to_paths(
-        cls,
-        paths: list[str],
-        *,
-        reason: dict[str, Any] | None = None,
-    ) -> "RoutingAction":
-        """Fork row to multiple parallel paths (copy mode)."""
-        return cls(
-            kind=RoutingKind.FORK_TO_PATHS,
-            destinations=tuple(paths),
-            mode=RoutingMode.COPY,
-            reason=_freeze_dict(reason),
-        )
 
 
 @dataclass

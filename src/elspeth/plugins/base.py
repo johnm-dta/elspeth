@@ -323,6 +323,10 @@ class BaseSource(ABC):
     output_schema: type[PluginSchema]
     node_id: str | None = None  # Set by orchestrator after registration
 
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism = Determinism.IO_READ  # Sources read from external world
+    plugin_version: str = "0.0.0"
+
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
         self.config = config

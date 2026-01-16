@@ -177,6 +177,25 @@ class TestBaseSink:
         assert sink.rows[0] == {"value": 1}
 
 
+class TestBaseSourceMetadata:
+    """Verify BaseSource has required metadata attributes."""
+
+    def test_base_source_has_plugin_version(self) -> None:
+        """BaseSource should have plugin_version class attribute."""
+        from elspeth.plugins.base import BaseSource
+
+        assert hasattr(BaseSource, "plugin_version")
+        assert BaseSource.plugin_version == "0.0.0"
+
+    def test_base_source_has_determinism(self) -> None:
+        """BaseSource should have determinism class attribute."""
+        from elspeth.contracts import Determinism
+        from elspeth.plugins.base import BaseSource
+
+        assert hasattr(BaseSource, "determinism")
+        assert BaseSource.determinism == Determinism.IO_READ
+
+
 class TestBaseSource:
     """Base class for sources."""
 

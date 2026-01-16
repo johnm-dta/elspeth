@@ -461,4 +461,4 @@ class TestResumeCheck:
 
         check = ResumeCheck(can_resume=True)
         with pytest.raises(AttributeError):
-            check.can_resume = False  # type: ignore
+            check.can_resume = False  # type: ignore[misc]

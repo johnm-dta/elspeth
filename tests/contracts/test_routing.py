@@ -87,7 +87,7 @@ class TestRoutingAction:
         assert isinstance(action.reason, MappingProxyType)
 
         with pytest.raises(TypeError):
-            action.reason["new_key"] = "new_value"  # type: ignore
+            action.reason["new_key"] = "new_value"  # type: ignore[index]
 
     def test_reason_deep_copied(self) -> None:
         """Mutating original dict should not affect frozen reason."""
@@ -108,7 +108,7 @@ class TestRoutingAction:
 
         action = RoutingAction.continue_()
         with pytest.raises(AttributeError):
-            action.kind = "other"  # type: ignore
+            action.kind = "other"  # type: ignore[misc]
 
 
 class TestRoutingSpec:
@@ -149,7 +149,7 @@ class TestRoutingSpec:
 
         spec = RoutingSpec(edge_id="edge-1", mode=RoutingMode.MOVE)
         with pytest.raises(AttributeError):
-            spec.edge_id = "changed"  # type: ignore
+            spec.edge_id = "changed"  # type: ignore[misc]
 
 
 class TestEdgeInfo:
@@ -193,4 +193,4 @@ class TestEdgeInfo:
             mode=RoutingMode.MOVE,
         )
         with pytest.raises(AttributeError):
-            edge.from_node = "changed"  # type: ignore
+            edge.from_node = "changed"  # type: ignore[misc]

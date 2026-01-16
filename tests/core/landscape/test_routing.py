@@ -36,4 +36,4 @@ class TestRoutingSpecReExport:
         """RoutingSpec should be immutable."""
         spec = RoutingSpec(edge_id="edge-1", mode=RoutingMode.MOVE)
         with pytest.raises(AttributeError):
-            spec.edge_id = "changed"  # type: ignore
+            spec.edge_id = "changed"  # type: ignore[misc]

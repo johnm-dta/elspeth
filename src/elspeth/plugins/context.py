@@ -96,5 +96,4 @@ class PluginContext:
         """
         if self.tracer is None:
             return nullcontext()
-        # OpenTelemetry tracer returns untyped context manager
-        return self.tracer.start_as_current_span(name)  # type: ignore[no-any-return]
+        return self.tracer.start_as_current_span(name)

@@ -45,7 +45,7 @@ def _normalize_value(obj: Any) -> Any:
         ValueError: If value contains NaN or Infinity
     """
     # Check for NaN/Infinity FIRST (before type coercion)
-    if isinstance(obj, (float, np.floating)):
+    if isinstance(obj, float | np.floating):
         if math.isnan(obj) or math.isinf(obj):
             raise ValueError(
                 f"Cannot canonicalize non-finite float: {obj}. "
@@ -56,7 +56,7 @@ def _normalize_value(obj: Any) -> Any:
         return obj
 
     # Primitives pass through unchanged
-    if obj is None or isinstance(obj, (str, int, bool)):
+    if obj is None or isinstance(obj, str | int | bool):
         return obj
 
     # NumPy scalar types
@@ -109,7 +109,7 @@ def _normalize_for_canonical(data: Any) -> Any:
     """
     if isinstance(data, dict):
         return {k: _normalize_for_canonical(v) for k, v in data.items()}
-    if isinstance(data, (list, tuple)):
+    if isinstance(data, list | tuple):
         return [_normalize_for_canonical(v) for v in data]
     return _normalize_value(data)
 
@@ -132,8 +132,7 @@ def canonical_json(obj: Any) -> str:
         TypeError: If data contains types that cannot be serialized
     """
     normalized = _normalize_for_canonical(obj)
-    # rfc8785.dumps returns bytes (untyped library), decode to string
-    result: bytes = rfc8785.dumps(normalized)  # type: ignore[no-any-return]
+    result: bytes = rfc8785.dumps(normalized)
     return result.decode("utf-8")
 
 

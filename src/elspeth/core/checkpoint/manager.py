@@ -7,8 +7,8 @@ from typing import Any
 
 from sqlalchemy import asc, delete, desc, select
 
+from elspeth.contracts import Checkpoint
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.models import Checkpoint
 from elspeth.core.landscape.schema import checkpoints_table
 
 

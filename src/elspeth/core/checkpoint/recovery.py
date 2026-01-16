@@ -14,10 +14,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.engine import Row
 
-from elspeth.contracts import RunStatus
+from elspeth.contracts import Checkpoint, RunStatus
 from elspeth.core.checkpoint.manager import CheckpointManager
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.models import Checkpoint
 from elspeth.core.landscape.schema import rows_table, runs_table
 
 

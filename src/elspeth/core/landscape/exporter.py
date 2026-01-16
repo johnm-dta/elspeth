@@ -11,12 +11,9 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 
+from elspeth.contracts import NodeStateCompleted, NodeStateOpen
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.models import (
-    NodeStateCompleted,
-    NodeStateOpen,
-)
 from elspeth.core.landscape.recorder import LandscapeRecorder
 
 

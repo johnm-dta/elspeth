@@ -3,3 +3,5 @@
 allowed_external_types:
   # TUI display types - presentation-specific, not cross-boundary contracts
   - "tui/types:TokenDisplayInfo"
+  # Plugin execution context - framework infrastructure, not a data contract
+  - "plugins/context:PluginContext"

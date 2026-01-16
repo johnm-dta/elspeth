@@ -16,32 +16,32 @@ if TYPE_CHECKING:
 from sqlalchemy import select
 
 from elspeth.contracts import (
-    Determinism,
-    NodeStateStatus,
-    NodeType,
-    RoutingSpec,
-    RowLineage,
-    RunStatus,
-)
-from elspeth.core.canonical import canonical_json, stable_hash
-from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.models import (
     Artifact,
     Batch,
     BatchMember,
+    BatchStatus,
     Call,
+    Determinism,
     Edge,
     Node,
     NodeState,
     NodeStateCompleted,
     NodeStateFailed,
     NodeStateOpen,
+    NodeStateStatus,
+    NodeType,
     RoutingEvent,
+    RoutingMode,
+    RoutingSpec,
     Row,
+    RowLineage,
     Run,
+    RunStatus,
     Token,
     TokenParent,
 )
+from elspeth.core.canonical import canonical_json, stable_hash
+from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.row_data import RowDataResult, RowDataState
 from elspeth.core.landscape.schema import (
     artifacts_table,
@@ -462,9 +462,9 @@ class LandscapeRecorder:
             node_id=node_id,
             run_id=run_id,
             plugin_name=plugin_name,
-            node_type=node_type_enum.value,  # Store string in DB
+            node_type=node_type_enum,  # Strict: enum type
             plugin_version=plugin_version,
-            determinism=determinism_enum.value,  # Store string in DB
+            determinism=determinism_enum,  # Strict: enum type
             config_hash=config_hash,
             config_json=config_json,
             schema_hash=schema_hash,
@@ -478,9 +478,9 @@ class LandscapeRecorder:
                     node_id=node.node_id,
                     run_id=node.run_id,
                     plugin_name=node.plugin_name,
-                    node_type=node.node_type,
+                    node_type=node.node_type.value,  # Store string in DB
                     plugin_version=node.plugin_version,
-                    determinism=node.determinism,
+                    determinism=node.determinism.value,  # Store string in DB
                     config_hash=node.config_hash,
                     config_json=node.config_json,
                     schema_hash=node.schema_hash,
@@ -497,7 +497,7 @@ class LandscapeRecorder:
         from_node_id: str,
         to_node_id: str,
         label: str,
-        mode: str,
+        mode: RoutingMode | str,
         *,
         edge_id: str | None = None,
     ) -> Edge:
@@ -508,12 +508,18 @@ class LandscapeRecorder:
             from_node_id: Source node
             to_node_id: Destination node
             label: Edge label ("continue", route name, etc.)
-            mode: Default routing mode ("move" or "copy")
+            mode: Default routing mode (RoutingMode enum or "move"/"copy" string)
             edge_id: Optional edge ID (generated if not provided)
 
         Returns:
             Edge model
+
+        Raises:
+            ValueError: If mode string is not a valid RoutingMode value
         """
+        # Validate and coerce mode enum early - fail fast on typos
+        mode_enum = _coerce_enum(mode, RoutingMode)
+
         edge_id = edge_id or _generate_id()
         now = _now()
 
@@ -523,7 +529,7 @@ class LandscapeRecorder:
             from_node_id=from_node_id,
             to_node_id=to_node_id,
             label=label,
-            default_mode=mode,
+            default_mode=mode_enum,  # Strict: enum type
             created_at=now,
         )
 
@@ -535,7 +541,7 @@ class LandscapeRecorder:
                     from_node_id=edge.from_node_id,
                     to_node_id=edge.to_node_id,
                     label=edge.label,
-                    default_mode=edge.default_mode,
+                    default_mode=edge.default_mode.value,  # Store string in DB
                     created_at=edge.created_at,
                 )
             )
@@ -566,9 +572,9 @@ class LandscapeRecorder:
                 node_id=row.node_id,
                 run_id=row.run_id,
                 plugin_name=row.plugin_name,
-                node_type=row.node_type,
+                node_type=NodeType(row.node_type),  # Coerce DB string to enum
                 plugin_version=row.plugin_version,
-                determinism=row.determinism,
+                determinism=Determinism(row.determinism),  # Coerce DB string to enum
                 config_hash=row.config_hash,
                 config_json=row.config_json,
                 schema_hash=row.schema_hash,
@@ -605,7 +611,7 @@ class LandscapeRecorder:
                 from_node_id=r.from_node_id,
                 to_node_id=r.to_node_id,
                 label=r.label,
-                default_mode=r.default_mode,
+                default_mode=RoutingMode(r.default_mode),  # Coerce DB string to enum
                 created_at=r.created_at,
             )
             for r in rows
@@ -989,7 +995,7 @@ class LandscapeRecorder:
         self,
         state_id: str,
         edge_id: str,
-        mode: str,
+        mode: RoutingMode | str,
         reason: dict[str, Any] | None = None,
         *,
         event_id: str | None = None,
@@ -1002,7 +1008,7 @@ class LandscapeRecorder:
         Args:
             state_id: Node state that made the routing decision
             edge_id: Edge that was taken
-            mode: Routing mode (move or copy)
+            mode: Routing mode (RoutingMode enum or "move"/"copy" string)
             reason: Reason for this routing decision
             event_id: Optional event ID
             routing_group_id: Group ID (for multi-destination routing)
@@ -1011,7 +1017,13 @@ class LandscapeRecorder:
 
         Returns:
             RoutingEvent model
+
+        Raises:
+            ValueError: If mode string is not a valid RoutingMode value
         """
+        # Validate and coerce mode enum early - fail fast on typos
+        mode_enum = _coerce_enum(mode, RoutingMode)
+
         event_id = event_id or _generate_id()
         routing_group_id = routing_group_id or _generate_id()
         reason_hash = stable_hash(reason) if reason else None
@@ -1023,7 +1035,7 @@ class LandscapeRecorder:
             edge_id=edge_id,
             routing_group_id=routing_group_id,
             ordinal=ordinal,
-            mode=mode,
+            mode=mode_enum,  # Strict: enum type
             reason_hash=reason_hash,
             reason_ref=reason_ref,
             created_at=now,
@@ -1037,7 +1049,7 @@ class LandscapeRecorder:
                     edge_id=event.edge_id,
                     routing_group_id=event.routing_group_id,
                     ordinal=event.ordinal,
-                    mode=event.mode,
+                    mode=event.mode.value,  # Store string in DB
                     reason_hash=event.reason_hash,
                     reason_ref=event.reason_ref,
                     created_at=event.created_at,
@@ -1078,7 +1090,7 @@ class LandscapeRecorder:
                     edge_id=route.edge_id,
                     routing_group_id=routing_group_id,
                     ordinal=ordinal,
-                    mode=route.mode,
+                    mode=route.mode,  # Already RoutingMode enum from RoutingSpec
                     reason_hash=reason_hash,
                     reason_ref=None,
                     created_at=now,
@@ -1091,7 +1103,7 @@ class LandscapeRecorder:
                         edge_id=event.edge_id,
                         routing_group_id=event.routing_group_id,
                         ordinal=event.ordinal,
-                        mode=event.mode,
+                        mode=event.mode.value,  # Store string in DB
                         reason_hash=event.reason_hash,
                         created_at=event.created_at,
                     )
@@ -1130,7 +1142,7 @@ class LandscapeRecorder:
             run_id=run_id,
             aggregation_node_id=aggregation_node_id,
             attempt=attempt,
-            status="draft",
+            status=BatchStatus.DRAFT,  # Strict: enum type
             created_at=now,
         )
 
@@ -1141,7 +1153,7 @@ class LandscapeRecorder:
                     run_id=batch.run_id,
                     aggregation_node_id=batch.aggregation_node_id,
                     attempt=batch.attempt,
-                    status=batch.status,
+                    status=batch.status.value,  # Store string in DB
                     created_at=batch.created_at,
                 )
             )
@@ -1275,7 +1287,7 @@ class LandscapeRecorder:
             aggregation_state_id=row.aggregation_state_id,
             trigger_reason=row.trigger_reason,
             attempt=row.attempt,
-            status=row.status,
+            status=BatchStatus(row.status),  # Coerce DB string to enum
             created_at=row.created_at,
             completed_at=row.completed_at,
         )
@@ -1320,7 +1332,7 @@ class LandscapeRecorder:
                 aggregation_state_id=row.aggregation_state_id,
                 trigger_reason=row.trigger_reason,
                 attempt=row.attempt,
-                status=row.status,
+                status=BatchStatus(row.status),  # Coerce DB string to enum
                 created_at=row.created_at,
                 completed_at=row.completed_at,
             )
@@ -1683,7 +1695,7 @@ class LandscapeRecorder:
                 edge_id=r.edge_id,
                 routing_group_id=r.routing_group_id,
                 ordinal=r.ordinal,
-                mode=r.mode,
+                mode=RoutingMode(r.mode),  # Coerce DB string to enum
                 reason_hash=r.reason_hash,
                 reason_ref=r.reason_ref,
                 created_at=r.created_at,

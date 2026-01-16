@@ -17,7 +17,29 @@ Model Classes:
     Artifact - Output artifacts
 """
 
-from elspeth.contracts import NodeStateStatus, RoutingSpec, RunStatus
+from elspeth.contracts import (
+    Artifact,
+    Batch,
+    BatchMember,
+    BatchOutput,
+    Call,
+    Checkpoint,
+    Edge,
+    Node,
+    NodeState,
+    NodeStateCompleted,
+    NodeStateFailed,
+    NodeStateOpen,
+    NodeStateStatus,
+    RoutingEvent,
+    RoutingSpec,
+    Row,
+    RowLineage,
+    Run,
+    RunStatus,
+    Token,
+    TokenParent,
+)
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.exporter import LandscapeExporter
 from elspeth.core.landscape.formatters import (
@@ -26,25 +48,6 @@ from elspeth.core.landscape.formatters import (
     JSONFormatter,
 )
 from elspeth.core.landscape.lineage import LineageResult, explain
-from elspeth.core.landscape.models import (
-    Artifact,
-    Batch,
-    BatchMember,
-    BatchOutput,
-    Call,
-    Edge,
-    Node,
-    NodeState,
-    NodeStateCompleted,
-    NodeStateFailed,
-    NodeStateOpen,
-    RoutingEvent,
-    Row,
-    RowLineage,
-    Run,
-    Token,
-    TokenParent,
-)
 from elspeth.core.landscape.recorder import LandscapeRecorder
 from elspeth.core.landscape.reproducibility import (
     ReproducibilityGrade,
@@ -77,6 +80,7 @@ __all__ = [
     "BatchOutput",
     "CSVFormatter",
     "Call",
+    "Checkpoint",
     "Edge",
     "ExportFormatter",
     "JSONFormatter",

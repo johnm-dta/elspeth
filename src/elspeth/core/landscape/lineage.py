@@ -8,11 +8,11 @@ complete lineage for a token or row.
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from elspeth.contracts import RowLineage
-from elspeth.core.landscape.models import (
+from elspeth.contracts import (
     Call,
     NodeState,
     RoutingEvent,
+    RowLineage,
     Token,
 )
 

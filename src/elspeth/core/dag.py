@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, cast
 import networkx as nx
 from networkx import DiGraph
 
+from elspeth.contracts import EdgeInfo, RoutingMode
+
 if TYPE_CHECKING:
     from elspeth.core.config import ElspethSettings
 
@@ -90,7 +92,7 @@ class ExecutionGraph:
         to_node: str,
         *,
         label: str,
-        mode: str = "move",
+        mode: RoutingMode = RoutingMode.MOVE,
     ) -> None:
         """Add an edge between nodes.
 
@@ -98,7 +100,7 @@ class ExecutionGraph:
             from_node: Source node ID
             to_node: Target node ID
             label: Edge label (e.g., "continue", "suspicious")
-            mode: Routing mode ("move" or "copy")
+            mode: Routing mode (MOVE or COPY)
         """
         self._graph.add_edge(from_node, to_node, label=label, mode=mode)
 
@@ -200,13 +202,21 @@ class ExecutionGraph:
             raise KeyError(f"Node not found: {node_id}")
         return cast(NodeInfo, self._graph.nodes[node_id]["info"])
 
-    def get_edges(self) -> list[tuple[str, str, dict[str, Any]]]:
-        """Get all edges with their data.
+    def get_edges(self) -> list[EdgeInfo]:
+        """Get all edges with their data as typed EdgeInfo.
 
         Returns:
-            List of (from_node, to_node, edge_data) tuples
+            List of EdgeInfo contracts (not tuples)
         """
-        return [(u, v, dict(data)) for u, v, data in self._graph.edges(data=True)]
+        return [
+            EdgeInfo(
+                from_node=u,
+                to_node=v,
+                label=data["label"],
+                mode=data["mode"],  # Already RoutingMode after add_edge change
+            )
+            for u, v, data in self._graph.edges(data=True)
+        ]
 
     @classmethod
     def from_config(cls, config: ElspethSettings) -> ExecutionGraph:
@@ -274,7 +284,7 @@ class ExecutionGraph:
             )
 
             # Edge from previous node
-            graph.add_edge(prev_node_id, tid, label="continue", mode="move")
+            graph.add_edge(prev_node_id, tid, label="continue", mode=RoutingMode.MOVE)
 
             # Gate routes to sinks
             # Edge labels ARE route labels (not sink names)
@@ -296,7 +306,7 @@ class ExecutionGraph:
                         )
                     # Edge label = route_label (e.g., "suspicious")
                     graph.add_edge(
-                        tid, sink_ids[target], label=route_label, mode="move"
+                        tid, sink_ids[target], label=route_label, mode=RoutingMode.MOVE
                     )
                     # Store reverse mapping: (gate_node, sink_name) -> route_label
                     graph._route_label_map[(tid, target)] = route_label
@@ -317,7 +327,7 @@ class ExecutionGraph:
                 prev_node_id,
                 output_sink_node,
                 label="continue",
-                mode="move",
+                mode=RoutingMode.MOVE,
             )
 
         return graph

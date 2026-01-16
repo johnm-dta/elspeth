@@ -209,21 +209,30 @@ class TestExecutionGraphAccessors:
 
     def test_get_edges(self) -> None:
         """Get all edges with data."""
+        from elspeth.contracts import EdgeInfo, RoutingMode
         from elspeth.core.dag import ExecutionGraph
 
         graph = ExecutionGraph()
         graph.add_node("a", node_type="source", plugin_name="src")
         graph.add_node("b", node_type="transform", plugin_name="tf")
         graph.add_node("c", node_type="sink", plugin_name="sink")
-        graph.add_edge("a", "b", label="continue", mode="move")
-        graph.add_edge("b", "c", label="output", mode="copy")
+        graph.add_edge("a", "b", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("b", "c", label="output", mode=RoutingMode.COPY)
 
         edges = list(graph.get_edges())
 
         assert len(edges) == 2
-        # Each edge is (from_id, to_id, data_dict)
-        assert ("a", "b", {"label": "continue", "mode": "move"}) in edges
-        assert ("b", "c", {"label": "output", "mode": "copy"}) in edges
+        # Each edge is EdgeInfo (not tuple)
+        assert (
+            EdgeInfo(
+                from_node="a", to_node="b", label="continue", mode=RoutingMode.MOVE
+            )
+            in edges
+        )
+        assert (
+            EdgeInfo(from_node="b", to_node="c", label="output", mode=RoutingMode.COPY)
+            in edges
+        )
 
     def test_get_edges_empty_graph(self) -> None:
         """Empty graph returns empty list."""
@@ -530,3 +539,41 @@ class TestExecutionGraphRouteMapping:
         # The edge to output sink uses "continue" label
         route_label = graph.get_route_label(gate_node_id, "results")
         assert route_label == "continue"
+
+
+class TestEdgeInfoIntegration:
+    """Tests for typed edge returns."""
+
+    def test_get_edges_returns_edge_info(self) -> None:
+        """get_edges() returns list of EdgeInfo, not tuples."""
+        from elspeth.contracts import EdgeInfo, RoutingMode
+        from elspeth.core.dag import ExecutionGraph
+
+        graph = ExecutionGraph()
+        graph.add_node("source-1", node_type="source", plugin_name="csv")
+        graph.add_node("sink-1", node_type="sink", plugin_name="csv")
+        graph.add_edge("source-1", "sink-1", label="continue", mode=RoutingMode.MOVE)
+
+        edges = graph.get_edges()
+
+        assert len(edges) == 1
+        assert isinstance(edges[0], EdgeInfo)
+        assert edges[0].from_node == "source-1"
+        assert edges[0].to_node == "sink-1"
+        assert edges[0].label == "continue"
+        assert edges[0].mode == RoutingMode.MOVE
+
+    def test_add_edge_accepts_routing_mode_enum(self) -> None:
+        """add_edge() accepts RoutingMode enum, not string."""
+        from elspeth.contracts import RoutingMode
+        from elspeth.core.dag import ExecutionGraph
+
+        graph = ExecutionGraph()
+        graph.add_node("n1", node_type="transform", plugin_name="test")
+        graph.add_node("n2", node_type="sink", plugin_name="test")
+
+        # Should accept enum directly
+        graph.add_edge("n1", "n2", label="route", mode=RoutingMode.COPY)
+
+        edges = graph.get_edges()
+        assert edges[0].mode == RoutingMode.COPY

@@ -377,16 +377,16 @@ class Orchestrator:
         # Gates return route labels, so edge_map is keyed by label
         edge_map: dict[tuple[str, str], str] = {}
 
-        for from_id, to_id, edge_data in graph.get_edges():
+        for edge_info in graph.get_edges():
             edge = recorder.register_edge(
                 run_id=run_id,
-                from_node_id=from_id,
-                to_node_id=to_id,
-                label=edge_data["label"],
-                mode=edge_data["mode"],
+                from_node_id=edge_info.from_node,
+                to_node_id=edge_info.to_node,
+                label=edge_info.label,
+                mode=edge_info.mode,
             )
             # Key by edge label - gates return route labels, transforms use "continue"
-            edge_map[(from_id, edge_data["label"])] = edge.edge_id
+            edge_map[(edge_info.from_node, edge_info.label)] = edge.edge_id
 
         # Get route resolution map - maps (gate_node, label) -> "continue" | sink_name
         route_resolution_map = graph.get_route_resolution_map()

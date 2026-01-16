@@ -95,6 +95,7 @@ all = [
 
 [project.scripts]
 elspeth = "elspeth.cli:app"
+check-contracts = "scripts.check_contracts:main"
 
 [project.urls]
 Homepage = "https://github.com/your-org/elspeth"

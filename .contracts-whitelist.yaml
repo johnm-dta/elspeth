@@ -1,0 +1,5 @@
+# Types intentionally defined outside contracts/
+# These are internal to their module and not used across boundaries
+allowed_external_types:
+  # TUI display types - presentation-specific, not cross-boundary contracts
+  - "tui/types:TokenDisplayInfo"

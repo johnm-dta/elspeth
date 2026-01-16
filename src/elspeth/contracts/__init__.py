@@ -54,6 +54,7 @@ from elspeth.contracts.results import (
     TransformResult,
 )
 from elspeth.contracts.routing import EdgeInfo, RoutingAction, RoutingSpec
+from elspeth.contracts.data import PluginSchema
 from elspeth.contracts.config import (
     CheckpointSettings,
     ConcurrencySettings,
@@ -126,4 +127,6 @@ __all__ = [
     "EdgeInfo",
     "RoutingAction",
     "RoutingSpec",
+    # data
+    "PluginSchema",
 ]

@@ -1,8 +1,8 @@
 """Tests for RowResult using RowOutcome enum."""
 
+from elspeth.contracts import RowOutcome
 from elspeth.engine.processor import RowResult
 from elspeth.engine.tokens import TokenInfo
-from elspeth.plugins.results import RowOutcome
 
 
 class TestRowResultOutcome:

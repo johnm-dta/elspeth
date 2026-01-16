@@ -9,35 +9,19 @@ included here, even if not used until Phase 3.
 import copy
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import Enum
 from types import MappingProxyType
 from typing import Any, Literal
 
-from elspeth.plugins.enums import RoutingKind, RoutingMode
+from elspeth.contracts import RoutingKind, RoutingMode, RowOutcome
 
-
-class RowOutcome(Enum):
-    """Terminal states for rows in the pipeline.
-
-    DESIGN NOTE: Per architecture (00-overview.md:267-279), token terminal
-    states are DERIVED from the combination of node_states, routing_events,
-    and batch membership—not stored as a column. This enum is used at
-    query/explain time to report final disposition, not at runtime.
-
-    The engine does NOT set these directly. The Landscape query layer
-    derives them when answering explain() queries.
-
-    INVARIANT: Every row reaches exactly one terminal state.
-    No silent drops.
-    """
-
-    COMPLETED = "completed"  # Reached output sink
-    ROUTED = "routed"  # Sent to named sink by gate (move mode)
-    FORKED = "forked"  # Split into child tokens (parent terminates)
-    CONSUMED_IN_BATCH = "consumed_in_batch"  # Fed into aggregation
-    COALESCED = "coalesced"  # Merged with other tokens
-    QUARANTINED = "quarantined"  # Failed, stored for investigation
-    FAILED = "failed"  # Failed, not recoverable
+# Re-export RowOutcome as part of public plugin API
+__all__ = [
+    "AcceptResult",
+    "GateResult",
+    "RoutingAction",
+    "RowOutcome",
+    "TransformResult",
+]
 
 
 def _freeze_dict(d: dict[str, Any] | None) -> Mapping[str, Any]:

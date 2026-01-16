@@ -15,16 +15,14 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from elspeth.contracts import Determinism, NodeType, RowOutcome, RunStatus
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
-from elspeth.core.landscape.models import RunStatus
 from elspeth.engine.processor import RowProcessor
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.enums import NodeType
 from elspeth.plugins.protocols import SinkProtocol, SourceProtocol
-from elspeth.plugins.results import RowOutcome
 
 # Type alias for transform-like plugins
 TransformLike = BaseTransform | BaseGate | BaseAggregation
@@ -322,8 +320,6 @@ class Orchestrator:
         - Edges via get_edges()
         - Explicit ID mappings via get_sink_id_map() and get_transform_id_map()
         """
-        from elspeth.plugins.enums import Determinism
-
         # Get execution order from graph
         execution_order = graph.topological_order()
 

@@ -177,7 +177,7 @@ class TestRoutingActionEnums:
 
     def test_continue_uses_routing_kind_enum(self) -> None:
         """continue_() returns RoutingKind enum value."""
-        from elspeth.plugins.enums import RoutingKind
+        from elspeth.contracts import RoutingKind
         from elspeth.plugins.results import RoutingAction
 
         action = RoutingAction.continue_()
@@ -187,7 +187,7 @@ class TestRoutingActionEnums:
 
     def test_route_uses_enums(self) -> None:
         """route() uses enum types."""
-        from elspeth.plugins.enums import RoutingKind, RoutingMode
+        from elspeth.contracts import RoutingKind, RoutingMode
         from elspeth.plugins.results import RoutingAction
 
         action = RoutingAction.route("suspicious", mode=RoutingMode.COPY)
@@ -199,7 +199,7 @@ class TestRoutingActionEnums:
 
     def test_fork_to_paths_uses_enums(self) -> None:
         """fork_to_paths() uses enum types."""
-        from elspeth.plugins.enums import RoutingKind, RoutingMode
+        from elspeth.contracts import RoutingKind, RoutingMode
         from elspeth.plugins.results import RoutingAction
 
         action = RoutingAction.fork_to_paths(["path_a", "path_b"])

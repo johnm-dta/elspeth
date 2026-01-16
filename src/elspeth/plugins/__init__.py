@@ -18,6 +18,13 @@ Phase 3 Integration:
 
 # Results
 # Base classes
+# Enums (re-exported from contracts as part of public plugin API)
+from elspeth.contracts import (
+    Determinism,
+    NodeType,
+    RoutingKind,
+    RoutingMode,
+)
 from elspeth.plugins.base import (
     BaseAggregation,
     BaseGate,
@@ -31,14 +38,6 @@ from elspeth.plugins.config_base import PathConfig, PluginConfig, PluginConfigEr
 
 # Context
 from elspeth.plugins.context import PluginContext
-
-# Enums
-from elspeth.plugins.enums import (
-    Determinism,
-    NodeType,
-    RoutingKind,
-    RoutingMode,
-)
 
 # Hookspecs
 from elspeth.plugins.hookspecs import hookimpl, hookspec

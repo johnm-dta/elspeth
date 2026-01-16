@@ -176,11 +176,18 @@ class TestNodesDeterminismColumn:
 
     def test_determinism_values(self) -> None:
         """Verify valid determinism values match Determinism enum."""
-        from elspeth.plugins.enums import Determinism
+        from elspeth.contracts import Determinism
 
         valid_values = {d.value for d in Determinism}
-        # Current enum values (not the granular architecture spec values)
-        expected = {"deterministic", "seeded", "nondeterministic"}
+        # All 6 values per architecture specification
+        expected = {
+            "deterministic",
+            "seeded",
+            "io_read",
+            "io_write",
+            "external_call",
+            "non_deterministic",
+        }
         assert valid_values == expected
 
 

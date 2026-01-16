@@ -69,8 +69,8 @@ class TestTransformProtocol:
     """Transform plugin protocol (stateless row processing)."""
 
     def test_transform_implementation(self) -> None:
+        from elspeth.contracts import Determinism
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.protocols import TransformProtocol
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
@@ -130,8 +130,8 @@ class TestGateProtocol:
     """Gate plugin protocol (routing decisions)."""
 
     def test_gate_implementation(self) -> None:
+        from elspeth.contracts import Determinism
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.protocols import GateProtocol
         from elspeth.plugins.results import GateResult, RoutingAction
         from elspeth.plugins.schemas import PluginSchema
@@ -194,8 +194,8 @@ class TestAggregationProtocol:
     """Aggregation plugin protocol (stateful batching)."""
 
     def test_aggregation_implementation(self) -> None:
+        from elspeth.contracts import Determinism
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.protocols import AggregationProtocol
         from elspeth.plugins.results import AcceptResult
         from elspeth.plugins.schemas import PluginSchema
@@ -285,8 +285,8 @@ class TestCoalesceProtocol:
         """QUORUM policy needs a quorum_threshold."""
         from typing import ClassVar
 
+        from elspeth.contracts import Determinism
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.protocols import CoalescePolicy, CoalesceProtocol
         from elspeth.plugins.schemas import PluginSchema
 
@@ -335,8 +335,8 @@ class TestCoalesceProtocol:
         """Test merge() combines branch outputs correctly."""
         from typing import ClassVar
 
+        from elspeth.contracts import Determinism
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.protocols import CoalescePolicy, CoalesceProtocol
         from elspeth.plugins.schemas import PluginSchema
 
@@ -387,8 +387,8 @@ class TestSinkProtocol:
     def test_sink_implementation(self) -> None:
         from typing import ClassVar
 
+        from elspeth.contracts import Determinism
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.protocols import SinkProtocol
         from elspeth.plugins.schemas import PluginSchema
 
@@ -463,8 +463,8 @@ class TestProtocolMetadata:
         assert "plugin_version" in TransformProtocol.__protocol_attrs__
 
     def test_deterministic_transform(self) -> None:
+        from elspeth.contracts import Determinism
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.results import TransformResult
 
         class MyTransform:
@@ -479,17 +479,17 @@ class TestProtocolMetadata:
         assert t.determinism == Determinism.DETERMINISTIC
 
     def test_nondeterministic_transform(self) -> None:
+        from elspeth.contracts import Determinism
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.results import TransformResult
 
         class LLMTransform:
             name = "llm_classifier"
-            determinism = Determinism.NONDETERMINISTIC
+            determinism = Determinism.EXTERNAL_CALL
             plugin_version = "0.1.0"
 
             def process(self, row: dict, ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
         t = LLMTransform()
-        assert t.determinism == Determinism.NONDETERMINISTIC
+        assert t.determinism == Determinism.EXTERNAL_CALL

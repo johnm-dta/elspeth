@@ -8,7 +8,8 @@ class TestRunModel:
     """Run table model."""
 
     def test_create_run(self) -> None:
-        from elspeth.core.landscape.models import Run, RunStatus
+        from elspeth.contracts import RunStatus
+        from elspeth.core.landscape.models import Run
 
         run = Run(
             run_id="run-001",

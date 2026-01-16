@@ -13,8 +13,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from typing import Any
 
+from elspeth.contracts import Determinism
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.enums import Determinism
 from elspeth.plugins.results import (
     AcceptResult,
     GateResult,

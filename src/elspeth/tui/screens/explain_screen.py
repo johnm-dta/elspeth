@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any
 
+from elspeth.contracts import NodeType
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.recorder import LandscapeRecorder
-from elspeth.plugins.enums import NodeType
 from elspeth.tui.types import LineageData
 from elspeth.tui.widgets.lineage_tree import LineageTree
 from elspeth.tui.widgets.node_detail import NodeDetailPanel

@@ -342,7 +342,7 @@ class TestOrchestratorAuditTrail:
         run_result = orchestrator.run(config, graph=_build_test_graph(config))
 
         # Query Landscape to verify audit trail
-        from elspeth.core.landscape.models import RunStatus
+        from elspeth.contracts import RunStatus
 
         recorder = LandscapeRecorder(db)
         run = recorder.get_run(run_result.run_id)
@@ -440,7 +440,7 @@ class TestOrchestratorErrorHandling:
 
         # Verify run was marked as failed in Landscape audit trail
         # Query for all runs and find the one that was created
-        from elspeth.core.landscape.models import RunStatus
+        from elspeth.contracts import RunStatus
 
         recorder = LandscapeRecorder(db)
         runs = recorder.list_runs()
@@ -2722,11 +2722,11 @@ class TestNodeMetadataFromPlugin:
         Verifies that the node's plugin_version in Landscape matches
         the plugin class's plugin_version attribute.
         """
+        from elspeth.contracts import Determinism
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
 
@@ -2757,7 +2757,7 @@ class TestNodeMetadataFromPlugin:
             input_schema = ValueSchema
             output_schema = ValueSchema
             plugin_version = "2.5.0"  # Custom version (not 1.0.0)
-            determinism = Determinism.NONDETERMINISTIC
+            determinism = Determinism.EXTERNAL_CALL
 
             def __init__(self) -> None:
                 super().__init__({})
@@ -2845,11 +2845,11 @@ class TestNodeMetadataFromPlugin:
         Verifies that nondeterministic plugins are recorded correctly
         in the Landscape for reproducibility tracking.
         """
+        from elspeth.contracts import Determinism
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-        from elspeth.plugins.enums import Determinism
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
 
@@ -2880,7 +2880,7 @@ class TestNodeMetadataFromPlugin:
             input_schema = ValueSchema
             output_schema = ValueSchema
             plugin_version = "1.0.0"
-            determinism = Determinism.NONDETERMINISTIC  # Explicit nondeterministic
+            determinism = Determinism.EXTERNAL_CALL  # Explicit nondeterministic
 
             def __init__(self) -> None:
                 super().__init__({})
@@ -2947,7 +2947,7 @@ class TestNodeMetadataFromPlugin:
 
         # Verify determinism is recorded correctly
         assert (
-            transform_node.determinism == "nondeterministic"
+            transform_node.determinism == "external_call"
         ), f"Transform determinism should be 'nondeterministic', got '{transform_node.determinism}'"
 
 

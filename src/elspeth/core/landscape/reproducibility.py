@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
+from elspeth.contracts import Determinism
 from elspeth.core.landscape.schema import nodes_table, runs_table
-from elspeth.plugins.enums import Determinism
 
 if TYPE_CHECKING:
     from elspeth.core.landscape.database import LandscapeDB
@@ -40,9 +40,10 @@ def compute_grade(db: "LandscapeDB", run_id: str) -> ReproducibilityGrade:
     """Compute reproducibility grade from node determinism values.
 
     Logic:
-    - If any node has determinism='nondeterministic', return REPLAY_REPRODUCIBLE
+    - If any node has non-reproducible determinism (EXTERNAL_CALL, NON_DETERMINISTIC),
+      return REPLAY_REPRODUCIBLE
     - Otherwise return FULL_REPRODUCIBLE
-    - 'seeded' counts as reproducible (same seed = same output)
+    - DETERMINISTIC, SEEDED, IO_READ, IO_WRITE all count as reproducible
     - Empty pipeline (no nodes) is trivially FULL_REPRODUCIBLE
 
     Args:
@@ -52,19 +53,25 @@ def compute_grade(db: "LandscapeDB", run_id: str) -> ReproducibilityGrade:
     Returns:
         ReproducibilityGrade enum value
     """
-    # Query for any nondeterministic nodes in this run
+    # Determinism values that require replay (cannot reproduce from inputs alone)
+    non_reproducible = {
+        Determinism.EXTERNAL_CALL.value,
+        Determinism.NON_DETERMINISTIC.value,
+    }
+
+    # Query for any non-reproducible nodes in this run
     query = (
         select(nodes_table.c.determinism)
         .where(nodes_table.c.run_id == run_id)
-        .where(nodes_table.c.determinism == Determinism.NONDETERMINISTIC.value)
+        .where(nodes_table.c.determinism.in_(non_reproducible))
         .limit(1)  # We only need to know if ANY exist
     )
 
     with db.connection() as conn:
         result = conn.execute(query)
-        has_nondeterministic = result.fetchone() is not None
+        has_non_reproducible = result.fetchone() is not None
 
-    if has_nondeterministic:
+    if has_non_reproducible:
         return ReproducibilityGrade.REPLAY_REPRODUCIBLE
     else:
         return ReproducibilityGrade.FULL_REPRODUCIBLE

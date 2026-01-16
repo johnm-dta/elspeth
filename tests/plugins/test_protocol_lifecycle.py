@@ -1,8 +1,8 @@
 # tests/plugins/test_protocol_lifecycle.py
 """Tests for plugin lifecycle methods in protocols."""
 
+from elspeth.contracts import Determinism
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.enums import Determinism
 from elspeth.plugins.protocols import GateProtocol, TransformProtocol
 from elspeth.plugins.results import GateResult, RoutingAction, TransformResult
 from elspeth.plugins.schemas import PluginSchema

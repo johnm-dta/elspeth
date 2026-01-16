@@ -13,19 +13,9 @@ These models define the schema for tracking:
 
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
 from typing import Literal
 
-
-class RunStatus(str, Enum):
-    """Status for pipeline runs.
-
-    RUNNING is intermediate, COMPLETED/FAILED are terminal.
-    """
-
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
+from elspeth.contracts import NodeStateStatus, RunStatus
 
 
 @dataclass
@@ -130,18 +120,6 @@ class TokenParent:
     token_id: str
     parent_token_id: str
     ordinal: int
-
-
-class NodeStateStatus(str, Enum):
-    """Status for node state records.
-
-    OPEN is intermediate (processing in progress).
-    COMPLETED and FAILED are terminal.
-    """
-
-    OPEN = "open"
-    COMPLETED = "completed"
-    FAILED = "failed"
 
 
 @dataclass(frozen=True)

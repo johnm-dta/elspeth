@@ -229,7 +229,7 @@ class TestEngineIntegration:
         assert all(r["processed"] for r in sink.results)
 
         # Verify audit trail
-        from elspeth.core.landscape.models import RunStatus
+        from elspeth.contracts import RunStatus
 
         recorder = LandscapeRecorder(db)
         run = recorder.get_run(result.run_id)
@@ -258,10 +258,10 @@ class TestEngineIntegration:
         - All node_states are "completed"
         - Artifacts are recorded for sinks
         """
+        from elspeth.contracts import NodeType
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
         from elspeth.engine.artifacts import ArtifactDescriptor
-        from elspeth.plugins.enums import NodeType
         from elspeth.plugins.results import TransformResult
         from elspeth.plugins.schemas import PluginSchema
 
@@ -410,10 +410,10 @@ class TestEngineIntegration:
         - Routed tokens reach correct sink
         - All tokens still have complete audit trail
         """
+        from elspeth.contracts import NodeType
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
         from elspeth.engine.artifacts import ArtifactDescriptor
-        from elspeth.plugins.enums import NodeType
         from elspeth.plugins.results import GateResult, RoutingAction
         from elspeth.plugins.schemas import PluginSchema
 
@@ -738,7 +738,7 @@ class TestNoSilentAuditLoss:
             orchestrator.run(config, graph=_build_test_graph(config))
 
         # Run must be marked as failed in audit trail
-        from elspeth.core.landscape.models import RunStatus
+        from elspeth.contracts import RunStatus
 
         recorder = LandscapeRecorder(db)
         runs = recorder.list_runs()
@@ -816,7 +816,7 @@ class TestNoSilentAuditLoss:
             orchestrator.run(config, graph=_build_test_graph(config))
 
         # Run must be marked as failed in audit trail
-        from elspeth.core.landscape.models import RunStatus
+        from elspeth.contracts import RunStatus
 
         recorder = LandscapeRecorder(db)
         runs = recorder.list_runs()

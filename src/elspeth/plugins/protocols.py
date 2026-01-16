@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from elspeth.plugins.enums import Determinism
+from elspeth.contracts import Determinism
 
 if TYPE_CHECKING:
     from elspeth.plugins.context import PluginContext

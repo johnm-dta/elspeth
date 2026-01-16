@@ -9,8 +9,8 @@ from typing import Any
 
 import pluggy
 
+from elspeth.contracts import Determinism, NodeType
 from elspeth.core.canonical import stable_hash
-from elspeth.plugins.enums import Determinism, NodeType
 from elspeth.plugins.hookspecs import (
     PROJECT_NAME,
     ElspethSinkSpec,

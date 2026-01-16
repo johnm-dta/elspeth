@@ -3,7 +3,7 @@
 
 import pytest
 
-from elspeth.plugins.enums import Determinism, NodeType
+from elspeth.contracts import Determinism, NodeType
 from elspeth.plugins.manager import PluginSpec
 
 

@@ -127,7 +127,7 @@ class TestPluginSpec:
     """PluginSpec registration record."""
 
     def test_spec_from_transform(self) -> None:
-        from elspeth.plugins.enums import Determinism, NodeType
+        from elspeth.contracts import Determinism, NodeType
         from elspeth.plugins.manager import PluginSpec
 
         class MyTransform:
@@ -146,7 +146,7 @@ class TestPluginSpec:
 
     def test_spec_defaults(self) -> None:
         """Optional attributes (determinism, schemas) have defaults."""
-        from elspeth.plugins.enums import Determinism, NodeType
+        from elspeth.contracts import Determinism, NodeType
         from elspeth.plugins.manager import PluginSpec
 
         class MinimalTransform:
@@ -219,7 +219,7 @@ class TestPluginSpecSchemaHashes:
 
     def test_from_plugin_captures_input_schema_hash(self) -> None:
         """Input schema is hashed."""
-        from elspeth.plugins.enums import NodeType
+        from elspeth.contracts import NodeType
         from elspeth.plugins.manager import PluginSpec
         from elspeth.plugins.schemas import PluginSchema
 
@@ -240,7 +240,7 @@ class TestPluginSpecSchemaHashes:
 
     def test_schema_hash_stable(self) -> None:
         """Same schema always produces same hash."""
-        from elspeth.plugins.enums import NodeType
+        from elspeth.contracts import NodeType
         from elspeth.plugins.manager import PluginSpec
         from elspeth.plugins.schemas import PluginSchema
 

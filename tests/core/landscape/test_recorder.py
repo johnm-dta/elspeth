@@ -6,8 +6,8 @@ class TestLandscapeRecorderRuns:
     """Run lifecycle management."""
 
     def test_begin_run(self) -> None:
+        from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -23,8 +23,8 @@ class TestLandscapeRecorderRuns:
         assert run.started_at is not None
 
     def test_complete_run_success(self) -> None:
+        from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -37,8 +37,8 @@ class TestLandscapeRecorderRuns:
         assert completed.completed_at is not None
 
     def test_complete_run_failed(self) -> None:
+        from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -68,8 +68,8 @@ class TestLandscapeRecorderRunStatusValidation:
 
     def test_begin_run_with_enum_status(self) -> None:
         """Test that RunStatus enum is accepted."""
+        from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -85,8 +85,8 @@ class TestLandscapeRecorderRunStatusValidation:
 
     def test_begin_run_with_valid_string_status(self) -> None:
         """Test that valid string status is accepted and coerced."""
+        from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -119,8 +119,8 @@ class TestLandscapeRecorderRunStatusValidation:
 
     def test_complete_run_with_enum_status(self) -> None:
         """Test that RunStatus enum is accepted for complete_run."""
+        from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -133,8 +133,8 @@ class TestLandscapeRecorderRunStatusValidation:
 
     def test_complete_run_with_valid_string_status(self) -> None:
         """Test that valid string status is accepted for complete_run."""
+        from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -162,8 +162,8 @@ class TestLandscapeRecorderRunStatusValidation:
 
     def test_list_runs_with_enum_status_filter(self) -> None:
         """Test that RunStatus enum is accepted for list_runs filter."""
+        from elspeth.contracts import RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
         db = LandscapeDB.in_memory()
@@ -237,9 +237,9 @@ class TestLandscapeRecorderNodes:
 
     def test_register_node_with_enum(self) -> None:
         """Test that NodeType enum is accepted and coerced."""
+        from elspeth.contracts import NodeType
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
-        from elspeth.plugins.enums import NodeType
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -1931,10 +1931,10 @@ class TestReproducibilityGradeComputation:
 
     def test_pure_pipeline_gets_full_reproducible(self) -> None:
         """Pipeline with only deterministic/seeded nodes gets FULL_REPRODUCIBLE."""
+        from elspeth.contracts import Determinism
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
         from elspeth.core.landscape.reproducibility import ReproducibilityGrade
-        from elspeth.plugins.enums import Determinism
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -1980,10 +1980,10 @@ class TestReproducibilityGradeComputation:
 
     def test_external_calls_gets_replay_reproducible(self) -> None:
         """Pipeline with nondeterministic nodes gets REPLAY_REPRODUCIBLE."""
+        from elspeth.contracts import Determinism
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
         from elspeth.core.landscape.reproducibility import ReproducibilityGrade
-        from elspeth.plugins.enums import Determinism
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -2004,7 +2004,7 @@ class TestReproducibilityGradeComputation:
             node_type="transform",
             plugin_version="1.0",
             config={},
-            determinism=Determinism.NONDETERMINISTIC,  # LLM call
+            determinism=Determinism.EXTERNAL_CALL,  # LLM call
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -2021,11 +2021,10 @@ class TestReproducibilityGradeComputation:
 
     def test_finalize_run_sets_grade(self) -> None:
         """finalize_run() computes grade and completes the run."""
+        from elspeth.contracts import Determinism, RunStatus
         from elspeth.core.landscape.database import LandscapeDB
-        from elspeth.core.landscape.models import RunStatus
         from elspeth.core.landscape.recorder import LandscapeRecorder
         from elspeth.core.landscape.reproducibility import ReproducibilityGrade
-        from elspeth.plugins.enums import Determinism
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -2060,13 +2059,13 @@ class TestReproducibilityGradeComputation:
 
     def test_grade_degrades_after_purge(self) -> None:
         """REPLAY_REPRODUCIBLE degrades to ATTRIBUTABLE_ONLY after purge."""
+        from elspeth.contracts import Determinism
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
         from elspeth.core.landscape.reproducibility import (
             ReproducibilityGrade,
             update_grade_after_purge,
         )
-        from elspeth.plugins.enums import Determinism
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -2079,7 +2078,7 @@ class TestReproducibilityGradeComputation:
             node_type="source",
             plugin_version="1.0",
             config={},
-            determinism=Determinism.NONDETERMINISTIC,
+            determinism=Determinism.EXTERNAL_CALL,
         )
 
         # Finalize with REPLAY_REPRODUCIBLE grade
@@ -2102,13 +2101,13 @@ class TestReproducibilityGradeComputation:
 
     def test_full_reproducible_unchanged_after_purge(self) -> None:
         """FULL_REPRODUCIBLE remains unchanged after purge (payloads not needed for replay)."""
+        from elspeth.contracts import Determinism
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
         from elspeth.core.landscape.reproducibility import (
             ReproducibilityGrade,
             update_grade_after_purge,
         )
-        from elspeth.plugins.enums import Determinism
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -2170,13 +2169,13 @@ class TestReproducibilityGradeComputation:
 
     def test_attributable_only_unchanged_after_purge(self) -> None:
         """ATTRIBUTABLE_ONLY remains unchanged after purge (already at lowest grade)."""
+        from elspeth.contracts import Determinism
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
         from elspeth.core.landscape.reproducibility import (
             ReproducibilityGrade,
             update_grade_after_purge,
         )
-        from elspeth.plugins.enums import Determinism
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -2189,7 +2188,7 @@ class TestReproducibilityGradeComputation:
             node_type="source",
             plugin_version="1.0",
             config={},
-            determinism=Determinism.NONDETERMINISTIC,
+            determinism=Determinism.EXTERNAL_CALL,
         )
 
         # Finalize and degrade to ATTRIBUTABLE_ONLY

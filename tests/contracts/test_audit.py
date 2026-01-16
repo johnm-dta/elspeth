@@ -641,3 +641,127 @@ class TestBatchOutput:
 
         assert output.output_type == "artifact"
         assert output.output_id == "artifact-789"
+
+
+class TestCheckpoint:
+    """Tests for Checkpoint audit model."""
+
+    def test_create_checkpoint_with_required_fields(self) -> None:
+        """Can create Checkpoint with required fields."""
+        from elspeth.contracts import Checkpoint
+
+        now = datetime.now(UTC)
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-123",
+            run_id="run-456",
+            token_id="token-789",
+            node_id="node-1",
+            sequence_number=42,
+            created_at=now,
+        )
+
+        assert checkpoint.checkpoint_id == "cp-123"
+        assert checkpoint.run_id == "run-456"
+        assert checkpoint.token_id == "token-789"
+        assert checkpoint.node_id == "node-1"
+        assert checkpoint.sequence_number == 42
+        assert checkpoint.created_at == now
+        assert checkpoint.aggregation_state_json is None
+
+    def test_checkpoint_with_aggregation_state(self) -> None:
+        """Checkpoint can have aggregation_state_json for stateful nodes."""
+        from elspeth.contracts import Checkpoint
+
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-123",
+            run_id="run-456",
+            token_id="token-789",
+            node_id="node-1",
+            sequence_number=42,
+            created_at=datetime.now(UTC),
+            aggregation_state_json='{"count": 10, "sum": 500}',
+        )
+
+        assert checkpoint.aggregation_state_json == '{"count": 10, "sum": 500}'
+
+    def test_checkpoint_created_at_optional(self) -> None:
+        """Checkpoint.created_at can be None."""
+        from elspeth.contracts import Checkpoint
+
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-123",
+            run_id="run-456",
+            token_id="token-789",
+            node_id="node-1",
+            sequence_number=0,
+            created_at=None,
+        )
+
+        assert checkpoint.created_at is None
+
+
+class TestRowLineage:
+    """Tests for RowLineage audit model."""
+
+    def test_create_row_lineage_with_all_fields(self) -> None:
+        """Can create RowLineage with all fields."""
+        from elspeth.contracts import RowLineage
+
+        now = datetime.now(UTC)
+        lineage = RowLineage(
+            row_id="row-123",
+            run_id="run-456",
+            source_node_id="node-src",
+            row_index=42,
+            source_data_hash="abc123def456",
+            created_at=now,
+            source_data={"id": 1, "name": "test"},
+            payload_available=True,
+        )
+
+        assert lineage.row_id == "row-123"
+        assert lineage.run_id == "run-456"
+        assert lineage.source_node_id == "node-src"
+        assert lineage.row_index == 42
+        assert lineage.source_data_hash == "abc123def456"
+        assert lineage.created_at == now
+        assert lineage.source_data == {"id": 1, "name": "test"}
+        assert lineage.payload_available is True
+
+    def test_row_lineage_with_purged_payload(self) -> None:
+        """RowLineage supports graceful payload degradation."""
+        from elspeth.contracts import RowLineage
+
+        lineage = RowLineage(
+            row_id="row-123",
+            run_id="run-456",
+            source_node_id="node-src",
+            row_index=0,
+            source_data_hash="abc123def456",
+            created_at=datetime.now(UTC),
+            source_data=None,  # Payload was purged
+            payload_available=False,
+        )
+
+        # Hash is still available even though payload is purged
+        assert lineage.source_data_hash == "abc123def456"
+        assert lineage.source_data is None
+        assert lineage.payload_available is False
+
+    def test_row_lineage_hash_always_present(self) -> None:
+        """RowLineage always has source_data_hash for audit integrity."""
+        from elspeth.contracts import RowLineage
+
+        # Even with purged payload, hash is required and present
+        lineage = RowLineage(
+            row_id="row-123",
+            run_id="run-456",
+            source_node_id="node-src",
+            row_index=0,
+            source_data_hash="required_hash_value",
+            created_at=datetime.now(UTC),
+            source_data=None,
+            payload_available=False,
+        )
+
+        assert lineage.source_data_hash == "required_hash_value"

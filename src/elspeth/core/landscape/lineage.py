@@ -8,11 +8,11 @@ complete lineage for a token or row.
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from elspeth.contracts import RowLineage
 from elspeth.core.landscape.models import (
     Call,
     NodeState,
     RoutingEvent,
-    Row,
     Token,
 )
 
@@ -31,8 +31,8 @@ class LineageResult:
     token: Token
     """The token being explained."""
 
-    source_row: Row
-    """The original source row."""
+    source_row: RowLineage
+    """The original source row with resolved payload."""
 
     node_states: list[NodeState]
     """All node states visited by this token, in order."""
@@ -85,9 +85,9 @@ def explain(
     if token is None:
         return None
 
-    # Get source row
-    row = recorder.get_row(token.row_id)
-    if row is None:
+    # Get source row with resolved payload via explain_row
+    source_row = recorder.explain_row(run_id, token.row_id)
+    if source_row is None:
         return None
 
     # Get node states for this token
@@ -116,7 +116,7 @@ def explain(
 
     return LineageResult(
         token=token,
-        source_row=row,
+        source_row=source_row,
         node_states=node_states,
         routing_events=routing_events,
         calls=calls,

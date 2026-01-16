@@ -1646,7 +1646,7 @@ class TestExplainGracefulDegradation:
         )
 
         assert lineage is not None
-        assert lineage.source_hash is not None  # Hash preserved
+        assert lineage.source_data_hash is not None  # Hash preserved
         assert lineage.source_data is None  # Payload unavailable
         assert lineage.payload_available is False
 
@@ -1788,7 +1788,7 @@ class TestExplainGracefulDegradation:
         )
 
         assert lineage is not None
-        assert lineage.source_hash is not None
+        assert lineage.source_data_hash is not None
         assert lineage.source_data is None  # No payload store
         assert lineage.payload_available is False
 
@@ -1826,7 +1826,7 @@ class TestExplainGracefulDegradation:
         )
 
         assert lineage is not None
-        assert lineage.source_hash is not None
+        assert lineage.source_data_hash is not None
         assert lineage.source_data is None  # No payload_ref
         assert lineage.payload_available is False
 
@@ -1869,7 +1869,7 @@ class TestExplainGracefulDegradation:
         )
 
         assert lineage is not None
-        assert lineage.source_hash is not None  # Hash preserved
+        assert lineage.source_data_hash is not None  # Hash preserved
         assert lineage.source_data is None  # Corrupted payload not returned
         assert lineage.payload_available is False  # Reports as unavailable
 

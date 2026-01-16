@@ -20,6 +20,7 @@ from elspeth.contracts import (
     NodeStateStatus,
     NodeType,
     RoutingSpec,
+    RowLineage,
     RunStatus,
 )
 from elspeth.core.canonical import canonical_json, stable_hash
@@ -37,7 +38,6 @@ from elspeth.core.landscape.models import (
     NodeStateOpen,
     RoutingEvent,
     Row,
-    RowLineage,
     Run,
     Token,
     TokenParent,
@@ -1772,9 +1772,12 @@ class LandscapeRecorder:
                 pass
 
         return RowLineage(
-            row_id=row_id,
-            run_id=run_id,
-            source_hash=row.source_data_hash,
+            row_id=row.row_id,
+            run_id=row.run_id,
+            source_node_id=row.source_node_id,
+            row_index=row.row_index,
+            source_data_hash=row.source_data_hash,
+            created_at=row.created_at,
             source_data=source_data,
             payload_available=payload_available,
         )

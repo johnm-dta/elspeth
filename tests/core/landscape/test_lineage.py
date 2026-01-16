@@ -14,22 +14,26 @@ class TestLineageResult:
 
     def test_lineage_result_fields(self) -> None:
         """LineageResult has expected fields."""
+        from elspeth.contracts import RowLineage
         from elspeth.core.landscape.lineage import LineageResult
-        from elspeth.core.landscape.models import Row, Token
+        from elspeth.core.landscape.models import Token
 
+        now = datetime.now(UTC)
         result = LineageResult(
             token=Token(
                 token_id="t1",
                 row_id="r1",
-                created_at=datetime.now(UTC),
+                created_at=now,
             ),
-            source_row=Row(
+            source_row=RowLineage(
                 row_id="r1",
                 run_id="run1",
                 source_node_id="src",
                 row_index=0,
                 source_data_hash="abc",
-                created_at=datetime.now(UTC),
+                created_at=now,
+                source_data={"field": "value"},
+                payload_available=True,
             ),
             node_states=[],
             routing_events=[],
@@ -38,6 +42,7 @@ class TestLineageResult:
         )
         assert result.token.token_id == "t1"
         assert result.source_row.row_id == "r1"
+        assert result.source_row.payload_available is True
 
 
 class TestExplainFunction:
@@ -106,10 +111,10 @@ class TestExplainFunction:
             row_index=0,
             data={"id": 1},
         )
-        token = recorder.create_token(row_id=row.row_id)
+        _token = recorder.create_token(row_id=row.row_id)
         recorder.complete_run(run.run_id, status="completed")
 
-        # Query by row_id
+        # Query by row_id (token must exist but we don't use it directly)
         result = explain(recorder, run_id=run.run_id, row_id=row.row_id)
 
         assert result is not None

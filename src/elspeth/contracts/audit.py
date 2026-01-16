@@ -281,3 +281,43 @@ class BatchOutput:
     batch_id: str
     output_type: str  # token, artifact
     output_id: str
+
+
+@dataclass
+class Checkpoint:
+    """Checkpoint for crash recovery.
+
+    Captures run progress at row/transform boundaries.
+    """
+
+    checkpoint_id: str
+    run_id: str
+    token_id: str
+    node_id: str
+    sequence_number: int
+    created_at: datetime | None
+    aggregation_state_json: str | None = None
+
+
+@dataclass
+class RowLineage:
+    """Source row with resolved payload for explain output.
+
+    Combines Row DB record fields with resolved payload data.
+    Used by LineageResult.source_row for complete explain output.
+
+    Supports graceful payload degradation - hash always preserved,
+    actual data may be unavailable after retention purge.
+    """
+
+    # From Row (DB record fields)
+    row_id: str
+    run_id: str
+    source_node_id: str
+    row_index: int
+    source_data_hash: str  # Consistent naming with Row
+    created_at: datetime
+
+    # Resolved payload (from PayloadStore)
+    source_data: dict[str, object] | None  # None if purged
+    payload_available: bool

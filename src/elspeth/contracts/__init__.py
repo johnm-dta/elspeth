@@ -8,6 +8,10 @@ Import pattern:
     from elspeth.contracts import NodeType, TransformResult, Run
 """
 
+# isort: skip_file
+# Import order is load-bearing: config imports MUST come last to avoid circular
+# import through core.checkpoint -> core.landscape -> contracts.
+
 from elspeth.contracts.enums import (
     BatchStatus,
     CallStatus,
@@ -30,8 +34,35 @@ from elspeth.contracts.results import (
     TransformResult,
 )
 from elspeth.contracts.routing import EdgeInfo, RoutingAction, RoutingSpec
+from elspeth.contracts.config import (
+    CheckpointSettings,
+    ConcurrencySettings,
+    DatabaseSettings,
+    DatasourceSettings,
+    ElspethSettings,
+    LandscapeExportSettings,
+    LandscapeSettings,
+    PayloadStoreSettings,
+    RateLimitSettings,
+    RetrySettings,
+    RowPluginSettings,
+    SinkSettings,
+)
 
 __all__ = [
+    # config
+    "CheckpointSettings",
+    "ConcurrencySettings",
+    "DatabaseSettings",
+    "DatasourceSettings",
+    "ElspethSettings",
+    "LandscapeExportSettings",
+    "LandscapeSettings",
+    "PayloadStoreSettings",
+    "RateLimitSettings",
+    "RetrySettings",
+    "RowPluginSettings",
+    "SinkSettings",
     # enums
     "BatchStatus",
     "CallStatus",

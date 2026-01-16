@@ -28,6 +28,10 @@ from elspeth.contracts.enums import (
 from elspeth.contracts.audit import (
     Edge,
     Node,
+    NodeState,
+    NodeStateCompleted,
+    NodeStateFailed,
+    NodeStateOpen,
     Row,
     Run,
     Token,
@@ -61,6 +65,10 @@ __all__ = [
     # audit
     "Edge",
     "Node",
+    "NodeState",
+    "NodeStateCompleted",
+    "NodeStateFailed",
+    "NodeStateOpen",
     "Row",
     "Run",
     "Token",

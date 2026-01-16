@@ -7,6 +7,11 @@ from elspeth.contracts import (
     Edge,
     ExportStatus,
     Node,
+    NodeState,
+    NodeStateCompleted,
+    NodeStateFailed,
+    NodeStateOpen,
+    NodeStateStatus,
     NodeType,
     RoutingMode,
     Row,
@@ -262,3 +267,91 @@ class TestTokenParent:
 
         assert parent1.ordinal == 0
         assert parent2.ordinal == 1
+
+
+class TestNodeStateVariants:
+    """Tests for NodeState discriminated union."""
+
+    def test_open_state_has_literal_status(self) -> None:
+        """NodeStateOpen.status is Literal[OPEN]."""
+        state = NodeStateOpen(
+            state_id="state-1",
+            token_id="token-1",
+            node_id="node-1",
+            step_index=0,
+            attempt=1,
+            status=NodeStateStatus.OPEN,
+            input_hash="abc123",
+            started_at=datetime.now(UTC),
+        )
+        assert state.status == NodeStateStatus.OPEN
+
+    def test_completed_state_requires_output(self) -> None:
+        """NodeStateCompleted requires output_hash and completed_at."""
+        now = datetime.now(UTC)
+        state = NodeStateCompleted(
+            state_id="state-1",
+            token_id="token-1",
+            node_id="node-1",
+            step_index=0,
+            attempt=1,
+            status=NodeStateStatus.COMPLETED,
+            input_hash="abc123",
+            started_at=now,
+            output_hash="def456",  # Required
+            completed_at=now,  # Required
+            duration_ms=100.0,  # Required
+        )
+        assert state.output_hash == "def456"
+
+    def test_failed_state_has_error_fields(self) -> None:
+        """NodeStateFailed can have error_json."""
+        now = datetime.now(UTC)
+        state = NodeStateFailed(
+            state_id="state-1",
+            token_id="token-1",
+            node_id="node-1",
+            step_index=0,
+            attempt=1,
+            status=NodeStateStatus.FAILED,
+            input_hash="abc123",
+            started_at=now,
+            completed_at=now,
+            duration_ms=50.0,
+            error_json='{"error": "something went wrong"}',
+        )
+        assert state.status == NodeStateStatus.FAILED
+        assert state.error_json == '{"error": "something went wrong"}'
+
+    def test_union_type_annotation(self) -> None:
+        """NodeState is union of all variants."""
+        # Type checker accepts any variant
+        state: NodeState = NodeStateOpen(
+            state_id="state-1",
+            token_id="token-1",
+            node_id="node-1",
+            step_index=0,
+            attempt=1,
+            status=NodeStateStatus.OPEN,
+            input_hash="abc123",
+            started_at=datetime.now(UTC),
+        )
+        assert state is not None
+
+    def test_frozen_dataclass_immutable(self) -> None:
+        """NodeState variants are frozen (immutable)."""
+        import dataclasses
+
+        state = NodeStateOpen(
+            state_id="state-1",
+            token_id="token-1",
+            node_id="node-1",
+            step_index=0,
+            attempt=1,
+            status=NodeStateStatus.OPEN,
+            input_hash="abc123",
+            started_at=datetime.now(UTC),
+        )
+        # Frozen dataclass should raise FrozenInstanceError on mutation
+        with __import__("pytest").raises(dataclasses.FrozenInstanceError):
+            state.state_id = "modified"  # type: ignore[misc]

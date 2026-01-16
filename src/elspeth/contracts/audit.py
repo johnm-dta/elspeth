@@ -9,10 +9,12 @@ garbage from it, something catastrophic happened - crash immediately.
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from elspeth.contracts.enums import (
     Determinism,
     ExportStatus,
+    NodeStateStatus,
     NodeType,
     RoutingMode,
     RunStatus,
@@ -110,3 +112,79 @@ class TokenParent:
     token_id: str
     parent_token_id: str
     ordinal: int
+
+
+@dataclass(frozen=True)
+class NodeStateOpen:
+    """A node state currently being processed.
+
+    Invariants:
+    - No output_hash (not produced yet)
+    - No completed_at (not completed)
+    - No duration_ms (not finished timing)
+    """
+
+    state_id: str
+    token_id: str
+    node_id: str
+    step_index: int
+    attempt: int
+    status: Literal[NodeStateStatus.OPEN]
+    input_hash: str
+    started_at: datetime
+    context_before_json: str | None = None
+
+
+@dataclass(frozen=True)
+class NodeStateCompleted:
+    """A node state that completed successfully.
+
+    Invariants:
+    - Has output_hash (produced output)
+    - Has completed_at (finished)
+    - Has duration_ms (timing complete)
+    """
+
+    state_id: str
+    token_id: str
+    node_id: str
+    step_index: int
+    attempt: int
+    status: Literal[NodeStateStatus.COMPLETED]
+    input_hash: str
+    started_at: datetime
+    output_hash: str
+    completed_at: datetime
+    duration_ms: float
+    context_before_json: str | None = None
+    context_after_json: str | None = None
+
+
+@dataclass(frozen=True)
+class NodeStateFailed:
+    """A node state that failed during processing.
+
+    Invariants:
+    - Has completed_at (finished, with failure)
+    - Has duration_ms (timing complete)
+    - May have error_json
+    """
+
+    state_id: str
+    token_id: str
+    node_id: str
+    step_index: int
+    attempt: int
+    status: Literal[NodeStateStatus.FAILED]
+    input_hash: str
+    started_at: datetime
+    completed_at: datetime
+    duration_ms: float
+    error_json: str | None = None
+    output_hash: str | None = None
+    context_before_json: str | None = None
+    context_after_json: str | None = None
+
+
+# Discriminated union type
+NodeState = NodeStateOpen | NodeStateCompleted | NodeStateFailed

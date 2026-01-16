@@ -18,11 +18,14 @@ from typing import TYPE_CHECKING, Any
 from elspeth.contracts import Determinism, NodeType, RowOutcome, RunStatus
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+from elspeth.core.logging import get_logger
 from elspeth.engine.processor import RowProcessor
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import SinkProtocol, SourceProtocol
+
+logger = get_logger(__name__)
 
 # Type alias for transform-like plugins
 TransformLike = BaseTransform | BaseGate | BaseAggregation
@@ -99,6 +102,7 @@ class Orchestrator:
         self._checkpoint_manager = checkpoint_manager
         self._checkpoint_settings = checkpoint_settings
         self._sequence_number = 0  # Monotonic counter for checkpoint ordering
+        self._checkpoint_warning_logged = False  # Ensure warning logs once per run
 
     def _maybe_checkpoint(self, run_id: str, token_id: str, node_id: str) -> None:
         """Create checkpoint if configured.
@@ -117,6 +121,13 @@ class Orchestrator:
         if not self._checkpoint_settings or not self._checkpoint_settings.enabled:
             return
         if self._checkpoint_manager is None:
+            # Log once per orchestrator instance, not every row
+            if not self._checkpoint_warning_logged:
+                logger.warning(
+                    "Checkpoint settings enabled but no checkpoint manager configured. "
+                    "Checkpointing will not occur for this run."
+                )
+                self._checkpoint_warning_logged = True
             return
 
         self._sequence_number += 1

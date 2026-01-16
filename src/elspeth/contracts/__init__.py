@@ -25,6 +25,14 @@ from elspeth.contracts.enums import (
     RowOutcome,
     RunStatus,
 )
+from elspeth.contracts.audit import (
+    Edge,
+    Node,
+    Row,
+    Run,
+    Token,
+    TokenParent,
+)
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.results import (
     AcceptResult,
@@ -50,6 +58,13 @@ from elspeth.contracts.config import (
 )
 
 __all__ = [
+    # audit
+    "Edge",
+    "Node",
+    "Row",
+    "Run",
+    "Token",
+    "TokenParent",
     # config
     "CheckpointSettings",
     "ConcurrencySettings",

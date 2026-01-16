@@ -12,7 +12,7 @@ Coordinates:
 from dataclasses import dataclass
 from typing import Any
 
-from elspeth.contracts import RowOutcome
+from elspeth.contracts import RowOutcome, TokenInfo
 from elspeth.core.landscape import LandscapeRecorder
 from elspeth.engine.executors import (
     AggregationExecutor,
@@ -20,7 +20,7 @@ from elspeth.engine.executors import (
     TransformExecutor,
 )
 from elspeth.engine.spans import SpanFactory
-from elspeth.engine.tokens import TokenInfo, TokenManager
+from elspeth.engine.tokens import TokenManager
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
 

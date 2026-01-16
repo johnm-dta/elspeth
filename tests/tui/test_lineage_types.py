@@ -2,7 +2,7 @@
 
 import pytest
 
-from elspeth.tui.types import LineageData, NodeInfo, SourceInfo, TokenInfo
+from elspeth.tui.types import LineageData, NodeInfo, SourceInfo, TokenDisplayInfo
 
 
 class TestLineageDataContract:
@@ -45,7 +45,7 @@ class TestLineageDataContract:
 
     def test_token_info_contract(self) -> None:
         """TokenInfo requires token_id, row_id, and path."""
-        token: TokenInfo = {
+        token: TokenDisplayInfo = {
             "token_id": "tok-001",
             "row_id": "row-001",
             "path": ["node-1", "node-2", "node-3"],
@@ -56,7 +56,7 @@ class TestLineageDataContract:
 
     def test_token_info_with_empty_path(self) -> None:
         """TokenInfo allows empty path list."""
-        token: TokenInfo = {
+        token: TokenDisplayInfo = {
             "token_id": "tok-001",
             "row_id": "row-001",
             "path": [],

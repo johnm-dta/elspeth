@@ -12,12 +12,12 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
+from elspeth.contracts import TokenInfo
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape import LandscapeRecorder
 from elspeth.core.landscape.models import Artifact, NodeStateOpen, RoutingSpec
 from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.spans import SpanFactory
-from elspeth.engine.tokens import TokenInfo
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import (
     AcceptResult,

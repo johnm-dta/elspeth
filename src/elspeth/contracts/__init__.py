@@ -21,6 +21,7 @@ from elspeth.contracts.enums import (
     RowOutcome,
     RunStatus,
 )
+from elspeth.contracts.identity import TokenInfo
 
 __all__ = [
     # enums
@@ -35,4 +36,6 @@ __all__ = [
     "RoutingMode",
     "RowOutcome",
     "RunStatus",
+    # identity
+    "TokenInfo",
 ]

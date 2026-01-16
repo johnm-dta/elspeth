@@ -459,8 +459,8 @@ class Orchestrator:
         )
 
         # Process rows - Buffer TOKENS, not dicts, to preserve identity
+        from elspeth.contracts import TokenInfo
         from elspeth.engine.executors import SinkExecutor
-        from elspeth.engine.tokens import TokenInfo
 
         rows_processed = 0
         rows_succeeded = 0

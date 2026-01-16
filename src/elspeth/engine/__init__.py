@@ -24,6 +24,7 @@ Example:
     result = orchestrator.run(config)
 """
 
+from elspeth.contracts import TokenInfo
 from elspeth.engine.adapters import SinkAdapter
 from elspeth.engine.executors import (
     AggregationExecutor,
@@ -41,7 +42,7 @@ from elspeth.engine.orchestrator import (
 from elspeth.engine.processor import RowProcessor, RowResult
 from elspeth.engine.retry import MaxRetriesExceeded, RetryConfig, RetryManager
 from elspeth.engine.spans import SpanFactory
-from elspeth.engine.tokens import TokenInfo, TokenManager
+from elspeth.engine.tokens import TokenManager
 
 __all__ = [
     "AggregationExecutor",

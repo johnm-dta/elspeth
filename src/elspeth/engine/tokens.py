@@ -5,27 +5,10 @@ Provides a simplified interface over LandscapeRecorder for managing
 tokens (row instances flowing through the DAG).
 """
 
-from dataclasses import dataclass
 from typing import Any
 
+from elspeth.contracts import TokenInfo
 from elspeth.core.landscape import LandscapeRecorder
-
-
-@dataclass
-class TokenInfo:
-    """Information about a token in flight.
-
-    Carries both identity (IDs) and current state (row_data).
-
-    Note: Step position is NOT tracked here - the Orchestrator/RowProcessor
-    is the authority for where a token is in the DAG. TokenInfo is just
-    identity + payload, not position.
-    """
-
-    row_id: str
-    token_id: str
-    row_data: dict[str, Any]
-    branch_name: str | None = None
 
 
 class TokenManager:

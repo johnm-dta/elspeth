@@ -23,8 +23,12 @@ class SourceInfo(TypedDict):
     node_id: str | None
 
 
-class TokenInfo(TypedDict):
-    """Information about a token in the pipeline."""
+class TokenDisplayInfo(TypedDict):
+    """Token information formatted for TUI display.
+
+    Note: This is a DISPLAY type, not the canonical TokenInfo from contracts.
+    It contains presentation-specific fields like 'path' for breadcrumb display.
+    """
 
     token_id: str
     row_id: str
@@ -43,4 +47,4 @@ class LineageData(TypedDict):
     source: SourceInfo
     transforms: list[NodeInfo]
     sinks: list[NodeInfo]
-    tokens: list[TokenInfo]
+    tokens: list[TokenDisplayInfo]

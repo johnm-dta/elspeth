@@ -10,11 +10,11 @@ from typing import Any
 
 from pydantic import model_validator
 
+from elspeth.contracts import PluginSchema
 from elspeth.plugins.base import BaseGate
 from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import GateResult, RoutingAction
-from elspeth.plugins.schemas import PluginSchema
 from elspeth.plugins.sentinels import MISSING
 
 

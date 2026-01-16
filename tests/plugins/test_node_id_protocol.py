@@ -23,9 +23,9 @@ class TestNodeIdProtocol:
         from collections.abc import Iterator
         from typing import Any
 
+        from elspeth.contracts import PluginSchema
         from elspeth.plugins.base import BaseSource
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.schemas import PluginSchema
 
         class TestSchema(PluginSchema):
             pass
@@ -58,10 +58,10 @@ class TestNodeIdProtocol:
         """BaseTransform has node_id attribute with default None."""
         from typing import Any
 
+        from elspeth.contracts import PluginSchema
         from elspeth.plugins.base import BaseTransform
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import TransformResult
-        from elspeth.plugins.schemas import PluginSchema
 
         class TestSchema(PluginSchema):
             pass
@@ -94,11 +94,10 @@ class TestNodeIdProtocol:
         """BaseGate has node_id attribute with default None."""
         from typing import Any
 
-        from elspeth.contracts import RoutingAction
+        from elspeth.contracts import PluginSchema, RoutingAction
         from elspeth.plugins.base import BaseGate
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import GateResult
-        from elspeth.plugins.schemas import PluginSchema
 
         class TestSchema(PluginSchema):
             pass
@@ -129,10 +128,10 @@ class TestNodeIdProtocol:
         """BaseAggregation has node_id attribute with default None."""
         from typing import Any
 
+        from elspeth.contracts import PluginSchema
         from elspeth.plugins.base import BaseAggregation
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import AcceptResult
-        from elspeth.plugins.schemas import PluginSchema
 
         class TestSchema(PluginSchema):
             pass
@@ -184,9 +183,9 @@ class TestNodeIdProtocol:
         """BaseSink has node_id attribute with default None."""
         from typing import Any
 
+        from elspeth.contracts import PluginSchema
         from elspeth.plugins.base import BaseSink
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.schemas import PluginSchema
 
         class TestSchema(PluginSchema):
             pass

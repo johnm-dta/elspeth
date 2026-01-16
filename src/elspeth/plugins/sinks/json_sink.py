@@ -7,10 +7,10 @@ Writes rows to JSON files. Supports JSON array and JSONL formats.
 import json
 from typing import IO, Any, Literal
 
+from elspeth.contracts import PluginSchema
 from elspeth.plugins.base import BaseSink
 from elspeth.plugins.config_base import PathConfig
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.schemas import PluginSchema
 
 
 class JSONInputSchema(PluginSchema):

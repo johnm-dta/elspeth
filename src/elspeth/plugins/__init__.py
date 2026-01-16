@@ -19,11 +19,17 @@ Phase 3 Integration:
 # Results
 # Base classes
 # Enums (re-exported from contracts as part of public plugin API)
+# Schemas (canonical location: elspeth.contracts)
 from elspeth.contracts import (
+    CompatibilityResult,
     Determinism,
     NodeType,
+    PluginSchema,
     RoutingKind,
     RoutingMode,
+    SchemaValidationError,
+    check_compatibility,
+    validate_row,
 )
 from elspeth.plugins.base import (
     BaseAggregation,
@@ -61,15 +67,6 @@ from elspeth.plugins.results import (
     RoutingAction,
     RowOutcome,
     TransformResult,
-)
-
-# Schemas
-from elspeth.plugins.schemas import (
-    CompatibilityResult,
-    PluginSchema,
-    SchemaValidationError,
-    check_compatibility,
-    validate_row,
 )
 
 __all__ = [  # Grouped by category for readability

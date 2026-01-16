@@ -14,11 +14,11 @@ class TestPluginManager:
         assert manager is not None
 
     def test_register_plugin(self) -> None:
+        from elspeth.contracts import PluginSchema
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.hookspecs import hookimpl
         from elspeth.plugins.manager import PluginManager
         from elspeth.plugins.results import TransformResult
-        from elspeth.plugins.schemas import PluginSchema
 
         class InputSchema(PluginSchema):
             x: int
@@ -62,11 +62,11 @@ class TestPluginManager:
         assert transforms[0].name == "my_transform"
 
     def test_get_plugin_by_name(self) -> None:
+        from elspeth.contracts import PluginSchema
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.hookspecs import hookimpl
         from elspeth.plugins.manager import PluginManager
         from elspeth.plugins.results import TransformResult
-        from elspeth.plugins.schemas import PluginSchema
 
         class Schema(PluginSchema):
             x: int
@@ -229,9 +229,8 @@ class TestPluginSpecSchemaHashes:
 
     def test_from_plugin_captures_input_schema_hash(self) -> None:
         """Input schema is hashed."""
-        from elspeth.contracts import NodeType
+        from elspeth.contracts import NodeType, PluginSchema
         from elspeth.plugins.manager import PluginSpec
-        from elspeth.plugins.schemas import PluginSchema
 
         class InputSchema(PluginSchema):
             field_a: str
@@ -250,9 +249,8 @@ class TestPluginSpecSchemaHashes:
 
     def test_schema_hash_stable(self) -> None:
         """Same schema always produces same hash."""
-        from elspeth.contracts import NodeType
+        from elspeth.contracts import NodeType, PluginSchema
         from elspeth.plugins.manager import PluginSpec
-        from elspeth.plugins.schemas import PluginSchema
 
         class MySchema(PluginSchema):
             value: int

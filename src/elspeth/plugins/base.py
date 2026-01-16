@@ -13,14 +13,13 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from typing import Any
 
-from elspeth.contracts import Determinism
+from elspeth.contracts import Determinism, PluginSchema
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import (
     AcceptResult,
     GateResult,
     TransformResult,
 )
-from elspeth.plugins.schemas import PluginSchema
 
 
 class BaseTransform(ABC):

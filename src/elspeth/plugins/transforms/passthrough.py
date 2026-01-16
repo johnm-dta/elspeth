@@ -6,10 +6,10 @@ Passes rows through unchanged. Useful for testing and debugging pipelines.
 import copy
 from typing import Any
 
+from elspeth.contracts import PluginSchema
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import TransformResult
-from elspeth.plugins.schemas import PluginSchema
 
 
 class PassThroughSchema(PluginSchema):

@@ -7,7 +7,7 @@ This is opt-in validation - the pipeline still runs without it.
 
 from __future__ import annotations
 
-from elspeth.plugins.schemas import PluginSchema
+from elspeth.contracts import PluginSchema
 
 
 def validate_pipeline_schemas(

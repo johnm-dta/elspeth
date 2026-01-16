@@ -7,7 +7,7 @@ because the processor uses isinstance() for type-safe plugin detection.
 
 from typing import Any
 
-from elspeth.contracts import RoutingMode
+from elspeth.contracts import PluginSchema, RoutingMode
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import (
@@ -17,7 +17,6 @@ from elspeth.plugins.results import (
     RowOutcome,
     TransformResult,
 )
-from elspeth.plugins.schemas import PluginSchema
 
 
 # Shared schema for test plugins

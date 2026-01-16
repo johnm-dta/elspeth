@@ -9,10 +9,10 @@ from typing import Any
 
 import pandas as pd
 
+from elspeth.contracts import PluginSchema
 from elspeth.plugins.base import BaseSource
 from elspeth.plugins.config_base import PathConfig
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.schemas import PluginSchema
 
 
 class CSVOutputSchema(PluginSchema):

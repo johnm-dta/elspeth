@@ -9,10 +9,10 @@ from typing import Any, Literal
 from sqlalchemy import Column, MetaData, String, Table, create_engine, insert
 from sqlalchemy.engine import Engine
 
+from elspeth.contracts import PluginSchema
 from elspeth.plugins.base import BaseSink
 from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.schemas import PluginSchema
 
 
 class DatabaseInputSchema(PluginSchema):

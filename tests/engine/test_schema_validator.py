@@ -11,8 +11,8 @@ class TestPipelineSchemaValidator:
 
     def test_validates_compatible_schemas(self) -> None:
         """Compatible schemas pass validation."""
+        from elspeth.contracts import PluginSchema
         from elspeth.engine.schema_validator import validate_pipeline_schemas
-        from elspeth.plugins.schemas import PluginSchema
 
         class SourceOutput(PluginSchema):
             name: str
@@ -34,8 +34,8 @@ class TestPipelineSchemaValidator:
 
     def test_detects_missing_field(self) -> None:
         """Detects when consumer expects field producer doesn't provide."""
+        from elspeth.contracts import PluginSchema
         from elspeth.engine.schema_validator import validate_pipeline_schemas
-        from elspeth.plugins.schemas import PluginSchema
 
         class SourceOutput(PluginSchema):
             name: str
@@ -56,8 +56,8 @@ class TestPipelineSchemaValidator:
 
     def test_detects_transform_chain_incompatibility(self) -> None:
         """Detects incompatibility between transforms in a chain."""
+        from elspeth.contracts import PluginSchema
         from elspeth.engine.schema_validator import validate_pipeline_schemas
-        from elspeth.plugins.schemas import PluginSchema
 
         class Schema1(PluginSchema):
             field_a: str
@@ -87,8 +87,8 @@ class TestPipelineSchemaValidator:
 
     def test_detects_sink_incompatibility(self) -> None:
         """Detects when sink requires field that final transform doesn't provide."""
+        from elspeth.contracts import PluginSchema
         from elspeth.engine.schema_validator import validate_pipeline_schemas
-        from elspeth.plugins.schemas import PluginSchema
 
         class TransformOutput(PluginSchema):
             result: str
@@ -110,8 +110,8 @@ class TestPipelineSchemaValidator:
 
     def test_skips_validation_for_none_schemas(self) -> None:
         """Plugins with None schemas (dynamic) skip validation."""
+        from elspeth.contracts import PluginSchema
         from elspeth.engine.schema_validator import validate_pipeline_schemas
-        from elspeth.plugins.schemas import PluginSchema
 
         class SomeSchema(PluginSchema):
             field: str
@@ -128,8 +128,8 @@ class TestPipelineSchemaValidator:
 
     def test_optional_fields_not_required(self) -> None:
         """Optional fields in consumer schema are not required from producer."""
+        from elspeth.contracts import PluginSchema
         from elspeth.engine.schema_validator import validate_pipeline_schemas
-        from elspeth.plugins.schemas import PluginSchema
 
         class SourceOutput(PluginSchema):
             name: str
@@ -149,8 +149,8 @@ class TestPipelineSchemaValidator:
 
     def test_multiple_sinks_validated_independently(self) -> None:
         """Each sink is validated against final transform output."""
+        from elspeth.contracts import PluginSchema
         from elspeth.engine.schema_validator import validate_pipeline_schemas
-        from elspeth.plugins.schemas import PluginSchema
 
         class TransformOutput(PluginSchema):
             data: str

@@ -17,10 +17,10 @@ class TestBaseTransform:
             BaseTransform({})  # type: ignore[abstract]
 
     def test_subclass_implementation(self) -> None:
+        from elspeth.contracts import PluginSchema
         from elspeth.plugins.base import BaseTransform
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import TransformResult
-        from elspeth.plugins.schemas import PluginSchema
 
         class InputSchema(PluginSchema):
             x: int
@@ -63,10 +63,10 @@ class TestBaseGate:
     """Base class for gates."""
 
     def test_base_gate_implementation(self) -> None:
+        from elspeth.contracts import PluginSchema
         from elspeth.plugins.base import BaseGate
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import GateResult, RoutingAction
-        from elspeth.plugins.schemas import PluginSchema
 
         class RowSchema(PluginSchema):
             value: int
@@ -96,10 +96,10 @@ class TestBaseAggregation:
     """Base class for aggregations."""
 
     def test_base_aggregation_implementation(self) -> None:
+        from elspeth.contracts import PluginSchema
         from elspeth.plugins.base import BaseAggregation
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import AcceptResult
-        from elspeth.plugins.schemas import PluginSchema
 
         class InputSchema(PluginSchema):
             value: int
@@ -147,9 +147,9 @@ class TestBaseSink:
     """Base class for sinks."""
 
     def test_base_sink_implementation(self) -> None:
+        from elspeth.contracts import PluginSchema
         from elspeth.plugins.base import BaseSink
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.schemas import PluginSchema
 
         class InputSchema(PluginSchema):
             value: int
@@ -188,9 +188,9 @@ class TestBaseSource:
     def test_base_source_implementation(self) -> None:
         from collections.abc import Iterator
 
+        from elspeth.contracts import PluginSchema
         from elspeth.plugins.base import BaseSource
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.schemas import PluginSchema
 
         class OutputSchema(PluginSchema):
             value: int

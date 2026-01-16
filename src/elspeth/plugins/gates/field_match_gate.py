@@ -6,11 +6,11 @@ Routes rows based on field value matching (exact, regex, or list membership).
 import re
 from typing import Any, Literal
 
+from elspeth.contracts import PluginSchema
 from elspeth.plugins.base import BaseGate
 from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import GateResult, RoutingAction
-from elspeth.plugins.schemas import PluginSchema
 from elspeth.plugins.sentinels import MISSING
 
 

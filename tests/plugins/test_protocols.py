@@ -15,9 +15,9 @@ class TestSourceProtocol:
         assert hasattr(SourceProtocol, "__protocol_attrs__")
 
     def test_source_implementation(self) -> None:
+        from elspeth.contracts import PluginSchema
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.protocols import SourceProtocol
-        from elspeth.plugins.schemas import PluginSchema
 
         class OutputSchema(PluginSchema):
             value: int
@@ -71,11 +71,10 @@ class TestTransformProtocol:
     """Transform plugin protocol (stateless row processing)."""
 
     def test_transform_implementation(self) -> None:
-        from elspeth.contracts import Determinism
+        from elspeth.contracts import Determinism, PluginSchema
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.protocols import TransformProtocol
         from elspeth.plugins.results import TransformResult
-        from elspeth.plugins.schemas import PluginSchema
 
         class InputSchema(PluginSchema):
             value: int
@@ -135,11 +134,10 @@ class TestGateProtocol:
     """Gate plugin protocol (routing decisions)."""
 
     def test_gate_implementation(self) -> None:
-        from elspeth.contracts import Determinism
+        from elspeth.contracts import Determinism, PluginSchema
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.protocols import GateProtocol
         from elspeth.plugins.results import GateResult, RoutingAction
-        from elspeth.plugins.schemas import PluginSchema
 
         class RowSchema(PluginSchema):
             value: int
@@ -200,11 +198,10 @@ class TestAggregationProtocol:
     """Aggregation plugin protocol (stateful batching)."""
 
     def test_aggregation_implementation(self) -> None:
-        from elspeth.contracts import Determinism
+        from elspeth.contracts import Determinism, PluginSchema
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.protocols import AggregationProtocol
         from elspeth.plugins.results import AcceptResult
-        from elspeth.plugins.schemas import PluginSchema
 
         class InputSchema(PluginSchema):
             value: int
@@ -290,10 +287,9 @@ class TestCoalesceProtocol:
 
     def test_quorum_requires_threshold(self) -> None:
         """QUORUM policy needs a quorum_threshold."""
-        from elspeth.contracts import Determinism
+        from elspeth.contracts import Determinism, PluginSchema
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.protocols import CoalescePolicy, CoalesceProtocol
-        from elspeth.plugins.schemas import PluginSchema
 
         class OutputSchema(PluginSchema):
             combined: str
@@ -343,10 +339,9 @@ class TestCoalesceProtocol:
 
     def test_coalesce_merge_behavior(self) -> None:
         """Test merge() combines branch outputs correctly."""
-        from elspeth.contracts import Determinism
+        from elspeth.contracts import Determinism, PluginSchema
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.protocols import CoalescePolicy, CoalesceProtocol
-        from elspeth.plugins.schemas import PluginSchema
 
         class OutputSchema(PluginSchema):
             total: int
@@ -400,10 +395,9 @@ class TestSinkProtocol:
     def test_sink_implementation(self) -> None:
         from typing import ClassVar
 
-        from elspeth.contracts import Determinism
+        from elspeth.contracts import Determinism, PluginSchema
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.protocols import SinkProtocol
-        from elspeth.plugins.schemas import PluginSchema
 
         class InputSchema(PluginSchema):
             value: int

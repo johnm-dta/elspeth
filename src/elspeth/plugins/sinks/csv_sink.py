@@ -8,10 +8,10 @@ import csv
 from collections.abc import Sequence
 from typing import IO, Any
 
+from elspeth.contracts import PluginSchema
 from elspeth.plugins.base import BaseSink
 from elspeth.plugins.config_base import PathConfig
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.schemas import PluginSchema
 
 
 class CSVInputSchema(PluginSchema):

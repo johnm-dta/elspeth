@@ -7,14 +7,13 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import Determinism, RoutingMode
+from elspeth.contracts import Determinism, PluginSchema, RoutingMode
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.base import BaseGate, BaseTransform
 from elspeth.plugins.results import GateResult, RoutingAction, TransformResult
-from elspeth.plugins.schemas import PluginSchema
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:

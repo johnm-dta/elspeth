@@ -9,7 +9,7 @@ class TestPluginSchema:
     """Base class for plugin schemas."""
 
     def test_schema_validates_fields(self) -> None:
-        from elspeth.plugins.schemas import PluginSchema
+        from elspeth.contracts import PluginSchema
 
         class MySchema(PluginSchema):
             temperature: float
@@ -24,7 +24,7 @@ class TestPluginSchema:
             MySchema(temperature="not a number", humidity=65.0)
 
     def test_schema_to_dict(self) -> None:
-        from elspeth.plugins.schemas import PluginSchema
+        from elspeth.contracts import PluginSchema
 
         class MySchema(PluginSchema):
             value: int
@@ -35,7 +35,7 @@ class TestPluginSchema:
         assert as_dict == {"value": 42, "name": "test"}
 
     def test_schema_from_row(self) -> None:
-        from elspeth.plugins.schemas import PluginSchema
+        from elspeth.contracts import PluginSchema
 
         class MySchema(PluginSchema):
             value: int
@@ -47,7 +47,7 @@ class TestPluginSchema:
         assert data.name == "test"
 
     def test_schema_extra_fields_ignored(self) -> None:
-        from elspeth.plugins.schemas import PluginSchema
+        from elspeth.contracts import PluginSchema
 
         class StrictSchema(PluginSchema):
             required_field: str
@@ -61,7 +61,7 @@ class TestSchemaValidation:
     """Schema validation utilities."""
 
     def test_validate_row_against_schema(self) -> None:
-        from elspeth.plugins.schemas import PluginSchema, validate_row
+        from elspeth.contracts import PluginSchema, validate_row
 
         class MySchema(PluginSchema):
             x: int
@@ -76,7 +76,7 @@ class TestSchemaValidation:
         assert len(errors) > 0
 
     def test_validate_missing_field(self) -> None:
-        from elspeth.plugins.schemas import PluginSchema, validate_row
+        from elspeth.contracts import PluginSchema, validate_row
 
         class MySchema(PluginSchema):
             required: str
@@ -90,7 +90,7 @@ class TestSchemaCompatibility:
     """Check if output schema is compatible with input schema."""
 
     def test_compatible_schemas(self) -> None:
-        from elspeth.plugins.schemas import PluginSchema, check_compatibility
+        from elspeth.contracts import PluginSchema, check_compatibility
 
         class ProducerOutput(PluginSchema):
             x: int
@@ -107,7 +107,7 @@ class TestSchemaCompatibility:
         assert result.missing_fields == []
 
     def test_incompatible_schemas_missing_field(self) -> None:
-        from elspeth.plugins.schemas import PluginSchema, check_compatibility
+        from elspeth.contracts import PluginSchema, check_compatibility
 
         class ProducerOutput(PluginSchema):
             x: int
@@ -121,7 +121,7 @@ class TestSchemaCompatibility:
         assert "y" in result.missing_fields
 
     def test_incompatible_schemas_type_mismatch(self) -> None:
-        from elspeth.plugins.schemas import PluginSchema, check_compatibility
+        from elspeth.contracts import PluginSchema, check_compatibility
 
         class ProducerOutput(PluginSchema):
             value: str  # String
@@ -135,7 +135,7 @@ class TestSchemaCompatibility:
 
     def test_optional_fields_not_required(self) -> None:
         """Optional fields with defaults should not cause incompatibility."""
-        from elspeth.plugins.schemas import PluginSchema, check_compatibility
+        from elspeth.contracts import PluginSchema, check_compatibility
 
         class ProducerOutput(PluginSchema):
             x: int
@@ -150,7 +150,7 @@ class TestSchemaCompatibility:
 
     def test_optional_union_compatible(self) -> None:
         """Producer can send X when consumer expects Optional[X]."""
-        from elspeth.plugins.schemas import PluginSchema, check_compatibility
+        from elspeth.contracts import PluginSchema, check_compatibility
 
         class ProducerOutput(PluginSchema):
             value: int  # Always provides int

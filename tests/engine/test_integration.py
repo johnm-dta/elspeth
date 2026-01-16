@@ -17,9 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from elspeth.contracts import Determinism, RoutingMode
+from elspeth.contracts import Determinism, PluginSchema, RoutingMode
 from elspeth.plugins.base import BaseGate, BaseTransform
-from elspeth.plugins.schemas import PluginSchema
 
 if TYPE_CHECKING:
     from elspeth.contracts.results import ArtifactDescriptor, TransformResult
@@ -183,11 +182,11 @@ class TestEngineIntegration:
 
     def test_full_pipeline_with_audit(self) -> None:
         """Full pipeline execution with audit trail verification."""
+        from elspeth.contracts import PluginSchema
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.results import TransformResult
-        from elspeth.plugins.schemas import PluginSchema
 
         db = LandscapeDB.in_memory()
 
@@ -304,12 +303,11 @@ class TestEngineIntegration:
         - All node_states are "completed"
         - Artifacts are recorded for sinks
         """
-        from elspeth.contracts import NodeType
+        from elspeth.contracts import NodeType, PluginSchema
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.results import TransformResult
-        from elspeth.plugins.schemas import PluginSchema
 
         db = LandscapeDB.in_memory()
 
@@ -456,12 +454,11 @@ class TestEngineIntegration:
         - Routed tokens reach correct sink
         - All tokens still have complete audit trail
         """
-        from elspeth.contracts import NodeType
+        from elspeth.contracts import NodeType, PluginSchema
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.results import GateResult, RoutingAction
-        from elspeth.plugins.schemas import PluginSchema
 
         db = LandscapeDB.in_memory()
 
@@ -602,11 +599,11 @@ class TestNoSilentAuditLoss:
         have a registered edge, the error is raised immediately rather
         than being silently counted as a failure.
         """
+        from elspeth.contracts import PluginSchema
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine import MissingEdgeError, Orchestrator, PipelineConfig
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.results import GateResult, RoutingAction
-        from elspeth.plugins.schemas import PluginSchema
 
         db = LandscapeDB.in_memory()
 
@@ -709,10 +706,10 @@ class TestNoSilentAuditLoss:
 
     def test_transform_exception_propagates(self) -> None:
         """Transform exceptions must propagate, not be silently caught."""
+        from elspeth.contracts import PluginSchema
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
         from elspeth.engine.artifacts import ArtifactDescriptor
-        from elspeth.plugins.schemas import PluginSchema
 
         db = LandscapeDB.in_memory()
 
@@ -793,10 +790,10 @@ class TestNoSilentAuditLoss:
 
     def test_sink_exception_propagates(self) -> None:
         """Sink exceptions must propagate, not be silently caught."""
+        from elspeth.contracts import PluginSchema
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
         from elspeth.plugins.results import TransformResult
-        from elspeth.plugins.schemas import PluginSchema
 
         db = LandscapeDB.in_memory()
 
@@ -875,11 +872,11 @@ class TestAuditTrailCompleteness:
 
     def test_empty_source_still_records_run(self) -> None:
         """Even with no rows, run must be recorded in audit trail."""
+        from elspeth.contracts import PluginSchema
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.results import TransformResult
-        from elspeth.plugins.schemas import PluginSchema
 
         db = LandscapeDB.in_memory()
 
@@ -958,11 +955,11 @@ class TestAuditTrailCompleteness:
 
     def test_multiple_sinks_all_record_artifacts(self) -> None:
         """When multiple sinks receive data, all must record artifacts."""
+        from elspeth.contracts import PluginSchema
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.plugins.results import GateResult, RoutingAction
-        from elspeth.plugins.schemas import PluginSchema
 
         db = LandscapeDB.in_memory()
 

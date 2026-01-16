@@ -20,9 +20,9 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from elspeth.contracts import Determinism
 
 if TYPE_CHECKING:
+    from elspeth.contracts import PluginSchema
     from elspeth.plugins.context import PluginContext
     from elspeth.plugins.results import AcceptResult, GateResult, TransformResult
-    from elspeth.plugins.schemas import PluginSchema
 
 
 @runtime_checkable

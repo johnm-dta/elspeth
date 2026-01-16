@@ -7,6 +7,7 @@ with the base class hierarchy (BaseTransform, BaseGate, BaseAggregation).
 
 from typing import Any
 
+from elspeth.contracts import PluginSchema
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import (
@@ -15,7 +16,6 @@ from elspeth.plugins.results import (
     RoutingAction,
     TransformResult,
 )
-from elspeth.plugins.schemas import PluginSchema
 
 
 class TestPluginTypeDetection:

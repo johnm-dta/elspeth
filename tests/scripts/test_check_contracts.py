@@ -107,7 +107,7 @@ def test_ignores_plugin_schema(tmp_path: Path) -> None:
     """Does not flag PluginSchema classes."""
     test_file = tmp_path / "test.py"
     test_file.write_text("""
-from elspeth.plugins.schemas import PluginSchema
+from elspeth.contracts import PluginSchema
 
 class MyPluginConfig(PluginSchema):
     setting: str

@@ -8,11 +8,11 @@ from typing import Any
 
 from pydantic import Field
 
+from elspeth.contracts import PluginSchema
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import TransformResult
-from elspeth.plugins.schemas import PluginSchema
 from elspeth.plugins.sentinels import MISSING
 
 

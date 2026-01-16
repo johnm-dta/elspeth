@@ -1204,7 +1204,7 @@ class LandscapeRecorder:
     def update_batch_status(
         self,
         batch_id: str,
-        status: str,
+        status: BatchStatus | str,
         *,
         trigger_reason: str | None = None,
         state_id: str | None = None,
@@ -1217,13 +1217,16 @@ class LandscapeRecorder:
             trigger_reason: Why the batch was triggered
             state_id: Node state for the flush operation
         """
-        updates: dict[str, Any] = {"status": status}
+        # Validate and coerce status enum early - fail fast on typos
+        status_enum = _coerce_enum(status, BatchStatus)
+
+        updates: dict[str, Any] = {"status": status_enum.value}
 
         if trigger_reason:
             updates["trigger_reason"] = trigger_reason
         if state_id:
             updates["aggregation_state_id"] = state_id
-        if status in ("completed", "failed"):
+        if status_enum in (BatchStatus.COMPLETED, BatchStatus.FAILED):
             updates["completed_at"] = _now()
 
         with self._db.connection() as conn:

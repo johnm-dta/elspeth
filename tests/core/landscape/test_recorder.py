@@ -2288,3 +2288,46 @@ class TestReproducibilityGradeComputation:
 
         # Since defaults are DETERMINISTIC, should get FULL_REPRODUCIBLE
         assert grade == ReproducibilityGrade.FULL_REPRODUCIBLE
+
+
+class TestBatchStatusEnum:
+    """Verify update_batch_status uses enum validation."""
+
+    def test_update_batch_status_accepts_enum(self) -> None:
+        """update_batch_status accepts BatchStatus enum."""
+        from elspeth.contracts import BatchStatus
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Create a batch first
+        batch = recorder.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id="agg-node-1",
+        )
+
+        # Should accept enum without error
+        recorder.update_batch_status(batch.batch_id, BatchStatus.COMPLETED)
+
+    def test_update_batch_status_rejects_invalid_string(self) -> None:
+        """update_batch_status rejects invalid status strings."""
+        import pytest
+
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        batch = recorder.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id="agg-node-1",
+        )
+
+        # Should raise ValueError for invalid status
+        with pytest.raises(ValueError, match="not a valid BatchStatus"):
+            recorder.update_batch_status(batch.batch_id, "invalid_status")

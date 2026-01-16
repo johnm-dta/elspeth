@@ -25,6 +25,11 @@ from elspeth.contracts.enums import (
     RowOutcome,
     RunStatus,
 )
+from elspeth.contracts.errors import (
+    ExecutionError,
+    RoutingReason,
+    TransformReason,
+)
 from elspeth.contracts.audit import (
     Artifact,
     Batch,
@@ -73,6 +78,10 @@ from elspeth.contracts.config import (
 __all__ = [
     # audit
     "Artifact",
+    # errors
+    "ExecutionError",
+    "RoutingReason",
+    "TransformReason",
     "Batch",
     "BatchMember",
     "BatchOutput",

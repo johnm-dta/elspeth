@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from elspeth.contracts import (
     Artifact,
+    ExecutionError,
     NodeStateOpen,
     RoutingAction,
     RoutingSpec,
@@ -160,11 +161,15 @@ class TransformExecutor:
             except Exception as e:
                 duration_ms = (time.perf_counter() - start) * 1000
                 # Record failure
+                error: ExecutionError = {
+                    "exception": str(e),
+                    "type": type(e).__name__,
+                }
                 self._recorder.complete_node_state(
                     state_id=state.state_id,
                     status="failed",
                     duration_ms=duration_ms,
-                    error={"exception": str(e), "type": type(e).__name__},
+                    error=error,
                 )
                 raise
 
@@ -304,11 +309,15 @@ class GateExecutor:
             except Exception as e:
                 duration_ms = (time.perf_counter() - start) * 1000
                 # Record failure
+                error: ExecutionError = {
+                    "exception": str(e),
+                    "type": type(e).__name__,
+                }
                 self._recorder.complete_node_state(
                     state_id=state.state_id,
                     status="failed",
                     duration_ms=duration_ms,
-                    error={"exception": str(e), "type": type(e).__name__},
+                    error=error,
                 )
                 raise
 
@@ -577,11 +586,15 @@ class AggregationExecutor:
         except Exception as e:
             duration_ms = (time.perf_counter() - start) * 1000
             # Record failure
+            error: ExecutionError = {
+                "exception": str(e),
+                "type": type(e).__name__,
+            }
             self._recorder.complete_node_state(
                 state_id=state.state_id,
                 status="failed",
                 duration_ms=duration_ms,
-                error={"exception": str(e), "type": type(e).__name__},
+                error=error,
             )
             raise
 
@@ -769,12 +782,16 @@ class SinkExecutor:
             except Exception as e:
                 duration_ms = (time.perf_counter() - start) * 1000
                 # Mark all token states as failed
+                error: ExecutionError = {
+                    "exception": str(e),
+                    "type": type(e).__name__,
+                }
                 for _, state in states:
                     self._recorder.complete_node_state(
                         state_id=state.state_id,
                         status="failed",
                         duration_ms=duration_ms,
-                        error={"exception": str(e), "type": type(e).__name__},
+                        error=error,
                     )
                 raise
 

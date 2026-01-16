@@ -23,6 +23,7 @@ from elspeth.contracts import (
     Call,
     Determinism,
     Edge,
+    ExecutionError,
     Node,
     NodeState,
     NodeStateCompleted,
@@ -905,7 +906,7 @@ class LandscapeRecorder:
         *,
         output_data: dict[str, Any] | None = None,
         duration_ms: float | None = None,
-        error: dict[str, Any] | None = None,
+        error: ExecutionError | dict[str, Any] | None = None,
         context_after: dict[str, Any] | None = None,
     ) -> NodeStateCompleted | NodeStateFailed:
         """Complete a node state.

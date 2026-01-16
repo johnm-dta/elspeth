@@ -9,10 +9,9 @@ Coordinates:
 - Final outcome recording
 """
 
-from dataclasses import dataclass
 from typing import Any
 
-from elspeth.contracts import RowOutcome, TokenInfo
+from elspeth.contracts import RowOutcome, RowResult
 from elspeth.core.landscape import LandscapeRecorder
 from elspeth.engine.executors import (
     AggregationExecutor,
@@ -23,24 +22,6 @@ from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenManager
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
-
-
-@dataclass
-class RowResult:
-    """Result of processing a row through the pipeline."""
-
-    token: TokenInfo  # Preserve full token identity, not just IDs
-    final_data: dict[str, Any]
-    outcome: RowOutcome  # Terminal state from RowOutcome enum
-    sink_name: str | None = None  # Set when outcome is ROUTED
-
-    @property
-    def token_id(self) -> str:
-        return self.token.token_id
-
-    @property
-    def row_id(self) -> str:
-        return self.token.row_id
 
 
 class RowProcessor:

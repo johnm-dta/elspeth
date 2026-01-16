@@ -2,7 +2,7 @@
 """Unified artifact descriptors for all sink types.
 
 IMPORTANT: ArtifactDescriptor is now defined in elspeth.contracts.results.
-This module re-exports it for backwards compatibility.
+This module re-exports it as part of the engine's public API.
 """
 
 from elspeth.contracts import ArtifactDescriptor

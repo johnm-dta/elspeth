@@ -14,12 +14,11 @@ Tests for:
 
 import pytest
 
-from elspeth.contracts import RoutingAction, TokenInfo
+from elspeth.contracts import RoutingAction, RowOutcome, TokenInfo
 from elspeth.contracts.results import (
     AcceptResult,
     ArtifactDescriptor,
     GateResult,
-    RowOutcome,
     RowResult,
     TransformResult,
 )

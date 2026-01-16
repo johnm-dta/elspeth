@@ -10,6 +10,9 @@ from datetime import UTC, datetime
 import pytest
 
 from elspeth.contracts import (
+    BatchStatus,
+    CallStatus,
+    CallType,
     Determinism,
     ExportStatus,
     NodeType,
@@ -17,8 +20,11 @@ from elspeth.contracts import (
     RunStatus,
 )
 from elspeth.core.landscape.repositories import (
+    BatchRepository,
+    CallRepository,
     EdgeRepository,
     NodeRepository,
+    RoutingEventRepository,
     RowRepository,
     RunRepository,
     TokenParentRepository,
@@ -436,3 +442,238 @@ class TestTokenParentRepository:
         assert parent.token_id == "tok-child"
         assert parent.parent_token_id == "tok-parent"
         assert parent.ordinal == 0
+
+
+class TestCallRepository:
+    """Tests for CallRepository."""
+
+    def test_load_converts_enums(self) -> None:
+        """Repository converts call_type and status strings to enums."""
+
+        @dataclass
+        class CallRow:
+            call_id: str
+            state_id: str
+            call_index: int
+            call_type: str  # String in DB
+            status: str  # String in DB
+            request_hash: str
+            created_at: datetime
+            request_ref: str | None = None
+            response_hash: str | None = None
+            response_ref: str | None = None
+            error_json: str | None = None
+            latency_ms: float | None = None
+
+        db_row = CallRow(
+            call_id="call-123",
+            state_id="state-456",
+            call_index=0,
+            call_type="llm",  # String from DB
+            status="success",  # String from DB
+            request_hash="abc123",
+            created_at=datetime.now(UTC),
+            latency_ms=150.5,
+        )
+
+        repo = CallRepository(session=None)
+        call = repo.load(db_row)
+
+        assert call.call_type == CallType.LLM
+        assert isinstance(call.call_type, CallType)
+        assert call.status == CallStatus.SUCCESS
+        assert isinstance(call.status, CallStatus)
+
+    def test_load_crashes_on_invalid_call_type(self) -> None:
+        """Repository crashes on invalid call_type per Data Manifesto."""
+
+        @dataclass
+        class CallRow:
+            call_id: str
+            state_id: str
+            call_index: int
+            call_type: str
+            status: str
+            request_hash: str
+            created_at: datetime
+            request_ref: str | None = None
+            response_hash: str | None = None
+            response_ref: str | None = None
+            error_json: str | None = None
+            latency_ms: float | None = None
+
+        db_row = CallRow(
+            call_id="call-123",
+            state_id="state-456",
+            call_index=0,
+            call_type="invalid_call_type",  # Invalid!
+            status="success",
+            request_hash="abc123",
+            created_at=datetime.now(UTC),
+        )
+
+        repo = CallRepository(session=None)
+
+        with pytest.raises(ValueError):
+            repo.load(db_row)
+
+    def test_load_crashes_on_invalid_status(self) -> None:
+        """Repository crashes on invalid status per Data Manifesto."""
+
+        @dataclass
+        class CallRow:
+            call_id: str
+            state_id: str
+            call_index: int
+            call_type: str
+            status: str
+            request_hash: str
+            created_at: datetime
+            request_ref: str | None = None
+            response_hash: str | None = None
+            response_ref: str | None = None
+            error_json: str | None = None
+            latency_ms: float | None = None
+
+        db_row = CallRow(
+            call_id="call-123",
+            state_id="state-456",
+            call_index=0,
+            call_type="llm",
+            status="invalid_status",  # Invalid!
+            request_hash="abc123",
+            created_at=datetime.now(UTC),
+        )
+
+        repo = CallRepository(session=None)
+
+        with pytest.raises(ValueError):
+            repo.load(db_row)
+
+
+class TestRoutingEventRepository:
+    """Tests for RoutingEventRepository."""
+
+    def test_load_converts_mode_to_enum(self) -> None:
+        """Repository converts mode string to RoutingMode enum."""
+
+        @dataclass
+        class RoutingEventRow:
+            event_id: str
+            state_id: str
+            edge_id: str
+            routing_group_id: str
+            ordinal: int
+            mode: str  # String in DB
+            created_at: datetime
+            reason_hash: str | None = None
+            reason_ref: str | None = None
+
+        db_row = RoutingEventRow(
+            event_id="evt-123",
+            state_id="state-456",
+            edge_id="edge-789",
+            routing_group_id="group-1",
+            ordinal=0,
+            mode="move",  # String from DB
+            created_at=datetime.now(UTC),
+        )
+
+        repo = RoutingEventRepository(session=None)
+        event = repo.load(db_row)
+
+        assert event.mode == RoutingMode.MOVE
+        assert isinstance(event.mode, RoutingMode)
+
+    def test_load_crashes_on_invalid_mode(self) -> None:
+        """Repository crashes on invalid mode per Data Manifesto."""
+
+        @dataclass
+        class RoutingEventRow:
+            event_id: str
+            state_id: str
+            edge_id: str
+            routing_group_id: str
+            ordinal: int
+            mode: str
+            created_at: datetime
+            reason_hash: str | None = None
+            reason_ref: str | None = None
+
+        db_row = RoutingEventRow(
+            event_id="evt-123",
+            state_id="state-456",
+            edge_id="edge-789",
+            routing_group_id="group-1",
+            ordinal=0,
+            mode="teleport",  # Invalid!
+            created_at=datetime.now(UTC),
+        )
+
+        repo = RoutingEventRepository(session=None)
+
+        with pytest.raises(ValueError):
+            repo.load(db_row)
+
+
+class TestBatchRepository:
+    """Tests for BatchRepository."""
+
+    def test_load_converts_status_to_enum(self) -> None:
+        """Repository converts status string to BatchStatus enum."""
+
+        @dataclass
+        class BatchRow:
+            batch_id: str
+            run_id: str
+            aggregation_node_id: str
+            attempt: int
+            status: str  # String in DB
+            created_at: datetime
+            aggregation_state_id: str | None = None
+            trigger_reason: str | None = None
+            completed_at: datetime | None = None
+
+        db_row = BatchRow(
+            batch_id="batch-123",
+            run_id="run-456",
+            aggregation_node_id="node-1",
+            attempt=1,
+            status="executing",  # String from DB
+            created_at=datetime.now(UTC),
+        )
+
+        repo = BatchRepository(session=None)
+        batch = repo.load(db_row)
+
+        assert batch.status == BatchStatus.EXECUTING
+        assert isinstance(batch.status, BatchStatus)
+
+    def test_load_crashes_on_invalid_status(self) -> None:
+        """Repository crashes on invalid status per Data Manifesto."""
+
+        @dataclass
+        class BatchRow:
+            batch_id: str
+            run_id: str
+            aggregation_node_id: str
+            attempt: int
+            status: str
+            created_at: datetime
+            aggregation_state_id: str | None = None
+            trigger_reason: str | None = None
+            completed_at: datetime | None = None
+
+        db_row = BatchRow(
+            batch_id="batch-123",
+            run_id="run-456",
+            aggregation_node_id="node-1",
+            attempt=1,
+            status="invalid_status",  # Invalid!
+            created_at=datetime.now(UTC),
+        )
+
+        repo = BatchRepository(session=None)
+
+        with pytest.raises(ValueError):
+            repo.load(db_row)

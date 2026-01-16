@@ -26,12 +26,18 @@ from elspeth.contracts.enums import (
     RunStatus,
 )
 from elspeth.contracts.audit import (
+    Artifact,
+    Batch,
+    BatchMember,
+    BatchOutput,
+    Call,
     Edge,
     Node,
     NodeState,
     NodeStateCompleted,
     NodeStateFailed,
     NodeStateOpen,
+    RoutingEvent,
     Row,
     Run,
     Token,
@@ -63,12 +69,18 @@ from elspeth.contracts.config import (
 
 __all__ = [
     # audit
+    "Artifact",
+    "Batch",
+    "BatchMember",
+    "BatchOutput",
+    "Call",
     "Edge",
     "Node",
     "NodeState",
     "NodeStateCompleted",
     "NodeStateFailed",
     "NodeStateOpen",
+    "RoutingEvent",
     "Row",
     "Run",
     "Token",

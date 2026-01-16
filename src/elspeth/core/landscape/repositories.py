@@ -10,14 +10,20 @@ Per Data Manifesto: The audit database is OUR data. Bad data = crash.
 from typing import Any
 
 from elspeth.contracts.audit import (
+    Batch,
+    Call,
     Edge,
     Node,
+    RoutingEvent,
     Row,
     Run,
     Token,
     TokenParent,
 )
 from elspeth.contracts.enums import (
+    BatchStatus,
+    CallStatus,
+    CallType,
     Determinism,
     ExportStatus,
     NodeType,
@@ -160,4 +166,70 @@ class TokenParentRepository:
             token_id=row.token_id,
             parent_token_id=row.parent_token_id,
             ordinal=row.ordinal,
+        )
+
+
+class CallRepository:
+    """Repository for Call records."""
+
+    def __init__(self, session: Any) -> None:
+        self.session = session
+
+    def load(self, row: Any) -> Call:
+        """Load Call from database row."""
+        return Call(
+            call_id=row.call_id,
+            state_id=row.state_id,
+            call_index=row.call_index,
+            call_type=CallType(row.call_type),  # Convert HERE
+            status=CallStatus(row.status),  # Convert HERE
+            request_hash=row.request_hash,
+            created_at=row.created_at,
+            request_ref=row.request_ref,
+            response_hash=row.response_hash,
+            response_ref=row.response_ref,
+            error_json=row.error_json,
+            latency_ms=row.latency_ms,
+        )
+
+
+class RoutingEventRepository:
+    """Repository for RoutingEvent records."""
+
+    def __init__(self, session: Any) -> None:
+        self.session = session
+
+    def load(self, row: Any) -> RoutingEvent:
+        """Load RoutingEvent from database row."""
+        return RoutingEvent(
+            event_id=row.event_id,
+            state_id=row.state_id,
+            edge_id=row.edge_id,
+            routing_group_id=row.routing_group_id,
+            ordinal=row.ordinal,
+            mode=RoutingMode(row.mode),  # Convert HERE
+            created_at=row.created_at,
+            reason_hash=row.reason_hash,
+            reason_ref=row.reason_ref,
+        )
+
+
+class BatchRepository:
+    """Repository for Batch records."""
+
+    def __init__(self, session: Any) -> None:
+        self.session = session
+
+    def load(self, row: Any) -> Batch:
+        """Load Batch from database row."""
+        return Batch(
+            batch_id=row.batch_id,
+            run_id=row.run_id,
+            aggregation_node_id=row.aggregation_node_id,
+            attempt=row.attempt,
+            status=BatchStatus(row.status),  # Convert HERE
+            created_at=row.created_at,
+            aggregation_state_id=row.aggregation_state_id,
+            trigger_reason=row.trigger_reason,
+            completed_at=row.completed_at,
         )

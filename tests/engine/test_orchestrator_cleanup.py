@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+from elspeth.contracts import RoutingMode
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.engine.artifacts import ArtifactDescriptor
@@ -37,7 +38,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
             node_type="gate" if is_gate else "transform",
             plugin_name=t.name,
         )
-        graph.add_edge(prev, node_id, label="continue", mode="move")
+        graph.add_edge(prev, node_id, label="continue", mode=RoutingMode.MOVE)
         prev = node_id
 
     # Add sinks and populate sink_id_map
@@ -46,14 +47,16 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
         node_id = f"sink_{sink_name}"
         sink_ids[sink_name] = node_id
         graph.add_node(node_id, node_type="sink", plugin_name=sink.name)
-        graph.add_edge(prev, node_id, label=sink_name, mode="move")
+        graph.add_edge(prev, node_id, label=sink_name, mode=RoutingMode.MOVE)
 
         # Gates can route to any sink, so add edges from all gates
         for i, t in enumerate(config.transforms):
             if hasattr(t, "evaluate"):
                 gate_id = f"transform_{i}"
                 if gate_id != prev:  # Don't duplicate edge
-                    graph.add_edge(gate_id, node_id, label=sink_name, mode="move")
+                    graph.add_edge(
+                        gate_id, node_id, label=sink_name, mode=RoutingMode.MOVE
+                    )
 
     # Populate internal ID maps
     graph._sink_id_map = sink_ids

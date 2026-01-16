@@ -1,6 +1,8 @@
 # tests/core/landscape/test_recorder.py
 """Tests for LandscapeRecorder."""
 
+from elspeth.contracts import RoutingMode
+
 
 class TestLandscapeRecorderRuns:
     """Run lifecycle management."""
@@ -313,7 +315,7 @@ class TestLandscapeRecorderNodes:
             from_node_id=source.node_id,
             to_node_id=transform.node_id,
             label="continue",
-            mode="move",
+            mode=RoutingMode.MOVE,
         )
 
         assert edge.edge_id is not None
@@ -757,7 +759,7 @@ class TestLandscapeRecorderRouting:
             from_node_id=gate.node_id,
             to_node_id=sink.node_id,
             label="high_value",
-            mode="move",
+            mode=RoutingMode.MOVE,
         )
 
         row = recorder.create_row(
@@ -777,7 +779,7 @@ class TestLandscapeRecorderRouting:
         event = recorder.record_routing_event(
             state_id=state.state_id,
             edge_id=edge.edge_id,
-            mode="move",
+            mode=RoutingMode.MOVE,
             reason={"rule": "value > 1000", "result": True},
         )
 
@@ -822,14 +824,14 @@ class TestLandscapeRecorderRouting:
             from_node_id=gate.node_id,
             to_node_id=sink_a.node_id,
             label="path_a",
-            mode="copy",
+            mode=RoutingMode.COPY,
         )
         edge_b = recorder.register_edge(
             run_id=run.run_id,
             from_node_id=gate.node_id,
             to_node_id=sink_b.node_id,
             label="path_b",
-            mode="copy",
+            mode=RoutingMode.COPY,
         )
 
         row = recorder.create_row(
@@ -1299,7 +1301,7 @@ class TestLandscapeRecorderEdges:
             from_node_id="source_1",
             to_node_id="sink_1",
             label="continue",
-            mode="move",
+            mode=RoutingMode.MOVE,
         )
 
         # Query edges
@@ -1375,21 +1377,21 @@ class TestLandscapeRecorderEdges:
             from_node_id="source",
             to_node_id="gate",
             label="continue",
-            mode="move",
+            mode=RoutingMode.MOVE,
         )
         recorder.register_edge(
             run_id=run.run_id,
             from_node_id="gate",
             to_node_id="sink_high",
             label="high",
-            mode="move",
+            mode=RoutingMode.MOVE,
         )
         recorder.register_edge(
             run_id=run.run_id,
             from_node_id="gate",
             to_node_id="sink_low",
             label="low",
-            mode="move",
+            mode=RoutingMode.MOVE,
         )
 
         # Query edges
@@ -1542,7 +1544,7 @@ class TestLandscapeRecorderQueryMethods:
             from_node_id=gate.node_id,
             to_node_id=sink.node_id,
             label="output",
-            mode="move",
+            mode=RoutingMode.MOVE,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -1562,7 +1564,7 @@ class TestLandscapeRecorderQueryMethods:
         recorder.record_routing_event(
             state_id=state.state_id,
             edge_id=edge.edge_id,
-            mode="move",
+            mode=RoutingMode.MOVE,
         )
 
         # Query routing events

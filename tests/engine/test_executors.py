@@ -5,6 +5,8 @@ from typing import Any
 
 import pytest
 
+from elspeth.contracts import RoutingMode
+
 
 class TestTransformExecutor:
     """Transform execution with audit."""
@@ -428,7 +430,7 @@ class TestGateExecutor:
             from_node_id=gate_node.node_id,
             to_node_id=sink_node.node_id,
             label="above",  # Route label, not sink name
-            mode="move",
+            mode=RoutingMode.MOVE,
         )
 
         # Mock gate that routes high values using route label
@@ -601,14 +603,14 @@ class TestGateExecutor:
             from_node_id=gate_node.node_id,
             to_node_id=path_a_node.node_id,
             label="path_a",
-            mode="copy",
+            mode=RoutingMode.COPY,
         )
         edge_b = recorder.register_edge(
             run_id=run.run_id,
             from_node_id=gate_node.node_id,
             to_node_id=path_b_node.node_id,
             label="path_b",
-            mode="copy",
+            mode=RoutingMode.COPY,
         )
 
         # Mock gate that forks to both paths
@@ -722,14 +724,14 @@ class TestGateExecutor:
             from_node_id=gate_node.node_id,
             to_node_id=path_a_node.node_id,
             label="path_a",
-            mode="copy",
+            mode=RoutingMode.COPY,
         )
         edge_b = recorder.register_edge(
             run_id=run.run_id,
             from_node_id=gate_node.node_id,
             to_node_id=path_b_node.node_id,
             label="path_b",
-            mode="copy",
+            mode=RoutingMode.COPY,
         )
 
         # Mock gate that forks to multiple paths
@@ -1320,7 +1322,7 @@ class TestAggregationExecutor:
             result = executor.accept(aggregation, token, ctx, step_in_pipeline=1)
             if result.trigger:
                 batch_ids.append(result.batch_id)
-                outputs = executor.flush(
+                _outputs = executor.flush(
                     aggregation=aggregation,
                     ctx=ctx,
                     trigger_reason="count_reached",

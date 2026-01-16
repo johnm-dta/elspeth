@@ -7,6 +7,7 @@ because the processor uses isinstance() for type-safe plugin detection.
 
 from typing import Any
 
+from elspeth.contracts import RoutingMode
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import (
@@ -387,7 +388,7 @@ class TestRowProcessorGates:
             from_node_id=gate.node_id,
             to_node_id=sink.node_id,
             label="above",  # Route label, not sink name
-            mode="move",
+            mode=RoutingMode.MOVE,
         )
 
         class RouterGate(BaseGate):
@@ -476,14 +477,14 @@ class TestRowProcessorGates:
             from_node_id=gate.node_id,
             to_node_id=path_a.node_id,
             label="path_a",
-            mode="copy",
+            mode=RoutingMode.COPY,
         )
         edge_b = recorder.register_edge(
             run_id=run.run_id,
             from_node_id=gate.node_id,
             to_node_id=path_b.node_id,
             label="path_b",
-            mode="copy",
+            mode=RoutingMode.COPY,
         )
 
         class SplitterGate(BaseGate):

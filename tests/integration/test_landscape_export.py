@@ -14,6 +14,8 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+from elspeth.contracts import RoutingMode
+
 runner = CliRunner()
 
 
@@ -238,7 +240,7 @@ class TestSignedExportDeterminism:
                 from_node_id=f"node_{i}",
                 to_node_id=f"node_{i + 1}",
                 label="continue",
-                mode="move",
+                mode=RoutingMode.MOVE,
             )
 
         # Multiple rows with tokens

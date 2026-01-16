@@ -3,6 +3,7 @@
 
 import pytest
 
+from elspeth.contracts import RoutingMode
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 from elspeth.core.landscape.exporter import LandscapeExporter
 
@@ -165,7 +166,7 @@ class TestLandscapeExporterComplexRun:
             from_node_id="source",
             to_node_id="sink",
             label="continue",
-            mode="move",
+            mode=RoutingMode.MOVE,
         )
         recorder.complete_run(run.run_id, status="completed")
 
@@ -402,7 +403,7 @@ class TestLandscapeExporterComplexRun:
             from_node_id="gate",
             to_node_id="sink",
             label="high_value",
-            mode="move",
+            mode=RoutingMode.MOVE,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -420,7 +421,7 @@ class TestLandscapeExporterComplexRun:
         recorder.record_routing_event(
             state_id=state.state_id,
             edge_id=edge.edge_id,
-            mode="move",
+            mode=RoutingMode.MOVE,
             reason={"rule": "value > 1000"},
         )
         recorder.complete_run(run.run_id, status="completed")
@@ -609,7 +610,7 @@ class TestLandscapeExporterSigning:
                 from_node_id=f"node_{i}",
                 to_node_id=f"node_{i + 1}",
                 label="continue",
-                mode="move",
+                mode=RoutingMode.MOVE,
             )
 
         # Multiple rows (tests get_rows ordering)
@@ -649,7 +650,7 @@ class TestLandscapeExporterSigning:
                         recorder.record_routing_event(
                             state_id=state.state_id,
                             edge_id="edge_placeholder",  # Not validated
-                            mode="move",
+                            mode=RoutingMode.MOVE,
                         )
 
         # Multiple batches (tests get_batches ordering)

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from elspeth.contracts import RoutingMode
 from elspeth.plugins.base import BaseGate, BaseTransform
 
 if TYPE_CHECKING:
@@ -46,7 +47,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
             node_type="gate" if is_gate else "transform",
             plugin_name=t.name,
         )
-        graph.add_edge(prev, node_id, label="continue", mode="move")
+        graph.add_edge(prev, node_id, label="continue", mode=RoutingMode.MOVE)
         prev = node_id
 
     # Add sinks and populate sink_id_map
@@ -55,14 +56,16 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
         node_id = f"sink_{sink_name}"
         sink_ids[sink_name] = node_id
         graph.add_node(node_id, node_type="sink", plugin_name=sink.name)
-        graph.add_edge(prev, node_id, label=sink_name, mode="move")
+        graph.add_edge(prev, node_id, label=sink_name, mode=RoutingMode.MOVE)
 
         # Gates can route to any sink, so add edges from all gates
         for i, t in enumerate(config.transforms):
             if isinstance(t, BaseGate):
                 gate_id = f"transform_{i}"
                 if gate_id != prev:  # Don't duplicate edge
-                    graph.add_edge(gate_id, node_id, label=sink_name, mode="move")
+                    graph.add_edge(
+                        gate_id, node_id, label=sink_name, mode=RoutingMode.MOVE
+                    )
 
     # Populate internal ID maps so get_sink_id_map() and get_transform_id_map() work
     graph._sink_id_map = sink_ids
@@ -847,7 +850,7 @@ class TestOrchestratorAcceptsGraph:
         graph = ExecutionGraph()
         graph.add_node("source_1", node_type="source", plugin_name="csv")
         graph.add_node("sink_1", node_type="sink", plugin_name="csv")
-        graph.add_edge("source_1", "sink_1", label="continue", mode="move")
+        graph.add_edge("source_1", "sink_1", label="continue", mode=RoutingMode.MOVE)
 
         orchestrator = Orchestrator(db)
 
@@ -1135,8 +1138,8 @@ class TestLifecycleHooks:
         graph.add_node("source", node_type="source", plugin_name="csv")
         graph.add_node("transform", node_type="transform", plugin_name="tracked")
         graph.add_node("sink", node_type="sink", plugin_name="csv")
-        graph.add_edge("source", "transform", label="continue", mode="move")
-        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph.add_edge("source", "transform", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("transform", "sink", label="continue", mode=RoutingMode.MOVE)
         graph._transform_id_map = {0: "transform"}
         graph._sink_id_map = {"output": "sink"}
         graph._output_sink = "output"
@@ -1206,8 +1209,8 @@ class TestLifecycleHooks:
         graph.add_node("source", node_type="source", plugin_name="csv")
         graph.add_node("transform", node_type="transform", plugin_name="tracked")
         graph.add_node("sink", node_type="sink", plugin_name="csv")
-        graph.add_edge("source", "transform", label="continue", mode="move")
-        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph.add_edge("source", "transform", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("transform", "sink", label="continue", mode=RoutingMode.MOVE)
         graph._transform_id_map = {0: "transform"}
         graph._sink_id_map = {"output": "sink"}
         graph._output_sink = "output"
@@ -1277,8 +1280,8 @@ class TestLifecycleHooks:
         graph.add_node("source", node_type="source", plugin_name="failing")
         graph.add_node("transform", node_type="transform", plugin_name="failing")
         graph.add_node("sink", node_type="sink", plugin_name="csv")
-        graph.add_edge("source", "transform", label="continue", mode="move")
-        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph.add_edge("source", "transform", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("transform", "sink", label="continue", mode=RoutingMode.MOVE)
         graph._transform_id_map = {0: "transform"}
         graph._sink_id_map = {"output": "sink"}
         graph._output_sink = "output"
@@ -1783,7 +1786,7 @@ class TestSourceLifecycleHooks:
         graph = ExecutionGraph()
         graph.add_node("source", node_type="source", plugin_name="tracked_source")
         graph.add_node("sink", node_type="sink", plugin_name="csv")
-        graph.add_edge("source", "sink", label="continue", mode="move")
+        graph.add_edge("source", "sink", label="continue", mode=RoutingMode.MOVE)
         graph._transform_id_map = {}
         graph._sink_id_map = {"output": "sink"}
         graph._output_sink = "output"
@@ -1858,7 +1861,7 @@ class TestSinkLifecycleHooks:
         graph = ExecutionGraph()
         graph.add_node("source", node_type="source", plugin_name="csv")
         graph.add_node("sink", node_type="sink", plugin_name="tracked_sink")
-        graph.add_edge("source", "sink", label="continue", mode="move")
+        graph.add_edge("source", "sink", label="continue", mode=RoutingMode.MOVE)
         graph._transform_id_map = {}
         graph._sink_id_map = {"output": "sink"}
         graph._output_sink = "output"
@@ -1948,8 +1951,8 @@ class TestSinkLifecycleHooks:
         graph.add_node("source", node_type="source", plugin_name="csv")
         graph.add_node("transform", node_type="transform", plugin_name="failing")
         graph.add_node("sink", node_type="sink", plugin_name="tracked_sink")
-        graph.add_edge("source", "transform", label="continue", mode="move")
-        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph.add_edge("source", "transform", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("transform", "sink", label="continue", mode=RoutingMode.MOVE)
         graph._transform_id_map = {0: "transform"}
         graph._sink_id_map = {"output": "sink"}
         graph._output_sink = "output"
@@ -2804,8 +2807,8 @@ class TestNodeMetadataFromPlugin:
             "transform", node_type="transform", plugin_name="versioned_transform"
         )
         graph.add_node("sink", node_type="sink", plugin_name="versioned_sink")
-        graph.add_edge("source", "transform", label="continue", mode="move")
-        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph.add_edge("source", "transform", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("transform", "sink", label="continue", mode=RoutingMode.MOVE)
         graph._transform_id_map = {0: "transform"}
         graph._sink_id_map = {"default": "sink"}
         graph._output_sink = "default"
@@ -2927,8 +2930,8 @@ class TestNodeMetadataFromPlugin:
             "transform", node_type="transform", plugin_name="nondeterministic_transform"
         )
         graph.add_node("sink", node_type="sink", plugin_name="test_sink")
-        graph.add_edge("source", "transform", label="continue", mode="move")
-        graph.add_edge("transform", "sink", label="continue", mode="move")
+        graph.add_edge("source", "transform", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("transform", "sink", label="continue", mode=RoutingMode.MOVE)
         graph._transform_id_map = {0: "transform"}
         graph._sink_id_map = {"default": "sink"}
         graph._output_sink = "default"
@@ -3043,9 +3046,11 @@ class TestRouteValidation:
         graph.add_node("gate", node_type="gate", plugin_name="routing_gate")
         graph.add_node("sink_default", node_type="sink", plugin_name="collect")
         graph.add_node("sink_quarantine", node_type="sink", plugin_name="collect")
-        graph.add_edge("source", "gate", label="continue", mode="move")
-        graph.add_edge("gate", "sink_default", label="continue", mode="move")
-        graph.add_edge("gate", "sink_quarantine", label="quarantine", mode="move")
+        graph.add_edge("source", "gate", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("gate", "sink_default", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge(
+            "gate", "sink_quarantine", label="quarantine", mode=RoutingMode.MOVE
+        )
         graph._transform_id_map = {0: "gate"}
         graph._sink_id_map = {
             "default": "sink_default",
@@ -3152,8 +3157,8 @@ class TestRouteValidation:
         graph.add_node("source", node_type="source", plugin_name="test_source")
         graph.add_node("gate", node_type="gate", plugin_name="safety_gate")
         graph.add_node("sink_default", node_type="sink", plugin_name="collect")
-        graph.add_edge("source", "gate", label="continue", mode="move")
-        graph.add_edge("gate", "sink_default", label="continue", mode="move")
+        graph.add_edge("source", "gate", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("gate", "sink_default", label="continue", mode=RoutingMode.MOVE)
         graph._transform_id_map = {0: "gate"}
         graph._sink_id_map = {"default": "sink_default"}
         graph._output_sink = "default"
@@ -3260,8 +3265,8 @@ class TestRouteValidation:
         graph.add_node("gate", node_type="gate", plugin_name="threshold_gate")
         graph.add_node("sink_default", node_type="sink", plugin_name="collect")
         graph.add_node("sink_errors", node_type="sink", plugin_name="collect")
-        graph.add_edge("source", "gate", label="continue", mode="move")
-        graph.add_edge("gate", "sink_default", label="continue", mode="move")
+        graph.add_edge("source", "gate", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("gate", "sink_default", label="continue", mode=RoutingMode.MOVE)
         graph._transform_id_map = {0: "gate"}
         graph._sink_id_map = {"default": "sink_default", "errors": "sink_errors"}
         graph._output_sink = "default"
@@ -3362,8 +3367,8 @@ class TestRouteValidation:
         graph.add_node("source", node_type="source", plugin_name="test_source")
         graph.add_node("gate", node_type="gate", plugin_name="filter_gate")
         graph.add_node("sink_default", node_type="sink", plugin_name="collect")
-        graph.add_edge("source", "gate", label="continue", mode="move")
-        graph.add_edge("gate", "sink_default", label="continue", mode="move")
+        graph.add_edge("source", "gate", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("gate", "sink_default", label="continue", mode=RoutingMode.MOVE)
         graph._transform_id_map = {0: "gate"}
         graph._sink_id_map = {"default": "sink_default"}
         graph._output_sink = "default"

@@ -265,3 +265,113 @@ class TestRouteToSink:
 
         # Should not raise
         ctx.route_to_sink(sink_name="error_sink", row={"id": 42})
+
+
+class TestTransformErrorRecording:
+    """Tests for transform error recording."""
+
+    def test_transform_error_token_exists(self) -> None:
+        """TransformErrorToken can be created."""
+        from elspeth.plugins.context import TransformErrorToken
+
+        token = TransformErrorToken(
+            token_id="tok_123",
+            transform_id="field_mapper",
+            destination="error_sink",
+        )
+
+        assert token.token_id == "tok_123"
+        assert token.transform_id == "field_mapper"
+        assert token.destination == "error_sink"
+        assert token.error_id is None
+
+    def test_transform_error_token_defaults_to_discard(self) -> None:
+        """TransformErrorToken defaults to 'discard' if not specified."""
+        from elspeth.plugins.context import TransformErrorToken
+
+        token = TransformErrorToken(
+            token_id="tok_123",
+            transform_id="field_mapper",
+        )
+
+        assert token.destination == "discard"
+
+    def test_record_transform_error_without_landscape(self) -> None:
+        """record_transform_error works without landscape (logs warning)."""
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="test-run", config={}, node_id="transform_node")
+
+        token = ctx.record_transform_error(
+            token_id="tok_123",
+            transform_id="field_mapper",
+            row={"id": 1, "data": "test"},
+            error_details={"reason": "Cannot process"},
+            destination="error_sink",
+        )
+
+        assert token.token_id == "tok_123"
+        assert token.transform_id == "field_mapper"
+        assert token.destination == "error_sink"
+        assert token.error_id is None  # No landscape
+
+    def test_record_transform_error_without_landscape_logs_warning(
+        self, caplog: "pytest.LogCaptureFixture"
+    ) -> None:
+        """record_transform_error logs warning when no landscape configured."""
+        import logging
+
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="test-run", config={}, node_id="transform_node")
+
+        with caplog.at_level(logging.WARNING):
+            ctx.record_transform_error(
+                token_id="tok_123",
+                transform_id="field_mapper",
+                row={"id": 1, "data": "test"},
+                error_details={"reason": "Cannot process"},
+                destination="error_sink",
+            )
+
+        # Check that warning was logged
+        assert "no landscape" in caplog.text.lower()
+
+    def test_record_transform_error_with_landscape(self) -> None:
+        """record_transform_error stores in audit trail via mock."""
+        from unittest.mock import MagicMock
+
+        from elspeth.plugins.context import PluginContext
+
+        # Create mock landscape recorder
+        mock_landscape = MagicMock()
+        mock_landscape.record_transform_error.return_value = "terr_abc123def4"
+
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            node_id="transform_node",
+            landscape=mock_landscape,
+        )
+
+        token = ctx.record_transform_error(
+            token_id="tok_456",
+            transform_id="field_mapper",
+            row={"id": 42, "value": "bad"},
+            error_details={"reason": "Division by zero"},
+            destination="failed_rows",
+        )
+
+        # Should have called landscape
+        mock_landscape.record_transform_error.assert_called_once()
+        call_kwargs = mock_landscape.record_transform_error.call_args[1]
+        assert call_kwargs["run_id"] == "test-run"
+        assert call_kwargs["token_id"] == "tok_456"
+        assert call_kwargs["transform_id"] == "field_mapper"
+        assert call_kwargs["row_data"] == {"id": 42, "value": "bad"}
+        assert call_kwargs["error_details"] == {"reason": "Division by zero"}
+        assert call_kwargs["destination"] == "failed_rows"
+
+        # Token should have error_id from landscape
+        assert token.error_id == "terr_abc123def4"
+        assert token.destination == "failed_rows"

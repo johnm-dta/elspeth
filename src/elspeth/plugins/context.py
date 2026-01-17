@@ -40,6 +40,20 @@ class ValidationErrorToken:
 
 
 @dataclass
+class TransformErrorToken:
+    """Token returned when recording a transform error.
+
+    Allows tracking the errored row through the audit trail.
+    This is for LEGITIMATE processing errors, not transform bugs.
+    """
+
+    token_id: str
+    transform_id: str
+    error_id: str | None = None  # Set if recorded to landscape
+    destination: str = "discard"  # Sink name or "discard"
+
+
+@dataclass
 class PluginContext:
     """Context passed to every plugin operation.
 
@@ -153,6 +167,57 @@ class PluginContext:
         return ValidationErrorToken(
             row_id=row_id,
             node_id=self.node_id or "unknown",
+            error_id=error_id,
+            destination=destination,
+        )
+
+    def record_transform_error(
+        self,
+        token_id: str,
+        transform_id: str,
+        row: dict[str, Any],
+        error_details: dict[str, Any],
+        destination: str,
+    ) -> TransformErrorToken:
+        """Record a transform processing error for audit trail.
+
+        Called when a transform returns TransformResult.error().
+        This is for legitimate errors, NOT transform bugs (which crash).
+
+        Args:
+            token_id: Token ID for the row being processed
+            transform_id: Transform that returned the error
+            row: The row data that could not be processed
+            error_details: Error details from TransformResult.error()
+            destination: Sink name where row is routed, or "discard"
+
+        Returns:
+            TransformErrorToken for tracking
+        """
+        if self.landscape is None:
+            logger.warning(
+                "Transform error not recorded (no landscape): %s - %s",
+                transform_id,
+                error_details,
+            )
+            return TransformErrorToken(
+                token_id=token_id,
+                transform_id=transform_id,
+                destination=destination,
+            )
+
+        error_id = self.landscape.record_transform_error(
+            run_id=self.run_id,
+            token_id=token_id,
+            transform_id=transform_id,
+            row_data=row,
+            error_details=error_details,
+            destination=destination,
+        )
+
+        return TransformErrorToken(
+            token_id=token_id,
+            transform_id=transform_id,
             error_id=error_id,
             destination=destination,
         )

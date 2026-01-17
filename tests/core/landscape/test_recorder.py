@@ -2455,3 +2455,138 @@ class TestSchemaRecording:
         assert nodes[0].schema_mode == "strict"
         assert nodes[0].schema_fields is not None
         assert len(nodes[0].schema_fields) == 1
+
+
+class TestTransformErrorRecording:
+    """Tests for transform error recording in landscape."""
+
+    def test_record_transform_error_returns_error_id(self) -> None:
+        """record_transform_error returns an error_id."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        error_id = recorder.record_transform_error(
+            run_id=run.run_id,
+            token_id="tok_123",
+            transform_id="field_mapper",
+            row_data={"id": 42, "value": "bad"},
+            error_details={"reason": "Division by zero"},
+            destination="failed_rows",
+        )
+
+        assert error_id is not None
+        assert error_id.startswith("terr_")
+
+    def test_record_transform_error_stores_in_database(self) -> None:
+        """record_transform_error stores error in transform_errors table."""
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.schema import transform_errors_table
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        error_id = recorder.record_transform_error(
+            run_id=run.run_id,
+            token_id="tok_456",
+            transform_id="field_mapper",
+            row_data={"id": 42, "value": "bad"},
+            error_details={"reason": "Division by zero", "field": "divisor"},
+            destination="error_sink",
+        )
+
+        # Verify stored in database
+        with db.connection() as conn:
+            result = conn.execute(
+                select(transform_errors_table).where(
+                    transform_errors_table.c.error_id == error_id
+                )
+            )
+            row = result.fetchone()
+
+        assert row is not None
+        assert row.run_id == run.run_id
+        assert row.token_id == "tok_456"
+        assert row.transform_id == "field_mapper"
+        assert row.row_hash is not None
+        assert row.row_data_json is not None
+        assert row.error_details_json is not None
+        assert row.destination == "error_sink"
+        assert row.created_at is not None
+
+    def test_record_transform_error_stores_row_hash(self) -> None:
+        """record_transform_error computes and stores row hash."""
+        from sqlalchemy import select
+
+        from elspeth.core.canonical import stable_hash
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.schema import transform_errors_table
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        row_data = {"id": 42, "value": "bad"}
+        expected_hash = stable_hash(row_data)
+
+        error_id = recorder.record_transform_error(
+            run_id=run.run_id,
+            token_id="tok_789",
+            transform_id="processor",
+            row_data=row_data,
+            error_details={"reason": "Processing failed"},
+            destination="discard",
+        )
+
+        with db.connection() as conn:
+            result = conn.execute(
+                select(transform_errors_table).where(
+                    transform_errors_table.c.error_id == error_id
+                )
+            )
+            row = result.fetchone()
+
+        assert row.row_hash == expected_hash
+
+    def test_record_transform_error_discard_destination(self) -> None:
+        """record_transform_error handles 'discard' destination."""
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.landscape.schema import transform_errors_table
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        error_id = recorder.record_transform_error(
+            run_id=run.run_id,
+            token_id="tok_999",
+            transform_id="gate",
+            row_data={"id": 1},
+            error_details={"reason": "Gate evaluation failed"},
+            destination="discard",
+        )
+
+        with db.connection() as conn:
+            result = conn.execute(
+                select(transform_errors_table).where(
+                    transform_errors_table.c.error_id == error_id
+                )
+            )
+            row = result.fetchone()
+
+        assert row.destination == "discard"

@@ -59,6 +59,7 @@ from elspeth.core.landscape.schema import (
     runs_table,
     token_parents_table,
     tokens_table,
+    transform_errors_table,
     validation_errors_table,
 )
 
@@ -1932,6 +1933,52 @@ class LandscapeRecorder:
                     row_data_json=canonical_json(row_data),
                     error=error,
                     schema_mode=schema_mode,
+                    destination=destination,
+                    created_at=_now(),
+                )
+            )
+
+        return error_id
+
+    # === Transform Error Recording (WP-11.99b) ===
+
+    def record_transform_error(
+        self,
+        run_id: str,
+        token_id: str,
+        transform_id: str,
+        row_data: dict[str, Any],
+        error_details: dict[str, Any],
+        destination: str,
+    ) -> str:
+        """Record a transform processing error in the audit trail.
+
+        Called when a transform returns TransformResult.error().
+        This is for legitimate errors, NOT transform bugs.
+
+        Args:
+            run_id: Current run ID
+            token_id: Token ID for the row
+            transform_id: Transform that returned the error
+            row_data: The row that could not be processed
+            error_details: Error details from TransformResult
+            destination: Where row was routed ("discard" or sink name)
+
+        Returns:
+            error_id for tracking
+        """
+        error_id = f"terr_{_generate_id()[:12]}"
+
+        with self._db.connection() as conn:
+            conn.execute(
+                transform_errors_table.insert().values(
+                    error_id=error_id,
+                    run_id=run_id,
+                    token_id=token_id,
+                    transform_id=transform_id,
+                    row_hash=stable_hash(row_data),
+                    row_data_json=canonical_json(row_data),
+                    error_details_json=canonical_json(error_details),
                     destination=destination,
                     created_at=_now(),
                 )

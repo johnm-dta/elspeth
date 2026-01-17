@@ -288,6 +288,26 @@ validation_errors_table = Table(
 Index("ix_validation_errors_run", validation_errors_table.c.run_id)
 Index("ix_validation_errors_node", validation_errors_table.c.node_id)
 
+# === Transform Errors (WP-11.99b: Transform Error Routing) ===
+
+transform_errors_table = Table(
+    "transform_errors",
+    metadata,
+    Column("error_id", String(32), primary_key=True),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("token_id", String(64), nullable=False),
+    Column("transform_id", String(64), nullable=False),
+    Column("row_hash", String(64), nullable=False),
+    Column("row_data_json", Text),
+    Column("error_details_json", Text),  # From TransformResult.error()
+    Column("destination", String(255), nullable=False),  # Sink name or "discard"
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+Index("ix_transform_errors_run", transform_errors_table.c.run_id)
+Index("ix_transform_errors_token", transform_errors_table.c.token_id)
+Index("ix_transform_errors_transform", transform_errors_table.c.transform_id)
+
 # === Checkpoints (Phase 5: Production Hardening) ===
 
 checkpoints_table = Table(

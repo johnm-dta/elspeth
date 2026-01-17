@@ -237,3 +237,261 @@ class TestCoalesceExecutorRequireAll:
             "entities": ["ACME"],
         }
         assert len(outcome2.consumed_tokens) == 2
+
+
+class TestCoalesceExecutorFirst:
+    """Test FIRST policy."""
+
+    def test_first_merges_immediately(
+        self,
+        recorder: LandscapeRecorder,
+        run: Run,
+    ) -> None:
+        """FIRST policy should merge as soon as one token arrives."""
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="source_1",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="coalesce_1",
+            plugin_name="first_wins",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = CoalesceSettings(
+            name="first_wins",
+            branches=["fast", "slow"],
+            policy="first",
+            merge="select",
+            select_branch="fast",  # Prefer fast, but take whatever arrives first
+        )
+
+        executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        executor.register_coalesce(settings, coalesce_node.node_id)
+
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data={"original": True},
+        )
+        children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["fast", "slow"],
+            step_in_pipeline=1,
+        )
+
+        # Simulate slow arriving first (fast is delayed)
+        token_slow = TokenInfo(
+            row_id=children[1].row_id,
+            token_id=children[1].token_id,
+            row_data={"result": "from_slow"},
+            branch_name="slow",
+        )
+
+        # Accept slow token - should merge immediately with FIRST policy
+        outcome = executor.accept(token_slow, "first_wins", step_in_pipeline=2)
+
+        assert outcome.held is False
+        assert outcome.merged_token is not None
+        assert outcome.merged_token.row_data == {"result": "from_slow"}
+
+
+class TestCoalesceExecutorQuorum:
+    """Test QUORUM policy."""
+
+    def test_quorum_merges_at_threshold(
+        self,
+        recorder: LandscapeRecorder,
+        run: Run,
+    ) -> None:
+        """QUORUM should merge when quorum_count branches arrive."""
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="source_1",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="coalesce_1",
+            plugin_name="quorum_merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = CoalesceSettings(
+            name="quorum_merge",
+            branches=["model_a", "model_b", "model_c"],
+            policy="quorum",
+            quorum_count=2,  # Merge when 2 of 3 arrive
+            merge="nested",
+        )
+
+        executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        executor.register_coalesce(settings, coalesce_node.node_id)
+
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data={},
+        )
+        children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["model_a", "model_b", "model_c"],
+            step_in_pipeline=1,
+        )
+
+        token_a = TokenInfo(
+            row_id=children[0].row_id,
+            token_id=children[0].token_id,
+            row_data={"score": 0.9},
+            branch_name="model_a",
+        )
+        token_b = TokenInfo(
+            row_id=children[1].row_id,
+            token_id=children[1].token_id,
+            row_data={"score": 0.85},
+            branch_name="model_b",
+        )
+
+        # Accept first - should hold (1 < 2)
+        outcome1 = executor.accept(token_a, "quorum_merge", step_in_pipeline=2)
+        assert outcome1.held is True
+
+        # Accept second - should merge (2 >= 2)
+        outcome2 = executor.accept(token_b, "quorum_merge", step_in_pipeline=2)
+        assert outcome2.held is False
+        assert outcome2.merged_token is not None
+        # Nested merge strategy
+        assert outcome2.merged_token.row_data == {
+            "model_a": {"score": 0.9},
+            "model_b": {"score": 0.85},
+        }
+
+
+class TestCoalesceExecutorBestEffort:
+    """Test BEST_EFFORT policy with timeout."""
+
+    def test_best_effort_merges_on_timeout(
+        self,
+        recorder: LandscapeRecorder,
+        run: Run,
+    ) -> None:
+        """BEST_EFFORT should merge whatever arrived when timeout expires."""
+        import time
+
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="source_1",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="coalesce_1",
+            plugin_name="best_effort_merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = CoalesceSettings(
+            name="best_effort_merge",
+            branches=["path_a", "path_b", "path_c"],
+            policy="best_effort",
+            timeout_seconds=0.1,  # Short timeout for testing
+            merge="union",
+        )
+
+        executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        executor.register_coalesce(settings, coalesce_node.node_id)
+
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data={},
+        )
+        children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["path_a", "path_b", "path_c"],
+            step_in_pipeline=1,
+        )
+
+        token_a = TokenInfo(
+            row_id=children[0].row_id,
+            token_id=children[0].token_id,
+            row_data={"a_result": 1},
+            branch_name="path_a",
+        )
+
+        # Accept one token
+        outcome1 = executor.accept(token_a, "best_effort_merge", step_in_pipeline=2)
+        assert outcome1.held is True
+
+        # Wait for timeout
+        time.sleep(0.15)
+
+        # Check timeout and force merge
+        timed_out = executor.check_timeouts("best_effort_merge", step_in_pipeline=2)
+
+        # Should have one merged result
+        assert len(timed_out) == 1
+        assert timed_out[0].merged_token is not None
+        assert timed_out[0].merged_token.row_data == {"a_result": 1}

@@ -288,3 +288,72 @@ class CoalesceExecutor:
             return arrived[settings.select_branch].row_data.copy()
         # Fallback to first arrived if select branch not present
         return next(iter(arrived.values())).row_data.copy()
+
+    def check_timeouts(
+        self,
+        coalesce_name: str,
+        step_in_pipeline: int,
+    ) -> list[CoalesceOutcome]:
+        """Check for timed-out pending coalesces and merge them.
+
+        For best_effort policy, merges whatever has arrived when timeout expires.
+        For quorum policy with timeout, merges if quorum met when timeout expires.
+
+        Args:
+            coalesce_name: Name of the coalesce configuration
+            step_in_pipeline: Current position in DAG
+
+        Returns:
+            List of CoalesceOutcomes for any merges triggered by timeout
+        """
+        if coalesce_name not in self._settings:
+            raise ValueError(f"Coalesce '{coalesce_name}' not registered")
+
+        settings = self._settings[coalesce_name]
+        node_id = self._node_ids[coalesce_name]
+
+        if settings.timeout_seconds is None:
+            return []
+
+        now = time.monotonic()
+        results: list[CoalesceOutcome] = []
+        keys_to_process: list[tuple[str, str]] = []
+
+        # Find timed-out entries
+        for key, pending in self._pending.items():
+            if key[0] != coalesce_name:
+                continue
+
+            elapsed = now - pending.first_arrival
+            if elapsed >= settings.timeout_seconds:
+                keys_to_process.append(key)
+
+        # Process timed-out entries
+        for key in keys_to_process:
+            pending = self._pending[key]
+
+            # For best_effort, always merge on timeout if anything arrived
+            if settings.policy == "best_effort" and len(pending.arrived) > 0:
+                outcome = self._execute_merge(
+                    settings=settings,
+                    node_id=node_id,
+                    pending=pending,
+                    step_in_pipeline=step_in_pipeline,
+                    key=key,
+                )
+                results.append(outcome)
+
+            # For quorum, merge on timeout only if quorum met
+            elif settings.policy == "quorum":
+                assert settings.quorum_count is not None
+                if len(pending.arrived) >= settings.quorum_count:
+                    outcome = self._execute_merge(
+                        settings=settings,
+                        node_id=node_id,
+                        pending=pending,
+                        step_in_pipeline=step_in_pipeline,
+                        key=key,
+                    )
+                    results.append(outcome)
+
+        return results

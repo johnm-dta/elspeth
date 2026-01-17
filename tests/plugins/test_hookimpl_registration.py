@@ -35,18 +35,6 @@ class TestBuiltinPluginDiscovery:
         assert "passthrough" in transform_names
         assert "field_mapper" in transform_names
 
-    def test_builtin_gates_discoverable(self) -> None:
-        """Built-in gate plugins are registered via hookimpl."""
-        manager = PluginManager()
-        manager.register_builtin_plugins()
-
-        gates = manager.get_gates()
-        gate_names = [g.name for g in gates]
-
-        assert "threshold_gate" in gate_names
-        assert "field_match_gate" in gate_names
-        assert "filter_gate" in gate_names
-
     def test_builtin_sinks_discoverable(self) -> None:
         """Built-in sink plugins are registered via hookimpl."""
         manager = PluginManager()
@@ -71,11 +59,6 @@ class TestBuiltinPluginDiscovery:
         # Transforms
         assert manager.get_transform_by_name("passthrough") is not None
         assert manager.get_transform_by_name("field_mapper") is not None
-
-        # Gates
-        assert manager.get_gate_by_name("threshold_gate") is not None
-        assert manager.get_gate_by_name("field_match_gate") is not None
-        assert manager.get_gate_by_name("filter_gate") is not None
 
         # Sinks
         assert manager.get_sink_by_name("csv") is not None

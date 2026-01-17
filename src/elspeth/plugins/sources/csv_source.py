@@ -15,15 +15,15 @@ from pydantic import ValidationError
 
 from elspeth.contracts import PluginSchema
 from elspeth.plugins.base import BaseSource
-from elspeth.plugins.config_base import PathConfig
+from elspeth.plugins.config_base import SourceDataConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.schema_factory import create_schema_from_config
 
 
-class CSVSourceConfig(PathConfig):
+class CSVSourceConfig(SourceDataConfig):
     """Configuration for CSV source plugin.
 
-    Inherits from PathConfig, which requires schema configuration.
+    Inherits from SourceDataConfig, which requires schema and on_validation_failure.
     """
 
     delimiter: str = ","
@@ -36,7 +36,7 @@ class CSVSource(BaseSource):
 
     Config options:
         path: Path to CSV file (required)
-        schema: Schema configuration (required, via PathConfig)
+        schema: Schema configuration (required, via SourceDataConfig)
         delimiter: Field delimiter (default: ",")
         encoding: File encoding (default: "utf-8")
         skip_rows: Number of header rows to skip (default: 0)
@@ -60,9 +60,12 @@ class CSVSource(BaseSource):
         self._dataframe: pd.DataFrame | None = None
 
         # Store schema config for audit trail
-        # PathConfig (via DataPluginConfig) ensures schema_config is not None
+        # SourceDataConfig (via DataPluginConfig) ensures schema_config is not None
         assert cfg.schema_config is not None
         self._schema_config = cfg.schema_config
+
+        # Store quarantine routing destination
+        self._on_validation_failure = cfg.on_validation_failure
 
         # CRITICAL: allow_coercion=True for sources (external data boundary)
         # Sources are the ONLY place where type coercion is allowed

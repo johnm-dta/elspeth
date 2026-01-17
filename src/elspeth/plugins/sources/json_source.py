@@ -15,15 +15,15 @@ from pydantic import ValidationError
 
 from elspeth.contracts import PluginSchema
 from elspeth.plugins.base import BaseSource
-from elspeth.plugins.config_base import PathConfig
+from elspeth.plugins.config_base import SourceDataConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.schema_factory import create_schema_from_config
 
 
-class JSONSourceConfig(PathConfig):
+class JSONSourceConfig(SourceDataConfig):
     """Configuration for JSON source plugin.
 
-    Inherits from PathConfig, which requires schema configuration.
+    Inherits from SourceDataConfig, which requires schema and on_validation_failure.
     """
 
     format: Literal["json", "jsonl"] | None = None
@@ -36,7 +36,7 @@ class JSONSource(BaseSource):
 
     Config options:
         path: Path to JSON file (required)
-        schema: Schema configuration (required, via PathConfig)
+        schema: Schema configuration (required, via SourceDataConfig)
         format: "json" (array) or "jsonl" (lines). Auto-detected from extension if not set.
         data_key: Key to extract array from JSON object (e.g., "results")
         encoding: File encoding (default: "utf-8")
@@ -64,9 +64,12 @@ class JSONSource(BaseSource):
         self._format = fmt
 
         # Store schema config for audit trail
-        # PathConfig (via DataPluginConfig) ensures schema_config is not None
+        # SourceDataConfig (via DataPluginConfig) ensures schema_config is not None
         assert cfg.schema_config is not None
         self._schema_config = cfg.schema_config
+
+        # Store quarantine routing destination
+        self._on_validation_failure = cfg.on_validation_failure
 
         # CRITICAL: allow_coercion=True for sources (external data boundary)
         # Sources are the ONLY place where type coercion is allowed

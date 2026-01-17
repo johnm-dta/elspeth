@@ -7,8 +7,11 @@ import pytest
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import SourceProtocol
 
-# Dynamic schema config for tests - PathConfig now requires schema
+# Dynamic schema config for tests - SourceDataConfig requires schema
 DYNAMIC_SCHEMA = {"fields": "dynamic"}
+
+# Standard quarantine routing for tests
+QUARANTINE_SINK = "quarantine"
 
 
 class TestCSVSource:
@@ -32,7 +35,13 @@ class TestCSVSource:
 
         assert isinstance(CSVSource, type)
         # Runtime check via Protocol
-        source = CSVSource({"path": "/tmp/test.csv", "schema": DYNAMIC_SCHEMA})
+        source = CSVSource(
+            {
+                "path": "/tmp/test.csv",
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
+        )
         assert isinstance(source, SourceProtocol)
 
     def test_has_required_attributes(self) -> None:
@@ -41,14 +50,26 @@ class TestCSVSource:
 
         assert CSVSource.name == "csv"
         # output_schema is an instance attribute (set based on config)
-        source = CSVSource({"path": "/tmp/test.csv", "schema": DYNAMIC_SCHEMA})
+        source = CSVSource(
+            {
+                "path": "/tmp/test.csv",
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
+        )
         assert hasattr(source, "output_schema")
 
     def test_load_yields_rows(self, sample_csv: Path, ctx: PluginContext) -> None:
         """load() yields dict rows from CSV."""
         from elspeth.plugins.sources.csv_source import CSVSource
 
-        source = CSVSource({"path": str(sample_csv), "schema": DYNAMIC_SCHEMA})
+        source = CSVSource(
+            {
+                "path": str(sample_csv),
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
+        )
         rows = list(source.load(ctx))
 
         assert len(rows) == 3
@@ -64,7 +85,12 @@ class TestCSVSource:
         csv_file.write_text("id;name;value\n1;alice;100\n")
 
         source = CSVSource(
-            {"path": str(csv_file), "delimiter": ";", "schema": DYNAMIC_SCHEMA}
+            {
+                "path": str(csv_file),
+                "delimiter": ";",
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
         )
         rows = list(source.load(ctx))
 
@@ -79,7 +105,12 @@ class TestCSVSource:
         csv_file.write_bytes(b"id,name\n1,caf\xe9\n")
 
         source = CSVSource(
-            {"path": str(csv_file), "encoding": "latin-1", "schema": DYNAMIC_SCHEMA}
+            {
+                "path": str(csv_file),
+                "encoding": "latin-1",
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
         )
         rows = list(source.load(ctx))
 
@@ -89,7 +120,13 @@ class TestCSVSource:
         """close() can be called multiple times."""
         from elspeth.plugins.sources.csv_source import CSVSource
 
-        source = CSVSource({"path": str(sample_csv), "schema": DYNAMIC_SCHEMA})
+        source = CSVSource(
+            {
+                "path": str(sample_csv),
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
+        )
         list(source.load(ctx))  # Consume iterator
         source.close()
         source.close()  # Should not raise
@@ -98,7 +135,13 @@ class TestCSVSource:
         """Missing file raises FileNotFoundError."""
         from elspeth.plugins.sources.csv_source import CSVSource
 
-        source = CSVSource({"path": "/nonexistent/file.csv", "schema": DYNAMIC_SCHEMA})
+        source = CSVSource(
+            {
+                "path": "/nonexistent/file.csv",
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
+        )
         with pytest.raises(FileNotFoundError):
             list(source.load(ctx))
 
@@ -112,7 +155,9 @@ class TestCSVSourceConfigValidation:
         from elspeth.plugins.sources.csv_source import CSVSource
 
         with pytest.raises(PluginConfigError, match="path"):
-            CSVSource({"schema": DYNAMIC_SCHEMA})
+            CSVSource(
+                {"schema": DYNAMIC_SCHEMA, "on_validation_failure": QUARANTINE_SINK}
+            )
 
     def test_empty_path_raises_error(self) -> None:
         """Empty path string raises PluginConfigError."""
@@ -120,7 +165,13 @@ class TestCSVSourceConfigValidation:
         from elspeth.plugins.sources.csv_source import CSVSource
 
         with pytest.raises(PluginConfigError, match="path cannot be empty"):
-            CSVSource({"path": "", "schema": DYNAMIC_SCHEMA})
+            CSVSource(
+                {
+                    "path": "",
+                    "schema": DYNAMIC_SCHEMA,
+                    "on_validation_failure": QUARANTINE_SINK,
+                }
+            )
 
     def test_unknown_field_raises_error(self) -> None:
         """Unknown config field raises PluginConfigError."""
@@ -132,6 +183,7 @@ class TestCSVSourceConfigValidation:
                 {
                     "path": "/tmp/test.csv",
                     "schema": DYNAMIC_SCHEMA,
+                    "on_validation_failure": QUARANTINE_SINK,
                     "unknown_field": "value",
                 }
             )
@@ -142,4 +194,14 @@ class TestCSVSourceConfigValidation:
         from elspeth.plugins.sources.csv_source import CSVSource
 
         with pytest.raises(PluginConfigError, match="require.*schema"):
-            CSVSource({"path": "/tmp/test.csv"})
+            CSVSource(
+                {"path": "/tmp/test.csv", "on_validation_failure": QUARANTINE_SINK}
+            )
+
+    def test_missing_on_validation_failure_raises_error(self) -> None:
+        """Missing on_validation_failure raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        with pytest.raises(PluginConfigError, match="on_validation_failure"):
+            CSVSource({"path": "/tmp/test.csv", "schema": DYNAMIC_SCHEMA})

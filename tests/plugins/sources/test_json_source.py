@@ -8,8 +8,11 @@ import pytest
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import SourceProtocol
 
-# Dynamic schema config for tests - PathConfig now requires schema
+# Dynamic schema config for tests - SourceDataConfig requires schema
 DYNAMIC_SCHEMA = {"fields": "dynamic"}
+
+# Standard quarantine routing for tests
+QUARANTINE_SINK = "quarantine"
 
 
 class TestJSONSource:
@@ -24,7 +27,13 @@ class TestJSONSource:
         """JSONSource implements SourceProtocol."""
         from elspeth.plugins.sources.json_source import JSONSource
 
-        source = JSONSource({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA})
+        source = JSONSource(
+            {
+                "path": "/tmp/test.json",
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
+        )
         assert isinstance(source, SourceProtocol)
 
     def test_has_required_attributes(self) -> None:
@@ -33,7 +42,13 @@ class TestJSONSource:
 
         assert JSONSource.name == "json"
         # output_schema is an instance attribute (set based on config)
-        source = JSONSource({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA})
+        source = JSONSource(
+            {
+                "path": "/tmp/test.json",
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
+        )
         assert hasattr(source, "output_schema")
 
     def test_load_json_array(self, tmp_path: Path, ctx: PluginContext) -> None:
@@ -47,7 +62,13 @@ class TestJSONSource:
         ]
         json_file.write_text(json.dumps(data))
 
-        source = JSONSource({"path": str(json_file), "schema": DYNAMIC_SCHEMA})
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
+        )
         rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -66,7 +87,12 @@ class TestJSONSource:
         )
 
         source = JSONSource(
-            {"path": str(jsonl_file), "format": "jsonl", "schema": DYNAMIC_SCHEMA}
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
         )
         rows = list(source.load(ctx))
 
@@ -83,7 +109,11 @@ class TestJSONSource:
         jsonl_file.write_text('{"id": 1}\n{"id": 2}\n')
 
         source = JSONSource(
-            {"path": str(jsonl_file), "schema": DYNAMIC_SCHEMA}
+            {
+                "path": str(jsonl_file),
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
         )  # No format specified
         rows = list(source.load(ctx))
 
@@ -103,7 +133,12 @@ class TestJSONSource:
         json_file.write_text(json.dumps(data))
 
         source = JSONSource(
-            {"path": str(json_file), "data_key": "results", "schema": DYNAMIC_SCHEMA}
+            {
+                "path": str(json_file),
+                "data_key": "results",
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
         )
         rows = list(source.load(ctx))
 
@@ -120,7 +155,12 @@ class TestJSONSource:
         jsonl_file.write_text('{"id": 1}\n\n{"id": 2}\n\n')
 
         source = JSONSource(
-            {"path": str(jsonl_file), "format": "jsonl", "schema": DYNAMIC_SCHEMA}
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
         )
         rows = list(source.load(ctx))
 
@@ -131,7 +171,11 @@ class TestJSONSource:
         from elspeth.plugins.sources.json_source import JSONSource
 
         source = JSONSource(
-            {"path": "/nonexistent/file.json", "schema": DYNAMIC_SCHEMA}
+            {
+                "path": "/nonexistent/file.json",
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
         )
         with pytest.raises(FileNotFoundError):
             list(source.load(ctx))
@@ -143,7 +187,13 @@ class TestJSONSource:
         json_file = tmp_path / "object.json"
         json_file.write_text('{"not": "an_array"}')
 
-        source = JSONSource({"path": str(json_file), "schema": DYNAMIC_SCHEMA})
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
+        )
         with pytest.raises(ValueError, match="Expected JSON array"):
             list(source.load(ctx))
 
@@ -154,7 +204,74 @@ class TestJSONSource:
         json_file = tmp_path / "data.json"
         json_file.write_text("[]")
 
-        source = JSONSource({"path": str(json_file), "schema": DYNAMIC_SCHEMA})
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
+        )
         list(source.load(ctx))
         source.close()
         source.close()  # Should not raise
+
+
+class TestJSONSourceConfigValidation:
+    """Test JSONSource config validation."""
+
+    def test_missing_path_raises_error(self) -> None:
+        """Empty config raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        with pytest.raises(PluginConfigError, match="path"):
+            JSONSource(
+                {"schema": DYNAMIC_SCHEMA, "on_validation_failure": QUARANTINE_SINK}
+            )
+
+    def test_empty_path_raises_error(self) -> None:
+        """Empty path string raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        with pytest.raises(PluginConfigError, match="path cannot be empty"):
+            JSONSource(
+                {
+                    "path": "",
+                    "schema": DYNAMIC_SCHEMA,
+                    "on_validation_failure": QUARANTINE_SINK,
+                }
+            )
+
+    def test_unknown_field_raises_error(self) -> None:
+        """Unknown config field raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        with pytest.raises(PluginConfigError, match="Extra inputs"):
+            JSONSource(
+                {
+                    "path": "/tmp/test.json",
+                    "schema": DYNAMIC_SCHEMA,
+                    "on_validation_failure": QUARANTINE_SINK,
+                    "unknown_field": "value",
+                }
+            )
+
+    def test_missing_schema_raises_error(self) -> None:
+        """Missing schema raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        with pytest.raises(PluginConfigError, match="require.*schema"):
+            JSONSource(
+                {"path": "/tmp/test.json", "on_validation_failure": QUARANTINE_SINK}
+            )
+
+    def test_missing_on_validation_failure_raises_error(self) -> None:
+        """Missing on_validation_failure raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        with pytest.raises(PluginConfigError, match="on_validation_failure"):
+            JSONSource({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA})

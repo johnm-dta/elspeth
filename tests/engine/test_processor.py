@@ -562,7 +562,6 @@ class TestRowProcessorAggregation:
             def __init__(self, node_id: str) -> None:
                 super().__init__({})
                 self.node_id = node_id
-                self._batch_id: str | None = None
                 self._count: int = 0
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
@@ -629,7 +628,6 @@ class TestRowProcessorAggregation:
             def __init__(self, node_id: str) -> None:
                 super().__init__({})
                 self.node_id = node_id
-                self._batch_id: str | None = None
                 self._values: list[int] = []
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:

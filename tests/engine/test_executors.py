@@ -871,7 +871,6 @@ class TestAggregationExecutor:
         class SumAggregation:
             name = "sum_aggregator"
             node_id = agg_node.node_id
-            _batch_id: str | None = None
             _values: list[int]
 
             def __init__(self) -> None:
@@ -917,7 +916,7 @@ class TestAggregationExecutor:
         # Verify result
         assert result.accepted is True
         assert result.batch_id is not None
-        assert aggregation._batch_id == result.batch_id
+        assert executor.get_batch_id(aggregation.node_id) == result.batch_id
 
         # Verify batch was created in landscape
         batch = recorder.get_batch(result.batch_id)
@@ -960,7 +959,6 @@ class TestAggregationExecutor:
         class CountAggregation:
             name = "count_aggregator"
             node_id = agg_node.node_id
-            _batch_id: str | None = None
             _count: int = 0
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
@@ -1004,7 +1002,7 @@ class TestAggregationExecutor:
 
         # Both should have same batch_id
         assert result1.batch_id == result2.batch_id
-        assert aggregation._batch_id == batch_id
+        assert executor.get_batch_id(aggregation.node_id) == batch_id
 
         # Verify both members recorded with correct ordinals
         members = recorder.get_batch_members(batch_id)
@@ -1038,7 +1036,6 @@ class TestAggregationExecutor:
         class AvgAggregation:
             name = "avg_aggregator"
             node_id = agg_node.node_id
-            _batch_id: str | None = None
             _values: list[float]
 
             def __init__(self) -> None:
@@ -1099,8 +1096,8 @@ class TestAggregationExecutor:
         assert batch.status == "completed"
         assert batch.trigger_reason == "count_reached"
 
-        # Verify aggregation._batch_id is reset
-        assert aggregation._batch_id is None
+        # Verify batch_id is reset in executor
+        assert executor.get_batch_id(aggregation.node_id) is None
 
     def test_flush_without_batch_raises_error(self) -> None:
         """Flush without prior accept raises ValueError."""
@@ -1124,7 +1121,6 @@ class TestAggregationExecutor:
         class NoBatchAggregation:
             name = "no_batch"
             node_id = agg_node.node_id
-            _batch_id: str | None = None
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 return AcceptResult(accepted=True, trigger=False)
@@ -1168,7 +1164,6 @@ class TestAggregationExecutor:
         class ExplodingAggregation:
             name = "exploding_agg"
             node_id = agg_node.node_id
-            _batch_id: str | None = None
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 raise RuntimeError("accept failed!")
@@ -1228,7 +1223,6 @@ class TestAggregationExecutor:
         class ExplodingFlushAggregation:
             name = "exploding_flush"
             node_id = agg_node.node_id
-            _batch_id: str | None = None
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 return AcceptResult(accepted=True, trigger=True)
@@ -1296,7 +1290,6 @@ class TestAggregationExecutor:
         class BatchCounterAggregation:
             name = "batch_counter"
             node_id = agg_node.node_id
-            _batch_id: str | None = None
             _count: int = 0
             _batch_num: int = 0
 

@@ -25,6 +25,7 @@ Example:
 """
 
 from elspeth.contracts import RowResult, TokenInfo
+from elspeth.engine.coalesce_executor import CoalesceExecutor, CoalesceOutcome
 from elspeth.engine.executors import (
     AggregationExecutor,
     GateExecutor,
@@ -50,6 +51,8 @@ from elspeth.engine.tokens import TokenManager
 
 __all__ = [
     "AggregationExecutor",
+    "CoalesceExecutor",
+    "CoalesceOutcome",
     "ExpressionParser",
     "ExpressionSecurityError",
     "ExpressionSyntaxError",

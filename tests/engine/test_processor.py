@@ -933,6 +933,165 @@ class TestRowProcessorUnknownType:
         assert "BaseAggregation" in str(exc_info.value)
 
 
+class TestRowProcessorNestedForks:
+    """Nested fork tests for work queue execution."""
+
+    def test_nested_forks_all_children_executed(self) -> None:
+        """Nested forks should execute all descendants.
+
+        Pipeline: source -> gate1 (fork 2) -> gate2 (fork 2) -> transform
+
+        Expected token tree:
+        - 1 parent FORKED at gate1
+        - 2 children FORKED at gate2
+        - 4 grandchildren COMPLETED at transform
+        Total: 7 results
+        """
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Setup nodes for: source -> gate1 (fork 2) -> gate2 (fork 2) -> transform
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="test_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        gate1_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="fork_gate_1",
+            node_type="gate",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        gate2_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="fork_gate_2",
+            node_type="gate",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="marker",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Register edges for both fork paths at each gate
+        edge1a = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate1_node.node_id,
+            to_node_id=gate2_node.node_id,
+            label="left",
+            mode=RoutingMode.COPY,
+        )
+        edge1b = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate1_node.node_id,
+            to_node_id=gate2_node.node_id,
+            label="right",
+            mode=RoutingMode.COPY,
+        )
+        edge2a = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate2_node.node_id,
+            to_node_id=transform_node.node_id,
+            label="left",
+            mode=RoutingMode.COPY,
+        )
+        edge2b = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate2_node.node_id,
+            to_node_id=transform_node.node_id,
+            label="right",
+            mode=RoutingMode.COPY,
+        )
+
+        class ForkGate(BaseGate):
+            name = "fork_gate"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
+                return GateResult(
+                    row=row,
+                    action=RoutingAction.fork_to_paths(["left", "right"]),
+                )
+
+        class MarkerTransform(BaseTransform):
+            name = "marker"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                # Note: .get() is allowed here - this is row data (their data, Tier 2)
+                return TransformResult.success(
+                    {**row, "count": row.get("count", 0) + 1}
+                )
+
+        gate1 = ForkGate(gate1_node.node_id)
+        gate2 = ForkGate(gate2_node.node_id)
+        transform = MarkerTransform(transform_node.node_id)
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            edge_map={
+                (gate1_node.node_id, "left"): edge1a.edge_id,
+                (gate1_node.node_id, "right"): edge1b.edge_id,
+                (gate2_node.node_id, "left"): edge2a.edge_id,
+                (gate2_node.node_id, "right"): edge2b.edge_id,
+            },
+        )
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+        results = processor.process_row(
+            row_index=0,
+            row_data={"value": 42},
+            transforms=[gate1, gate2, transform],
+            ctx=ctx,
+        )
+
+        # Expected: 1 parent FORKED + 2 children FORKED + 4 grandchildren COMPLETED = 7
+        assert len(results) == 7
+
+        forked_count = sum(1 for r in results if r.outcome == RowOutcome.FORKED)
+        completed_count = sum(1 for r in results if r.outcome == RowOutcome.COMPLETED)
+
+        assert forked_count == 3  # Parent + 2 first-level children
+        assert completed_count == 4  # 4 grandchildren
+
+        # All completed tokens should have been processed by transform
+        for result in results:
+            if result.outcome == RowOutcome.COMPLETED:
+                # .get() allowed on row data (their data, Tier 2)
+                assert result.final_data.get("count") == 1
+
+
 class TestRowProcessorWorkQueue:
     """Work queue tests for fork child execution."""
 

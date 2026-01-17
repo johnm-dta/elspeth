@@ -221,6 +221,52 @@ class Orchestrator:
                     f"'{destination}' exists. Available sinks: {sorted(available_sinks)}"
                 )
 
+    def _assign_plugin_node_ids(
+        self,
+        source: SourceProtocol,
+        transforms: list[TransformLike],
+        sinks: dict[str, SinkLike],
+        source_id: str,
+        transform_id_map: dict[int, str],
+        sink_id_map: dict[str, str],
+    ) -> None:
+        """Explicitly assign node_id to all plugins with validation.
+
+        This is part of the plugin protocol contract - all plugins define
+        node_id: str | None and the orchestrator populates it.
+
+        Args:
+            source: Source plugin instance
+            transforms: List of transform plugins
+            sinks: Dict of sink_name -> sink plugin
+            source_id: Node ID for source
+            transform_id_map: Maps transform sequence -> node_id
+            sink_id_map: Maps sink_name -> node_id
+
+        Raises:
+            ValueError: If transform/sink not in ID map
+        """
+        # Set node_id on source
+        source.node_id = source_id
+
+        # Set node_id on transforms
+        for seq, transform in enumerate(transforms):
+            if seq not in transform_id_map:
+                raise ValueError(
+                    f"Transform at sequence {seq} not found in graph. "
+                    f"Graph has mappings for sequences: {list(transform_id_map.keys())}"
+                )
+            transform.node_id = transform_id_map[seq]
+
+        # Set node_id on sinks
+        for sink_name, sink in sinks.items():
+            if sink_name not in sink_id_map:
+                raise ValueError(
+                    f"Sink '{sink_name}' not found in graph. "
+                    f"Available sinks: {list(sink_id_map.keys())}"
+                )
+            sink.node_id = sink_id_map[sink_name]
+
     def run(
         self,
         config: PipelineConfig,
@@ -424,27 +470,15 @@ class Orchestrator:
         transform_id_map = graph.get_transform_id_map()
         output_sink_name = graph.get_output_sink()
 
-        # Set node_id on source plugin
-        # node_id is now part of the plugin protocol contract
-        config.source.node_id = source_id
-
-        # Set node_id on transforms using graph's transform_id_map
-        for seq, transform in enumerate(config.transforms):
-            if seq not in transform_id_map:
-                raise ValueError(
-                    f"Transform at sequence {seq} not found in graph. "
-                    f"Graph has mappings for sequences: {list(transform_id_map.keys())}"
-                )
-            transform.node_id = transform_id_map[seq]
-
-        # Set node_id on sinks using explicit mapping
-        for sink_name, sink in config.sinks.items():
-            if sink_name not in sink_id_map:
-                raise ValueError(
-                    f"Sink '{sink_name}' not found in graph. "
-                    f"Available sinks: {list(sink_id_map.keys())}"
-                )
-            sink.node_id = sink_id_map[sink_name]
+        # Assign node_ids to all plugins
+        self._assign_plugin_node_ids(
+            source=config.source,
+            transforms=config.transforms,
+            sinks=config.sinks,
+            source_id=source_id,
+            transform_id_map=transform_id_map,
+            sink_id_map=sink_id_map,
+        )
 
         # Create context with the LandscapeRecorder
         ctx = PluginContext(

@@ -1901,6 +1901,7 @@ class LandscapeRecorder:
         row_data: dict[str, Any],
         error: str,
         schema_mode: str,
+        destination: str,
     ) -> str:
         """Record a validation error in the audit trail.
 
@@ -1914,6 +1915,7 @@ class LandscapeRecorder:
             row_data: The row that failed validation
             error: Error description
             schema_mode: Schema mode that caught the error ("strict", "free", "dynamic")
+            destination: Where row was routed ("discard" or sink name)
 
         Returns:
             error_id for tracking
@@ -1930,6 +1932,7 @@ class LandscapeRecorder:
                     row_data_json=canonical_json(row_data),
                     error=error,
                     schema_mode=schema_mode,
+                    destination=destination,
                     created_at=_now(),
                 )
             )

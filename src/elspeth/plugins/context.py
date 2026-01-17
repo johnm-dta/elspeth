@@ -36,6 +36,7 @@ class ValidationErrorToken:
     row_id: str
     node_id: str
     error_id: str | None = None  # Set if recorded to landscape
+    destination: str = "discard"  # Sink name or "discard"
 
 
 @dataclass
@@ -106,6 +107,7 @@ class PluginContext:
         row: dict[str, Any],
         error: str,
         schema_mode: str,
+        destination: str,
     ) -> ValidationErrorToken:
         """Record a validation error for audit trail.
 
@@ -117,6 +119,7 @@ class PluginContext:
             row: The row data that failed validation
             error: Description of the validation failure
             schema_mode: "strict", "free", or "dynamic"
+            destination: Sink name where row is routed, or "discard"
 
         Returns:
             ValidationErrorToken for tracking the quarantined row
@@ -134,6 +137,7 @@ class PluginContext:
             return ValidationErrorToken(
                 row_id=row_id,
                 node_id=self.node_id or "unknown",
+                destination=destination,
             )
 
         # Record to landscape audit trail
@@ -143,10 +147,12 @@ class PluginContext:
             row_data=row,
             error=error,
             schema_mode=schema_mode,
+            destination=destination,
         )
 
         return ValidationErrorToken(
             row_id=row_id,
             node_id=self.node_id or "unknown",
             error_id=error_id,
+            destination=destination,
         )

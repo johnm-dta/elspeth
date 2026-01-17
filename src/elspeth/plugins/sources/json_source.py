@@ -151,6 +151,7 @@ class JSONSource(BaseSource):
                 row=row,
                 error=str(e),
                 schema_mode=self._schema_config.mode or "dynamic",
+                destination=self._on_validation_failure,
             )
             # Skip invalid row - don't yield
 

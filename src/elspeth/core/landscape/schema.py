@@ -281,6 +281,7 @@ validation_errors_table = Table(
     Column("row_data_json", Text),  # Store the row for debugging
     Column("error", Text, nullable=False),
     Column("schema_mode", String(16), nullable=False),  # "strict", "free", "dynamic"
+    Column("destination", String(255), nullable=False),  # Sink name or "discard"
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 

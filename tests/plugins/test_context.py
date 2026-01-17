@@ -68,6 +68,7 @@ class TestValidationErrorRecording:
             row={"id": 42, "invalid": "data"},
             error="validation failed",
             schema_mode="strict",
+            destination="discard",
         )
 
         assert token is not None
@@ -90,6 +91,7 @@ class TestValidationErrorRecording:
                 row={"id": 42, "invalid": "data"},
                 error="validation failed",
                 schema_mode="strict",
+                destination="discard",
             )
 
         # Should still return a token even without landscape
@@ -108,6 +110,7 @@ class TestValidationErrorRecording:
             row={"id": "row-42", "invalid": "data"},
             error="validation failed",
             schema_mode="strict",
+            destination="discard",
         )
 
         assert token.row_id == "row-42"
@@ -122,6 +125,7 @@ class TestValidationErrorRecording:
             row={"no_id_field": "data"},
             error="validation failed",
             schema_mode="strict",
+            destination="discard",
         )
 
         # Should generate a row_id from hash (16 chars)
@@ -149,6 +153,7 @@ class TestValidationErrorRecording:
             row={"id": 42, "invalid": "data"},
             error="validation failed",
             schema_mode="strict",
+            destination="quarantine_sink",
         )
 
         # Should have called landscape
@@ -159,6 +164,63 @@ class TestValidationErrorRecording:
         assert call_kwargs["row_data"] == {"id": 42, "invalid": "data"}
         assert call_kwargs["error"] == "validation failed"
         assert call_kwargs["schema_mode"] == "strict"
+        assert call_kwargs["destination"] == "quarantine_sink"
 
         # Token should have error_id from landscape
         assert token.error_id == "verr_abc123"
+        assert token.destination == "quarantine_sink"
+
+
+class TestValidationErrorDestination:
+    """Tests for validation error destination tracking."""
+
+    def test_validation_error_token_has_destination(self) -> None:
+        """ValidationErrorToken includes destination field."""
+        from elspeth.plugins.context import ValidationErrorToken
+
+        token = ValidationErrorToken(
+            row_id="row_1",
+            node_id="source_node",
+            destination="quarantine_sink",
+        )
+
+        assert token.destination == "quarantine_sink"
+
+    def test_validation_error_token_defaults_to_discard(self) -> None:
+        """ValidationErrorToken defaults to 'discard' if not specified."""
+        from elspeth.plugins.context import ValidationErrorToken
+
+        token = ValidationErrorToken(row_id="row_1", node_id="source_node")
+
+        assert token.destination == "discard"
+
+    def test_record_validation_error_requires_destination(self) -> None:
+        """record_validation_error requires destination parameter."""
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="test-run", config={}, node_id="source_node")
+
+        # Should work with destination
+        token = ctx.record_validation_error(
+            row={"id": 1, "bad": "data"},
+            error="validation failed",
+            schema_mode="strict",
+            destination="quarantine_sink",
+        )
+
+        assert token.destination == "quarantine_sink"
+
+    def test_record_validation_error_with_discard_destination(self) -> None:
+        """record_validation_error accepts 'discard' as destination."""
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="test-run", config={}, node_id="source_node")
+
+        token = ctx.record_validation_error(
+            row={"id": 1, "bad": "data"},
+            error="validation failed",
+            schema_mode="strict",
+            destination="discard",
+        )
+
+        assert token.destination == "discard"

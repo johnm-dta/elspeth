@@ -104,7 +104,7 @@ class TestRowProcessor:
             source_node_id=source.node_id,
         )
 
-        result = processor.process_row(
+        results = processor.process_row(
             row_index=0,
             row_data={"value": 10},
             transforms=[
@@ -113,6 +113,10 @@ class TestRowProcessor:
             ],
             ctx=ctx,
         )
+
+        # Single result - no forks
+        assert len(results) == 1
+        result = results[0]
 
         # 10 * 2 = 20, 20 + 1 = 21
         assert result.final_data == {"value": 21}
@@ -167,12 +171,16 @@ class TestRowProcessor:
             source_node_id=source.node_id,
         )
 
-        result = processor.process_row(
+        results = processor.process_row(
             row_index=0,
             row_data={"name": "test"},
             transforms=[EnricherTransform(transform.node_id)],
             ctx=ctx,
         )
+
+        # Single result - no forks
+        assert len(results) == 1
+        result = results[0]
 
         assert result.final_data == {"name": "test", "enriched": True}
         assert result.outcome == RowOutcome.COMPLETED
@@ -207,12 +215,16 @@ class TestRowProcessor:
             source_node_id=source.node_id,
         )
 
-        result = processor.process_row(
+        results = processor.process_row(
             row_index=0,
             row_data={"passthrough": True},
             transforms=[],
             ctx=ctx,
         )
+
+        # Single result - no forks
+        assert len(results) == 1
+        result = results[0]
 
         assert result.final_data == {"passthrough": True}
         assert result.outcome == RowOutcome.COMPLETED
@@ -271,12 +283,16 @@ class TestRowProcessor:
             source_node_id=source.node_id,
         )
 
-        result = processor.process_row(
+        results = processor.process_row(
             row_index=0,
             row_data={"value": -5},
             transforms=[ValidatorTransform(transform.node_id)],
             ctx=ctx,
         )
+
+        # Single result - no forks
+        assert len(results) == 1
+        result = results[0]
 
         assert result.outcome == RowOutcome.FAILED
         # Original data preserved on failure
@@ -355,12 +371,16 @@ class TestRowProcessorGates:
             source_node_id=source.node_id,
         )
 
-        result = processor.process_row(
+        results = processor.process_row(
             row_index=0,
             row_data={"value": 42},
             transforms=[PassGate(gate.node_id), FinalTransform(transform.node_id)],
             ctx=ctx,
         )
+
+        # Single result - no forks
+        assert len(results) == 1
+        result = results[0]
 
         assert result.final_data == {"value": 42, "final": True}
         assert result.outcome == RowOutcome.COMPLETED
@@ -439,12 +459,16 @@ class TestRowProcessorGates:
             route_resolution_map=route_resolution_map,
         )
 
-        result = processor.process_row(
+        results = processor.process_row(
             row_index=0,
             row_data={"value": 150},
             transforms=[RouterGate(gate.node_id)],
             ctx=ctx,
         )
+
+        # Single result - routed to sink
+        assert len(results) == 1
+        result = results[0]
 
         assert result.outcome == RowOutcome.ROUTED
         assert result.sink_name == "high_values"
@@ -537,16 +561,31 @@ class TestRowProcessorGates:
             edge_map=edge_map,
         )
 
-        result = processor.process_row(
+        results = processor.process_row(
             row_index=0,
             row_data={"value": 42},
             transforms=[SplitterGate(gate.node_id)],
             ctx=ctx,
         )
 
-        # In linear pipeline mode, fork returns "forked" - caller handles children
-        assert result.outcome == RowOutcome.FORKED
-        assert result.final_data == {"value": 42}
+        # Fork creates 3 results: parent (FORKED) + 2 children (COMPLETED)
+        # Children have no remaining transforms, so they reach COMPLETED
+        assert len(results) == 3
+
+        forked_results = [r for r in results if r.outcome == RowOutcome.FORKED]
+        completed_results = [r for r in results if r.outcome == RowOutcome.COMPLETED]
+
+        assert len(forked_results) == 1
+        assert len(completed_results) == 2
+
+        # Parent has FORKED outcome
+        parent = forked_results[0]
+        assert parent.final_data == {"value": 42}
+
+        # Children completed with original data (no transforms after fork)
+        for child in completed_results:
+            assert child.final_data == {"value": 42}
+            assert child.token.branch_name in ("path_a", "path_b")
 
 
 class TestRowProcessorAggregation:
@@ -609,12 +648,16 @@ class TestRowProcessorAggregation:
             source_node_id=source.node_id,
         )
 
-        result = processor.process_row(
+        results = processor.process_row(
             row_index=0,
             row_data={"value": 1},
             transforms=[CounterAggregation(agg.node_id)],
             ctx=ctx,
         )
+
+        # Single result - aggregated
+        assert len(results) == 1
+        result = results[0]
 
         assert result.outcome == RowOutcome.CONSUMED_IN_BATCH
 
@@ -681,23 +724,25 @@ class TestRowProcessorAggregation:
         )
 
         # First row - no trigger
-        result1 = processor.process_row(
+        results1 = processor.process_row(
             row_index=0,
             row_data={"value": 10},
             transforms=[aggregation],
             ctx=ctx,
         )
-        assert result1.outcome == RowOutcome.CONSUMED_IN_BATCH
+        assert len(results1) == 1
+        assert results1[0].outcome == RowOutcome.CONSUMED_IN_BATCH
         assert len(flush_called) == 0
 
         # Second row - triggers
-        result2 = processor.process_row(
+        results2 = processor.process_row(
             row_index=1,
             row_data={"value": 20},
             transforms=[aggregation],
             ctx=ctx,
         )
-        assert result2.outcome == RowOutcome.CONSUMED_IN_BATCH
+        assert len(results2) == 1
+        assert results2[0].outcome == RowOutcome.CONSUMED_IN_BATCH
         assert len(flush_called) == 1  # Flush was called
 
 
@@ -731,12 +776,16 @@ class TestRowProcessorTokenIdentity:
             source_node_id=source.node_id,
         )
 
-        result = processor.process_row(
+        results = processor.process_row(
             row_index=0,
             row_data={"test": "data"},
             transforms=[],
             ctx=ctx,
         )
+
+        # Single result - no forks
+        assert len(results) == 1
+        result = results[0]
 
         # Can access token identity
         assert result.token is not None
@@ -805,7 +854,7 @@ class TestRowProcessorTokenIdentity:
             source_node_id=source.node_id,
         )
 
-        result = processor.process_row(
+        results = processor.process_row(
             row_index=0,
             row_data={"value": 1},
             transforms=[
@@ -814,6 +863,10 @@ class TestRowProcessorTokenIdentity:
             ],
             ctx=ctx,
         )
+
+        # Single result - no forks
+        assert len(results) == 1
+        result = results[0]
 
         assert result.outcome == RowOutcome.COMPLETED
 

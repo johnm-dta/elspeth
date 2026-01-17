@@ -9,7 +9,7 @@ garbage from it, something catastrophic happened - crash immediately.
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Literal, TypedDict
 
 from elspeth.contracts.enums import (
     BatchStatus,
@@ -321,3 +321,30 @@ class RowLineage:
     # Resolved payload (from PayloadStore)
     source_data: dict[str, object] | None  # None if purged
     payload_available: bool
+
+
+class ExportStatusUpdate(TypedDict, total=False):
+    """Schema for export status updates in recorder.
+
+    Used by recorder methods that update export-related fields on Run records.
+    Uses total=False to allow partial updates.
+    """
+
+    export_status: ExportStatus
+    exported_at: datetime
+    export_error: str
+    export_format: str
+    export_sink: str
+
+
+class BatchStatusUpdate(TypedDict, total=False):
+    """Schema for batch status updates in recorder.
+
+    Used by recorder methods that update batch-related fields.
+    Uses total=False to allow partial updates.
+    """
+
+    status: BatchStatus
+    completed_at: datetime
+    trigger_reason: str
+    aggregation_state_id: str

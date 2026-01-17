@@ -76,3 +76,12 @@
 ## Notes / Links
 - Related issues/PRs: N/A
 - Related design docs: `docs/design/architecture.md`
+
+## Resolution
+
+**Fixed in:** 2026-01-18
+**Fix:** Migrated `ExecutionGraph` from `networkx.DiGraph` to `networkx.MultiDiGraph`, using edge labels as keys to allow multiple edges between the same node pair.
+
+**Commits:**
+- feat(dag): migrate ExecutionGraph from DiGraph to MultiDiGraph
+- test(dag): add multi-edge scenario integration tests

@@ -12,6 +12,98 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
+class GateSettings(BaseModel):
+    """Engine-level gate configuration for config-driven routing.
+
+    Engine-level gates are defined in YAML and evaluated by the engine using
+    ExpressionParser. This is distinct from plugin-based gates which use
+    RowPluginSettings with type="gate".
+
+    Example YAML:
+        gates:
+          - name: quality_check
+            condition: "row['confidence'] >= 0.85"
+            routes:
+              high: continue
+              low: review_sink
+          - name: parallel_analysis
+            condition: "True"
+            routes:
+              all: fork
+            fork_to:
+              - path_a
+              - path_b
+    """
+
+    model_config = {"frozen": True}
+
+    name: str = Field(description="Gate identifier (unique within pipeline)")
+    condition: str = Field(
+        description="Expression to evaluate (validated by ExpressionParser)"
+    )
+    routes: dict[str, str] = Field(
+        description="Maps route labels to destinations ('continue' or sink name)"
+    )
+    fork_to: list[str] | None = Field(
+        default=None,
+        description="List of paths for fork operations",
+    )
+
+    @field_validator("condition")
+    @classmethod
+    def validate_condition_expression(cls, v: str) -> str:
+        """Validate that condition is a valid expression at config time."""
+        from elspeth.engine.expression_parser import (
+            ExpressionParser,
+            ExpressionSecurityError,
+            ExpressionSyntaxError,
+        )
+
+        try:
+            ExpressionParser(v)
+        except ExpressionSyntaxError as e:
+            raise ValueError(f"Invalid condition syntax: {e}") from e
+        except ExpressionSecurityError as e:
+            raise ValueError(f"Forbidden construct in condition: {e}") from e
+        return v
+
+    @field_validator("routes")
+    @classmethod
+    def validate_routes_not_empty(cls, v: dict[str, str]) -> dict[str, str]:
+        """Routes must have at least one entry."""
+        if not v:
+            raise ValueError("routes must have at least one entry")
+        return v
+
+    @field_validator("routes")
+    @classmethod
+    def validate_route_destinations(cls, v: dict[str, str]) -> dict[str, str]:
+        """Route destinations must be 'continue', 'fork', or valid identifiers."""
+        import re
+
+        identifier_pattern = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+        for label, destination in v.items():
+            if destination in ("continue", "fork"):
+                continue
+            if not identifier_pattern.match(destination):
+                raise ValueError(
+                    f"Route destination '{destination}' for label '{label}' "
+                    "must be 'continue', 'fork', or a valid identifier"
+                )
+        return v
+
+    @model_validator(mode="after")
+    def validate_fork_consistency(self) -> "GateSettings":
+        """Ensure fork_to is provided when routes use 'fork' destination."""
+        has_fork_route = any(dest == "fork" for dest in self.routes.values())
+        if has_fork_route and not self.fork_to:
+            raise ValueError("fork_to is required when any route destination is 'fork'")
+        if self.fork_to and not has_fork_route:
+            raise ValueError("fork_to is only valid when a route destination is 'fork'")
+        return self
+
+
 class DatasourceSettings(BaseModel):
     """Source plugin configuration per architecture."""
 
@@ -263,6 +355,12 @@ class ElspethSettings(BaseModel):
     row_plugins: list[RowPluginSettings] = Field(
         default_factory=list,
         description="Ordered list of transforms/gates to apply",
+    )
+
+    # Optional - engine-level gates (config-driven routing)
+    gates: list[GateSettings] = Field(
+        default_factory=list,
+        description="Engine-level gates for config-driven routing (evaluated by ExpressionParser)",
     )
 
     # Optional - subsystem configuration with defaults

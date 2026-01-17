@@ -294,3 +294,83 @@ class TestPluginConfigWithSchema:
         )
         assert config.schema_config.mode == "strict"
         assert len(config.schema_config.fields) == 2
+
+
+class TestSourceDataConfig:
+    """Tests for SourceDataConfig with on_validation_failure."""
+
+    def test_on_validation_failure_required(self) -> None:
+        """on_validation_failure must be explicitly specified."""
+        from elspeth.plugins.config_base import SourceDataConfig
+
+        with pytest.raises(ValidationError) as exc_info:
+            SourceDataConfig(
+                path="data.csv",
+                schema_config=None,  # Will fail DataPluginConfig validation too
+            )
+
+        # Should fail because on_validation_failure is required
+        errors = exc_info.value.errors()
+        field_names = [e["loc"][0] for e in errors]
+        assert "on_validation_failure" in field_names
+
+    def test_on_validation_failure_accepts_sink_name(self) -> None:
+        """on_validation_failure accepts a sink name."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.config_base import SourceDataConfig
+
+        config = SourceDataConfig(
+            path="data.csv",
+            schema_config=SchemaConfig.from_dict(
+                {"fields": ["id: int", "name: str"], "mode": "strict"}
+            ),
+            on_validation_failure="quarantine_sink",
+        )
+
+        assert config.on_validation_failure == "quarantine_sink"
+
+    def test_on_validation_failure_accepts_discard(self) -> None:
+        """on_validation_failure accepts 'discard' for explicit /dev/null."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.config_base import SourceDataConfig
+
+        config = SourceDataConfig(
+            path="data.csv",
+            schema_config=SchemaConfig.from_dict(
+                {"fields": ["id: int"], "mode": "free"}
+            ),
+            on_validation_failure="discard",
+        )
+
+        assert config.on_validation_failure == "discard"
+
+    def test_on_validation_failure_rejects_empty_string(self) -> None:
+        """on_validation_failure rejects empty string."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.config_base import SourceDataConfig
+
+        with pytest.raises(ValidationError):
+            SourceDataConfig(
+                path="data.csv",
+                schema_config=SchemaConfig.from_dict(
+                    {"fields": ["id: int"], "mode": "strict"}
+                ),
+                on_validation_failure="",
+            )
+
+    def test_source_config_inherits_path_and_schema(self) -> None:
+        """SourceDataConfig inherits path and schema_config requirements."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.config_base import SourceDataConfig
+
+        config = SourceDataConfig(
+            path="data/input.csv",
+            schema_config=SchemaConfig.from_dict(
+                {"fields": ["name: str"], "mode": "strict"}
+            ),
+            on_validation_failure="bad_rows",
+        )
+
+        assert config.path == "data/input.csv"
+        assert config.schema_config is not None
+        assert config.schema_config.mode == "strict"

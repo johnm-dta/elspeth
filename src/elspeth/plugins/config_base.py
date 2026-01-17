@@ -18,7 +18,7 @@ Example usage:
 from pathlib import Path
 from typing import Any, Self
 
-from pydantic import BaseModel, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from elspeth.contracts.schema import SchemaConfig
 
@@ -127,3 +127,24 @@ class PathConfig(DataPluginConfig):
         if base_dir and not p.is_absolute():
             return base_dir / p
         return p
+
+
+class SourceDataConfig(PathConfig):
+    """Base config for source plugins with quarantine routing.
+
+    Extends PathConfig to add required on_validation_failure field.
+    All sources must specify where non-conformant rows go.
+    """
+
+    on_validation_failure: str = Field(
+        ...,  # Required - no default
+        description="Sink name for non-conformant rows, or 'discard' for explicit drop",
+    )
+
+    @field_validator("on_validation_failure")
+    @classmethod
+    def validate_on_validation_failure(cls, v: str) -> str:
+        """Ensure on_validation_failure is not empty."""
+        if not v or not v.strip():
+            raise ValueError("on_validation_failure must be a sink name or 'discard'")
+        return v.strip()

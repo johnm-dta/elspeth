@@ -45,6 +45,7 @@ from elspeth.plugins.config_base import (
     PathConfig,
     PluginConfig,
     PluginConfigError,
+    SourceDataConfig,
 )
 
 # Context
@@ -108,6 +109,7 @@ __all__ = [  # Grouped by category for readability
     "PathConfig",
     "PluginConfig",
     "PluginConfigError",
+    "SourceDataConfig",
     # Manager
     "PluginManager",
     "PluginSpec",

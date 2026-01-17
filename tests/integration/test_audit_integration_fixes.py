@@ -34,7 +34,7 @@ class TestIntegrationAuditFixes:
         # All built-in plugins discoverable
         assert len(manager.get_sources()) >= 2
         assert len(manager.get_transforms()) >= 2
-        assert len(manager.get_gates()) >= 3
+        assert len(manager.get_gates()) >= 0  # Gate plugins removed in WP-02
         assert len(manager.get_sinks()) >= 3
 
         # Instantiate a plugin and verify node_id
@@ -190,14 +190,8 @@ class TestIntegrationAuditFixes:
         transform.node_id = "transform-001"
         assert transform.node_id == "transform-001"
 
-        # Test gate
-        filter_gate_cls = manager.get_gate_by_name("filter_gate")
-        assert filter_gate_cls is not None
-        # Protocols don't define __init__ but concrete classes do
-        gate = filter_gate_cls({"field": "score", "greater_than": 50})  # type: ignore[call-arg]
-        assert hasattr(gate, "node_id")
-        gate.node_id = "gate-001"
-        assert gate.node_id == "gate-001"
+        # Test gate - SKIPPED: Gate plugins removed in WP-02
+        # Protocol/base class still supports node_id, but no concrete implementations exist
 
         # Test sink
         csv_sink_cls = manager.get_sink_by_name("csv")

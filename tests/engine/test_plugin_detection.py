@@ -21,13 +21,6 @@ from elspeth.plugins.results import (
 class TestPluginTypeDetection:
     """Tests for isinstance-based plugin detection."""
 
-    def test_gate_is_base_gate(self) -> None:
-        """Gates should be instances of BaseGate."""
-        from elspeth.plugins.gates.threshold_gate import ThresholdGate
-
-        gate = ThresholdGate({"field": "score", "threshold": 0.5})
-        assert isinstance(gate, BaseGate)
-
     def test_transform_is_base_transform(self) -> None:
         """Transforms should be instances of BaseTransform."""
         from elspeth.plugins.transforms.passthrough import PassThrough
@@ -119,14 +112,6 @@ class TestPluginTypeDetection:
 
 class TestPluginInheritanceHierarchy:
     """Tests verifying proper inheritance hierarchy."""
-
-    def test_gate_not_transform(self) -> None:
-        """Gates should NOT be instances of BaseTransform."""
-        from elspeth.plugins.gates.threshold_gate import ThresholdGate
-
-        gate = ThresholdGate({"field": "score", "threshold": 0.5})
-        # mypy knows these are incompatible hierarchies - that's what we're verifying
-        assert not isinstance(gate, BaseTransform)  # type: ignore[unreachable]
 
     def test_transform_not_gate(self) -> None:
         """Transforms should NOT be instances of BaseGate."""

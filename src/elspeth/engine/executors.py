@@ -20,9 +20,11 @@ from elspeth.contracts import (
     RoutingSpec,
     TokenInfo,
 )
-from elspeth.contracts.enums import RoutingKind
+from elspeth.contracts.enums import RoutingKind, RoutingMode
 from elspeth.core.canonical import stable_hash
+from elspeth.core.config import GateSettings
 from elspeth.core.landscape import LandscapeRecorder
+from elspeth.engine.expression_parser import ExpressionParser
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import (
@@ -413,6 +415,211 @@ class GateExecutor:
             row_id=token.row_id,
             token_id=token.token_id,
             row_data=result.row,
+            branch_name=token.branch_name,
+        )
+
+        return GateOutcome(
+            result=result,
+            updated_token=updated_token,
+            child_tokens=child_tokens,
+            sink_name=sink_name,
+        )
+
+    def execute_config_gate(
+        self,
+        gate_config: GateSettings,
+        node_id: str,
+        token: TokenInfo,
+        ctx: PluginContext,
+        step_in_pipeline: int,
+        token_manager: "TokenManager | None" = None,
+    ) -> GateOutcome:
+        """Execute a config-driven gate using ExpressionParser.
+
+        Unlike execute_gate() which uses a GateProtocol plugin,
+        this method evaluates the gate condition directly using
+        the expression parser. The condition expression is evaluated
+        against the token's row_data.
+
+        Route Resolution:
+        - If condition returns a string, it's used as the route label directly
+        - If condition returns a boolean, it's converted to "true"/"false" label
+        - The label is then looked up in gate_config.routes to get the destination
+
+        Args:
+            gate_config: Gate configuration with condition and routes
+            node_id: Node ID assigned by orchestrator
+            token: Current token with row data
+            ctx: Plugin context
+            step_in_pipeline: Current position in DAG (Orchestrator is authority)
+            token_manager: TokenManager for fork operations (required for fork destinations)
+
+        Returns:
+            GateOutcome with result, updated token, and routing info
+
+        Raises:
+            MissingEdgeError: If routing refers to an unregistered edge
+            ValueError: If condition result doesn't match any route label
+            RuntimeError: If fork destination without token_manager
+        """
+        input_hash = stable_hash(token.row_data)
+
+        # Begin node state
+        state = self._recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=node_id,
+            step_index=step_in_pipeline,
+            input_data=token.row_data,
+        )
+
+        # Create parser and evaluate condition
+        with self._spans.gate_span(gate_config.name, input_hash=input_hash):
+            start = time.perf_counter()
+            try:
+                parser = ExpressionParser(gate_config.condition)
+                eval_result = parser.evaluate(token.row_data)
+                duration_ms = (time.perf_counter() - start) * 1000
+            except Exception as e:
+                duration_ms = (time.perf_counter() - start) * 1000
+                # Record failure
+                error: ExecutionError = {
+                    "exception": str(e),
+                    "type": type(e).__name__,
+                }
+                self._recorder.complete_node_state(
+                    state_id=state.state_id,
+                    status="failed",
+                    duration_ms=duration_ms,
+                    error=error,
+                )
+                raise
+
+        # Convert evaluation result to route label
+        if isinstance(eval_result, bool):
+            route_label = "true" if eval_result else "false"
+        elif isinstance(eval_result, str):
+            route_label = eval_result
+        else:
+            # Unexpected result type - convert to string
+            route_label = str(eval_result)
+
+        # Look up destination in routes config
+        if route_label not in gate_config.routes:
+            # Record failure before raising
+            error = {
+                "exception": f"Route label '{route_label}' not found in routes config",
+                "type": "ValueError",
+            }
+            self._recorder.complete_node_state(
+                state_id=state.state_id,
+                status="failed",
+                duration_ms=duration_ms,
+                error=error,
+            )
+            raise ValueError(
+                f"Gate '{gate_config.name}' condition returned '{route_label}' "
+                f"which is not in routes: {list(gate_config.routes.keys())}"
+            )
+
+        destination = gate_config.routes[route_label]
+
+        # Build routing action and process based on destination
+        child_tokens: list[TokenInfo] = []
+        sink_name: str | None = None
+        reason = {"condition": gate_config.condition, "result": route_label}
+
+        if destination == "continue":
+            # Continue to next node - no routing event needed
+            action = RoutingAction.continue_(reason=reason)
+
+        elif destination == "fork":
+            # Fork to multiple paths
+            if gate_config.fork_to is None:
+                # This should be caught by Pydantic validation, but be defensive
+                error = {
+                    "exception": "fork destination requires fork_to paths",
+                    "type": "ValueError",
+                }
+                self._recorder.complete_node_state(
+                    state_id=state.state_id,
+                    status="failed",
+                    duration_ms=duration_ms,
+                    error=error,
+                )
+                raise ValueError(
+                    f"Gate '{gate_config.name}' routes to 'fork' but fork_to is not configured"
+                )
+
+            if token_manager is None:
+                error = {
+                    "exception": "fork requires TokenManager",
+                    "type": "RuntimeError",
+                }
+                self._recorder.complete_node_state(
+                    state_id=state.state_id,
+                    status="failed",
+                    duration_ms=duration_ms,
+                    error=error,
+                )
+                raise RuntimeError(
+                    f"Gate {node_id} routes to fork but no TokenManager provided. "
+                    "Cannot create child tokens - audit integrity would be compromised."
+                )
+
+            action = RoutingAction.fork_to_paths(gate_config.fork_to, reason=reason)
+
+            # Record routing events for all paths
+            self._record_routing(
+                state_id=state.state_id,
+                node_id=node_id,
+                action=action,
+            )
+
+            # Create child tokens
+            child_tokens = token_manager.fork_token(
+                parent_token=token,
+                branches=gate_config.fork_to,
+                step_in_pipeline=step_in_pipeline,
+                row_data=token.row_data,
+            )
+
+        else:
+            # Route to a named sink
+            sink_name = destination
+            action = RoutingAction.route(
+                route_label, mode=RoutingMode.MOVE, reason=reason
+            )
+
+            # Record routing event
+            self._record_routing(
+                state_id=state.state_id,
+                node_id=node_id,
+                action=action,
+            )
+
+        # Create GateResult for audit fields
+        result = GateResult(
+            row=token.row_data,
+            action=action,
+        )
+        result.input_hash = input_hash
+        result.output_hash = stable_hash(token.row_data)
+        result.duration_ms = duration_ms
+
+        # Complete node state - always "completed" for successful execution
+        # Terminal state is DERIVED from routing_events, not stored here
+        self._recorder.complete_node_state(
+            state_id=state.state_id,
+            status="completed",
+            output_data=token.row_data,
+            duration_ms=duration_ms,
+        )
+
+        # Token row_data is unchanged (config gates don't modify data)
+        updated_token = TokenInfo(
+            row_id=token.row_id,
+            token_id=token.token_id,
+            row_data=token.row_data,
             branch_name=token.branch_name,
         )
 

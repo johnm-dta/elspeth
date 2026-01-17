@@ -3631,3 +3631,117 @@ class TestOrchestratorForkExecution:
         assert run_result.rows_succeeded == 3
         # All 3 written to sink
         assert len(sink.results) == 3
+
+
+class TestOrchestratorQuarantineMetrics:
+    """Test that QUARANTINED rows are counted separately from FAILED."""
+
+    def test_orchestrator_counts_quarantined_rows(self) -> None:
+        """Orchestrator should count QUARANTINED rows separately.
+
+        A transform with _on_error="discard" intentionally quarantines rows
+        when it returns TransformResult.error(). These should be counted
+        as quarantined, not failed.
+        """
+        from elspeth.contracts import PluginSchema
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+            quality: str
+
+        class ListSource(_TestSourceBase):
+            name = "list_source"
+            output_schema = ValueSchema
+
+            def __init__(self, data: list[dict[str, Any]]) -> None:
+                self._data = data
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def load(self, ctx: Any) -> Any:
+                yield from self._data
+
+            def close(self) -> None:
+                pass
+
+        class QualityFilter(BaseTransform):
+            """Transform that errors on 'bad' quality rows.
+
+            With _on_error="discard", these become QUARANTINED.
+            """
+
+            name = "quality_filter"
+            input_schema = ValueSchema
+            output_schema = ValueSchema
+            _on_error = "discard"  # Intentionally discard errors
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def process(self, row: Any, ctx: Any) -> TransformResult:
+                if row.get("quality") == "bad":
+                    return TransformResult.error(
+                        {"reason": "bad_quality", "value": row["value"]}
+                    )
+                return TransformResult.success(row)
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
+
+            def close(self) -> None:
+                pass
+
+        # 3 rows: good, bad, good
+        source = ListSource(
+            [
+                {"value": 1, "quality": "good"},
+                {"value": 2, "quality": "bad"},  # Will be quarantined
+                {"value": 3, "quality": "good"},
+            ]
+        )
+        transform = QualityFilter()
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[transform],
+            sinks={"default": sink},
+        )
+
+        orchestrator = Orchestrator(db)
+        run_result = orchestrator.run(config, graph=_build_test_graph(config))
+
+        # Verify counts
+        assert run_result.status == "completed"
+        assert run_result.rows_processed == 3, "All 3 rows should be processed"
+        assert run_result.rows_succeeded == 2, "2 good quality rows should succeed"
+        assert (
+            run_result.rows_quarantined == 1
+        ), "1 bad quality row should be quarantined"
+        assert run_result.rows_failed == 0, "No rows should fail (quarantine != fail)"
+
+        # Only good rows written to sink
+        assert len(sink.results) == 2
+        assert all(r["quality"] == "good" for r in sink.results)

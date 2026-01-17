@@ -33,7 +33,9 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         assert JSONSink.name == "json"
-        assert hasattr(JSONSink, "input_schema")
+        # input_schema is now set per-instance based on config
+        sink = JSONSink({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA})
+        assert hasattr(sink, "input_schema")
 
     def test_write_json_array(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Write rows as JSON array."""

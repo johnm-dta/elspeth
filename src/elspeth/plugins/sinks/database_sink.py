@@ -2,6 +2,9 @@
 """Database sink plugin for ELSPETH.
 
 Writes rows to a database table using SQLAlchemy Core.
+
+IMPORTANT: Sinks use allow_coercion=False to enforce that transforms
+output correct types. Wrong types = upstream bug = crash.
 """
 
 import hashlib
@@ -13,22 +16,21 @@ from sqlalchemy.engine import Engine
 
 from elspeth.contracts import ArtifactDescriptor, PluginSchema
 from elspeth.plugins.base import BaseSink
-from elspeth.plugins.config_base import PluginConfig
+from elspeth.plugins.config_base import DataPluginConfig
 from elspeth.plugins.context import PluginContext
+from elspeth.plugins.schema_factory import create_schema_from_config
 
 
-class DatabaseInputSchema(PluginSchema):
-    """Dynamic schema - accepts any row structure."""
+class DatabaseSinkConfig(DataPluginConfig):
+    """Configuration for database sink plugin.
 
-    model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic pattern
-
-
-class DatabaseSinkConfig(PluginConfig):
-    """Configuration for database sink plugin."""
+    Inherits from DataPluginConfig, which requires schema configuration.
+    """
 
     url: str
     table: str
     if_exists: Literal["append", "replace"] = "append"
+    validate_input: bool = False  # Optional runtime validation of incoming rows
 
 
 class DatabaseSink(BaseSink):
@@ -43,20 +45,44 @@ class DatabaseSink(BaseSink):
     Config options:
         url: Database connection URL (required)
         table: Table name (required)
+        schema: Schema configuration (required, via DataPluginConfig)
         if_exists: "append" or "replace" (default: "append")
+        validate_input: Validate incoming rows against schema (default: False)
+
+    The schema can be:
+        - Dynamic: {"fields": "dynamic"} - accept any fields
+        - Strict: {"mode": "strict", "fields": ["id: int", "name: str"]}
+        - Free: {"mode": "free", "fields": ["id: int"]} - at least these fields
     """
 
     name = "database"
-    input_schema = DatabaseInputSchema
     plugin_version = "1.0.0"
     # determinism inherited from BaseSink (IO_WRITE)
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         cfg = DatabaseSinkConfig.from_dict(config)
+
         self._url = cfg.url
         self._table_name = cfg.table
         self._if_exists = cfg.if_exists
+        self._validate_input = cfg.validate_input
+
+        # Store schema config for audit trail
+        # DataPluginConfig ensures schema_config is not None
+        assert cfg.schema_config is not None
+        self._schema_config = cfg.schema_config
+
+        # CRITICAL: allow_coercion=False - wrong types are bugs, not data to fix
+        # Sinks receive PIPELINE DATA (already validated by source)
+        self._schema_class: type[PluginSchema] = create_schema_from_config(
+            self._schema_config,
+            "DatabaseRowSchema",
+            allow_coercion=False,  # Sinks reject wrong types (upstream bug)
+        )
+
+        # Set input_schema for protocol compliance
+        self.input_schema = self._schema_class
 
         self._engine: Engine | None = None
         self._table: Table | None = None
@@ -95,6 +121,10 @@ class DatabaseSink(BaseSink):
 
         Returns:
             ArtifactDescriptor with content_hash (SHA-256) and size_bytes
+
+        Raises:
+            ValidationError: If validate_input=True and a row fails validation.
+                This indicates a bug in an upstream transform.
         """
         # Compute canonical JSON payload BEFORE any database operation
         payload_json = json.dumps(rows, sort_keys=True, separators=(",", ":"))
@@ -111,6 +141,12 @@ class DatabaseSink(BaseSink):
                 payload_size=0,
                 row_count=0,
             )
+
+        # Optional input validation - crash on failure (upstream bug!)
+        if self._validate_input and not self._schema_config.is_dynamic:
+            for row in rows:
+                # Raises ValidationError on failure - this is intentional
+                self._schema_class.model_validate(row)
 
         # Ensure table exists (infer from first row)
         self._ensure_table(rows[0])

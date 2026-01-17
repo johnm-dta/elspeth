@@ -33,7 +33,9 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         assert CSVSink.name == "csv"
-        assert hasattr(CSVSink, "input_schema")
+        # input_schema is now set per-instance based on config
+        sink = CSVSink({"path": "/tmp/test.csv", "schema": DYNAMIC_SCHEMA})
+        assert hasattr(sink, "input_schema")
 
     def test_write_creates_file(self, tmp_path: Path, ctx: PluginContext) -> None:
         """write() creates CSV file with headers."""

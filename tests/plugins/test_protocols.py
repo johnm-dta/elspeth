@@ -15,7 +15,7 @@ class TestSourceProtocol:
         assert hasattr(SourceProtocol, "__protocol_attrs__")
 
     def test_source_implementation(self) -> None:
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import Determinism, PluginSchema
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.protocols import SourceProtocol
 
@@ -28,6 +28,8 @@ class TestSourceProtocol:
             name = "my_source"
             output_schema = OutputSchema
             node_id: str | None = None  # Set by orchestrator
+            determinism = Determinism.IO_READ
+            plugin_version = "1.0.0"
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -65,6 +67,54 @@ class TestSourceProtocol:
         # Check protocol has expected methods
         assert hasattr(SourceProtocol, "load")
         assert hasattr(SourceProtocol, "close")
+
+    def test_source_has_determinism_attribute(self) -> None:
+        from elspeth.plugins.protocols import SourceProtocol
+
+        assert "determinism" in SourceProtocol.__protocol_attrs__  # type: ignore[attr-defined]
+
+    def test_source_has_version_attribute(self) -> None:
+        from elspeth.plugins.protocols import SourceProtocol
+
+        assert "plugin_version" in SourceProtocol.__protocol_attrs__  # type: ignore[attr-defined]
+
+    def test_source_implementation_with_metadata(self) -> None:
+        from collections.abc import Iterator
+        from typing import Any
+
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import SourceProtocol
+
+        class OutputSchema(PluginSchema):
+            value: int
+
+        class MetadataSource:
+            name = "metadata_source"
+            output_schema = OutputSchema
+            node_id: str | None = None
+            determinism = Determinism.IO_READ
+            plugin_version = "1.0.0"
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+
+            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
+                yield {"value": 1}
+
+            def close(self) -> None:
+                pass
+
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
+        source = MetadataSource({})
+        assert isinstance(source, SourceProtocol)
+        assert source.determinism == Determinism.IO_READ
+        assert source.plugin_version == "1.0.0"
 
 
 class TestTransformProtocol:

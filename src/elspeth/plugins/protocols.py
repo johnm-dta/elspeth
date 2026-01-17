@@ -53,6 +53,10 @@ class SourceProtocol(Protocol):
     output_schema: type["PluginSchema"]
     node_id: str | None  # Set by orchestrator after registration
 
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism
+    plugin_version: str
+
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
         ...

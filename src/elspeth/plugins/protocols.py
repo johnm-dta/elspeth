@@ -263,6 +263,7 @@ class CoalescePolicy(Enum):
     REQUIRE_ALL = "require_all"  # Wait for all branches; any failure fails
     QUORUM = "quorum"  # Merge if >= n branches succeed
     BEST_EFFORT = "best_effort"  # Merge whatever arrives by timeout
+    FIRST = "first"  # Take first arrival, don't wait for others
 
 
 @runtime_checkable

@@ -271,6 +271,7 @@ class TestCoalesceProtocol:
         assert CoalescePolicy.REQUIRE_ALL.value == "require_all"
         assert CoalescePolicy.QUORUM.value == "quorum"
         assert CoalescePolicy.BEST_EFFORT.value == "best_effort"
+        assert CoalescePolicy.FIRST.value == "first"
 
     def test_quorum_requires_threshold(self) -> None:
         """QUORUM policy needs a quorum_threshold."""

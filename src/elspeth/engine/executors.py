@@ -25,7 +25,11 @@ from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape import LandscapeRecorder
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.protocols import SinkProtocol
+from elspeth.plugins.protocols import (
+    GateProtocol,
+    SinkProtocol,
+    TransformProtocol,
+)
 from elspeth.plugins.results import (
     AcceptResult,
     GateResult,
@@ -72,17 +76,6 @@ class GateOutcome:
     sink_name: str | None = None
 
 
-class TransformLike(Protocol):
-    """Protocol for transform-like plugins."""
-
-    name: str
-    node_id: str
-
-    def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
-        """Process a row."""
-        ...
-
-
 class TransformExecutor:
     """Executes transforms with audit recording.
 
@@ -119,7 +112,7 @@ class TransformExecutor:
 
     def execute_transform(
         self,
-        transform: TransformLike,
+        transform: TransformProtocol,
         token: TokenInfo,
         ctx: PluginContext,
         step_in_pipeline: int,
@@ -143,6 +136,7 @@ class TransformExecutor:
         Raises:
             Exception: Re-raised from transform.process() after recording failure
         """
+        assert transform.node_id is not None, "node_id must be set by orchestrator"
         input_hash = stable_hash(token.row_data)
 
         # Begin node state
@@ -209,17 +203,6 @@ class TransformExecutor:
         return result, updated_token
 
 
-class GateLike(Protocol):
-    """Protocol for gate-like plugins."""
-
-    name: str
-    node_id: str
-
-    def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
-        """Evaluate a row and decide routing."""
-        ...
-
-
 class GateExecutor:
     """Executes gates with audit recording and routing.
 
@@ -269,7 +252,7 @@ class GateExecutor:
 
     def execute_gate(
         self,
-        gate: GateLike,
+        gate: GateProtocol,
         token: TokenInfo,
         ctx: PluginContext,
         step_in_pipeline: int,
@@ -291,6 +274,7 @@ class GateExecutor:
             MissingEdgeError: If routing refers to an unregistered edge
             Exception: Re-raised from gate.evaluate() after recording failure
         """
+        assert gate.node_id is not None, "node_id must be set by orchestrator"
         input_hash = stable_hash(token.row_data)
 
         # Begin node state

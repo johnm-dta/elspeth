@@ -216,53 +216,6 @@ allow_hits:
     expires: null  # Permanent - intentional design
 
   # ============================================================
-  # PLUGIN LIFECYCLE TRUST BOUNDARY (Permanent)
-  # ============================================================
-  # Plugin adapters use hasattr to check for optional lifecycle methods
-  # (on_start, on_complete) because Phase 2 plugins may not implement them.
-  # This is legitimate duck-typing at a plugin trust boundary.
-  # ============================================================
-
-  - key: "engine/adapters.py:R3:SinkAdapter:on_start:line=272"
-    owner: "architecture"
-    reason: "Trust boundary: optional plugin lifecycle method may not exist"
-    safety: "Duck-typing at plugin boundary - Phase 2 plugins may not have lifecycle hooks"
-    expires: null  # Permanent - intentional design
-
-  - key: "engine/adapters.py:R3:SinkAdapter:on_complete:line=281"
-    owner: "architecture"
-    reason: "Trust boundary: optional plugin lifecycle method may not exist"
-    safety: "Duck-typing at plugin boundary - Phase 2 plugins may not have lifecycle hooks"
-    expires: null  # Permanent - intentional design
-
-  # ============================================================
-  # ARTIFACT DESCRIPTOR PARSING (Permanent)
-  # ============================================================
-  # RawArtifactDescriptor.from_dict parses external configuration dicts.
-  # Fields are optional depending on artifact kind. Validation happens in
-  # __post_init__. This is a trust boundary - external config may have
-  # different keys present.
-  # ============================================================
-
-  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=100"
-    owner: "architecture"
-    reason: "Trust boundary: parsing external config dict with optional fields"
-    safety: "Validation in __post_init__ ensures required fields for each kind"
-    expires: null  # Permanent - intentional design
-
-  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=101"
-    owner: "architecture"
-    reason: "Trust boundary: parsing external config dict with optional fields"
-    safety: "Validation in __post_init__ ensures required fields for each kind"
-    expires: null  # Permanent - intentional design
-
-  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=102"
-    owner: "architecture"
-    reason: "Trust boundary: parsing external config dict with optional fields"
-    safety: "Validation in __post_init__ ensures required fields for each kind"
-    expires: null  # Permanent - intentional design
-
-  # ============================================================
   # TRANSFORM/GATE CLEANUP (Permanent)
   # ============================================================
   # The orchestrator calls close() on transforms/gates in a finally block.

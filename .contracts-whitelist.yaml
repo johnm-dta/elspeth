@@ -17,8 +17,6 @@ allowed_dict_patterns:
   # ═══════════════════════════════════════════════════════════════════════════
 
   # Engine - row data handling
-  - "src/elspeth/engine/adapters.py:RowWiseSinkProtocol.write:row"
-  - "src/elspeth/engine/adapters.py:SinkAdapter.write:rows (list)"
   - "src/elspeth/engine/executors.py:TransformLike.process:row"
   - "src/elspeth/engine/executors.py:GateLike.evaluate:row"
   - "src/elspeth/engine/executors.py:AggregationLike.accept:row"
@@ -69,7 +67,6 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/base.py:BaseSink.write:row"
   - "src/elspeth/engine/executors.py:AggregationLike.flush:return (list)"
   - "src/elspeth/engine/executors.py:AggregationExecutor.flush:return (list)"
-  - "src/elspeth/engine/adapters.py:SinkAdapter.write:rows (list)"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # PLUGIN CONFIG (TRUST BOUNDARY)
@@ -123,12 +120,6 @@ allowed_dict_patterns:
   # is plugin-specific and cannot be typed at the framework level.
   # ═══════════════════════════════════════════════════════════════════════════
   - "src/elspeth/core/checkpoint/manager.py:CheckpointManager.create_checkpoint:aggregation_state"
-
-  # ═══════════════════════════════════════════════════════════════════════════
-  # ENGINE ADAPTER - from_dict factory
-  # RawArtifactDescriptor.from_dict receives dict from serialization layer
-  # ═══════════════════════════════════════════════════════════════════════════
-  - "src/elspeth/engine/adapters.py:RawArtifactDescriptor.from_dict:data"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # LANDSCAPE RECORDER - Audit trail recording

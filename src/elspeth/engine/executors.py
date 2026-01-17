@@ -23,9 +23,9 @@ from elspeth.contracts import (
 from elspeth.contracts.enums import RoutingKind
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape import LandscapeRecorder
-from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.context import PluginContext
+from elspeth.plugins.protocols import SinkProtocol
 from elspeth.plugins.results import (
     AcceptResult,
     GateResult,
@@ -665,33 +665,6 @@ class AggregationExecutor:
                 raise
 
 
-class SinkLike(Protocol):
-    """Protocol for sink-like plugins.
-
-    This is an engine-internal adapter interface, not the same as Phase 2 SinkProtocol.
-    Real SinkProtocol plugins write single rows. SinkAdapter (Phase 4) bridges between them.
-
-    The write() method accepts a list of rows (batch write) and returns artifact info.
-    """
-
-    name: str
-    node_id: str | None  # Set by orchestrator during registration
-
-    def write(
-        self, rows: list[dict[str, Any]], ctx: PluginContext
-    ) -> ArtifactDescriptor:
-        """Write rows to sink.
-
-        Args:
-            rows: List of row data dictionaries
-            ctx: Plugin context
-
-        Returns:
-            ArtifactDescriptor with unified artifact info
-        """
-        ...
-
-
 class SinkExecutor:
     """Executes sinks with artifact recording.
 
@@ -735,7 +708,7 @@ class SinkExecutor:
 
     def write(
         self,
-        sink: SinkLike,
+        sink: SinkProtocol,
         tokens: list[TokenInfo],
         ctx: PluginContext,
         step_in_pipeline: int,

@@ -271,19 +271,19 @@ allow_hits:
   # whole cleanup process.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R3:Orchestrator:_cleanup_transforms:line=169"
+  - key: "engine/orchestrator.py:R3:Orchestrator:_cleanup_transforms:line=167"
     owner: "architecture"
     reason: "Trust boundary: old plugins may not implement close() method"
     safety: "Duck-typing at plugin boundary - graceful skip for legacy plugins"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=171"
+  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=169"
     owner: "architecture"
     reason: "Best-effort cleanup: one plugin failure shouldn't prevent others from cleanup"
     safety: "Logged with warning, other plugins still get close() called"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R2:Orchestrator:_cleanup_transforms:line=175"
+  - key: "engine/orchestrator.py:R2:Orchestrator:_cleanup_transforms:line=173"
     owner: "architecture"
     reason: "Trust boundary: plugin may not have name attribute"
     safety: "Fallback to str() for log message - never raises"
@@ -296,13 +296,13 @@ allow_hits:
   # messages. These lookups are for UI/diagnostic purposes only.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=204"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=202"
     owner: "architecture"
     reason: "Building lookup for gate names - only gates (not transforms) are in map"
     safety: "None means 'not a gate at this sequence' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=216"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=214"
     owner: "architecture"
     reason: "Fallback for error message - use node_id if gate name not found"
     safety: "Error message still produced with node_id as fallback"
@@ -316,13 +316,13 @@ allow_hits:
   # legitimate duck-typing at a plugin trust boundary.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=351"
+  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=413"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define plugin_version attribute"
     safety: "Duck-typing at plugin boundary - fallback to '0.0.0' is documented behavior"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=356"
+  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=418"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define determinism attribute"
     safety: "Duck-typing at plugin boundary - fallback to DETERMINISTIC is documented"
@@ -335,7 +335,7 @@ allow_hits:
   # variables. This is explicitly checked and raises if missing when required.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=594"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=642"
     owner: "architecture"
     reason: "Standard pattern: optional environment variable with explicit check"
     safety: "Raises ValueError with clear message if signing enabled but key missing"
@@ -348,19 +348,19 @@ allow_hits:
   # entries raise MissingEdgeError with clear diagnostics.
   # ============================================================
 
-  - key: "engine/executors.py:R1:GateExecutor:execute_gate:line=341"
+  - key: "engine/executors.py:R1:GateExecutor:execute_gate:line=342"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=417"
+  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=418"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=431"
+  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=432"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
@@ -479,18 +479,6 @@ allow_hits:
   # invalid or missing values.
   # ============================================================
 
-  - key: "engine/retry.py:R1:RetryConfig:from_policy:line=68"
-    owner: "architecture"
-    reason: "Trust boundary: external policy dict may have invalid/missing values"
-    safety: "max() ensures minimum valid value, docstring documents this behavior"
-    expires: null  # Permanent - intentional design
-
-  - key: "engine/retry.py:R1:RetryConfig:from_policy:line=69"
-    owner: "architecture"
-    reason: "Trust boundary: external policy dict may have invalid/missing values"
-    safety: "max() ensures minimum valid value, docstring documents this behavior"
-    expires: null  # Permanent - intentional design
-
   - key: "engine/retry.py:R1:RetryConfig:from_policy:line=70"
     owner: "architecture"
     reason: "Trust boundary: external policy dict may have invalid/missing values"
@@ -498,6 +486,18 @@ allow_hits:
     expires: null  # Permanent - intentional design
 
   - key: "engine/retry.py:R1:RetryConfig:from_policy:line=71"
+    owner: "architecture"
+    reason: "Trust boundary: external policy dict may have invalid/missing values"
+    safety: "max() ensures minimum valid value, docstring documents this behavior"
+    expires: null  # Permanent - intentional design
+
+  - key: "engine/retry.py:R1:RetryConfig:from_policy:line=72"
+    owner: "architecture"
+    reason: "Trust boundary: external policy dict may have invalid/missing values"
+    safety: "max() ensures minimum valid value, docstring documents this behavior"
+    expires: null  # Permanent - intentional design
+
+  - key: "engine/retry.py:R1:RetryConfig:from_policy:line=73"
     owner: "architecture"
     reason: "Trust boundary: external policy dict may have invalid/missing values"
     safety: "max() ensures minimum valid value, docstring documents this behavior"

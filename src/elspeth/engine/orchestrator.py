@@ -18,13 +18,12 @@ from typing import TYPE_CHECKING, Any
 from elspeth.contracts import Determinism, NodeType, RowOutcome, RunStatus
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
-from elspeth.engine.executors import SinkLike
 from elspeth.engine.processor import RowProcessor
 from elspeth.engine.schema_validator import validate_pipeline_schemas
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.protocols import SourceProtocol
+from elspeth.plugins.protocols import SinkProtocol, SourceProtocol
 
 # Type alias for transform-like plugins
 TransformLike = BaseTransform | BaseGate | BaseAggregation
@@ -44,9 +43,7 @@ class PipelineConfig:
 
     source: SourceProtocol
     transforms: list[TransformLike]
-    sinks: dict[
-        str, SinkLike
-    ]  # Engine uses SinkLike (batch write), not SinkProtocol (single row)
+    sinks: dict[str, SinkProtocol]  # Sinks implement batch write directly
     config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -225,7 +222,7 @@ class Orchestrator:
         self,
         source: SourceProtocol,
         transforms: list[TransformLike],
-        sinks: dict[str, SinkLike],
+        sinks: dict[str, SinkProtocol],
         source_id: str,
         transform_id_map: dict[int, str],
         sink_id_map: dict[str, str],
@@ -577,10 +574,8 @@ class Orchestrator:
             for sink_name, tokens in pending_tokens.items():
                 if tokens and sink_name in config.sinks:
                     sink = config.sinks[sink_name]
-                    # NOTE: PipelineConfig.sinks is typed as SinkProtocol for API clarity,
-                    # but at runtime receives SinkAdapter instances (SinkLike interface)
                     sink_executor.write(
-                        sink=sink,  # type: ignore[arg-type]
+                        sink=sink,
                         tokens=tokens,
                         ctx=ctx,
                         step_in_pipeline=step,

@@ -24,7 +24,6 @@ allowed_dict_patterns:
   - "src/elspeth/engine/executors.py:AggregationLike.accept:row"
   - "src/elspeth/engine/executors.py:AggregationLike.flush:return (list)"
   - "src/elspeth/engine/executors.py:AggregationExecutor.flush:return (list)"
-  - "src/elspeth/engine/executors.py:SinkLike.write:rows (list)"
   - "src/elspeth/engine/tokens.py:TokenManager.create_initial_token:row_data"
   - "src/elspeth/engine/tokens.py:TokenManager.fork_token:row_data"
   - "src/elspeth/engine/tokens.py:TokenManager.coalesce_tokens:merged_data"
@@ -70,7 +69,6 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/base.py:BaseSink.write:row"
   - "src/elspeth/engine/executors.py:AggregationLike.flush:return (list)"
   - "src/elspeth/engine/executors.py:AggregationExecutor.flush:return (list)"
-  - "src/elspeth/engine/executors.py:SinkLike.write:rows (list)"
   - "src/elspeth/engine/adapters.py:SinkAdapter.write:rows (list)"
 
   # ═══════════════════════════════════════════════════════════════════════════

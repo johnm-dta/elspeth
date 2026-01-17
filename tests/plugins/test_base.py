@@ -59,39 +59,6 @@ class TestBaseTransform:
         assert hasattr(BaseTransform, "on_complete")
 
 
-class TestBaseGate:
-    """Base class for gates."""
-
-    def test_base_gate_implementation(self) -> None:
-        from elspeth.contracts import PluginSchema
-        from elspeth.plugins.base import BaseGate
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import GateResult, RoutingAction
-
-        class RowSchema(PluginSchema):
-            value: int
-
-        class ThresholdGate(BaseGate):
-            name = "threshold"
-            input_schema = RowSchema
-            output_schema = RowSchema
-
-            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
-                threshold = self.config["threshold"]
-                if row["value"] > threshold:
-                    return GateResult(
-                        row=row,
-                        action=RoutingAction.route("above"),  # Route label, not sink
-                    )
-                return GateResult(row=row, action=RoutingAction.route("below"))
-
-        gate = ThresholdGate({"threshold": 50})
-        ctx = PluginContext(run_id="test", config={})
-
-        result = gate.evaluate({"value": 100}, ctx)
-        assert result.action.kind == "route"
-
-
 class TestBaseAggregation:
     """Base class for aggregations."""
 

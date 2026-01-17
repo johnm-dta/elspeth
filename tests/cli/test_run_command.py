@@ -31,6 +31,7 @@ class TestRunCommand:
                 "plugin": "csv",
                 "options": {
                     "path": str(sample_data),
+                    "on_validation_failure": "discard",
                     "schema": {"fields": "dynamic"},
                 },
             },
@@ -103,12 +104,17 @@ datasource:
   plugin: csv
   options:
     path: input.csv
+    on_validation_failure: discard
+    schema:
+      fields: dynamic
 
 sinks:
   results:
     plugin: csv
     options:
       path: output.csv
+      schema:
+        fields: dynamic
 
 output_sink: results
 """)

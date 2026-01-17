@@ -65,6 +65,7 @@ datasource:
   plugin: csv
   options:
     path: "{input_file}"
+    on_validation_failure: discard
     schema:
       fields: dynamic
 
@@ -118,6 +119,7 @@ datasource:
   plugin: csv
   options:
     path: "{input_file}"
+    on_validation_failure: discard
     schema:
       fields: dynamic
 

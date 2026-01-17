@@ -48,6 +48,8 @@ class _TestSourceBase:
     """
 
     node_id: str | None = None
+    determinism = Determinism.DETERMINISTIC
+    plugin_version = "1.0.0"
 
 
 class _TestSinkBase:

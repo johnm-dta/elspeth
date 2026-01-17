@@ -154,15 +154,16 @@ class TestPluginSpec:
         assert spec.version == "1.2.3"
         assert spec.determinism == Determinism.DETERMINISTIC
 
-    def test_spec_defaults(self) -> None:
-        """Optional attributes (determinism, schemas) have defaults."""
+    def test_schema_defaults(self) -> None:
+        """Optional schema attributes default to None (accepts any schema)."""
         from elspeth.contracts import Determinism, NodeType
         from elspeth.plugins.manager import PluginSpec
 
         class MinimalTransform:
             name = "minimal"
             plugin_version = "1.0.0"
-            # No determinism or schema attributes - should use defaults
+            determinism = Determinism.DETERMINISTIC  # Required by protocol
+            # No schema attributes - should default to None
 
         spec = PluginSpec.from_plugin(MinimalTransform, NodeType.TRANSFORM)
 
@@ -229,7 +230,7 @@ class TestPluginSpecSchemaHashes:
 
     def test_from_plugin_captures_input_schema_hash(self) -> None:
         """Input schema is hashed."""
-        from elspeth.contracts import NodeType, PluginSchema
+        from elspeth.contracts import Determinism, NodeType, PluginSchema
         from elspeth.plugins.manager import PluginSpec
 
         class InputSchema(PluginSchema):
@@ -239,6 +240,7 @@ class TestPluginSpecSchemaHashes:
         class MyTransform:
             name = "test"
             plugin_version = "1.0.0"
+            determinism = Determinism.DETERMINISTIC  # Required by protocol
             input_schema = InputSchema
             output_schema = InputSchema
 
@@ -249,7 +251,7 @@ class TestPluginSpecSchemaHashes:
 
     def test_schema_hash_stable(self) -> None:
         """Same schema always produces same hash."""
-        from elspeth.contracts import NodeType, PluginSchema
+        from elspeth.contracts import Determinism, NodeType, PluginSchema
         from elspeth.plugins.manager import PluginSpec
 
         class MySchema(PluginSchema):
@@ -258,12 +260,14 @@ class TestPluginSpecSchemaHashes:
         class T1:
             name = "t1"
             plugin_version = "1.0.0"
+            determinism = Determinism.DETERMINISTIC  # Required by protocol
             input_schema = MySchema
             output_schema = MySchema
 
         class T2:
             name = "t2"
             plugin_version = "1.0.0"
+            determinism = Determinism.DETERMINISTIC  # Required by protocol
             input_schema = MySchema
             output_schema = MySchema
 

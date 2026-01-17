@@ -93,6 +93,8 @@ class ListSource:
     name = "list_source"
     output_schema = ValueSchema
     node_id: str | None = None  # Required by SourceProtocol
+    determinism = Determinism.DETERMINISTIC  # Required by SourceProtocol
+    plugin_version = "1.0.0"  # Required by SourceProtocol
 
     def __init__(self, data: list[dict[str, Any]]) -> None:
         self._data = data
@@ -295,15 +297,15 @@ class TestOrchestratorCleanup:
         assert gate.close_call_count == 1, "gate.close() called multiple times"
 
     def test_cleanup_handles_missing_close_method(self) -> None:
-        """Cleanup should handle transforms without close() method gracefully.
+        """Cleanup should handle transforms that use default close() method.
 
-        This tests graceful degradation for transforms that inherit from
-        BaseTransform but don't override the close() method (which is not
-        part of the base class).
+        BaseTransform provides a default no-op close() method, so transforms
+        that don't override it still satisfy the protocol. This test verifies
+        the cleanup process works correctly with the default implementation.
         """
         db = LandscapeDB.in_memory()
 
-        # Create a transform without close() method (BaseTransform doesn't define one)
+        # Transform using BaseTransform's default close() implementation
         class MinimalTransform(BaseTransform):
             name = "minimal"
             input_schema = ValueSchema
@@ -315,8 +317,7 @@ class TestOrchestratorCleanup:
             def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row)
 
-            # Note: No close() method - this is valid since BaseTransform
-            # doesn't require one
+            # Uses default close() from BaseTransform (no-op)
 
         source = ListSource([{"value": 1}])
         transform = MinimalTransform()

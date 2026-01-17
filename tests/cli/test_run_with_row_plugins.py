@@ -39,7 +39,11 @@ class TestRunWithTransforms:
         config = {
             "datasource": {
                 "plugin": "csv",
-                "options": {"path": str(sample_csv), "schema": DYNAMIC_SCHEMA},
+                "options": {
+                    "path": str(sample_csv),
+                    "on_validation_failure": "discard",
+                    "schema": DYNAMIC_SCHEMA,
+                },
             },
             "row_plugins": [
                 {
@@ -69,7 +73,11 @@ class TestRunWithTransforms:
         config = {
             "datasource": {
                 "plugin": "csv",
-                "options": {"path": str(sample_csv), "schema": DYNAMIC_SCHEMA},
+                "options": {
+                    "path": str(sample_csv),
+                    "on_validation_failure": "discard",
+                    "schema": DYNAMIC_SCHEMA,
+                },
             },
             "row_plugins": [
                 {
@@ -102,7 +110,11 @@ class TestRunWithTransforms:
         config = {
             "datasource": {
                 "plugin": "csv",
-                "options": {"path": str(sample_csv), "schema": DYNAMIC_SCHEMA},
+                "options": {
+                    "path": str(sample_csv),
+                    "on_validation_failure": "discard",
+                    "schema": DYNAMIC_SCHEMA,
+                },
             },
             "row_plugins": [
                 {
@@ -203,7 +215,11 @@ class TestRunWithGates:
         config = {
             "datasource": {
                 "plugin": "csv",
-                "options": {"path": str(sample_csv), "schema": DYNAMIC_SCHEMA},
+                "options": {
+                    "path": str(sample_csv),
+                    "on_validation_failure": "discard",
+                    "schema": DYNAMIC_SCHEMA,
+                },
             },
             "row_plugins": [
                 {
@@ -247,7 +263,11 @@ class TestRunWithGates:
         config = {
             "datasource": {
                 "plugin": "csv",
-                "options": {"path": str(csv_file), "schema": DYNAMIC_SCHEMA},
+                "options": {
+                    "path": str(csv_file),
+                    "on_validation_failure": "discard",
+                    "schema": DYNAMIC_SCHEMA,
+                },
             },
             "row_plugins": [
                 {
@@ -341,7 +361,11 @@ class TestRunWithTransformAndGate:
         config = {
             "datasource": {
                 "plugin": "csv",
-                "options": {"path": str(csv_file), "schema": DYNAMIC_SCHEMA},
+                "options": {
+                    "path": str(csv_file),
+                    "on_validation_failure": "discard",
+                    "schema": DYNAMIC_SCHEMA,
+                },
             },
             "row_plugins": [
                 # First: rename points -> score

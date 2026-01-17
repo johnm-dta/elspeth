@@ -42,6 +42,8 @@ class _TestSourceBase:
     """
 
     node_id: str | None = None
+    determinism = Determinism.DETERMINISTIC
+    plugin_version = "1.0.0"
 
 
 class _TestSinkBase:
@@ -851,10 +853,14 @@ class TestOrchestratorAcceptsGraph:
         # Create mock source and sink
         mock_source = MagicMock()
         mock_source.name = "csv"
+        mock_source.determinism = Determinism.IO_READ
+        mock_source.plugin_version = "1.0.0"
         mock_source.load.return_value = iter([])  # Empty source
 
         mock_sink = MagicMock()
         mock_sink.name = "csv"
+        mock_sink.determinism = Determinism.IO_WRITE
+        mock_sink.plugin_version = "1.0.0"
 
         pipeline_config = PipelineConfig(
             source=mock_source,
@@ -979,11 +985,15 @@ class TestOrchestratorOutputSinkRouting:
         # Mock source that yields one row
         mock_source = MagicMock()
         mock_source.name = "csv"
+        mock_source.determinism = Determinism.IO_READ
+        mock_source.plugin_version = "1.0.0"
         mock_source.load.return_value = iter([{"id": 1, "value": "test"}])
 
         # Mock sinks - track what gets written
         mock_results_sink = MagicMock()
         mock_results_sink.name = "csv"
+        mock_results_sink.determinism = Determinism.IO_WRITE
+        mock_results_sink.plugin_version = "1.0.0"
         mock_results_sink.write = MagicMock(
             return_value=ArtifactDescriptor.for_file(
                 path="memory", size_bytes=0, content_hash="abc123"
@@ -992,6 +1002,8 @@ class TestOrchestratorOutputSinkRouting:
 
         mock_errors_sink = MagicMock()
         mock_errors_sink.name = "csv"
+        mock_errors_sink.determinism = Determinism.IO_WRITE
+        mock_errors_sink.plugin_version = "1.0.0"
         mock_errors_sink.write = MagicMock(
             return_value=ArtifactDescriptor.for_file(
                 path="memory", size_bytes=0, content_hash="abc123"
@@ -1066,6 +1078,8 @@ class TestOrchestratorGateRouting:
         # Mock source
         mock_source = MagicMock()
         mock_source.name = "csv"
+        mock_source.determinism = Determinism.IO_READ
+        mock_source.plugin_version = "1.0.0"
         mock_source.load.return_value = iter([{"id": 1, "score": 0.2}])
 
         # Gate that routes using "suspicious" label (maps to "flagged" sink in routes config)
@@ -1088,12 +1102,16 @@ class TestOrchestratorGateRouting:
         # Mock sinks - must return proper artifact info from write()
         mock_results = MagicMock()
         mock_results.name = "csv"
+        mock_results.determinism = Determinism.IO_WRITE
+        mock_results.plugin_version = "1.0.0"
         mock_results.write.return_value = ArtifactDescriptor.for_file(
             path="memory", size_bytes=0, content_hash="abc123"
         )
 
         mock_flagged = MagicMock()
         mock_flagged.name = "csv"
+        mock_flagged.determinism = Determinism.IO_WRITE
+        mock_flagged.plugin_version = "1.0.0"
         mock_flagged.write.return_value = ArtifactDescriptor.for_file(
             path="memory", size_bytes=0, content_hash="abc123"
         )
@@ -1156,11 +1174,15 @@ class TestLifecycleHooks:
 
         mock_source = MagicMock()
         mock_source.name = "csv"
+        mock_source.determinism = Determinism.IO_READ
+        mock_source.plugin_version = "1.0.0"
         mock_source.load.return_value = iter([{"id": 1}])
 
         transform = TrackedTransform()
         mock_sink = MagicMock()
         mock_sink.name = "csv"
+        mock_sink.determinism = Determinism.IO_WRITE
+        mock_sink.plugin_version = "1.0.0"
         mock_sink.write.return_value = ArtifactDescriptor.for_file(
             path="memory", size_bytes=0, content_hash="abc123"
         )
@@ -1228,11 +1250,15 @@ class TestLifecycleHooks:
 
         mock_source = MagicMock()
         mock_source.name = "csv"
+        mock_source.determinism = Determinism.IO_READ
+        mock_source.plugin_version = "1.0.0"
         mock_source.load.return_value = iter([{"id": 1}, {"id": 2}])
 
         transform = TrackedTransform()
         mock_sink = MagicMock()
         mock_sink.name = "csv"
+        mock_sink.determinism = Determinism.IO_WRITE
+        mock_sink.plugin_version = "1.0.0"
         mock_sink.write.return_value = ArtifactDescriptor.for_file(
             path="memory", size_bytes=0, content_hash="abc123"
         )
@@ -1302,11 +1328,15 @@ class TestLifecycleHooks:
 
         mock_source = MagicMock()
         mock_source.name = "csv"
+        mock_source.determinism = Determinism.IO_READ
+        mock_source.plugin_version = "1.0.0"
         mock_source.load.return_value = iter([{"id": 1}])
 
         transform = FailingTransform()
         mock_sink = MagicMock()
         mock_sink.name = "csv"
+        mock_sink.determinism = Determinism.IO_WRITE
+        mock_sink.plugin_version = "1.0.0"
 
         config = PipelineConfig(
             source=mock_source,
@@ -1811,6 +1841,8 @@ class TestSourceLifecycleHooks:
         source = TrackedSource()
         mock_sink = MagicMock()
         mock_sink.name = "csv"
+        mock_sink.determinism = Determinism.IO_WRITE
+        mock_sink.plugin_version = "1.0.0"
         mock_sink.write.return_value = ArtifactDescriptor.for_file(
             path="memory", size_bytes=0, content_hash="abc123"
         )
@@ -1886,6 +1918,8 @@ class TestSinkLifecycleHooks:
 
         mock_source = MagicMock()
         mock_source.name = "csv"
+        mock_source.determinism = Determinism.IO_READ
+        mock_source.plugin_version = "1.0.0"
         mock_source.load.return_value = iter([{"value": 1}])
 
         sink = TrackedSink()
@@ -1975,6 +2009,8 @@ class TestSinkLifecycleHooks:
 
         mock_source = MagicMock()
         mock_source.name = "csv"
+        mock_source.determinism = Determinism.IO_READ
+        mock_source.plugin_version = "1.0.0"
         mock_source.load.return_value = iter([{"value": 1}])
 
         transform = FailingTransform()

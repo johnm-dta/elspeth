@@ -15,6 +15,7 @@ class TestPluginSpecValidation:
 
         class BadPlugin:
             plugin_version = "1.0.0"
+            determinism = Determinism.DETERMINISTIC
             # Missing: name
 
         with pytest.raises(ValueError, match="must define 'name' attribute"):
@@ -25,6 +26,7 @@ class TestPluginSpecValidation:
 
         class BadPlugin:
             name = "bad"
+            determinism = Determinism.DETERMINISTIC
             # Missing: plugin_version
 
         with pytest.raises(ValueError, match="must define 'plugin_version' attribute"):
@@ -36,21 +38,23 @@ class TestPluginSpecValidation:
         class GoodPlugin:
             name = "good"
             plugin_version = "1.0.0"
+            determinism = Determinism.DETERMINISTIC  # Required by protocol
 
         spec = PluginSpec.from_plugin(GoodPlugin, NodeType.TRANSFORM)
         assert spec.name == "good"
         assert spec.version == "1.0.0"
-
-    def test_determinism_defaults_to_deterministic(self) -> None:
-        """Plugins without determinism should default to DETERMINISTIC."""
-
-        class SimplePlugin:
-            name = "simple"
-            plugin_version = "1.0.0"
-            # Missing: determinism (should default)
-
-        spec = PluginSpec.from_plugin(SimplePlugin, NodeType.TRANSFORM)
         assert spec.determinism == Determinism.DETERMINISTIC
+
+    def test_determinism_is_required(self) -> None:
+        """Plugins must define determinism attribute (part of all protocols)."""
+
+        class IncompletePlugin:
+            name = "incomplete"
+            plugin_version = "1.0.0"
+            # Missing: determinism
+
+        with pytest.raises(AttributeError, match="determinism"):
+            PluginSpec.from_plugin(IncompletePlugin, NodeType.TRANSFORM)
 
     def test_schemas_default_to_none(self) -> None:
         """Plugins without schemas should have None schema hashes."""
@@ -58,7 +62,8 @@ class TestPluginSpecValidation:
         class MinimalPlugin:
             name = "minimal"
             plugin_version = "1.0.0"
-            # Missing: input_schema, output_schema (should default to None)
+            determinism = Determinism.DETERMINISTIC  # Required by protocol
+            # Missing: input_schema, output_schema (optional, default to None)
 
         spec = PluginSpec.from_plugin(MinimalPlugin, NodeType.TRANSFORM)
         assert spec.input_schema_hash is None
@@ -69,6 +74,7 @@ class TestPluginSpecValidation:
 
         class MyBadlyNamedPlugin:
             plugin_version = "1.0.0"
+            determinism = Determinism.DETERMINISTIC
 
         with pytest.raises(ValueError, match="MyBadlyNamedPlugin"):
             PluginSpec.from_plugin(MyBadlyNamedPlugin, NodeType.TRANSFORM)

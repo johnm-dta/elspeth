@@ -35,6 +35,7 @@ class TestCLIIntegration:
                 "plugin": "csv",
                 "options": {
                     "path": str(sample_csv),
+                    "on_validation_failure": "discard",
                     "schema": {"fields": "dynamic"},
                 },
             },

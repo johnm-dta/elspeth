@@ -44,7 +44,11 @@ class TestLandscapeExport:
         config = {
             "datasource": {
                 "plugin": "csv",
-                "options": {"path": str(input_csv), "schema": {"fields": "dynamic"}},
+                "options": {
+                    "path": str(input_csv),
+                    "on_validation_failure": "discard",
+                    "schema": {"fields": "dynamic"},
+                },
             },
             "sinks": {
                 "output": {
@@ -167,7 +171,11 @@ class TestLandscapeExport:
         config = {
             "datasource": {
                 "plugin": "csv",
-                "options": {"path": str(input_csv), "schema": {"fields": "dynamic"}},
+                "options": {
+                    "path": str(input_csv),
+                    "on_validation_failure": "discard",
+                    "schema": {"fields": "dynamic"},
+                },
             },
             "sinks": {
                 "output": {
@@ -319,7 +327,11 @@ class TestSignedExportDeterminism:
         config = {
             "datasource": {
                 "plugin": "csv",
-                "options": {"path": str(input_csv), "schema": {"fields": "dynamic"}},
+                "options": {
+                    "path": str(input_csv),
+                    "on_validation_failure": "discard",
+                    "schema": {"fields": "dynamic"},
+                },
             },
             "sinks": {
                 "output": {
@@ -395,6 +407,7 @@ class TestSignedExportDeterminism:
                     "plugin": "csv",
                     "options": {
                         "path": str(input_csv),
+                        "on_validation_failure": "discard",
                         "schema": {"fields": "dynamic"},
                     },
                 },

@@ -2,7 +2,7 @@
 """Tests for plugin protocols."""
 
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, ClassVar
 
 
 class TestSourceProtocol:
@@ -140,6 +140,7 @@ class TestTransformProtocol:
             node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
+            _on_error: str | None = None  # Error routing (WP-11.99b)
 
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
@@ -348,7 +349,7 @@ class TestCoalesceProtocol:
             name = "quorum_merge"
             policy = CoalescePolicy.QUORUM
             quorum_threshold = 2  # At least 2 branches must arrive
-            expected_branches: list[str] = [
+            expected_branches: ClassVar[list[str]] = [
                 "branch_a",
                 "branch_b",
                 "branch_c",
@@ -400,7 +401,7 @@ class TestCoalesceProtocol:
             name = "sum_merge"
             policy = CoalescePolicy.REQUIRE_ALL
             quorum_threshold = None
-            expected_branches: list[str] = ["branch_a", "branch_b"]
+            expected_branches: ClassVar[list[str]] = ["branch_a", "branch_b"]
             output_schema = OutputSchema
             node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC

@@ -41,7 +41,13 @@ class TestIntegrationAuditFixes:
         csv_source_cls = manager.get_source_by_name("csv")
         assert csv_source_cls is not None
         # Protocols don't define __init__ but concrete classes do
-        source = csv_source_cls({"path": "test.csv", "schema": DYNAMIC_SCHEMA})  # type: ignore[call-arg]
+        source = csv_source_cls(
+            {
+                "path": "test.csv",
+                "on_validation_failure": "discard",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )  # type: ignore[call-arg]
         assert source.node_id is None  # Not yet set
 
         source.node_id = "node-123"
@@ -164,7 +170,13 @@ class TestIntegrationAuditFixes:
         csv_source_cls = manager.get_source_by_name("csv")
         assert csv_source_cls is not None
         # Protocols don't define __init__ but concrete classes do
-        source = csv_source_cls({"path": "test.csv", "schema": DYNAMIC_SCHEMA})  # type: ignore[call-arg]
+        source = csv_source_cls(
+            {
+                "path": "test.csv",
+                "on_validation_failure": "discard",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )  # type: ignore[call-arg]
         assert hasattr(source, "node_id")
         source.node_id = "source-001"
         assert source.node_id == "source-001"

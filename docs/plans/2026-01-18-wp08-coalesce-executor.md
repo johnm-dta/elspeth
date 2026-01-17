@@ -392,6 +392,23 @@ def run(db: LandscapeDB) -> Any:
     return recorder.create_run(settings_hash="test_hash")
 
 
+@pytest.fixture
+def executor_setup(db: LandscapeDB, run: Any) -> tuple[
+    LandscapeRecorder, SpanFactory, "TokenManager", str
+]:
+    """Common setup for executor tests - reduces boilerplate.
+
+    Returns:
+        Tuple of (recorder, span_factory, token_manager, run_id)
+    """
+    from elspeth.engine.tokens import TokenManager
+
+    recorder = LandscapeRecorder(db)
+    span_factory = SpanFactory()
+    token_manager = TokenManager(recorder)
+    return recorder, span_factory, token_manager, run.run_id
+
+
 class TestCoalesceExecutorInit:
     """Test CoalesceExecutor initialization."""
 
@@ -533,6 +550,16 @@ class CoalesceExecutor:
         """
         self._settings[settings.name] = settings
         self._node_ids[settings.name] = node_id
+
+    def get_registered_names(self) -> list[str]:
+        """Get names of all registered coalesce points.
+
+        Used by processor for timeout checking loop.
+
+        Returns:
+            List of registered coalesce names
+        """
+        return list(self._settings.keys())
 ```
 
 ### Step 4: Run test to verify it passes
@@ -552,6 +579,7 @@ git commit -m "feat(engine): create CoalesceExecutor skeleton (WP-08 Task 3)
 - Add CoalesceOutcome and _PendingCoalesce dataclasses
 - Initialize with recorder, span_factory, token_manager, run_id
 - Add register_coalesce() for configuration
+- Add get_registered_names() for timeout polling loop
 
 Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
 ```
@@ -1251,30 +1279,205 @@ Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
 
 ---
 
-## Task 6: Export CoalesceExecutor and Add NodeType.COALESCE
+## Task 5.5: Record Coalesce Audit Metadata
+
+**Goal:** Per the contract (lines 699-744), the audit trail must record coalesce event details including policy, strategy, timing, and arrival order.
+
+**Files:**
+- Modify: `src/elspeth/engine/coalesce_executor.py`
+- Test: `tests/engine/test_coalesce_executor.py`
+
+### Step 1: Write failing test for audit metadata
+
+```python
+# tests/engine/test_coalesce_executor.py - add to TestCoalesceIntegration
+
+def test_coalesce_records_audit_metadata(self, db: LandscapeDB, run: Any) -> None:
+    """Coalesce should record policy, strategy, and timing in audit trail."""
+    from elspeth.contracts import NodeType
+    from elspeth.engine.coalesce_executor import CoalesceExecutor
+    from elspeth.engine.tokens import TokenManager
+
+    recorder = LandscapeRecorder(db)
+    span_factory = SpanFactory()
+    token_manager = TokenManager(recorder)
+
+    source_node = recorder.register_node(
+        run_id=run.run_id, node_id="source",
+        plugin_name="csv", node_type=NodeType.SOURCE,
+    )
+    coalesce_node = recorder.register_node(
+        run_id=run.run_id, node_id="merge",
+        plugin_name="merge_results", node_type=NodeType.COALESCE,
+    )
+
+    settings = CoalesceSettings(
+        name="merge_results",
+        branches=["path_a", "path_b"],
+        policy="require_all",
+        merge="union",
+    )
+
+    executor = CoalesceExecutor(
+        recorder=recorder, span_factory=span_factory,
+        token_manager=token_manager, run_id=run.run_id,
+    )
+    executor.register_coalesce(settings, coalesce_node.node_id)
+
+    initial_token = token_manager.create_initial_token(
+        run_id=run.run_id, source_node_id=source_node.node_id,
+        row_index=0, row_data={"original": True},
+    )
+    children = token_manager.fork_token(
+        parent_token=initial_token, branches=["path_a", "path_b"],
+        step_in_pipeline=1,
+    )
+
+    token_a = TokenInfo(
+        row_id=children[0].row_id, token_id=children[0].token_id,
+        row_data={"from_a": 1}, branch_name="path_a",
+    )
+    token_b = TokenInfo(
+        row_id=children[1].row_id, token_id=children[1].token_id,
+        row_data={"from_b": 2}, branch_name="path_b",
+    )
+
+    executor.accept(token_a, "merge_results", step_in_pipeline=2)
+    outcome = executor.accept(token_b, "merge_results", step_in_pipeline=2)
+
+    # Verify audit metadata was recorded
+    # The merged token's node_state should have context_after with coalesce details
+    assert outcome.merged_token is not None
+    assert outcome.coalesce_metadata is not None
+    assert outcome.coalesce_metadata["policy"] == "require_all"
+    assert outcome.coalesce_metadata["merge_strategy"] == "union"
+    assert outcome.coalesce_metadata["wait_duration_ms"] >= 0
+    assert set(outcome.coalesce_metadata["branches_arrived"]) == {"path_a", "path_b"}
+```
+
+### Step 2: Update CoalesceOutcome to include metadata
+
+```python
+# src/elspeth/engine/coalesce_executor.py - update CoalesceOutcome
+
+@dataclass
+class CoalesceOutcome:
+    """Result of a coalesce accept operation.
+
+    Attributes:
+        held: True if token is being held waiting for more branches
+        merged_token: The merged token if merge is complete, None if held
+        consumed_tokens: Tokens that were merged (marked COALESCED)
+        coalesce_metadata: Audit metadata about the merge (policy, strategy, timing)
+    """
+
+    held: bool
+    merged_token: TokenInfo | None = None
+    consumed_tokens: list[TokenInfo] = field(default_factory=list)
+    coalesce_metadata: dict[str, Any] | None = None
+```
+
+### Step 3: Update _execute_merge to capture and return metadata
+
+```python
+# src/elspeth/engine/coalesce_executor.py - update _execute_merge
+
+    def _execute_merge(
+        self,
+        settings: CoalesceSettings,
+        node_id: str,
+        pending: "_PendingCoalesce",
+        step_in_pipeline: int,
+        key: tuple[str, str],
+    ) -> CoalesceOutcome:
+        """Execute the merge and create merged token."""
+        now = time.monotonic()
+
+        # Capture audit metadata
+        coalesce_metadata = {
+            "policy": settings.policy,
+            "merge_strategy": settings.merge,
+            "expected_branches": settings.branches,
+            "branches_arrived": list(pending.arrived.keys()),
+            "arrival_order": [
+                {"branch": branch, "arrival_offset_ms": (t - pending.first_arrival) * 1000}
+                for branch, t in sorted(pending.arrival_times.items(), key=lambda x: x[1])
+            ],
+            "wait_duration_ms": (now - pending.first_arrival) * 1000,
+        }
+
+        # Merge row data according to strategy
+        merged_data = self._merge_data(settings, pending.arrived)
+
+        # Get list of consumed tokens
+        consumed_tokens = list(pending.arrived.values())
+
+        # Create merged token via TokenManager
+        merged_token = self._token_manager.coalesce_tokens(
+            parents=consumed_tokens,
+            merged_data=merged_data,
+            step_in_pipeline=step_in_pipeline,
+        )
+
+        # Record node states for consumed tokens with coalesce metadata
+        for token in consumed_tokens:
+            state = self._recorder.begin_node_state(
+                token_id=token.token_id,
+                node_id=node_id,
+                step_index=step_in_pipeline,
+                input_data=token.row_data,
+            )
+            self._recorder.complete_node_state(
+                state_id=state.state_id,
+                status="coalesced",
+                output_data={"merged_into": merged_token.token_id},
+                duration_ms=coalesce_metadata["wait_duration_ms"],
+                context_after=coalesce_metadata,  # Store metadata in context_after
+            )
+
+        # Clean up pending state
+        del self._pending[key]
+
+        return CoalesceOutcome(
+            held=False,
+            merged_token=merged_token,
+            consumed_tokens=consumed_tokens,
+            coalesce_metadata=coalesce_metadata,
+        )
+```
+
+### Step 4: Run test to verify it passes
+
+```bash
+pytest tests/engine/test_coalesce_executor.py::TestCoalesceIntegration::test_coalesce_records_audit_metadata -v
+```
+
+Expected: PASS
+
+### Step 5: Commit
+
+```bash
+git add src/elspeth/engine/coalesce_executor.py tests/engine/test_coalesce_executor.py
+git commit -m "feat(coalesce): record audit metadata for coalesce events (WP-08 Task 5.5)
+
+- Add coalesce_metadata to CoalesceOutcome
+- Record policy, merge_strategy, branches_arrived, arrival_order, wait_duration_ms
+- Store metadata in node_state.context_after for audit trail
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
+```
+
+---
+
+## Task 6: Export CoalesceExecutor
 
 **Files:**
 - Modify: `src/elspeth/engine/__init__.py`
-- Modify: `src/elspeth/contracts/enums.py`
 - Test: Verify imports work
 
-### Step 1: Add NodeType.COALESCE if missing
+> **Note:** `NodeType.COALESCE` already exists in `enums.py:66` (verified 2026-01-18).
 
-```python
-# src/elspeth/contracts/enums.py - check NodeType enum and add COALESCE if missing
-
-class NodeType(str, Enum):
-    """Type of node in the DAG."""
-
-    SOURCE = "source"
-    TRANSFORM = "transform"
-    GATE = "gate"
-    AGGREGATION = "aggregation"
-    COALESCE = "coalesce"  # Add this if missing
-    SINK = "sink"
-```
-
-### Step 2: Export CoalesceExecutor
+### Step 1: Export CoalesceExecutor
 
 ```python
 # src/elspeth/engine/__init__.py - add to exports
@@ -1289,7 +1492,7 @@ __all__ = [
 ]
 ```
 
-### Step 3: Verify imports
+### Step 2: Verify imports
 
 ```bash
 python -c "from elspeth.engine import CoalesceExecutor, CoalesceOutcome; print('OK')"
@@ -1298,11 +1501,11 @@ python -c "from elspeth.contracts import NodeType; print(NodeType.COALESCE)"
 
 Expected: Both print successfully
 
-### Step 4: Commit
+### Step 3: Commit
 
 ```bash
-git add src/elspeth/engine/__init__.py src/elspeth/contracts/enums.py
-git commit -m "feat(engine): export CoalesceExecutor and add NodeType.COALESCE (WP-08 Task 6)
+git add src/elspeth/engine/__init__.py
+git commit -m "feat(engine): export CoalesceExecutor (WP-08 Task 6)
 
 Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
 ```
@@ -1496,6 +1699,296 @@ Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
 
 ---
 
+## Task 8.5: Add flush_pending() for Graceful Shutdown
+
+**Goal:** Handle end-of-source and graceful shutdown by processing any pending coalesces.
+
+**Files:**
+- Modify: `src/elspeth/engine/coalesce_executor.py`
+- Test: `tests/engine/test_coalesce_executor.py`
+
+### Step 1: Write failing test for flush_pending
+
+```python
+# tests/engine/test_coalesce_executor.py - add to TestCoalesceExecutorBestEffort
+
+def test_flush_pending_merges_incomplete(self, db: LandscapeDB, run: Any) -> None:
+    """flush_pending should merge incomplete pending coalesces at end-of-source."""
+    from elspeth.contracts import NodeType
+    from elspeth.engine.coalesce_executor import CoalesceExecutor
+    from elspeth.engine.tokens import TokenManager
+
+    recorder = LandscapeRecorder(db)
+    span_factory = SpanFactory()
+    token_manager = TokenManager(recorder)
+
+    source_node = recorder.register_node(
+        run_id=run.run_id, node_id="source_1",
+        plugin_name="test_source", node_type=NodeType.SOURCE,
+    )
+    coalesce_node = recorder.register_node(
+        run_id=run.run_id, node_id="coalesce_1",
+        plugin_name="best_effort_merge", node_type=NodeType.COALESCE,
+    )
+
+    settings = CoalesceSettings(
+        name="best_effort_merge",
+        branches=["path_a", "path_b", "path_c"],
+        policy="best_effort",
+        timeout_seconds=60,  # Long timeout
+        merge="union",
+    )
+
+    executor = CoalesceExecutor(
+        recorder=recorder, span_factory=span_factory,
+        token_manager=token_manager, run_id=run.run_id,
+    )
+    executor.register_coalesce(settings, coalesce_node.node_id)
+
+    initial_token = token_manager.create_initial_token(
+        run_id=run.run_id, source_node_id=source_node.node_id,
+        row_index=0, row_data={},
+    )
+    children = token_manager.fork_token(
+        parent_token=initial_token,
+        branches=["path_a", "path_b", "path_c"],
+        step_in_pipeline=1,
+    )
+
+    # Only two of three branches arrive
+    token_a = TokenInfo(
+        row_id=children[0].row_id, token_id=children[0].token_id,
+        row_data={"a_result": 1}, branch_name="path_a",
+    )
+    token_b = TokenInfo(
+        row_id=children[1].row_id, token_id=children[1].token_id,
+        row_data={"b_result": 2}, branch_name="path_b",
+    )
+
+    outcome1 = executor.accept(token_a, "best_effort_merge", step_in_pipeline=2)
+    assert outcome1.held is True
+    outcome2 = executor.accept(token_b, "best_effort_merge", step_in_pipeline=2)
+    assert outcome2.held is True  # Still waiting for path_c
+
+    # Source exhausts - flush pending coalesces
+    flushed = executor.flush_pending(step_in_pipeline=2)
+
+    # Should have merged what was available
+    assert len(flushed) == 1
+    assert flushed[0].merged_token is not None
+    assert flushed[0].merged_token.row_data == {"a_result": 1, "b_result": 2}
+    assert flushed[0].coalesce_metadata["branches_arrived"] == ["path_a", "path_b"]
+
+def test_flush_pending_respects_quorum(self, db: LandscapeDB, run: Any) -> None:
+    """flush_pending should NOT merge quorum policy if quorum not met."""
+    from elspeth.contracts import NodeType
+    from elspeth.engine.coalesce_executor import CoalesceExecutor
+    from elspeth.engine.tokens import TokenManager
+
+    recorder = LandscapeRecorder(db)
+    span_factory = SpanFactory()
+    token_manager = TokenManager(recorder)
+
+    source_node = recorder.register_node(
+        run_id=run.run_id, node_id="source_1",
+        plugin_name="test_source", node_type=NodeType.SOURCE,
+    )
+    coalesce_node = recorder.register_node(
+        run_id=run.run_id, node_id="coalesce_1",
+        plugin_name="quorum_merge", node_type=NodeType.COALESCE,
+    )
+
+    settings = CoalesceSettings(
+        name="quorum_merge",
+        branches=["model_a", "model_b", "model_c"],
+        policy="quorum",
+        quorum_count=3,  # Need all 3
+        merge="union",
+    )
+
+    executor = CoalesceExecutor(
+        recorder=recorder, span_factory=span_factory,
+        token_manager=token_manager, run_id=run.run_id,
+    )
+    executor.register_coalesce(settings, coalesce_node.node_id)
+
+    initial_token = token_manager.create_initial_token(
+        run_id=run.run_id, source_node_id=source_node.node_id,
+        row_index=0, row_data={},
+    )
+    children = token_manager.fork_token(
+        parent_token=initial_token,
+        branches=["model_a", "model_b", "model_c"],
+        step_in_pipeline=1,
+    )
+
+    # Only one arrives - doesn't meet quorum
+    token_a = TokenInfo(
+        row_id=children[0].row_id, token_id=children[0].token_id,
+        row_data={"score": 0.9}, branch_name="model_a",
+    )
+    executor.accept(token_a, "quorum_merge", step_in_pipeline=2)
+
+    # flush_pending returns failed entries (quorum not met)
+    flushed = executor.flush_pending(step_in_pipeline=2)
+
+    # Should return failure info, not a merged result
+    assert len(flushed) == 1
+    assert flushed[0].merged_token is None  # No merge - quorum not met
+    assert flushed[0].failure_reason == "quorum_not_met"
+```
+
+### Step 2: Update CoalesceOutcome to include failure_reason
+
+```python
+# src/elspeth/engine/coalesce_executor.py - update CoalesceOutcome
+
+@dataclass
+class CoalesceOutcome:
+    """Result of a coalesce accept operation."""
+
+    held: bool
+    merged_token: TokenInfo | None = None
+    consumed_tokens: list[TokenInfo] = field(default_factory=list)
+    coalesce_metadata: dict[str, Any] | None = None
+    failure_reason: str | None = None  # For flush_pending when merge not possible
+```
+
+### Step 3: Implement flush_pending method
+
+```python
+# src/elspeth/engine/coalesce_executor.py - add to CoalesceExecutor class
+
+    def flush_pending(
+        self,
+        step_in_pipeline: int,
+    ) -> list[CoalesceOutcome]:
+        """Flush all pending coalesces (called at end-of-source or shutdown).
+
+        For best_effort policy: merges whatever arrived.
+        For quorum policy: merges if quorum met, returns failure otherwise.
+        For require_all policy: returns failure (never partial merge).
+        For first policy: should never have pending (merges immediately).
+
+        Args:
+            step_in_pipeline: Current position in DAG
+
+        Returns:
+            List of CoalesceOutcomes for all pending coalesces
+        """
+        results: list[CoalesceOutcome] = []
+        keys_to_process = list(self._pending.keys())
+
+        for key in keys_to_process:
+            coalesce_name, row_id = key
+            settings = self._settings[coalesce_name]
+            node_id = self._node_ids[coalesce_name]
+            pending = self._pending[key]
+
+            if settings.policy == "best_effort":
+                # Always merge whatever arrived
+                if len(pending.arrived) > 0:
+                    outcome = self._execute_merge(
+                        settings=settings,
+                        node_id=node_id,
+                        pending=pending,
+                        step_in_pipeline=step_in_pipeline,
+                        key=key,
+                    )
+                    results.append(outcome)
+
+            elif settings.policy == "quorum":
+                assert settings.quorum_count is not None
+                if len(pending.arrived) >= settings.quorum_count:
+                    outcome = self._execute_merge(
+                        settings=settings,
+                        node_id=node_id,
+                        pending=pending,
+                        step_in_pipeline=step_in_pipeline,
+                        key=key,
+                    )
+                    results.append(outcome)
+                else:
+                    # Quorum not met - record failure
+                    del self._pending[key]
+                    results.append(CoalesceOutcome(
+                        held=False,
+                        failure_reason="quorum_not_met",
+                        coalesce_metadata={
+                            "policy": settings.policy,
+                            "quorum_required": settings.quorum_count,
+                            "branches_arrived": list(pending.arrived.keys()),
+                            "row_id": row_id,
+                        },
+                    ))
+
+            elif settings.policy == "require_all":
+                # require_all never does partial merge
+                if len(pending.arrived) == len(settings.branches):
+                    outcome = self._execute_merge(
+                        settings=settings,
+                        node_id=node_id,
+                        pending=pending,
+                        step_in_pipeline=step_in_pipeline,
+                        key=key,
+                    )
+                    results.append(outcome)
+                else:
+                    del self._pending[key]
+                    results.append(CoalesceOutcome(
+                        held=False,
+                        failure_reason="incomplete_branches",
+                        coalesce_metadata={
+                            "policy": settings.policy,
+                            "expected_branches": settings.branches,
+                            "branches_arrived": list(pending.arrived.keys()),
+                            "row_id": row_id,
+                        },
+                    ))
+
+            # FIRST policy should never have pending entries
+
+        return results
+
+    def get_pending_count(self, coalesce_name: str | None = None) -> int:
+        """Get count of pending coalesces (for monitoring/debugging).
+
+        Args:
+            coalesce_name: Filter by coalesce name, or None for all
+
+        Returns:
+            Number of pending coalesce operations
+        """
+        if coalesce_name is None:
+            return len(self._pending)
+        return sum(1 for k in self._pending if k[0] == coalesce_name)
+```
+
+### Step 4: Run tests
+
+```bash
+pytest tests/engine/test_coalesce_executor.py -v -k "flush_pending"
+```
+
+Expected: PASS
+
+### Step 5: Commit
+
+```bash
+git add src/elspeth/engine/coalesce_executor.py tests/engine/test_coalesce_executor.py
+git commit -m "feat(coalesce): add flush_pending() for graceful shutdown (WP-08 Task 8.5)
+
+- flush_pending() processes all pending coalesces at end-of-source
+- best_effort: merges whatever arrived
+- quorum: merges if met, returns failure_reason if not
+- require_all: returns failure_reason if incomplete
+- Add get_pending_count() for monitoring
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
+```
+
+---
+
 ## Task 9: Update Tracker
 
 **Files:**
@@ -1534,10 +2027,17 @@ After all tasks complete, verify:
   - [ ] `nested` - branches as nested objects
   - [ ] `select` - takes specific branch
 - [ ] `check_timeouts()` triggers timeout-based merges
-- [ ] `NodeType.COALESCE` exists
+- [ ] `flush_pending()` handles end-of-source gracefully
+- [ ] `get_registered_names()` returns list of coalesce names
+- [ ] `get_pending_count()` returns pending count for monitoring
+- [ ] `NodeType.COALESCE` exists (verified: already in enums.py:66)
 - [ ] `CoalesceExecutor` exported from engine module
 - [ ] `ElspethSettings.coalesce` field exists
+- [ ] Audit metadata recorded in `coalesce_metadata`:
+  - [ ] policy, merge_strategy, expected_branches
+  - [ ] branches_arrived, arrival_order, wait_duration_ms
 - [ ] Audit trail records consumed tokens with COALESCED status
+- [ ] `failure_reason` set for incomplete coalesces
 - [ ] `mypy --strict` passes
 - [ ] All tests pass
 
@@ -1548,9 +2048,11 @@ After all tasks complete, verify:
 | Risk | Mitigation |
 |------|------------|
 | Timeout race conditions | Use `time.monotonic()` (not wall clock) |
-| Memory leak from pending tokens | Cleanup on merge or timeout |
+| Memory leak from pending tokens | Cleanup on merge, timeout, or flush_pending |
 | Branch name mismatch | Validate branch in expected list |
-| Orphaned pending state | Timeout forces merge or cleanup |
+| Orphaned pending state | `flush_pending()` at end-of-source handles all remaining |
+| End-of-source with pending tokens | `flush_pending()` called by orchestrator after source exhausts |
+| Pipeline crash mid-coalesce | Tokens held in memory only; recovery uses checkpoint system |
 
 ---
 
@@ -1566,6 +2068,36 @@ After all tasks complete, verify:
    - Register coalesce nodes in Landscape
    - Create CoalesceExecutor
    - Call `register_coalesce()` for each config entry
-   - Periodically call `check_timeouts()` during processing
+   - Call `check_timeouts()` and `flush_pending()` at appropriate points
 
-3. **COALESCED terminal state**: Parent tokens that are coalesced get status "coalesced" in node_states. The `RowOutcome.COALESCED` enum value is for the processor to return.
+3. **Timeout polling strategy**: The `check_timeouts()` method uses a polling model. There are three integration points:
+
+   | When | Method | Caller |
+   |------|--------|--------|
+   | After processing each token batch | `check_timeouts(coalesce_name)` | RowProcessor work queue loop |
+   | After source exhausts | `flush_pending()` | Orchestrator.run() |
+   | On graceful shutdown | `flush_pending()` | Orchestrator.shutdown() |
+
+   **Recommended polling approach in processor work queue:**
+   ```python
+   while work_queue:
+       token = work_queue.popleft()
+       result = self._process_single_token(token, ...)
+
+       # After each token, check timeouts for any coalesce points
+       for coalesce_name in self._coalesce_executor.get_registered_names():
+           timed_out = self._coalesce_executor.check_timeouts(coalesce_name, step)
+           for outcome in timed_out:
+               if outcome.merged_token:
+                   work_queue.append(outcome.merged_token)
+
+   # After queue drains (source exhausted), flush pending
+   flushed = self._coalesce_executor.flush_pending(step)
+   for outcome in flushed:
+       if outcome.merged_token:
+           final_results.append(outcome.merged_token)
+       elif outcome.failure_reason:
+           failed_coalesces.append(outcome)
+   ```
+
+4. **COALESCED terminal state**: Parent tokens that are coalesced get status "coalesced" in node_states. The `RowOutcome.COALESCED` enum value is for the processor to return.

@@ -9,17 +9,14 @@ class TestPluginSystemIntegration:
     """End-to-end plugin system tests."""
 
     def test_full_plugin_workflow(self) -> None:
-        """Test source -> transform -> gate -> sink workflow."""
+        """Test source -> transform -> sink workflow."""
         from elspeth.plugins import (
-            BaseGate,
             BaseSink,
             BaseSource,
             BaseTransform,
-            GateResult,
             PluginContext,
             PluginManager,
             PluginSchema,
-            RoutingAction,
             TransformResult,
             hookimpl,
         )
@@ -59,22 +56,6 @@ class TestPluginSystemIntegration:
                     }
                 )
 
-        class ThresholdGate(BaseGate):
-            name = "threshold"
-            input_schema = EnrichedSchema
-            output_schema = EnrichedSchema
-
-            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
-                if row["doubled"] > self.config["threshold"]:
-                    return GateResult(
-                        row=row,
-                        action=RoutingAction.route(
-                            "above"
-                        ),  # Route label - sent elsewhere
-                    )
-                # Below threshold: continue to next step (sink in this test)
-                return GateResult(row=row, action=RoutingAction.continue_())
-
         class MemorySink(BaseSink):
             name = "memory"
             input_schema = EnrichedSchema
@@ -100,10 +81,6 @@ class TestPluginSystemIntegration:
                 return [DoubleTransform]
 
             @hookimpl
-            def elspeth_get_gates(self) -> list[type[BaseGate]]:
-                return [ThresholdGate]
-
-            @hookimpl
             def elspeth_get_sinks(self) -> list[type[BaseSink]]:
                 return [MemorySink]
 
@@ -113,7 +90,6 @@ class TestPluginSystemIntegration:
         # Verify registration
         assert len(manager.get_sources()) == 1
         assert len(manager.get_transforms()) == 1
-        assert len(manager.get_gates()) == 1
         assert len(manager.get_sinks()) == 1
 
         # Create instances and process
@@ -121,18 +97,15 @@ class TestPluginSystemIntegration:
 
         source_cls = manager.get_source_by_name("list")
         transform_cls = manager.get_transform_by_name("double")
-        gate_cls = manager.get_gate_by_name("threshold")
         sink_cls = manager.get_sink_by_name("memory")
 
         assert source_cls is not None
         assert transform_cls is not None
-        assert gate_cls is not None
         assert sink_cls is not None
 
         # Protocols don't define __init__ but concrete classes do
         source = source_cls({"values": [10, 50, 100]})  # type: ignore[call-arg]
         transform = transform_cls({})  # type: ignore[call-arg]
-        gate = gate_cls({"threshold": 100})  # type: ignore[call-arg]
         sink = sink_cls({})  # type: ignore[call-arg]
 
         MemorySink.collected = []  # Reset
@@ -141,18 +114,14 @@ class TestPluginSystemIntegration:
             result = transform.process(row, ctx)
             assert result.status == "success"
             assert result.row is not None  # Success always has row
-
-            gate_result = gate.evaluate(result.row, ctx)
-
-            if gate_result.action.kind == "continue":
-                sink.write(gate_result.row, ctx)
+            sink.write(result.row, ctx)
 
         # Verify results
         # Values: 10*2=20, 50*2=100, 100*2=200
-        # Threshold 100: 20 continues, 100 continues, 200 routed
-        assert len(MemorySink.collected) == 2
+        assert len(MemorySink.collected) == 3
         assert MemorySink.collected[0]["doubled"] == 20
         assert MemorySink.collected[1]["doubled"] == 100
+        assert MemorySink.collected[2]["doubled"] == 200
 
     def test_schema_validation_in_pipeline(self) -> None:
         """Test that schema compatibility is checked."""

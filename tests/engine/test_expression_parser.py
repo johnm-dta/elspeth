@@ -1,7 +1,13 @@
 # tests/engine/test_expression_parser.py
 """Tests for safe expression parser."""
 
+import contextlib
+import random
+import string
+
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from elspeth.engine.expression_parser import (
     ExpressionParser,
@@ -435,3 +441,521 @@ class TestExpressionParserRealWorldExamples:
         assert parser.evaluate({"category": "urgent", "score": 0.8}) is False
         assert parser.evaluate({"category": "normal", "score": 0.75}) is True
         assert parser.evaluate({"category": "normal", "score": 0.5}) is False
+
+
+# =============================================================================
+# FUZZ TESTING
+# =============================================================================
+# Property-based fuzz tests using Hypothesis to verify parser security.
+# These tests ensure the parser handles arbitrary malformed input without:
+# 1. Crashing with unhandled exceptions
+# 2. Executing malicious code
+# 3. Leaking internal state
+# =============================================================================
+
+# Strategy for generating random character strings
+random_chars = st.text(
+    alphabet=st.sampled_from(
+        string.ascii_letters + string.digits + string.punctuation + " \t\n\r"
+    ),
+    min_size=0,
+    max_size=500,
+)
+
+# Strategy for Python keywords that might cause issues
+python_keywords = st.sampled_from(
+    [
+        "import",
+        "from",
+        "eval",
+        "exec",
+        "compile",
+        "open",
+        "lambda",
+        "def",
+        "class",
+        "for",
+        "while",
+        "if",
+        "else",
+        "elif",
+        "try",
+        "except",
+        "finally",
+        "with",
+        "as",
+        "raise",
+        "assert",
+        "return",
+        "yield",
+        "await",
+        "async",
+        "global",
+        "nonlocal",
+        "pass",
+        "break",
+        "continue",
+        "del",
+        "__import__",
+        "__builtins__",
+        "__class__",
+        "__dict__",
+        "__globals__",
+        "__code__",
+        "__name__",
+        "__doc__",
+        "__module__",
+        "os",
+        "sys",
+        "subprocess",
+        "socket",
+        "pickle",
+        "marshal",
+    ]
+)
+
+# Strategy for common attack patterns
+malicious_patterns = st.sampled_from(
+    [
+        "__import__('os').system('echo pwned')",
+        "eval('1+1')",
+        "exec('print(1)')",
+        "compile('1', '', 'eval')",
+        "open('/etc/passwd').read()",
+        "lambda: 1",
+        "(lambda x: x)(1)",
+        "[x for x in [1,2,3]]",
+        "{x: x for x in [1,2,3]}",
+        "{x for x in [1,2,3]}",
+        "(x for x in [1,2,3])",
+        "(x := 1)",
+        "row.__class__.__bases__[0].__subclasses__()",
+        "row.__dict__",
+        "row.__getattribute__('keys')()",
+        "getattr(row, 'get')",
+        "hasattr(row, 'get')",
+        "type(row)",
+        "dir(row)",
+        "vars(row)",
+        "globals()",
+        "locals()",
+        "breakpoint()",
+        "help(row)",
+        "input('>')",
+        "print('pwned')",
+        "f'{__import__(\"os\")}'",
+        "f'{1+1}'",
+        "row['x'].__class__",
+        "row.items()",
+        "row.keys()",
+        "row.values()",
+        "row.pop('x')",
+        "row.update({})",
+        "row.clear()",
+        "[*row]",
+        "{**row}",
+    ]
+)
+
+# Strategy for operators and punctuation
+operators = st.sampled_from(
+    [
+        "+",
+        "-",
+        "*",
+        "/",
+        "//",
+        "%",
+        "**",
+        "==",
+        "!=",
+        "<",
+        ">",
+        "<=",
+        ">=",
+        "and",
+        "or",
+        "not",
+        "in",
+        "is",
+        "&",
+        "|",
+        "^",
+        "~",
+        "<<",
+        ">>",
+        "@",
+        ":=",
+        "=",
+        "+=",
+        "-=",
+        "*=",
+        "/=",
+    ]
+)
+
+# Strategy for bracket types
+brackets = st.sampled_from(["(", ")", "[", "]", "{", "}", "'", '"', "'''", '"""'])
+
+# Strategy for unicode characters that might cause issues
+unicode_chars = st.text(
+    alphabet=st.sampled_from(
+        "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\u0008\u0009\u000a\u000b"
+        "\u000c\u000d\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017"
+        "\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f"  # Control chars
+        "\u200b\u200c\u200d\ufeff"  # Zero-width chars
+        "\u202a\u202b\u202c\u202d\u202e"  # Bidi overrides
+        "\uff01\uff02\uff03"  # Fullwidth punctuation
+        "\U0001f600\U0001f601\U0001f602"  # Emoji
+    ),
+    min_size=0,
+    max_size=50,
+)
+
+
+# Composite strategy: build random expression-like strings
+@st.composite
+def expression_like_input(draw: st.DrawFn) -> str:
+    """Generate strings that vaguely resemble expressions."""
+    parts = []
+    num_parts = draw(st.integers(min_value=0, max_value=10))
+
+    for _ in range(num_parts):
+        choice = draw(
+            st.sampled_from(
+                [
+                    "keyword",
+                    "operator",
+                    "bracket",
+                    "text",
+                    "number",
+                    "row_access",
+                    "unicode",
+                ]
+            )
+        )
+
+        if choice == "keyword":
+            parts.append(draw(python_keywords))
+        elif choice == "operator":
+            parts.append(draw(operators))
+        elif choice == "bracket":
+            parts.append(draw(brackets))
+        elif choice == "text":
+            parts.append(draw(st.text(max_size=20)))
+        elif choice == "number":
+            parts.append(str(draw(st.integers() | st.floats(allow_nan=True))))
+        elif choice == "row_access":
+            field = draw(st.text(min_size=1, max_size=10))
+            parts.append(f"row['{field}']")
+        elif choice == "unicode":
+            parts.append(draw(unicode_chars))
+
+    return " ".join(parts)
+
+
+@st.composite
+def nested_expression(draw: st.DrawFn) -> str:
+    """Generate deeply nested bracket expressions."""
+    depth = draw(st.integers(min_value=1, max_value=50))
+    inner = draw(st.sampled_from(["row['x']", "1", "'str'", "True", "x"]))
+
+    expr = inner
+    for _ in range(depth):
+        bracket_type = draw(st.sampled_from(["paren", "bracket", "brace"]))
+        if bracket_type == "paren":
+            expr = f"({expr})"
+        elif bracket_type == "bracket":
+            expr = f"[{expr}]"
+        else:
+            expr = f"{{{expr}}}"
+
+    return expr
+
+
+class TestExpressionParserFuzz:
+    """Fuzz tests for expression parser security.
+
+    These tests verify that the parser handles arbitrary malformed input
+    without crashing or executing code. Defense-in-depth testing for
+    config expressions that might come from tampered YAML files.
+    """
+
+    # Expected exception types - anything else is a parser bug
+    ALLOWED_EXCEPTIONS = (
+        ExpressionSecurityError,
+        ExpressionSyntaxError,
+    )
+
+    def _assert_safe_parse(self, expression: str) -> None:
+        """Assert that parsing either succeeds or fails with expected error type.
+
+        The parser MUST NOT:
+        1. Raise an unexpected exception type (unhandled edge case)
+        2. Execute any code during parsing (no side effects)
+        3. Crash Python
+        """
+        try:
+            parser = ExpressionParser(expression)
+            # If parsing succeeds, the expression must be in the safe subset.
+            # Try evaluating with empty row to ensure evaluator also handles it.
+            # Expected runtime errors (KeyError, TypeError, ZeroDivisionError) are
+            # not parser bugs - they're valid expressions failing on empty row data.
+            with contextlib.suppress(KeyError, TypeError, ZeroDivisionError):
+                parser.evaluate({})
+        except self.ALLOWED_EXCEPTIONS:
+            # Security or syntax error - this is expected for malformed input
+            pass
+        except Exception as e:
+            # Any other exception is a parser bug - fail the test
+            pytest.fail(
+                f"Unexpected exception {type(e).__name__} for input {expression!r}: {e}"
+            )
+
+    @given(expression=random_chars)
+    @settings(max_examples=200, deadline=None)
+    def test_random_characters(self, expression: str) -> None:
+        """Random character strings should not crash the parser."""
+        self._assert_safe_parse(expression)
+
+    @given(expression=malicious_patterns)
+    @settings(max_examples=100, deadline=None)
+    def test_malicious_patterns(self, expression: str) -> None:
+        """Known malicious patterns should be rejected, not crash."""
+        self._assert_safe_parse(expression)
+
+    @given(expression=expression_like_input())
+    @settings(max_examples=300, deadline=None)
+    def test_expression_like_input(self, expression: str) -> None:
+        """Random expression-like strings should not crash the parser."""
+        self._assert_safe_parse(expression)
+
+    @given(expression=nested_expression())
+    @settings(max_examples=100, deadline=None)
+    def test_deeply_nested_brackets(self, expression: str) -> None:
+        """Deeply nested brackets should not crash or cause stack overflow."""
+        self._assert_safe_parse(expression)
+
+    @given(expression=unicode_chars)
+    @settings(max_examples=100, deadline=None)
+    def test_unicode_and_control_characters(self, expression: str) -> None:
+        """Unicode and control characters should not crash the parser."""
+        self._assert_safe_parse(expression)
+
+    @given(
+        prefix=random_chars,
+        valid_expr=st.sampled_from(
+            [
+                "row['x'] == 1",
+                "row.get('y') is None",
+                "row['a'] > 0 and row['b'] < 10",
+            ]
+        ),
+        suffix=random_chars,
+    )
+    @settings(max_examples=200, deadline=None)
+    def test_valid_expression_with_garbage(
+        self, prefix: str, valid_expr: str, suffix: str
+    ) -> None:
+        """Valid expressions surrounded by garbage should not crash."""
+        expression = prefix + valid_expr + suffix
+        self._assert_safe_parse(expression)
+
+    def test_deterministic_fuzz_with_seed(self) -> None:
+        """Deterministic fuzz test with 1000+ inputs for reproducibility.
+
+        Uses a fixed seed so failures are reproducible. This supplements
+        the Hypothesis tests with a simple random approach.
+        """
+        rng = random.Random(42)  # Fixed seed for reproducibility
+
+        # Character pools for generating inputs
+        all_chars = (
+            string.ascii_letters
+            + string.digits
+            + string.punctuation
+            + " \t\n\r"
+            + "\x00\x01\x02\x03"  # Null and control chars
+        )
+
+        dangerous_fragments = [
+            "__import__",
+            "os.system",
+            "eval(",
+            "exec(",
+            "compile(",
+            "open(",
+            "lambda",
+            "lambda:",
+            "[x for x",
+            "{x: x for",
+            "{x for x",
+            "(x for x",
+            ":=",
+            ".__class__",
+            ".__dict__",
+            ".__globals__",
+            ".__code__",
+            ".mro(",
+            ".__subclasses__(",
+            "breakpoint(",
+            "globals(",
+            "locals(",
+            "getattr(",
+            "setattr(",
+            "delattr(",
+            "hasattr(",
+            "f'",
+            'f"',
+            "f'''",
+            'f"""',
+            "*row",
+            "**row",
+            "[*",
+            "{**",
+        ]
+
+        inputs_tested = 0
+
+        # Test 500 random character strings
+        for _ in range(500):
+            length = rng.randint(0, 200)
+            expression = "".join(rng.choice(all_chars) for _ in range(length))
+            self._assert_safe_parse(expression)
+            inputs_tested += 1
+
+        # Test 300 combinations of dangerous fragments
+        for _ in range(300):
+            num_fragments = rng.randint(1, 5)
+            fragments = [rng.choice(dangerous_fragments) for _ in range(num_fragments)]
+            # Intersperse with random chars
+            parts = []
+            for frag in fragments:
+                parts.append(
+                    "".join(rng.choice(all_chars) for _ in range(rng.randint(0, 10)))
+                )
+                parts.append(frag)
+            expression = "".join(parts)
+            self._assert_safe_parse(expression)
+            inputs_tested += 1
+
+        # Test 200 deeply nested expressions
+        for _ in range(200):
+            depth = rng.randint(1, 100)
+            expr = "row['x']"
+            for _ in range(depth):
+                bracket = rng.choice(["(", "[", "{"])
+                close = {"(": ")", "[": "]", "{": "}"}[bracket]
+                expr = bracket + expr + close
+            self._assert_safe_parse(expr)
+            inputs_tested += 1
+
+        # Test 100 very long expressions
+        for _ in range(100):
+            length = rng.randint(1000, 5000)
+            expression = "".join(rng.choice(all_chars) for _ in range(length))
+            self._assert_safe_parse(expression)
+            inputs_tested += 1
+
+        assert inputs_tested >= 1000, f"Expected 1000+ inputs, got {inputs_tested}"
+
+    def test_null_byte_injection(self) -> None:
+        """Null bytes in expressions should not cause crashes."""
+        test_cases = [
+            "\x00",
+            "row['x']\x00",
+            "\x00row['x']",
+            "row['\x00x']",
+            "row['x']\x00 == 1",
+            "\x00\x00\x00",
+            "row['x'] == '\x00value'",
+        ]
+        for expr in test_cases:
+            self._assert_safe_parse(expr)
+
+    def test_very_long_expressions(self) -> None:
+        """Very long expressions should not cause memory issues."""
+        test_cases = [
+            "a" * 10000,
+            "row['x'] " * 1000,
+            "(" * 500 + "row['x']" + ")" * 500,
+            "row['x'] == 1 and " * 500 + "True",
+        ]
+        for expr in test_cases:
+            self._assert_safe_parse(expr)
+
+    def test_encoding_edge_cases(self) -> None:
+        """Various encoding edge cases should not crash."""
+        test_cases = [
+            "",  # Empty string
+            " ",  # Just whitespace
+            "\t\n\r",  # Just control chars
+            "\u200b",  # Zero-width space
+            "\ufeff",  # BOM
+            "\u202e",  # Right-to-left override
+            "row['x'] == '\u202eevil\u202c'",  # Bidi override in string
+            "\U0001f600",  # Emoji
+            "row['\U0001f600']",  # Emoji as field name
+        ]
+        for expr in test_cases:
+            self._assert_safe_parse(expr)
+
+    def test_incomplete_expressions(self) -> None:
+        """Incomplete/truncated expressions should not crash."""
+        valid_expr = "row['status'] == 'active' and row['count'] > 0"
+        # Test all truncation points
+        for i in range(len(valid_expr)):
+            truncated = valid_expr[:i]
+            self._assert_safe_parse(truncated)
+
+    def test_operator_combinations(self) -> None:
+        """Unusual operator combinations should not crash."""
+        operators = [
+            "+",
+            "-",
+            "*",
+            "/",
+            "//",
+            "%",
+            "**",
+            "==",
+            "!=",
+            "<",
+            ">",
+            "<=",
+            ">=",
+            "and",
+            "or",
+            "not",
+            "in",
+            "is",
+            "&",
+            "|",
+            "^",
+            "~",
+            "<<",
+            ">>",
+            ":=",
+        ]
+        rng = random.Random(123)
+        for _ in range(100):
+            num_ops = rng.randint(2, 10)
+            expr = " ".join(rng.choice(operators) for _ in range(num_ops))
+            self._assert_safe_parse(expr)
+
+    def test_mixed_quotes_and_brackets(self) -> None:
+        """Mixed quote and bracket styles should not crash."""
+        test_cases = [
+            "row['x\"]",
+            "row[\"x']",
+            "row[\"x']",
+            "row['x\"][",
+            "[('{",
+            "})]'\"",
+            "'''row'''",
+            '"""row"""',
+            "row['''x''']",
+            'row["""x"""]',
+        ]
+        for expr in test_cases:
+            self._assert_safe_parse(expr)

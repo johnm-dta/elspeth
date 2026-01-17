@@ -4,6 +4,7 @@ Coalesce is a stateful barrier that holds tokens until merge conditions are met.
 Tokens are correlated by row_id (same source row that was forked).
 """
 
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -117,3 +118,173 @@ class CoalesceExecutor:
             List of registered coalesce names
         """
         return list(self._settings.keys())
+
+    def accept(
+        self,
+        token: TokenInfo,
+        coalesce_name: str,
+        step_in_pipeline: int,
+    ) -> CoalesceOutcome:
+        """Accept a token at a coalesce point.
+
+        If merge conditions are met, returns the merged token.
+        Otherwise, holds the token and returns held=True.
+
+        Args:
+            token: Token arriving at coalesce point (must have branch_name)
+            coalesce_name: Name of the coalesce configuration
+            step_in_pipeline: Current position in DAG
+
+        Returns:
+            CoalesceOutcome indicating whether token was held or merged
+
+        Raises:
+            ValueError: If coalesce_name not registered or token has no branch_name
+        """
+        if coalesce_name not in self._settings:
+            raise ValueError(f"Coalesce '{coalesce_name}' not registered")
+
+        if token.branch_name is None:
+            raise ValueError(
+                f"Token {token.token_id} has no branch_name - "
+                "only forked tokens can be coalesced"
+            )
+
+        settings = self._settings[coalesce_name]
+        node_id = self._node_ids[coalesce_name]
+
+        # Validate branch is expected
+        if token.branch_name not in settings.branches:
+            raise ValueError(
+                f"Token branch '{token.branch_name}' not in expected branches "
+                f"for coalesce '{coalesce_name}': {settings.branches}"
+            )
+
+        # Get or create pending state for this row
+        key = (coalesce_name, token.row_id)
+        now = time.monotonic()
+
+        if key not in self._pending:
+            self._pending[key] = _PendingCoalesce(
+                arrived={},
+                arrival_times={},
+                first_arrival=now,
+            )
+
+        pending = self._pending[key]
+
+        # Record arrival
+        pending.arrived[token.branch_name] = token
+        pending.arrival_times[token.branch_name] = now
+
+        # Check if merge conditions are met
+        if self._should_merge(settings, pending):
+            return self._execute_merge(
+                settings=settings,
+                node_id=node_id,
+                pending=pending,
+                step_in_pipeline=step_in_pipeline,
+                key=key,
+            )
+
+        # Hold token
+        return CoalesceOutcome(held=True)
+
+    def _should_merge(
+        self,
+        settings: CoalesceSettings,
+        pending: _PendingCoalesce,
+    ) -> bool:
+        """Check if merge conditions are met based on policy."""
+        arrived_count = len(pending.arrived)
+        expected_count = len(settings.branches)
+
+        if settings.policy == "require_all":
+            return arrived_count == expected_count
+
+        elif settings.policy == "first":
+            return arrived_count >= 1
+
+        elif settings.policy == "quorum":
+            assert settings.quorum_count is not None
+            return arrived_count >= settings.quorum_count
+
+        # settings.policy == "best_effort":
+        # Only merge on timeout (checked elsewhere) or if all arrived
+        return arrived_count == expected_count
+
+    def _execute_merge(
+        self,
+        settings: CoalesceSettings,
+        node_id: str,
+        pending: _PendingCoalesce,
+        step_in_pipeline: int,
+        key: tuple[str, str],
+    ) -> CoalesceOutcome:
+        """Execute the merge and create merged token."""
+        # Merge row data according to strategy
+        merged_data = self._merge_data(settings, pending.arrived)
+
+        # Get list of consumed tokens
+        consumed_tokens = list(pending.arrived.values())
+
+        # Create merged token via TokenManager
+        merged_token = self._token_manager.coalesce_tokens(
+            parents=consumed_tokens,
+            merged_data=merged_data,
+            step_in_pipeline=step_in_pipeline,
+        )
+
+        # Record node states for consumed tokens
+        for token in consumed_tokens:
+            state = self._recorder.begin_node_state(
+                token_id=token.token_id,
+                node_id=node_id,
+                step_index=step_in_pipeline,
+                input_data=token.row_data,
+            )
+            self._recorder.complete_node_state(
+                state_id=state.state_id,
+                status="completed",
+                output_data={"merged_into": merged_token.token_id},
+                duration_ms=0,
+            )
+
+        # Clean up pending state
+        del self._pending[key]
+
+        return CoalesceOutcome(
+            held=False,
+            merged_token=merged_token,
+            consumed_tokens=consumed_tokens,
+        )
+
+    def _merge_data(
+        self,
+        settings: CoalesceSettings,
+        arrived: dict[str, TokenInfo],
+    ) -> dict[str, Any]:
+        """Merge row data from arrived tokens based on strategy."""
+        if settings.merge == "union":
+            # Combine all fields (later branches override earlier)
+            merged: dict[str, Any] = {}
+            for branch_name in settings.branches:
+                if branch_name in arrived:
+                    merged.update(arrived[branch_name].row_data)
+            return merged
+
+        elif settings.merge == "nested":
+            # Each branch as nested object
+            return {
+                branch_name: arrived[branch_name].row_data
+                for branch_name in settings.branches
+                if branch_name in arrived
+            }
+
+        # settings.merge == "select":
+        # Take specific branch output
+        assert settings.select_branch is not None
+        if settings.select_branch in arrived:
+            return arrived[settings.select_branch].row_data.copy()
+        # Fallback to first arrived if select branch not present
+        return next(iter(arrived.values())).row_data.copy()

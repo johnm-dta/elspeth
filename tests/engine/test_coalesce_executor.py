@@ -705,3 +705,102 @@ class TestCoalesceAuditMetadata:
             assert "branch" in entry
             assert "arrival_offset_ms" in entry
             assert entry["arrival_offset_ms"] >= 0
+
+
+class TestCoalesceIntegration:
+    """Integration tests for full fork -> process -> coalesce flow."""
+
+    def test_fork_process_coalesce_full_flow(
+        self, recorder: LandscapeRecorder, run: Run
+    ) -> None:
+        """Full flow: fork -> different transforms -> coalesce."""
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        # Register all nodes (use existing pattern with plugin_version, config, schema_config)
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="source",
+            plugin_name="csv",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="merge",
+            plugin_name="merge_results",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = CoalesceSettings(
+            name="merge_results",
+            branches=["sentiment", "entities"],
+            policy="require_all",
+            merge="nested",
+        )
+
+        executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        executor.register_coalesce(settings, coalesce_node.node_id)
+
+        # Simulate source row
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data={"text": "ACME Corp reported positive earnings"},
+        )
+
+        # Simulate fork
+        children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["sentiment", "entities"],
+            step_in_pipeline=1,
+        )
+
+        # Simulate different processing on each branch
+        sentiment_token = TokenInfo(
+            row_id=children[0].row_id,
+            token_id=children[0].token_id,
+            row_data={"sentiment": "positive", "confidence": 0.92},
+            branch_name="sentiment",
+        )
+        entities_token = TokenInfo(
+            row_id=children[1].row_id,
+            token_id=children[1].token_id,
+            row_data={"entities": [{"name": "ACME Corp", "type": "ORG"}]},
+            branch_name="entities",
+        )
+
+        # Coalesce
+        outcome1 = executor.accept(sentiment_token, "merge_results", step_in_pipeline=3)
+        assert outcome1.held is True
+
+        outcome2 = executor.accept(entities_token, "merge_results", step_in_pipeline=3)
+        assert outcome2.held is False
+        assert outcome2.merged_token is not None
+
+        # Verify merged data has nested structure
+        merged = outcome2.merged_token.row_data
+        assert merged == {
+            "sentiment": {"sentiment": "positive", "confidence": 0.92},
+            "entities": {"entities": [{"name": "ACME Corp", "type": "ORG"}]},
+        }
+
+        # Verify consumed tokens
+        assert len(outcome2.consumed_tokens) == 2
+        consumed_branches = {t.branch_name for t in outcome2.consumed_tokens}
+        assert consumed_branches == {"sentiment", "entities"}

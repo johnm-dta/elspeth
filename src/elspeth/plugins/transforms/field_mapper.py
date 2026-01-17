@@ -12,14 +12,14 @@ from typing import Any
 from pydantic import Field
 
 from elspeth.plugins.base import BaseTransform
-from elspeth.plugins.config_base import DataPluginConfig
+from elspeth.plugins.config_base import TransformDataConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import TransformResult
 from elspeth.plugins.schema_factory import create_schema_from_config
 from elspeth.plugins.sentinels import MISSING
 
 
-class FieldMapperConfig(DataPluginConfig):
+class FieldMapperConfig(TransformDataConfig):
     """Configuration for field mapper transform.
 
     Requires 'schema' in config to define input/output expectations.
@@ -54,8 +54,9 @@ class FieldMapper(BaseTransform):
         self._select_only: bool = cfg.select_only
         self._strict: bool = cfg.strict
         self._validate_input: bool = cfg.validate_input
+        self._on_error: str | None = cfg.on_error
 
-        # DataPluginConfig validates schema_config is not None
+        # TransformDataConfig validates schema_config is not None
         assert cfg.schema_config is not None
         self._schema_config = cfg.schema_config
 

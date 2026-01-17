@@ -12,13 +12,13 @@ from typing import Any
 from pydantic import Field
 
 from elspeth.plugins.base import BaseTransform
-from elspeth.plugins.config_base import DataPluginConfig
+from elspeth.plugins.config_base import TransformDataConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import TransformResult
 from elspeth.plugins.schema_factory import create_schema_from_config
 
 
-class PassThroughConfig(DataPluginConfig):
+class PassThroughConfig(TransformDataConfig):
     """Configuration for passthrough transform.
 
     Requires 'schema' in config to define input/output expectations.
@@ -50,8 +50,9 @@ class PassThrough(BaseTransform):
         super().__init__(config)
         cfg = PassThroughConfig.from_dict(config)
         self._validate_input = cfg.validate_input
+        self._on_error: str | None = cfg.on_error
 
-        # DataPluginConfig validates schema_config is not None
+        # TransformDataConfig validates schema_config is not None
         assert cfg.schema_config is not None
         self._schema_config = cfg.schema_config
 

@@ -18,7 +18,7 @@
 | WP-04a | Delete *Like Protocol Duplications | 🟢 Complete | 1.5h | WP-04 | — |
 | WP-05 | Audit Schema Enhancement | 🔴 Not Started | 2h | None | WP-06 |
 | WP-06 | Aggregation Triggers | 🔴 Not Started | 6h | WP-05 | WP-14 |
-| WP-07 | Fork Work Queue | 🔴 Not Started | 8h | None | WP-08, WP-10 |
+| WP-07 | Fork Work Queue | 🟢 Complete | 8h | None | WP-08, WP-10 |
 | WP-08 | Coalesce Executor | 🔴 Not Started | 8h | WP-07 | WP-14 |
 | WP-09 | Engine-Level Gates | 🟢 Complete | 10h | (after WP-02) | WP-14 |
 | WP-10 | Quarantine Implementation | 🔴 Not Started | 4h | WP-07 | WP-14 |
@@ -70,7 +70,7 @@ WP-11.99 ──► WP-12  (config-driven schemas unlock simplified utility conso
 
 ### Sprint 3: DAG & Aggregation
 - [ ] WP-06: Aggregation Triggers (includes stale code cleanup)
-- [ ] WP-07: Fork Work Queue
+- [x] WP-07: Fork Work Queue ✅ Complete (2026-01-18)
 - [ ] WP-10: Quarantine Implementation
 
 ### Sprint 4: Gates & Coalesce
@@ -389,20 +389,39 @@ c231f41 test(integration): update gate assertion for WP-02 (Task 10)
 
 ### WP-07: Fork Work Queue
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete (2026-01-18)
 **Goal:** Forked child tokens actually execute through their paths
 
-#### Tasks
-- [ ] Implement work queue in `src/elspeth/engine/processor.py`
-- [ ] Replace single-pass execution with queue loop
-- [ ] Process fork children through assigned paths
-- [ ] Add max iteration guard (prevent infinite loops)
+#### Files Modified
+- `src/elspeth/engine/processor.py` - Work queue using `collections.deque`, `_WorkItem` dataclass, BFS token processing
+- `src/elspeth/engine/orchestrator.py` - Updated to iterate over `list[RowResult]` returns
+- `tests/engine/test_processor.py` - Updated existing tests for new return type, added iteration guard and nested fork tests
+- `tests/integration/test_fork_pipeline.py` - Full pipeline fork integration test
 
-#### Verification
-- [ ] Fork creates children that execute
-- [ ] Each child follows its assigned path
-- [ ] Parent FORKED, children reach terminal states
-- [ ] Audit trail shows complete lineage
+#### Tasks
+- [x] Task 1: Implement `_WorkItem` dataclass tracking token and start_step
+- [x] Task 2: Implement work queue using `collections.deque` for BFS processing
+- [x] Task 3: Update `process_row()` to return `list[RowResult]` instead of single `RowResult`
+- [x] Task 4: Add `MAX_WORK_QUEUE_ITERATIONS = 10,000` safety guard
+- [x] Task 5: Add iteration guard test (raises `RuntimeError` on infinite loop)
+- [x] Task 6: Add nested fork test (fork within fork)
+- [x] Task 7: Add full pipeline integration test
+
+#### Commits
+```
+6b95e00 feat(engine): implement work queue for fork child execution (WP-07 Tasks 1-2)
+5ce491b test(processor): update existing tests for list[RowResult] return type (WP-07 Task 3)
+da7cf5c test(integration): add full pipeline fork test (WP-07)
+```
+
+#### Verification ✅
+- [x] Fork creates children that execute through remaining transforms
+- [x] Each child follows its assigned path (BFS order)
+- [x] Parent FORKED, children reach terminal states
+- [x] Audit trail shows complete lineage via `parent_token_id`
+- [x] MAX_WORK_QUEUE_ITERATIONS guard prevents infinite loops
+- [x] Nested forks work correctly (fork within fork)
+- [x] All tests pass
 
 ---
 
@@ -691,4 +710,5 @@ c424826 test(engine): add comprehensive integration tests for engine-level gates
 | 2026-01-17 | WP-04a | TransformLike/GateLike already deleted (f08c19a), only AggregationLike remains | Claude |
 | 2026-01-18 | WP-02 | ✅ **COMPLETE** - 9 files deleted, 9 modified, 11 commits. Plan gap fixed (test_run_with_row_plugins.py). Ready for WP-09. | Claude |
 | 2026-01-18 | WP-09 | ✅ **COMPLETE** - 8 commits, 6 tasks. Expression parser (424 lines), fuzz testing (2277+ inputs), GateSettings config, execute_config_gate(), orchestrator integration, 22 integration tests. All verification requirements met. | Claude |
+| 2026-01-18 | WP-07 | ✅ **COMPLETE** - Work queue using `collections.deque` for BFS token processing, `_WorkItem` dataclass, `process_row()` returns `list[RowResult]`, MAX_WORK_QUEUE_ITERATIONS=10,000 safety guard, nested fork support. Unlocks WP-08 and WP-10. | Claude |
 | | | | |

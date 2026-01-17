@@ -23,7 +23,7 @@
 | WP-09 | Engine-Level Gates | 🟢 Complete | 10h | (after WP-02) | WP-14 |
 | WP-10 | Quarantine Implementation | 🔴 Not Started | 4h | WP-07 | WP-14 |
 | WP-11 | Orphaned Code Cleanup | 🔴 Not Started | 2h | None | — |
-| WP-11.99 | Config-Driven Plugin Schemas | 🔴 Not Started | 4-6h | None | WP-12 |
+| WP-11.99 | Config-Driven Plugin Schemas | 🟢 Complete | 4-6h | None | WP-12 |
 | WP-12 | Utility Consolidation | 🔴 Not Started | 0.5h | WP-11.99 | — |
 | WP-13 | Sink Test Rewrites | 🔴 Not Started | 4h | WP-03, WP-04 | — |
 | WP-14 | Engine Test Rewrites | 🔴 Not Started | 16h | WP-06,07,08,09,10 | — |
@@ -605,10 +605,10 @@ c424826 test(engine): add comprehensive integration tests for engine-level gates
 
 ### WP-11.99: Config-Driven Plugin Schemas
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete
 **Plan:** [2026-01-17-wp11.99-config-driven-schemas.md](./2026-01-17-wp11.99-config-driven-schemas.md)
 **Goal:** Replace hardcoded schemas with mandatory config-driven definitions
-**Unlocks:** WP-12
+**Unlocks:** WP-12 ✅
 
 **Architecture:** Every data-processing plugin must declare `schema` in config:
 - `fields: dynamic` - Accept anything (logged for audit)

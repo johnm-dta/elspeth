@@ -258,23 +258,38 @@ class RowProcessor:
 
             elif isinstance(transform, BaseTransform):
                 # Regular transform
-                # Note: error_sink is used in Task 2 to determine correct outcome
-                result, current_token, _ = self._transform_executor.execute_transform(
-                    transform=transform,
-                    token=current_token,
-                    ctx=ctx,
-                    step_in_pipeline=step,
+                result, current_token, error_sink = (
+                    self._transform_executor.execute_transform(
+                        transform=transform,
+                        token=current_token,
+                        ctx=ctx,
+                        step_in_pipeline=step,
+                    )
                 )
 
                 if result.status == "error":
-                    return (
-                        RowResult(
-                            token=current_token,
-                            final_data=current_token.row_data,
-                            outcome=RowOutcome.FAILED,
-                        ),
-                        child_items,
-                    )
+                    # Determine outcome based on error routing
+                    if error_sink == "discard":
+                        # Intentionally discarded - QUARANTINED
+                        return (
+                            RowResult(
+                                token=current_token,
+                                final_data=current_token.row_data,
+                                outcome=RowOutcome.QUARANTINED,
+                            ),
+                            child_items,
+                        )
+                    else:
+                        # Routed to error sink
+                        return (
+                            RowResult(
+                                token=current_token,
+                                final_data=current_token.row_data,
+                                outcome=RowOutcome.ROUTED,
+                                sink_name=error_sink,
+                            ),
+                            child_items,
+                        )
 
             else:
                 raise TypeError(

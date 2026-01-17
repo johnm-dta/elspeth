@@ -20,6 +20,7 @@ from elspeth.contracts import (
     RoutingSpec,
     TokenInfo,
 )
+from elspeth.contracts.enums import RoutingKind
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape import LandscapeRecorder
 from elspeth.engine.artifacts import ArtifactDescriptor
@@ -331,11 +332,11 @@ class GateExecutor:
         child_tokens: list[TokenInfo] = []
         sink_name: str | None = None
 
-        if action.kind == "continue":
+        if action.kind == RoutingKind.CONTINUE:
             # No routing event needed - just continue to next transform
             pass
 
-        elif action.kind == "route":
+        elif action.kind == RoutingKind.ROUTE:
             # Gate returned a route label - resolve via routes config
             route_label = action.destinations[0]
             destination = self._route_resolution_map.get((gate.node_id, route_label))
@@ -357,7 +358,7 @@ class GateExecutor:
                     action=action,
                 )
 
-        elif action.kind == "fork_to_paths":
+        elif action.kind == RoutingKind.FORK_TO_PATHS:
             if token_manager is None:
                 raise RuntimeError(
                     f"Gate {gate.node_id} returned fork_to_paths but no TokenManager provided. "

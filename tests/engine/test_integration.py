@@ -51,13 +51,9 @@ class _TestSourceBase:
 
 
 class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes.
+    """Base class providing SinkProtocol required attributes."""
 
-    Note: input_schema is NOT provided here because child classes may override it
-    with their own schemas, and mypy's type invariance would flag that as a conflict.
-    Each test class should provide its own input_schema if needed.
-    """
-
+    input_schema = _TestSchema  # Required by protocol
     idempotent = True
     node_id: str | None = None
     determinism = Determinism.DETERMINISTIC

@@ -12,6 +12,7 @@ Coordinates:
 from typing import Any
 
 from elspeth.contracts import RowOutcome, RowResult
+from elspeth.contracts.enums import RoutingKind
 from elspeth.core.landscape import LandscapeRecorder
 from elspeth.engine.executors import (
     AggregationExecutor,
@@ -133,7 +134,7 @@ class RowProcessor:
                             outcome=RowOutcome.ROUTED,
                             sink_name=outcome.sink_name,
                         )
-                    elif outcome.result.action.kind == "fork_to_paths":
+                    elif outcome.result.action.kind == RoutingKind.FORK_TO_PATHS:
                         # NOTE: For full DAG support, we'd push child_tokens to a work queue
                         # and continue processing them. For now, return FORKED.
                         return RowResult(

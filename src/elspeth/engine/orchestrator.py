@@ -243,17 +243,12 @@ class Orchestrator:
                 "Build with ExecutionGraph.from_config(settings)"
             )
 
-        # Validate schema compatibility (opt-in, skip if schemas not defined)
-        source_output = getattr(config.source, "output_schema", None)
-        transform_inputs = [
-            getattr(t, "input_schema", None) for t in config.transforms
-        ]
-        transform_outputs = [
-            getattr(t, "output_schema", None) for t in config.transforms
-        ]
-        sink_inputs = [
-            getattr(s, "input_schema", None) for s in config.sinks.values()
-        ]
+        # Validate schema compatibility
+        # Schemas are required by plugin protocols - access directly
+        source_output = config.source.output_schema
+        transform_inputs = [t.input_schema for t in config.transforms]
+        transform_outputs = [t.output_schema for t in config.transforms]
+        sink_inputs = [s.input_schema for s in config.sinks.values()]
 
         schema_errors = validate_pipeline_schemas(
             source_output=source_output,

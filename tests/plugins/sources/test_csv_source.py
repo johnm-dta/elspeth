@@ -40,7 +40,9 @@ class TestCSVSource:
         from elspeth.plugins.sources.csv_source import CSVSource
 
         assert CSVSource.name == "csv"
-        assert hasattr(CSVSource, "output_schema")
+        # output_schema is an instance attribute (set based on config)
+        source = CSVSource({"path": "/tmp/test.csv", "schema": DYNAMIC_SCHEMA})
+        assert hasattr(source, "output_schema")
 
     def test_load_yields_rows(self, sample_csv: Path, ctx: PluginContext) -> None:
         """load() yields dict rows from CSV."""

@@ -32,7 +32,9 @@ class TestJSONSource:
         from elspeth.plugins.sources.json_source import JSONSource
 
         assert JSONSource.name == "json"
-        assert hasattr(JSONSource, "output_schema")
+        # output_schema is an instance attribute (set based on config)
+        source = JSONSource({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA})
+        assert hasattr(source, "output_schema")
 
     def test_load_json_array(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Load rows from JSON array file."""

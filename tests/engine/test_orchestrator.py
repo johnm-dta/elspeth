@@ -130,6 +130,78 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
     return graph
 
 
+def _build_fork_test_graph(
+    config: PipelineConfig,
+    fork_paths: dict[int, list[str]],  # transform_index -> list of fork path names
+) -> ExecutionGraph:
+    """Build a test graph that supports fork operations.
+
+    Args:
+        config: Pipeline configuration
+        fork_paths: Maps transform index to list of fork path names
+                   e.g., {0: ["path_a", "path_b"]} means transform_0 forks to those paths
+    """
+    from elspeth.core.dag import ExecutionGraph
+
+    graph = ExecutionGraph()
+
+    # Add source
+    graph.add_node("source", node_type="source", plugin_name=config.source.name)
+
+    # Add transforms
+    transform_ids: dict[int, str] = {}
+    prev = "source"
+    for i, t in enumerate(config.transforms):
+        node_id = f"transform_{i}"
+        transform_ids[i] = node_id
+        is_gate = isinstance(t, BaseGate)
+        graph.add_node(
+            node_id,
+            node_type="gate" if is_gate else "transform",
+            plugin_name=t.name,
+        )
+        graph.add_edge(prev, node_id, label="continue", mode=RoutingMode.MOVE)
+        prev = node_id
+
+    # Add sinks
+    sink_ids: dict[str, str] = {}
+    for sink_name, sink in config.sinks.items():
+        node_id = f"sink_{sink_name}"
+        sink_ids[sink_name] = node_id
+        graph.add_node(node_id, node_type="sink", plugin_name=sink.name)
+
+    # Add edge from last transform to default sink
+    if "default" in sink_ids:
+        graph.add_edge(
+            prev, sink_ids["default"], label="continue", mode=RoutingMode.MOVE
+        )
+
+    # Populate internal maps
+    graph._sink_id_map = sink_ids
+    graph._transform_id_map = transform_ids
+    graph._output_sink = "default" if "default" in sink_ids else next(iter(sink_ids))
+
+    # Build route resolution map with fork support
+    route_resolution_map: dict[tuple[str, str], str] = {}
+    for i, paths in fork_paths.items():
+        gate_id = f"transform_{i}"
+        for path_name in paths:
+            # Fork paths resolve to "fork" (special handling in executor)
+            route_resolution_map[(gate_id, path_name)] = "fork"
+            # Add edge for each fork path (needed for edge_map lookup)
+            # Fork paths go to the NEXT transform (or sink if last)
+            next_node = (
+                f"transform_{i+1}"
+                if i + 1 < len(config.transforms)
+                else sink_ids["default"]
+            )
+            graph.add_edge(gate_id, next_node, label=path_name, mode=RoutingMode.COPY)
+
+    graph._route_resolution_map = route_resolution_map
+
+    return graph
+
+
 class TestOrchestrator:
     """Full run orchestration."""
 
@@ -3454,3 +3526,108 @@ class TestRouteValidation:
 
         assert result.status == "completed"
         assert result.rows_processed == 1
+
+
+class TestOrchestratorForkExecution:
+    """Test orchestrator handles fork results correctly.
+
+    NOTE: Full fork testing at orchestrator level is blocked by ExecutionGraph
+    using DiGraph instead of MultiDiGraph (can't store multiple edges between
+    same nodes). See WP-07 notes. Fork logic is tested at processor level in
+    test_processor.py::TestRowProcessorWorkQueue.
+    """
+
+    def test_orchestrator_handles_list_results_from_processor(self) -> None:
+        """Orchestrator correctly iterates over list[RowResult] from processor.
+
+        This tests the basic plumbing (list handling, counting) without forks.
+        Fork-specific behavior is tested at processor level.
+        """
+        import hashlib
+
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+
+        class RowSchema(_TestSchema):
+            value: int
+
+        class ListSource(_TestSourceBase):
+            name = "list_source"
+            output_schema = RowSchema
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def load(self, ctx: Any) -> Any:
+                yield {"value": 1}
+                yield {"value": 2}
+                yield {"value": 3}
+
+            def close(self) -> None:
+                pass
+
+        class PassthroughTransform(BaseTransform):
+            name = "passthrough"
+            input_schema = RowSchema
+            output_schema = RowSchema
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def process(self, row: Any, ctx: Any) -> TransformResult:
+                return TransformResult.success(row)
+
+        class CollectSink(_TestSinkBase):
+            name = "collect_sink"
+
+            def __init__(self) -> None:
+                self.results: list[Any] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                content = str(rows).encode()
+                return ArtifactDescriptor(
+                    artifact_type="file",
+                    path_or_uri="memory://test",
+                    content_hash=hashlib.sha256(content).hexdigest(),
+                    size_bytes=len(content),
+                )
+
+            def close(self) -> None:
+                pass
+
+        source = ListSource()
+        transform = PassthroughTransform()
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[transform],
+            sinks={"default": sink},
+        )
+
+        graph = _build_test_graph(config)
+
+        orchestrator = Orchestrator(db)
+        run_result = orchestrator.run(config, graph=graph)
+
+        assert run_result.status == "completed"
+        # 3 rows from source
+        assert run_result.rows_processed == 3
+        # All 3 reach COMPLETED (no forks)
+        assert run_result.rows_succeeded == 3
+        # All 3 written to sink
+        assert len(sink.results) == 3

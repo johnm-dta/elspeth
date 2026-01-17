@@ -554,52 +554,61 @@ class Orchestrator:
                 for row_index, row_data in enumerate(config.source.load(ctx)):
                     rows_processed += 1
 
-                    result = processor.process_row(
+                    results = processor.process_row(
                         row_index=row_index,
                         row_data=row_data,
                         transforms=config.transforms,
                         ctx=ctx,
                     )
 
-                    # Determine the last node that processed this row
-                    # (used for checkpoint to know where to resume from)
-                    # For config gates, the last node is the last config gate if any
-                    last_node_id: str
-                    if config.gates:
-                        # Get the last config gate's node ID
-                        last_gate_name = config.gates[-1].name
-                        last_node_id = config_gate_id_map[last_gate_name]
-                    elif config.transforms:
-                        # node_id is guaranteed set - we assigned it above
-                        transform_node_id = config.transforms[-1].node_id
-                        assert transform_node_id is not None
-                        last_node_id = transform_node_id
-                    else:
-                        # source_id is guaranteed set - validated above
-                        last_node_id = source_id
+                    # Handle all results from this source row (includes fork children)
+                    for result in results:
+                        # Determine the last node that processed this token
+                        # (used for checkpoint to know where to resume from)
+                        # For config gates, the last node is the last config gate if any
+                        last_node_id: str
+                        if config.gates:
+                            # Get the last config gate's node ID
+                            last_gate_name = config.gates[-1].name
+                            last_node_id = config_gate_id_map[last_gate_name]
+                        elif config.transforms:
+                            # node_id is guaranteed set - we assigned it above
+                            transform_node_id = config.transforms[-1].node_id
+                            assert transform_node_id is not None
+                            last_node_id = transform_node_id
+                        else:
+                            # source_id is guaranteed set - validated above
+                            last_node_id = source_id
 
-                    if result.outcome == RowOutcome.COMPLETED:
-                        rows_succeeded += 1
-                        pending_tokens[output_sink_name].append(result.token)
-                        # Checkpoint after successful row processing
-                        self._maybe_checkpoint(
-                            run_id=run_id,
-                            token_id=result.token.token_id,
-                            node_id=last_node_id,
-                        )
-                    elif result.outcome == RowOutcome.ROUTED:
-                        rows_routed += 1
-                        # GateExecutor contract: ROUTED outcome always has sink_name set
-                        assert result.sink_name is not None
-                        pending_tokens[result.sink_name].append(result.token)
-                        # Checkpoint after successful routing
-                        self._maybe_checkpoint(
-                            run_id=run_id,
-                            token_id=result.token.token_id,
-                            node_id=last_node_id,
-                        )
-                    elif result.outcome == RowOutcome.FAILED:
-                        rows_failed += 1
+                        if result.outcome == RowOutcome.COMPLETED:
+                            rows_succeeded += 1
+                            pending_tokens[output_sink_name].append(result.token)
+                            # Checkpoint after successful row processing
+                            self._maybe_checkpoint(
+                                run_id=run_id,
+                                token_id=result.token.token_id,
+                                node_id=last_node_id,
+                            )
+                        elif result.outcome == RowOutcome.ROUTED:
+                            rows_routed += 1
+                            # GateExecutor contract: ROUTED outcome always has sink_name set
+                            assert result.sink_name is not None
+                            pending_tokens[result.sink_name].append(result.token)
+                            # Checkpoint after successful routing
+                            self._maybe_checkpoint(
+                                run_id=run_id,
+                                token_id=result.token.token_id,
+                                node_id=last_node_id,
+                            )
+                        elif result.outcome == RowOutcome.FAILED:
+                            rows_failed += 1
+                        elif result.outcome == RowOutcome.FORKED:
+                            # Parent token - don't count as succeeded/failed
+                            # Children are counted separately when they reach terminal state
+                            pass
+                        elif result.outcome == RowOutcome.CONSUMED_IN_BATCH:
+                            # Aggregated - will be counted when batch flushes
+                            pass
 
             # Write to sinks using SinkExecutor
             sink_executor = SinkExecutor(recorder, self._span_factory, run_id)

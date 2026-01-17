@@ -9,9 +9,11 @@ Coordinates:
 - Final outcome recording
 """
 
+from collections import deque
+from dataclasses import dataclass
 from typing import Any
 
-from elspeth.contracts import RowOutcome, RowResult
+from elspeth.contracts import RowOutcome, RowResult, TokenInfo
 from elspeth.contracts.enums import RoutingKind
 from elspeth.core.config import GateSettings
 from elspeth.core.landscape import LandscapeRecorder
@@ -24,6 +26,17 @@ from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenManager
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
+
+# Iteration guard to prevent infinite loops from bugs
+MAX_WORK_QUEUE_ITERATIONS = 10_000
+
+
+@dataclass
+class _WorkItem:
+    """Item in the work queue for DAG processing."""
+
+    token: TokenInfo
+    start_step: int  # Which step in transforms to start from (0-indexed)
 
 
 class RowProcessor:
@@ -100,12 +113,12 @@ class RowProcessor:
         row_data: dict[str, Any],
         transforms: list[Any],
         ctx: PluginContext,
-    ) -> RowResult:
+    ) -> list[RowResult]:
         """Process a row through all transforms.
 
-        NOTE: This implementation handles LINEAR pipelines only. For DAG support
-        (fork/join), this needs a work queue that processes child tokens from forks.
-        Currently fork_to_paths returns "forked" and the caller must handle the children.
+        Uses a work queue to handle fork operations - when a fork creates
+        child tokens, they are added to the queue and processed through
+        the remaining transforms.
 
         Args:
             row_index: Position in source
@@ -114,7 +127,7 @@ class RowProcessor:
             ctx: Plugin context
 
         Returns:
-            RowResult with final outcome
+            List of RowResults, one per terminal token (parent + children)
         """
         # Create initial token
         token = self._token_manager.create_initial_token(
@@ -124,98 +137,64 @@ class RowProcessor:
             row_data=row_data,
         )
 
+        # Initialize work queue with initial token starting at step 0
+        work_queue: deque[_WorkItem] = deque([_WorkItem(token=token, start_step=0)])
+        results: list[RowResult] = []
+        iterations = 0
+
         with self._spans.row_span(token.row_id, token.token_id):
-            current_token = token
-
-            for step, transform in enumerate(transforms, start=1):
-                # Type-safe plugin detection using base classes
-                if isinstance(transform, BaseGate):
-                    # Gate transform
-                    # Note: mypy [arg-type] - executors expect *Like protocols with node_id,
-                    # which is added at runtime by the orchestrator, not the base class
-                    outcome = self._gate_executor.execute_gate(
-                        gate=transform,  # type: ignore[arg-type]
-                        token=current_token,
-                        ctx=ctx,
-                        step_in_pipeline=step,
-                        token_manager=self._token_manager,
-                    )
-                    current_token = outcome.updated_token
-
-                    # Check if gate routed to a sink (sink_name set by executor)
-                    if outcome.sink_name is not None:
-                        return RowResult(
-                            token=current_token,
-                            final_data=current_token.row_data,
-                            outcome=RowOutcome.ROUTED,
-                            sink_name=outcome.sink_name,
-                        )
-                    elif outcome.result.action.kind == RoutingKind.FORK_TO_PATHS:
-                        # NOTE: For full DAG support, we'd push child_tokens to a work queue
-                        # and continue processing them. For now, return FORKED.
-                        return RowResult(
-                            token=current_token,
-                            final_data=current_token.row_data,
-                            outcome=RowOutcome.FORKED,
-                        )
-
-                elif isinstance(transform, BaseAggregation):
-                    # Aggregation transform
-                    accept_result = self._aggregation_executor.accept(
-                        aggregation=transform,
-                        token=current_token,
-                        ctx=ctx,
-                        step_in_pipeline=step,
+            while work_queue:
+                iterations += 1
+                if iterations > MAX_WORK_QUEUE_ITERATIONS:
+                    raise RuntimeError(
+                        f"Work queue exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. "
+                        "Possible infinite loop in pipeline."
                     )
 
-                    if accept_result.trigger:
-                        self._aggregation_executor.flush(
-                            aggregation=transform,
-                            ctx=ctx,
-                            trigger_reason="threshold",
-                            step_in_pipeline=step,
-                        )
+                item = work_queue.popleft()
+                result, child_items = self._process_single_token(
+                    token=item.token,
+                    transforms=transforms,
+                    ctx=ctx,
+                    start_step=item.start_step,
+                )
+                results.append(result)
 
-                    return RowResult(
-                        token=current_token,
-                        final_data=current_token.row_data,
-                        outcome=RowOutcome.CONSUMED_IN_BATCH,
-                    )
+                # Add any child tokens to the queue
+                work_queue.extend(child_items)
 
-                elif isinstance(transform, BaseTransform):
-                    # Regular transform
-                    result, current_token = self._transform_executor.execute_transform(
-                        transform=transform,  # type: ignore[arg-type]
-                        token=current_token,
-                        ctx=ctx,
-                        step_in_pipeline=step,
-                    )
+        return results
 
-                    if result.status == "error":
-                        return RowResult(
-                            token=current_token,
-                            final_data=current_token.row_data,
-                            outcome=RowOutcome.FAILED,
-                        )
+    def _process_single_token(
+        self,
+        token: TokenInfo,
+        transforms: list[Any],
+        ctx: PluginContext,
+        start_step: int,
+    ) -> tuple[RowResult, list[_WorkItem]]:
+        """Process a single token through transforms starting at given step.
 
-                else:
-                    raise TypeError(
-                        f"Unknown transform type: {type(transform).__name__}. "
-                        f"Expected BaseTransform, BaseGate, or BaseAggregation."
-                    )
+        Args:
+            token: Token to process
+            transforms: List of transform plugins
+            ctx: Plugin context
+            start_step: Index in transforms to start from (0-indexed)
 
-            # Process config-driven gates (after all plugin transforms)
-            # Step continues from where transforms left off
-            config_gate_start_step = len(transforms) + 1
-            for gate_idx, gate_config in enumerate(self._config_gates):
-                step = config_gate_start_step + gate_idx
+        Returns:
+            Tuple of (RowResult for this token, list of child WorkItems to queue)
+        """
+        current_token = token
+        child_items: list[_WorkItem] = []
 
-                # Get the node_id for this config gate
-                node_id = self._config_gate_id_map[gate_config.name]
+        # Process transforms starting from start_step
+        for step_offset, transform in enumerate(transforms[start_step:]):
+            step = start_step + step_offset + 1  # 1-indexed for audit
 
-                outcome = self._gate_executor.execute_config_gate(
-                    gate_config=gate_config,
-                    node_id=node_id,
+            # Type-safe plugin detection using base classes
+            if isinstance(transform, BaseGate):
+                # Gate transform
+                outcome = self._gate_executor.execute_gate(
+                    gate=transform,
                     token=current_token,
                     ctx=ctx,
                     step_in_pipeline=step,
@@ -223,24 +202,141 @@ class RowProcessor:
                 )
                 current_token = outcome.updated_token
 
-                # Check if gate routed to a sink
+                # Check if gate routed to a sink (sink_name set by executor)
                 if outcome.sink_name is not None:
-                    return RowResult(
+                    return (
+                        RowResult(
+                            token=current_token,
+                            final_data=current_token.row_data,
+                            outcome=RowOutcome.ROUTED,
+                            sink_name=outcome.sink_name,
+                        ),
+                        child_items,
+                    )
+                elif outcome.result.action.kind == RoutingKind.FORK_TO_PATHS:
+                    # Parent becomes FORKED, children continue from NEXT step
+                    next_step = start_step + step_offset + 1
+                    for child_token in outcome.child_tokens:
+                        child_items.append(
+                            _WorkItem(token=child_token, start_step=next_step)
+                        )
+
+                    return (
+                        RowResult(
+                            token=current_token,
+                            final_data=current_token.row_data,
+                            outcome=RowOutcome.FORKED,
+                        ),
+                        child_items,
+                    )
+
+            elif isinstance(transform, BaseAggregation):
+                # Aggregation transform
+                accept_result = self._aggregation_executor.accept(
+                    aggregation=transform,
+                    token=current_token,
+                    ctx=ctx,
+                    step_in_pipeline=step,
+                )
+
+                if accept_result.trigger:
+                    self._aggregation_executor.flush(
+                        aggregation=transform,
+                        ctx=ctx,
+                        trigger_reason="threshold",
+                        step_in_pipeline=step,
+                    )
+
+                return (
+                    RowResult(
+                        token=current_token,
+                        final_data=current_token.row_data,
+                        outcome=RowOutcome.CONSUMED_IN_BATCH,
+                    ),
+                    child_items,
+                )
+
+            elif isinstance(transform, BaseTransform):
+                # Regular transform
+                result, current_token = self._transform_executor.execute_transform(
+                    transform=transform,
+                    token=current_token,
+                    ctx=ctx,
+                    step_in_pipeline=step,
+                )
+
+                if result.status == "error":
+                    return (
+                        RowResult(
+                            token=current_token,
+                            final_data=current_token.row_data,
+                            outcome=RowOutcome.FAILED,
+                        ),
+                        child_items,
+                    )
+
+            else:
+                raise TypeError(
+                    f"Unknown transform type: {type(transform).__name__}. "
+                    f"Expected BaseTransform, BaseGate, or BaseAggregation."
+                )
+
+        # Process config-driven gates (after all plugin transforms)
+        # Step continues from where transforms left off
+        config_gate_start_step = len(transforms) + 1
+        for gate_idx, gate_config in enumerate(self._config_gates):
+            step = config_gate_start_step + gate_idx
+
+            # Get the node_id for this config gate
+            node_id = self._config_gate_id_map[gate_config.name]
+
+            outcome = self._gate_executor.execute_config_gate(
+                gate_config=gate_config,
+                node_id=node_id,
+                token=current_token,
+                ctx=ctx,
+                step_in_pipeline=step,
+                token_manager=self._token_manager,
+            )
+            current_token = outcome.updated_token
+
+            # Check if gate routed to a sink
+            if outcome.sink_name is not None:
+                return (
+                    RowResult(
                         token=current_token,
                         final_data=current_token.row_data,
                         outcome=RowOutcome.ROUTED,
                         sink_name=outcome.sink_name,
+                    ),
+                    child_items,
+                )
+            elif outcome.result.action.kind == RoutingKind.FORK_TO_PATHS:
+                # Config gate fork - children continue from next config gate
+                next_config_step = gate_idx + 1
+                for child_token in outcome.child_tokens:
+                    # Children start after ALL plugin transforms, at next config gate
+                    child_items.append(
+                        _WorkItem(
+                            token=child_token,
+                            start_step=len(transforms) + next_config_step,
+                        )
                     )
-                elif outcome.result.action.kind == RoutingKind.FORK_TO_PATHS:
-                    # For full DAG support, we'd push child_tokens to a work queue
-                    return RowResult(
+
+                return (
+                    RowResult(
                         token=current_token,
                         final_data=current_token.row_data,
                         outcome=RowOutcome.FORKED,
-                    )
+                    ),
+                    child_items,
+                )
 
-            return RowResult(
+        return (
+            RowResult(
                 token=current_token,
                 final_data=current_token.row_data,
                 outcome=RowOutcome.COMPLETED,
-            )
+            ),
+            child_items,
+        )

@@ -878,3 +878,130 @@ class TestRowProcessorUnknownType:
         assert "BaseTransform" in str(exc_info.value)
         assert "BaseGate" in str(exc_info.value)
         assert "BaseAggregation" in str(exc_info.value)
+
+
+class TestRowProcessorWorkQueue:
+    """Work queue tests for fork child execution."""
+
+    def test_fork_children_are_executed_through_work_queue(self) -> None:
+        """Fork child tokens should be processed, not orphaned."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register nodes
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="test_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        gate_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="splitter",
+            node_type="gate",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="enricher",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Register edges for fork paths
+        edge_a = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=transform_node.node_id,
+            label="path_a",
+            mode=RoutingMode.COPY,
+        )
+        edge_b = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=transform_node.node_id,
+            label="path_b",
+            mode=RoutingMode.COPY,
+        )
+
+        # Create gate that forks
+        class SplitterGate(BaseGate):
+            name = "splitter"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
+                return GateResult(
+                    row=row,
+                    action=RoutingAction.fork_to_paths(["path_a", "path_b"]),
+                )
+
+        # Create transform that marks execution
+        class MarkerTransform(BaseTransform):
+            name = "enricher"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success({**row, "processed": True})
+
+        gate = SplitterGate(gate_node.node_id)
+        transform = MarkerTransform(transform_node.node_id)
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            edge_map={
+                (gate_node.node_id, "path_a"): edge_a.edge_id,
+                (gate_node.node_id, "path_b"): edge_b.edge_id,
+            },
+        )
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process row - should return multiple results (parent + children)
+        results = processor.process_row(
+            row_index=0,
+            row_data={"value": 42},
+            transforms=[gate, transform],
+            ctx=ctx,
+        )
+
+        # Should have 3 results: parent (FORKED) + 2 children (COMPLETED)
+        assert isinstance(results, list)
+        assert len(results) == 3
+
+        # Parent should be FORKED
+        forked_results = [r for r in results if r.outcome == RowOutcome.FORKED]
+        assert len(forked_results) == 1
+
+        # Children should be COMPLETED and processed
+        completed_results = [r for r in results if r.outcome == RowOutcome.COMPLETED]
+        assert len(completed_results) == 2
+        for result in completed_results:
+            # Direct access - we know the field exists because we just set it
+            assert result.final_data["processed"] is True
+            assert result.token.branch_name in ("path_a", "path_b")

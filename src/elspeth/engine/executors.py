@@ -737,11 +737,15 @@ class SinkExecutor:
         rows = [t.row_data for t in tokens]
 
         # Create node_state for EACH token - this is how we derive COMPLETED terminal state
+        # Sink must have node_id assigned by orchestrator before execution
+        assert sink.node_id is not None, "Sink node_id must be set before execution"
+        sink_node_id: str = sink.node_id
+
         states: list[tuple[TokenInfo, NodeStateOpen]] = []
         for token in tokens:
             state = self._recorder.begin_node_state(
                 token_id=token.token_id,
-                node_id=sink.node_id,
+                node_id=sink_node_id,
                 step_index=step_in_pipeline,
                 input_data=token.row_data,
             )
@@ -790,7 +794,7 @@ class SinkExecutor:
         artifact = self._recorder.register_artifact(
             run_id=self._run_id,
             state_id=first_state.state_id,
-            sink_node_id=sink.node_id,
+            sink_node_id=sink_node_id,  # Already validated above
             artifact_type=artifact_info.artifact_type,
             path=artifact_info.path_or_uri,
             content_hash=artifact_info.content_hash,

@@ -7,12 +7,41 @@ These adapters bridge the gap.
 """
 
 import hashlib
+import inspect
 import os
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.engine.artifacts import ArtifactDescriptor
+
+
+def is_batch_sink(sink: Any) -> bool:
+    """Detect if a sink uses batch signature (write(rows)) vs row-wise (write(row)).
+
+    Uses signature inspection to check the first parameter name of the write() method.
+    Batch sinks have 'rows' (plural), row-wise sinks have 'row' (singular).
+
+    This is necessary because Python's @runtime_checkable Protocol only checks
+    that methods exist by name, not their signatures or return types.
+
+    Args:
+        sink: Sink instance to inspect (must have a write method)
+
+    Returns:
+        True if sink has batch signature, False if row-wise
+
+    Raises:
+        AttributeError: If sink has no write method (broken plugin)
+        ValueError/TypeError: If write method signature cannot be inspected (broken plugin)
+    """
+    # No defensive checks - if sink.write doesn't exist or can't be inspected,
+    # that's a broken plugin and the exception is the correct behavior
+    sig = inspect.signature(sink.write)
+    params = list(sig.parameters.keys())
+    # First param after 'self' (which is implicit for bound methods)
+    # should be 'rows' for batch, 'row' for row-wise
+    return bool(params and params[0] == "rows")
 
 
 @dataclass(frozen=True)
@@ -82,6 +111,18 @@ class RowWiseSinkProtocol(Protocol):
     def close(self) -> None: ...
 
 
+class BatchSinkProtocol(Protocol):
+    """Protocol for Phase 3 batch sinks."""
+
+    def write(self, rows: list[dict[str, Any]], ctx: Any) -> ArtifactDescriptor: ...
+    def flush(self) -> None: ...
+    def close(self) -> None: ...
+
+
+# Union type for any sink the adapter can handle
+AnySinkProtocol = RowWiseSinkProtocol | BatchSinkProtocol
+
+
 class SinkAdapter:
     """Adapts Phase 2 row-wise sinks to Phase 3B bulk SinkLike interface.
 
@@ -112,19 +153,23 @@ class SinkAdapter:
 
     def __init__(
         self,
-        sink: RowWiseSinkProtocol,
+        sink: AnySinkProtocol,
         plugin_name: str,
         sink_name: str,
         artifact_descriptor: dict[str, Any],
     ) -> None:
-        """Wrap a Phase 2 row-wise sink.
+        """Wrap a sink (batch or row-wise).
 
         Args:
-            sink: Phase 2 sink implementing write(row, ctx) -> None
+            sink: Sink implementing either batch or row-wise interface.
+                - Batch: write(rows: list, ctx) -> ArtifactDescriptor
+                - Row-wise: write(row: dict, ctx) -> None
             plugin_name: Type of sink plugin (csv, json, database)
             sink_name: Instance name from config (output, flagged, etc.)
             artifact_descriptor: Describes the artifact identity by kind.
                 Must include 'kind' (file|database|webhook) and kind-specific fields.
+                Note: For batch sinks, the sink's returned ArtifactDescriptor takes
+                precedence over this descriptor.
 
         Raises:
             ValueError: If artifact_descriptor is missing required fields
@@ -138,6 +183,8 @@ class SinkAdapter:
         self._response_code: int = 0  # Set dynamically for webhook artifacts
         self._rows_written: int = 0
         self._last_batch_rows: list[dict[str, Any]] = []  # For hash computation
+        # Cache sink type detection - sink protocol is immutable after construction
+        self._is_batch_sink = is_batch_sink(sink)
 
     @property
     def name(self) -> str:
@@ -164,27 +211,38 @@ class SinkAdapter:
         return self._artifact_descriptor.path
 
     def write(self, rows: list[dict[str, Any]], ctx: Any) -> ArtifactDescriptor:
-        """Write rows using the wrapped sink's row-wise interface.
+        """Write rows using the appropriate strategy based on sink type.
 
-        Loops over rows, calling sink.write() for each, then flushes.
-        Does NOT close the sink - close() must be called separately.
+        For batch sinks (write(rows) -> ArtifactDescriptor): delegates directly
+        For row-wise sinks (write(row) -> None): loops and computes artifact
 
         Args:
             rows: List of row dicts to write
             ctx: Plugin context
 
         Returns:
-            ArtifactDescriptor with unified artifact info for any sink type
+            ArtifactDescriptor from sink (batch) or computed (row-wise)
         """
-        # Store batch for hash computation (database/webhook sinks need this)
+        # Dispatch based on sink protocol (cached at construction)
+        if self._is_batch_sink:
+            # BatchSinkProtocol: delegate directly, sink returns its own artifact
+            batch_sink: BatchSinkProtocol = self._sink  # type: ignore[assignment]
+            artifact = batch_sink.write(rows, ctx)
+            self._rows_written += len(rows)
+            return artifact
+
+        # RowWiseSinkProtocol: loop over rows, adapter computes artifact
+        row_sink: RowWiseSinkProtocol = self._sink  # type: ignore[assignment]
+
+        # Store batch for hash computation
         self._last_batch_rows = list(rows)
 
-        # Loop over rows, calling Phase 2 row-wise write
+        # Loop over rows, calling row-wise write
         for row in rows:
-            self._sink.write(row, ctx)
+            row_sink.write(row, ctx)
             self._rows_written += 1
 
-        # Flush buffered data (but don't close - lifecycle managed separately)
+        # Flush buffered data
         self._sink.flush()
 
         # Compute artifact metadata based on descriptor kind

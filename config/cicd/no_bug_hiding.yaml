@@ -223,13 +223,13 @@ allow_hits:
   # This is legitimate duck-typing at a plugin trust boundary.
   # ============================================================
 
-  - key: "engine/adapters.py:R3:SinkAdapter:on_start:line=214"
+  - key: "engine/adapters.py:R3:SinkAdapter:on_start:line=272"
     owner: "architecture"
     reason: "Trust boundary: optional plugin lifecycle method may not exist"
     safety: "Duck-typing at plugin boundary - Phase 2 plugins may not have lifecycle hooks"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/adapters.py:R3:SinkAdapter:on_complete:line=223"
+  - key: "engine/adapters.py:R3:SinkAdapter:on_complete:line=281"
     owner: "architecture"
     reason: "Trust boundary: optional plugin lifecycle method may not exist"
     safety: "Duck-typing at plugin boundary - Phase 2 plugins may not have lifecycle hooks"
@@ -244,19 +244,19 @@ allow_hits:
   # different keys present.
   # ============================================================
 
-  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=71"
+  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=100"
     owner: "architecture"
     reason: "Trust boundary: parsing external config dict with optional fields"
     safety: "Validation in __post_init__ ensures required fields for each kind"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=72"
+  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=101"
     owner: "architecture"
     reason: "Trust boundary: parsing external config dict with optional fields"
     safety: "Validation in __post_init__ ensures required fields for each kind"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=73"
+  - key: "engine/adapters.py:R1:RawArtifactDescriptor:from_dict:line=102"
     owner: "architecture"
     reason: "Trust boundary: parsing external config dict with optional fields"
     safety: "Validation in __post_init__ ensures required fields for each kind"

@@ -295,9 +295,9 @@ class Orchestrator:
 
         schema_errors = validate_pipeline_schemas(
             source_output=source_output,
-            transform_inputs=transform_inputs,
-            transform_outputs=transform_outputs,
-            sink_inputs=sink_inputs,
+            transform_inputs=transform_inputs,  # type: ignore[arg-type]
+            transform_outputs=transform_outputs,  # type: ignore[arg-type]
+            sink_inputs=sink_inputs,  # type: ignore[arg-type]
         )
         if schema_errors:
             raise ValueError(
@@ -658,20 +658,16 @@ class Orchestrator:
         # Create context for sink writes
         ctx = PluginContext(run_id=run_id, config={}, landscape=None)
 
-        # Unwrap SinkAdapter if present (adapter expects bulk writes,
-        # but export writes records individually)
-        from elspeth.engine.adapters import SinkAdapter
-
-        # Extract artifact path from SinkAdapter using public API before unwrapping
-        artifact_path: str | None = None
-        if isinstance(sink, SinkAdapter):
-            artifact_path = sink.artifact_path
-            raw_sink = sink._sink
-        else:
-            raw_sink = sink
-
         if export_config.format == "csv":
             # Multi-file CSV export: one file per record type
+            # CSV export writes files directly (not via sink.write), so we need
+            # the path from sink config. CSV format requires file-based sink.
+            if "path" not in sink.config:
+                raise ValueError(
+                    f"CSV export requires file-based sink with 'path' in config, "
+                    f"but sink '{sink_name}' has no path configured"
+                )
+            artifact_path: str = sink.config["path"]
             self._export_csv_multifile(
                 exporter=exporter,
                 run_id=run_id,
@@ -680,19 +676,21 @@ class Orchestrator:
                 ctx=ctx,
             )
         else:
-            # JSON export: write records one at a time to single sink
-            for record in exporter.export_run(run_id, sign=export_config.sign):
-                raw_sink.write(record, ctx)
-            raw_sink.flush()
-            raw_sink.close()  # Finalize file (JSONSink writes array on close)
+            # JSON export: batch all records for single write
+            records = list(exporter.export_run(run_id, sign=export_config.sign))
+            if records:
+                # Capture ArtifactDescriptor for audit trail (future use)
+                _artifact_descriptor = sink.write(records, ctx)
+            sink.flush()
+            sink.close()
 
     def _export_csv_multifile(
         self,
         exporter: Any,  # LandscapeExporter (avoid circular import in type hint)
         run_id: str,
-        artifact_path: str | None,
+        artifact_path: str,
         sign: bool,
-        ctx: PluginContext,
+        ctx: PluginContext,  # - reserved for future use
     ) -> None:
         """Export audit trail as multiple CSV files (one per record type).
 
@@ -702,23 +700,14 @@ class Orchestrator:
         Args:
             exporter: LandscapeExporter instance
             run_id: The completed run ID
-            artifact_path: Path from SinkAdapter.artifact_path (file sinks only)
+            artifact_path: Path from sink config (validated by caller)
             sign: Whether to sign records
-            ctx: Plugin context for sink operations
-
-        Raises:
-            ValueError: If artifact_path is None (non-file sink used for CSV export)
+            ctx: Plugin context for sink operations (reserved for future use)
         """
         import csv
         from pathlib import Path
 
         from elspeth.core.landscape.formatters import CSVFormatter
-
-        # Validate that we have a file-based sink path
-        if artifact_path is None:
-            raise ValueError(
-                "CSV export requires a file-based sink with a configured path"
-            )
 
         export_dir = Path(artifact_path)
         if export_dir.suffix:

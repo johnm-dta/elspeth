@@ -38,15 +38,24 @@ class TestLandscapeExport:
         db_path = tmp_path / "audit.db"
 
         config = {
-            "datasource": {"plugin": "csv", "options": {"path": str(input_csv)}},
+            "datasource": {
+                "plugin": "csv",
+                "options": {"path": str(input_csv), "schema": {"fields": "dynamic"}},
+            },
             "sinks": {
                 "output": {
                     "plugin": "csv",
-                    "options": {"path": str(output_csv)},
+                    "options": {
+                        "path": str(output_csv),
+                        "schema": {"fields": "dynamic"},
+                    },
                 },
                 "audit_export": {
                     "plugin": "json",
-                    "options": {"path": str(audit_json)},
+                    "options": {
+                        "path": str(audit_json),
+                        "schema": {"fields": "dynamic"},
+                    },
                 },
             },
             "output_sink": "output",
@@ -152,15 +161,24 @@ class TestLandscapeExport:
         db_path = tmp_path / "audit.db"
 
         config = {
-            "datasource": {"plugin": "csv", "options": {"path": str(input_csv)}},
+            "datasource": {
+                "plugin": "csv",
+                "options": {"path": str(input_csv), "schema": {"fields": "dynamic"}},
+            },
             "sinks": {
                 "output": {
                     "plugin": "csv",
-                    "options": {"path": str(output_csv)},
+                    "options": {
+                        "path": str(output_csv),
+                        "schema": {"fields": "dynamic"},
+                    },
                 },
                 "audit_export": {
                     "plugin": "json",
-                    "options": {"path": str(audit_json)},
+                    "options": {
+                        "path": str(audit_json),
+                        "schema": {"fields": "dynamic"},
+                    },
                 },
             },
             "output_sink": "output",
@@ -294,12 +312,24 @@ class TestSignedExportDeterminism:
         db_path = tmp_path / "audit.db"
 
         config = {
-            "datasource": {"plugin": "csv", "options": {"path": str(input_csv)}},
+            "datasource": {
+                "plugin": "csv",
+                "options": {"path": str(input_csv), "schema": {"fields": "dynamic"}},
+            },
             "sinks": {
-                "output": {"plugin": "csv", "options": {"path": str(output_csv)}},
+                "output": {
+                    "plugin": "csv",
+                    "options": {
+                        "path": str(output_csv),
+                        "schema": {"fields": "dynamic"},
+                    },
+                },
                 "audit_export": {
                     "plugin": "json",
-                    "options": {"path": str(audit_json)},
+                    "options": {
+                        "path": str(audit_json),
+                        "schema": {"fields": "dynamic"},
+                    },
                 },
             },
             "output_sink": "output",
@@ -356,12 +386,27 @@ class TestSignedExportDeterminism:
             db_path = tmp_path / f"audit_{i}.db"
 
             config = {
-                "datasource": {"plugin": "csv", "options": {"path": str(input_csv)}},
+                "datasource": {
+                    "plugin": "csv",
+                    "options": {
+                        "path": str(input_csv),
+                        "schema": {"fields": "dynamic"},
+                    },
+                },
                 "sinks": {
-                    "output": {"plugin": "csv", "options": {"path": str(output_csv)}},
+                    "output": {
+                        "plugin": "csv",
+                        "options": {
+                            "path": str(output_csv),
+                            "schema": {"fields": "dynamic"},
+                        },
+                    },
                     "audit_export": {
                         "plugin": "json",
-                        "options": {"path": str(audit_json)},
+                        "options": {
+                            "path": str(audit_json),
+                            "schema": {"fields": "dynamic"},
+                        },
                     },
                 },
                 "output_sink": "output",

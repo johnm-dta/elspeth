@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.config_base import PathConfig, PluginConfig, PluginConfigError
+
+# Helper to create a dynamic schema for tests
+DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
 
 
 class TestPluginConfig:
@@ -82,7 +86,7 @@ class TestPathConfig:
             pass
 
         with pytest.raises(ValidationError) as exc_info:
-            FileConfig(path="")
+            FileConfig(path="", schema_config=DYNAMIC_SCHEMA)
 
         assert "path cannot be empty" in str(exc_info.value)
 
@@ -93,7 +97,7 @@ class TestPathConfig:
             pass
 
         with pytest.raises(ValidationError) as exc_info:
-            FileConfig(path="   ")
+            FileConfig(path="   ", schema_config=DYNAMIC_SCHEMA)
 
         assert "path cannot be empty" in str(exc_info.value)
 
@@ -103,7 +107,7 @@ class TestPathConfig:
         class FileConfig(PathConfig):
             pass
 
-        cfg = FileConfig(path="/path/to/file.csv")
+        cfg = FileConfig(path="/path/to/file.csv", schema_config=DYNAMIC_SCHEMA)
 
         assert cfg.path == "/path/to/file.csv"
 
@@ -113,7 +117,7 @@ class TestPathConfig:
         class FileConfig(PathConfig):
             pass
 
-        cfg = FileConfig(path="/absolute/path.csv")
+        cfg = FileConfig(path="/absolute/path.csv", schema_config=DYNAMIC_SCHEMA)
         result = cfg.resolved_path()
 
         assert result == Path("/absolute/path.csv")
@@ -124,7 +128,7 @@ class TestPathConfig:
         class FileConfig(PathConfig):
             pass
 
-        cfg = FileConfig(path="/absolute/path.csv")
+        cfg = FileConfig(path="/absolute/path.csv", schema_config=DYNAMIC_SCHEMA)
         result = cfg.resolved_path(base_dir=Path("/other/base"))
 
         assert result == Path("/absolute/path.csv")
@@ -135,7 +139,7 @@ class TestPathConfig:
         class FileConfig(PathConfig):
             pass
 
-        cfg = FileConfig(path="relative/path.csv")
+        cfg = FileConfig(path="relative/path.csv", schema_config=DYNAMIC_SCHEMA)
         result = cfg.resolved_path()
 
         assert result == Path("relative/path.csv")
@@ -146,7 +150,7 @@ class TestPathConfig:
         class FileConfig(PathConfig):
             pass
 
-        cfg = FileConfig(path="relative/path.csv")
+        cfg = FileConfig(path="relative/path.csv", schema_config=DYNAMIC_SCHEMA)
         result = cfg.resolved_path(base_dir=Path("/base"))
 
         assert result == Path("/base/relative/path.csv")
@@ -158,7 +162,12 @@ class TestPathConfig:
             delimiter: str = ","
             encoding: str = "utf-8"
 
-        cfg = CSVConfig(path="data.csv", delimiter=";", encoding="latin-1")
+        cfg = CSVConfig(
+            path="data.csv",
+            delimiter=";",
+            encoding="latin-1",
+            schema_config=DYNAMIC_SCHEMA,
+        )
 
         assert cfg.path == "data.csv"
         assert cfg.delimiter == ";"
@@ -171,7 +180,7 @@ class TestPathConfig:
             delimiter: str = ","
 
         with pytest.raises(ValidationError):
-            CSVConfig(path="data.csv", unknown="value")  # type: ignore[call-arg]
+            CSVConfig(path="data.csv", schema_config=DYNAMIC_SCHEMA, unknown="value")  # type: ignore[call-arg]
 
 
 class TestPluginConfigInheritance:
@@ -186,7 +195,12 @@ class TestPluginConfigInheritance:
         class SpecificConfig(MiddleConfig):
             format_version: int = 1
 
-        cfg = SpecificConfig(path="data.bin", compression="gzip", format_version=2)
+        cfg = SpecificConfig(
+            path="data.bin",
+            compression="gzip",
+            format_version=2,
+            schema_config=DYNAMIC_SCHEMA,
+        )
 
         assert cfg.path == "data.bin"
         assert cfg.compression == "gzip"
@@ -199,7 +213,84 @@ class TestPluginConfigInheritance:
         class SpecificConfig(PathConfig):
             custom_field: str = "default"
 
-        cfg = SpecificConfig.from_dict({"path": "test.csv", "custom_field": "custom"})
+        cfg = SpecificConfig.from_dict(
+            {
+                "path": "test.csv",
+                "custom_field": "custom",
+                "schema": {"fields": "dynamic"},
+            }
+        )
 
         assert isinstance(cfg, SpecificConfig)
         assert cfg.custom_field == "custom"
+
+
+class TestPluginConfigWithSchema:
+    """Tests for schema in plugin config."""
+
+    def test_plugin_config_accepts_schema(self) -> None:
+        """PluginConfig can have schema section."""
+        from elspeth.plugins.config_base import PluginConfig
+
+        class TestConfig(PluginConfig):
+            name: str
+
+        config = TestConfig.from_dict(
+            {
+                "name": "test",
+                "schema": {"fields": "dynamic"},
+            }
+        )
+        assert config.name == "test"
+        assert config.schema_config is not None
+        assert config.schema_config.is_dynamic is True
+
+    def test_plugin_config_schema_optional_by_default(self) -> None:
+        """Schema is optional in base PluginConfig."""
+        from elspeth.plugins.config_base import PluginConfig
+
+        class TestConfig(PluginConfig):
+            name: str
+
+        config = TestConfig.from_dict({"name": "test"})
+        assert config.name == "test"
+        assert config.schema_config is None
+
+    def test_data_plugin_config_requires_schema(self) -> None:
+        """DataPluginConfig (for sources/sinks) requires schema."""
+        from elspeth.plugins.config_base import DataPluginConfig
+
+        class SourceConfig(DataPluginConfig):
+            path: str
+
+        # Should fail without schema - from_dict wraps in PluginConfigError
+        with pytest.raises(PluginConfigError, match="require.*schema"):
+            SourceConfig.from_dict({"path": "data.csv"})
+
+        # Should succeed with schema
+        config = SourceConfig.from_dict(
+            {
+                "path": "data.csv",
+                "schema": {"fields": "dynamic"},
+            }
+        )
+        assert config.schema_config is not None
+
+    def test_data_plugin_config_with_explicit_schema(self) -> None:
+        """DataPluginConfig accepts explicit schema definition."""
+        from elspeth.plugins.config_base import DataPluginConfig
+
+        class SourceConfig(DataPluginConfig):
+            path: str
+
+        config = SourceConfig.from_dict(
+            {
+                "path": "data.csv",
+                "schema": {
+                    "mode": "strict",
+                    "fields": ["id: int", "name: str"],
+                },
+            }
+        )
+        assert config.schema_config.mode == "strict"
+        assert len(config.schema_config.fields) == 2

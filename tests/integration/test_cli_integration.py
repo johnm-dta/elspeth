@@ -31,12 +31,21 @@ class TestCLIIntegration:
         all completed rows to the "default" sink via output_sink.
         """
         config = {
-            "datasource": {"plugin": "csv", "options": {"path": str(sample_csv)}},
+            "datasource": {
+                "plugin": "csv",
+                "options": {
+                    "path": str(sample_csv),
+                    "schema": {"fields": "dynamic"},
+                },
+            },
             "sinks": {
                 # "default" is required - Orchestrator routes completed rows here
                 "default": {
                     "plugin": "json",
-                    "options": {"path": str(tmp_path / "output.json")},
+                    "options": {
+                        "path": str(tmp_path / "output.json"),
+                        "schema": {"fields": "dynamic"},
+                    },
                 },
             },
             "output_sink": "default",

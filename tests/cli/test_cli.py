@@ -65,12 +65,16 @@ datasource:
   plugin: csv
   options:
     path: "{input_file}"
+    schema:
+      fields: dynamic
 
 sinks:
   results:
     plugin: csv
     options:
       path: "{output_file}"
+      schema:
+        fields: dynamic
 
 row_plugins:
   - plugin: passthrough
@@ -111,12 +115,16 @@ datasource:
   plugin: csv
   options:
     path: "{input_file}"
+    schema:
+      fields: dynamic
 
 sinks:
   results:
     plugin: csv
     options:
       path: "{output_file}"
+      schema:
+        fields: dynamic
 
 row_plugins:
   - plugin: field_mapper

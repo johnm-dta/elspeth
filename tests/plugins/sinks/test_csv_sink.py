@@ -9,6 +9,9 @@ import pytest
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import SinkProtocol
 
+# Dynamic schema config for tests - PathConfig now requires schema
+DYNAMIC_SCHEMA = {"fields": "dynamic"}
+
 
 class TestCSVSink:
     """Tests for CSVSink plugin."""
@@ -22,7 +25,7 @@ class TestCSVSink:
         """CSVSink implements SinkProtocol."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
-        sink = CSVSink({"path": "/tmp/test.csv"})
+        sink = CSVSink({"path": "/tmp/test.csv", "schema": DYNAMIC_SCHEMA})
         assert isinstance(sink, SinkProtocol)
 
     def test_has_required_attributes(self) -> None:
@@ -37,7 +40,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file)})
+        sink = CSVSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
 
         sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.flush()
@@ -57,7 +60,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file)})
+        sink = CSVSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
 
         sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.write([{"id": "2", "name": "bob"}], ctx)
@@ -77,7 +80,9 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file), "delimiter": ";"})
+        sink = CSVSink(
+            {"path": str(output_file), "delimiter": ";", "schema": DYNAMIC_SCHEMA}
+        )
 
         sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.flush()
@@ -92,7 +97,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file)})
+        sink = CSVSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
 
         sink.write([{"id": "1"}], ctx)
         sink.close()
@@ -103,7 +108,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file)})
+        sink = CSVSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
 
         sink.write([{"id": "1"}], ctx)
         sink.flush()
@@ -123,7 +128,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file)})
+        sink = CSVSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
 
         artifact = sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.close()
@@ -140,7 +145,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file)})
+        sink = CSVSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
 
         artifact = sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.close()
@@ -158,7 +163,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file)})
+        sink = CSVSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
 
         rows = [
             {"id": "1", "name": "alice"},
@@ -182,7 +187,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file)})
+        sink = CSVSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
 
         artifact = sink.write([], ctx)
         sink.close()
@@ -196,7 +201,7 @@ class TestCSVSink:
         """CSVSink has plugin_version attribute."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
-        sink = CSVSink({"path": "/tmp/test.csv"})
+        sink = CSVSink({"path": "/tmp/test.csv", "schema": DYNAMIC_SCHEMA})
         assert hasattr(sink, "plugin_version")
         assert sink.plugin_version == "1.0.0"
 
@@ -205,7 +210,7 @@ class TestCSVSink:
         from elspeth.contracts import Determinism
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
-        sink = CSVSink({"path": "/tmp/test.csv"})
+        sink = CSVSink({"path": "/tmp/test.csv", "schema": DYNAMIC_SCHEMA})
         assert sink.determinism == Determinism.IO_WRITE
 
     def test_cumulative_hash_after_multiple_writes(
@@ -219,7 +224,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink({"path": str(output_file)})
+        sink = CSVSink({"path": str(output_file), "schema": DYNAMIC_SCHEMA})
 
         # First write
         artifact1 = sink.write([{"id": "1", "name": "alice"}], ctx)

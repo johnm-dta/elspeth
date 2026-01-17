@@ -18,7 +18,9 @@ Example usage:
 from pathlib import Path
 from typing import Any, Self
 
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, ValidationError, field_validator, model_validator
+
+from elspeth.contracts.schema import SchemaConfig
 
 
 class PluginConfigError(Exception):
@@ -32,9 +34,14 @@ class PluginConfig(BaseModel):
 
     Provides common validation patterns and helpful error messages.
     All plugin configs should inherit from this class.
+
+    Schema is optional in the base class. Subclasses that process data
+    (DataPluginConfig) require schema to be specified.
     """
 
     model_config = {"extra": "forbid"}  # Reject unknown fields
+
+    schema_config: SchemaConfig | None = None
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> Self:
@@ -50,15 +57,48 @@ class PluginConfig(BaseModel):
             PluginConfigError: If configuration is invalid.
         """
         try:
-            return cls(**config)
+            config_copy = dict(config)
+            if "schema" in config_copy:
+                schema_dict = config_copy.pop("schema")
+                config_copy["schema_config"] = SchemaConfig.from_dict(schema_dict)
+            return cls.model_validate(config_copy)
         except ValidationError as e:
+            raise PluginConfigError(
+                f"Invalid configuration for {cls.__name__}: {e}"
+            ) from e
+        except ValueError as e:
             raise PluginConfigError(
                 f"Invalid configuration for {cls.__name__}: {e}"
             ) from e
 
 
-class PathConfig(PluginConfig):
+class DataPluginConfig(PluginConfig):
+    """Base class for data-processing plugin configurations.
+
+    Used by sources, transforms, and sinks that handle data rows.
+    Schema is REQUIRED to ensure auditable schema choices.
+
+    Use 'schema: {fields: dynamic}' to accept any fields, or provide
+    explicit field definitions with mode (strict/free).
+    """
+
+    @model_validator(mode="after")
+    def _require_schema(self) -> Self:
+        """Validate that schema is provided."""
+        if self.schema_config is None:
+            raise ValueError(
+                "Data plugins require 'schema' configuration. "
+                "Use 'schema: {fields: dynamic}' to accept any fields, or "
+                "provide explicit field definitions with mode (strict/free)."
+            )
+        return self
+
+
+class PathConfig(DataPluginConfig):
     """Base for configs that include file paths.
+
+    Extends DataPluginConfig because file-based plugins process data rows
+    and therefore require schema configuration.
 
     Provides path validation and resolution relative to a base directory.
     """

@@ -12,6 +12,9 @@ from typer.testing import CliRunner
 
 runner = CliRunner()
 
+# Dynamic schema config for tests - PathConfig now requires schema
+DYNAMIC_SCHEMA = {"fields": "dynamic"}
+
 
 class TestRunWithTransforms:
     """Test run command with transform plugins."""
@@ -34,10 +37,16 @@ class TestRunWithTransforms:
     ) -> Path:
         """Config with passthrough transform."""
         config = {
-            "datasource": {"plugin": "csv", "options": {"path": str(sample_csv)}},
+            "datasource": {
+                "plugin": "csv",
+                "options": {"path": str(sample_csv), "schema": DYNAMIC_SCHEMA},
+            },
             "row_plugins": [{"plugin": "passthrough", "type": "transform"}],
             "sinks": {
-                "output": {"plugin": "csv", "options": {"path": str(output_csv)}}
+                "output": {
+                    "plugin": "csv",
+                    "options": {"path": str(output_csv), "schema": DYNAMIC_SCHEMA},
+                }
             },
             "output_sink": "output",
             "landscape": {"url": f"sqlite:///{tmp_path}/audit.db"},
@@ -52,7 +61,10 @@ class TestRunWithTransforms:
     ) -> Path:
         """Config with field_mapper transform that renames columns."""
         config = {
-            "datasource": {"plugin": "csv", "options": {"path": str(sample_csv)}},
+            "datasource": {
+                "plugin": "csv",
+                "options": {"path": str(sample_csv), "schema": DYNAMIC_SCHEMA},
+            },
             "row_plugins": [
                 {
                     "plugin": "field_mapper",
@@ -63,7 +75,10 @@ class TestRunWithTransforms:
                 }
             ],
             "sinks": {
-                "output": {"plugin": "csv", "options": {"path": str(output_csv)}}
+                "output": {
+                    "plugin": "csv",
+                    "options": {"path": str(output_csv), "schema": DYNAMIC_SCHEMA},
+                }
             },
             "output_sink": "output",
             "landscape": {"url": f"sqlite:///{tmp_path}/audit.db"},
@@ -78,7 +93,10 @@ class TestRunWithTransforms:
     ) -> Path:
         """Config with multiple transforms chained together."""
         config = {
-            "datasource": {"plugin": "csv", "options": {"path": str(sample_csv)}},
+            "datasource": {
+                "plugin": "csv",
+                "options": {"path": str(sample_csv), "schema": DYNAMIC_SCHEMA},
+            },
             "row_plugins": [
                 {"plugin": "passthrough", "type": "transform"},
                 {
@@ -88,7 +106,10 @@ class TestRunWithTransforms:
                 },
             ],
             "sinks": {
-                "output": {"plugin": "csv", "options": {"path": str(output_csv)}}
+                "output": {
+                    "plugin": "csv",
+                    "options": {"path": str(output_csv), "schema": DYNAMIC_SCHEMA},
+                }
             },
             "output_sink": "output",
             "landscape": {"url": f"sqlite:///{tmp_path}/audit.db"},
@@ -166,7 +187,10 @@ class TestRunWithGates:
         high_output = tmp_path / "high_scores.csv"
         low_output = tmp_path / "low_scores.csv"
         config = {
-            "datasource": {"plugin": "csv", "options": {"path": str(sample_csv)}},
+            "datasource": {
+                "plugin": "csv",
+                "options": {"path": str(sample_csv), "schema": DYNAMIC_SCHEMA},
+            },
             "row_plugins": [
                 {
                     "plugin": "threshold_gate",
@@ -183,8 +207,14 @@ class TestRunWithGates:
                 }
             ],
             "sinks": {
-                "high": {"plugin": "csv", "options": {"path": str(high_output)}},
-                "low": {"plugin": "csv", "options": {"path": str(low_output)}},
+                "high": {
+                    "plugin": "csv",
+                    "options": {"path": str(high_output), "schema": DYNAMIC_SCHEMA},
+                },
+                "low": {
+                    "plugin": "csv",
+                    "options": {"path": str(low_output), "schema": DYNAMIC_SCHEMA},
+                },
             },
             "output_sink": "high",  # Default, but gate routes explicitly
             "landscape": {"url": f"sqlite:///{tmp_path}/audit.db"},
@@ -201,7 +231,10 @@ class TestRunWithGates:
         eng_output = tmp_path / "engineering.csv"
         other_output = tmp_path / "other.csv"
         config = {
-            "datasource": {"plugin": "csv", "options": {"path": str(csv_file)}},
+            "datasource": {
+                "plugin": "csv",
+                "options": {"path": str(csv_file), "schema": DYNAMIC_SCHEMA},
+            },
             "row_plugins": [
                 {
                     "plugin": "field_match_gate",
@@ -220,8 +253,14 @@ class TestRunWithGates:
                 }
             ],
             "sinks": {
-                "engineering": {"plugin": "csv", "options": {"path": str(eng_output)}},
-                "other": {"plugin": "csv", "options": {"path": str(other_output)}},
+                "engineering": {
+                    "plugin": "csv",
+                    "options": {"path": str(eng_output), "schema": DYNAMIC_SCHEMA},
+                },
+                "other": {
+                    "plugin": "csv",
+                    "options": {"path": str(other_output), "schema": DYNAMIC_SCHEMA},
+                },
             },
             "output_sink": "other",
             "landscape": {"url": f"sqlite:///{tmp_path}/audit.db"},
@@ -286,7 +325,10 @@ class TestRunWithTransformAndGate:
         pass_output = tmp_path / "passed.csv"
         fail_output = tmp_path / "failed.csv"
         config = {
-            "datasource": {"plugin": "csv", "options": {"path": str(csv_file)}},
+            "datasource": {
+                "plugin": "csv",
+                "options": {"path": str(csv_file), "schema": DYNAMIC_SCHEMA},
+            },
             "row_plugins": [
                 # First: rename points -> score
                 {
@@ -310,8 +352,14 @@ class TestRunWithTransformAndGate:
                 },
             ],
             "sinks": {
-                "passed": {"plugin": "csv", "options": {"path": str(pass_output)}},
-                "failed": {"plugin": "csv", "options": {"path": str(fail_output)}},
+                "passed": {
+                    "plugin": "csv",
+                    "options": {"path": str(pass_output), "schema": DYNAMIC_SCHEMA},
+                },
+                "failed": {
+                    "plugin": "csv",
+                    "options": {"path": str(fail_output), "schema": DYNAMIC_SCHEMA},
+                },
             },
             "output_sink": "passed",
             "landscape": {"url": f"sqlite:///{tmp_path}/audit.db"},

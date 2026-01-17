@@ -14,6 +14,9 @@ from elspeth.core.landscape.recorder import LandscapeRecorder
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.manager import PluginManager
 
+# Dynamic schema config for tests - PathConfig now requires schema
+DYNAMIC_SCHEMA = {"fields": "dynamic"}
+
 
 class TestIntegrationAuditFixes:
     """End-to-end tests for integration audit fixes."""
@@ -38,7 +41,7 @@ class TestIntegrationAuditFixes:
         csv_source_cls = manager.get_source_by_name("csv")
         assert csv_source_cls is not None
         # Protocols don't define __init__ but concrete classes do
-        source = csv_source_cls({"path": "test.csv"})  # type: ignore[call-arg]
+        source = csv_source_cls({"path": "test.csv", "schema": DYNAMIC_SCHEMA})  # type: ignore[call-arg]
         assert source.node_id is None  # Not yet set
 
         source.node_id = "node-123"
@@ -161,7 +164,7 @@ class TestIntegrationAuditFixes:
         csv_source_cls = manager.get_source_by_name("csv")
         assert csv_source_cls is not None
         # Protocols don't define __init__ but concrete classes do
-        source = csv_source_cls({"path": "test.csv"})  # type: ignore[call-arg]
+        source = csv_source_cls({"path": "test.csv", "schema": DYNAMIC_SCHEMA})  # type: ignore[call-arg]
         assert hasattr(source, "node_id")
         source.node_id = "source-001"
         assert source.node_id == "source-001"
@@ -188,7 +191,7 @@ class TestIntegrationAuditFixes:
         csv_sink_cls = manager.get_sink_by_name("csv")
         assert csv_sink_cls is not None
         # Protocols don't define __init__ but concrete classes do
-        sink = csv_sink_cls({"path": "/tmp/test.csv"})  # type: ignore[call-arg]
+        sink = csv_sink_cls({"path": "/tmp/test.csv", "schema": DYNAMIC_SCHEMA})  # type: ignore[call-arg]
         assert hasattr(sink, "node_id")
         sink.node_id = "sink-001"
         assert sink.node_id == "sink-001"

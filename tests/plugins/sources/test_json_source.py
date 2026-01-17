@@ -8,6 +8,9 @@ import pytest
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import SourceProtocol
 
+# Dynamic schema config for tests - PathConfig now requires schema
+DYNAMIC_SCHEMA = {"fields": "dynamic"}
+
 
 class TestJSONSource:
     """Tests for JSONSource plugin."""
@@ -21,7 +24,7 @@ class TestJSONSource:
         """JSONSource implements SourceProtocol."""
         from elspeth.plugins.sources.json_source import JSONSource
 
-        source = JSONSource({"path": "/tmp/test.json"})
+        source = JSONSource({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA})
         assert isinstance(source, SourceProtocol)
 
     def test_has_required_attributes(self) -> None:
@@ -42,7 +45,7 @@ class TestJSONSource:
         ]
         json_file.write_text(json.dumps(data))
 
-        source = JSONSource({"path": str(json_file)})
+        source = JSONSource({"path": str(json_file), "schema": DYNAMIC_SCHEMA})
         rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -60,7 +63,9 @@ class TestJSONSource:
             '{"id": 3, "name": "carol"}\n'
         )
 
-        source = JSONSource({"path": str(jsonl_file), "format": "jsonl"})
+        source = JSONSource(
+            {"path": str(jsonl_file), "format": "jsonl", "schema": DYNAMIC_SCHEMA}
+        )
         rows = list(source.load(ctx))
 
         assert len(rows) == 3
@@ -75,7 +80,9 @@ class TestJSONSource:
         jsonl_file = tmp_path / "data.jsonl"
         jsonl_file.write_text('{"id": 1}\n{"id": 2}\n')
 
-        source = JSONSource({"path": str(jsonl_file)})  # No format specified
+        source = JSONSource(
+            {"path": str(jsonl_file), "schema": DYNAMIC_SCHEMA}
+        )  # No format specified
         rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -93,7 +100,9 @@ class TestJSONSource:
         }
         json_file.write_text(json.dumps(data))
 
-        source = JSONSource({"path": str(json_file), "data_key": "results"})
+        source = JSONSource(
+            {"path": str(json_file), "data_key": "results", "schema": DYNAMIC_SCHEMA}
+        )
         rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -108,7 +117,9 @@ class TestJSONSource:
         jsonl_file = tmp_path / "sparse.jsonl"
         jsonl_file.write_text('{"id": 1}\n\n{"id": 2}\n\n')
 
-        source = JSONSource({"path": str(jsonl_file), "format": "jsonl"})
+        source = JSONSource(
+            {"path": str(jsonl_file), "format": "jsonl", "schema": DYNAMIC_SCHEMA}
+        )
         rows = list(source.load(ctx))
 
         assert len(rows) == 2
@@ -117,7 +128,9 @@ class TestJSONSource:
         """Missing file raises FileNotFoundError."""
         from elspeth.plugins.sources.json_source import JSONSource
 
-        source = JSONSource({"path": "/nonexistent/file.json"})
+        source = JSONSource(
+            {"path": "/nonexistent/file.json", "schema": DYNAMIC_SCHEMA}
+        )
         with pytest.raises(FileNotFoundError):
             list(source.load(ctx))
 
@@ -128,7 +141,7 @@ class TestJSONSource:
         json_file = tmp_path / "object.json"
         json_file.write_text('{"not": "an_array"}')
 
-        source = JSONSource({"path": str(json_file)})
+        source = JSONSource({"path": str(json_file), "schema": DYNAMIC_SCHEMA})
         with pytest.raises(ValueError, match="Expected JSON array"):
             list(source.load(ctx))
 
@@ -139,7 +152,7 @@ class TestJSONSource:
         json_file = tmp_path / "data.json"
         json_file.write_text("[]")
 
-        source = JSONSource({"path": str(json_file)})
+        source = JSONSource({"path": str(json_file), "schema": DYNAMIC_SCHEMA})
         list(source.load(ctx))
         source.close()
         source.close()  # Should not raise

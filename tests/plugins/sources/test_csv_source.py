@@ -7,6 +7,9 @@ import pytest
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import SourceProtocol
 
+# Dynamic schema config for tests - PathConfig now requires schema
+DYNAMIC_SCHEMA = {"fields": "dynamic"}
+
 
 class TestCSVSource:
     """Tests for CSVSource plugin."""
@@ -29,7 +32,7 @@ class TestCSVSource:
 
         assert isinstance(CSVSource, type)
         # Runtime check via Protocol
-        source = CSVSource({"path": "/tmp/test.csv"})
+        source = CSVSource({"path": "/tmp/test.csv", "schema": DYNAMIC_SCHEMA})
         assert isinstance(source, SourceProtocol)
 
     def test_has_required_attributes(self) -> None:
@@ -43,7 +46,7 @@ class TestCSVSource:
         """load() yields dict rows from CSV."""
         from elspeth.plugins.sources.csv_source import CSVSource
 
-        source = CSVSource({"path": str(sample_csv)})
+        source = CSVSource({"path": str(sample_csv), "schema": DYNAMIC_SCHEMA})
         rows = list(source.load(ctx))
 
         assert len(rows) == 3
@@ -58,7 +61,9 @@ class TestCSVSource:
         csv_file = tmp_path / "semicolon.csv"
         csv_file.write_text("id;name;value\n1;alice;100\n")
 
-        source = CSVSource({"path": str(csv_file), "delimiter": ";"})
+        source = CSVSource(
+            {"path": str(csv_file), "delimiter": ";", "schema": DYNAMIC_SCHEMA}
+        )
         rows = list(source.load(ctx))
 
         assert len(rows) == 1
@@ -71,7 +76,9 @@ class TestCSVSource:
         csv_file = tmp_path / "latin1.csv"
         csv_file.write_bytes(b"id,name\n1,caf\xe9\n")
 
-        source = CSVSource({"path": str(csv_file), "encoding": "latin-1"})
+        source = CSVSource(
+            {"path": str(csv_file), "encoding": "latin-1", "schema": DYNAMIC_SCHEMA}
+        )
         rows = list(source.load(ctx))
 
         assert rows[0]["name"] == "caf\xe9"
@@ -80,7 +87,7 @@ class TestCSVSource:
         """close() can be called multiple times."""
         from elspeth.plugins.sources.csv_source import CSVSource
 
-        source = CSVSource({"path": str(sample_csv)})
+        source = CSVSource({"path": str(sample_csv), "schema": DYNAMIC_SCHEMA})
         list(source.load(ctx))  # Consume iterator
         source.close()
         source.close()  # Should not raise
@@ -89,7 +96,7 @@ class TestCSVSource:
         """Missing file raises FileNotFoundError."""
         from elspeth.plugins.sources.csv_source import CSVSource
 
-        source = CSVSource({"path": "/nonexistent/file.csv"})
+        source = CSVSource({"path": "/nonexistent/file.csv", "schema": DYNAMIC_SCHEMA})
         with pytest.raises(FileNotFoundError):
             list(source.load(ctx))
 
@@ -103,7 +110,7 @@ class TestCSVSourceConfigValidation:
         from elspeth.plugins.sources.csv_source import CSVSource
 
         with pytest.raises(PluginConfigError, match="path"):
-            CSVSource({})
+            CSVSource({"schema": DYNAMIC_SCHEMA})
 
     def test_empty_path_raises_error(self) -> None:
         """Empty path string raises PluginConfigError."""
@@ -111,7 +118,7 @@ class TestCSVSourceConfigValidation:
         from elspeth.plugins.sources.csv_source import CSVSource
 
         with pytest.raises(PluginConfigError, match="path cannot be empty"):
-            CSVSource({"path": ""})
+            CSVSource({"path": "", "schema": DYNAMIC_SCHEMA})
 
     def test_unknown_field_raises_error(self) -> None:
         """Unknown config field raises PluginConfigError."""
@@ -119,4 +126,18 @@ class TestCSVSourceConfigValidation:
         from elspeth.plugins.sources.csv_source import CSVSource
 
         with pytest.raises(PluginConfigError, match="Extra inputs"):
-            CSVSource({"path": "/tmp/test.csv", "unknown_field": "value"})
+            CSVSource(
+                {
+                    "path": "/tmp/test.csv",
+                    "schema": DYNAMIC_SCHEMA,
+                    "unknown_field": "value",
+                }
+            )
+
+    def test_missing_schema_raises_error(self) -> None:
+        """Missing schema raises PluginConfigError."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        with pytest.raises(PluginConfigError, match="require.*schema"):
+            CSVSource({"path": "/tmp/test.csv"})

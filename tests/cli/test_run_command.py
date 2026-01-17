@@ -29,12 +29,18 @@ class TestRunCommand:
         settings = {
             "datasource": {
                 "plugin": "csv",
-                "options": {"path": str(sample_data)},
+                "options": {
+                    "path": str(sample_data),
+                    "schema": {"fields": "dynamic"},
+                },
             },
             "sinks": {
                 "default": {
                     "plugin": "json",
-                    "options": {"path": str(output_file)},
+                    "options": {
+                        "path": str(output_file),
+                        "schema": {"fields": "dynamic"},
+                    },
                 },
             },
             "output_sink": "default",

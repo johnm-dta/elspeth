@@ -40,7 +40,12 @@ from elspeth.plugins.base import (
 )
 
 # Config base classes
-from elspeth.plugins.config_base import PathConfig, PluginConfig, PluginConfigError
+from elspeth.plugins.config_base import (
+    DataPluginConfig,
+    PathConfig,
+    PluginConfig,
+    PluginConfigError,
+)
 
 # Context
 from elspeth.plugins.context import PluginContext
@@ -99,6 +104,7 @@ __all__ = [  # Grouped by category for readability
     "BaseSource",
     "BaseTransform",
     # Config base classes
+    "DataPluginConfig",
     "PathConfig",
     "PluginConfig",
     "PluginConfigError",

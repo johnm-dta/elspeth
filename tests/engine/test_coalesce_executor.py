@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from elspeth.contracts import Run
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 from elspeth.engine.spans import SpanFactory
 
@@ -17,14 +18,20 @@ def db() -> LandscapeDB:
 
 
 @pytest.fixture
-def run(db: LandscapeDB) -> Any:
-    recorder = LandscapeRecorder(db)
+def recorder(db: LandscapeDB) -> LandscapeRecorder:
+    """Shared recorder for all tests."""
+    return LandscapeRecorder(db)
+
+
+@pytest.fixture
+def run(recorder: LandscapeRecorder) -> Run:
+    """Create a run for testing."""
     return recorder.begin_run(config={}, canonical_version="v1")
 
 
 @pytest.fixture
 def executor_setup(
-    db: LandscapeDB, run: Any
+    recorder: LandscapeRecorder, run: Run
 ) -> tuple[LandscapeRecorder, SpanFactory, "TokenManager", str]:
     """Common setup for executor tests - reduces boilerplate.
 
@@ -33,7 +40,6 @@ def executor_setup(
     """
     from elspeth.engine.tokens import TokenManager
 
-    recorder = LandscapeRecorder(db)
     span_factory = SpanFactory()
     token_manager = TokenManager(recorder)
     return recorder, span_factory, token_manager, run.run_id
@@ -42,20 +48,19 @@ def executor_setup(
 class TestCoalesceExecutorInit:
     """Test CoalesceExecutor initialization."""
 
-    def test_executor_initializes(self, db: LandscapeDB, run: Any) -> None:
+    def test_executor_initializes(
+        self, executor_setup: tuple[LandscapeRecorder, SpanFactory, Any, str]
+    ) -> None:
         """Executor should initialize with recorder and span factory."""
         from elspeth.engine.coalesce_executor import CoalesceExecutor
-        from elspeth.engine.tokens import TokenManager
 
-        recorder = LandscapeRecorder(db)
-        span_factory = SpanFactory()
-        token_manager = TokenManager(recorder)
+        recorder, span_factory, token_manager, run_id = executor_setup
 
         executor = CoalesceExecutor(
             recorder=recorder,
             span_factory=span_factory,
             token_manager=token_manager,
-            run_id=run.run_id,
+            run_id=run_id,
         )
 
         assert executor is not None

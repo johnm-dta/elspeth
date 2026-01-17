@@ -10,7 +10,7 @@ Each executor handles a specific plugin type:
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts import (
     Artifact,
@@ -424,29 +424,6 @@ class GateExecutor:
                 routes=routes,
                 reason=dict(action.reason) if action.reason else None,
             )
-
-
-class AggregationLike(Protocol):
-    """Protocol for aggregation-like plugins.
-
-    Aggregations collect multiple rows into batches and flush them when
-    triggered. The _batch_id is mutable state managed by AggregationExecutor.
-    """
-
-    name: str
-    node_id: str
-    _batch_id: str | None  # Mutable, managed by executor
-
-    def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
-        """Accept a row into the current batch.
-
-        Returns AcceptResult indicating if row was accepted and if batch should trigger.
-        """
-        ...
-
-    def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
-        """Flush the current batch and return output rows."""
-        ...
 
 
 class AggregationExecutor:

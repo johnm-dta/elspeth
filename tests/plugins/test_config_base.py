@@ -374,3 +374,66 @@ class TestSourceDataConfig:
         assert config.path == "data/input.csv"
         assert config.schema_config is not None
         assert config.schema_config.mode == "strict"
+
+
+class TestTransformDataConfig:
+    """Tests for TransformDataConfig with on_error."""
+
+    def test_on_error_is_optional(self) -> None:
+        """on_error can be omitted for transforms that never error."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.config_base import TransformDataConfig
+
+        config = TransformDataConfig(
+            schema_config=SchemaConfig.from_dict({"fields": "dynamic"}),
+        )
+
+        assert config.on_error is None
+
+    def test_on_error_accepts_sink_name(self) -> None:
+        """on_error accepts a sink name."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.config_base import TransformDataConfig
+
+        config = TransformDataConfig(
+            schema_config=SchemaConfig.from_dict(
+                {"mode": "strict", "fields": ["id: int"]}
+            ),
+            on_error="failed_transforms",
+        )
+
+        assert config.on_error == "failed_transforms"
+
+    def test_on_error_accepts_discard(self) -> None:
+        """on_error accepts 'discard' for explicit drop."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.config_base import TransformDataConfig
+
+        config = TransformDataConfig(
+            schema_config=SchemaConfig.from_dict(
+                {"mode": "strict", "fields": ["id: int"]}
+            ),
+            on_error="discard",
+        )
+
+        assert config.on_error == "discard"
+
+    def test_on_error_rejects_empty_string(self) -> None:
+        """on_error rejects empty string - use None or valid sink."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.config_base import TransformDataConfig
+
+        with pytest.raises(ValidationError):
+            TransformDataConfig(
+                schema_config=SchemaConfig.from_dict(
+                    {"mode": "strict", "fields": ["id: int"]}
+                ),
+                on_error="",
+            )
+
+    def test_transform_config_inherits_schema_requirement(self) -> None:
+        """TransformDataConfig inherits schema requirement from DataPluginConfig."""
+        from elspeth.plugins.config_base import TransformDataConfig
+
+        with pytest.raises(ValidationError):
+            TransformDataConfig()  # Missing schema_config

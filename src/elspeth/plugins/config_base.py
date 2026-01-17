@@ -148,3 +148,27 @@ class SourceDataConfig(PathConfig):
         if not v or not v.strip():
             raise ValueError("on_validation_failure must be a sink name or 'discard'")
         return v.strip()
+
+
+class TransformDataConfig(DataPluginConfig):
+    """Base config for transform plugins with error routing.
+
+    Extends DataPluginConfig to add optional on_error field.
+    Transforms that can return TransformResult.error() should configure
+    where those rows go.
+    """
+
+    on_error: str | None = Field(
+        default=None,
+        description="Sink name for rows that cannot be processed, or 'discard'. Required if transform can return errors.",
+    )
+
+    @field_validator("on_error")
+    @classmethod
+    def validate_on_error(cls, v: str | None) -> str | None:
+        """Ensure on_error is not empty string."""
+        if v is not None and not v.strip():
+            raise ValueError(
+                "on_error must be a sink name, 'discard', or omitted entirely"
+            )
+        return v.strip() if v else None

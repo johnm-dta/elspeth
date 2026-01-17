@@ -622,3 +622,76 @@ class TestEdgeInfoIntegration:
 
         edges = graph.get_edges()
         assert edges[0].mode == RoutingMode.COPY
+
+
+class TestMultiEdgeScenarios:
+    """Tests for scenarios requiring multiple edges between same nodes."""
+
+    def test_fork_gate_config_parses_into_valid_graph(self) -> None:
+        """Fork gate configuration parses into valid graph structure.
+
+        Note: This tests config parsing, not the multi-edge bug. Fork routes
+        with target="fork" don't create edges to sinks - they create child tokens.
+        The multi-edge bug is tested by test_gate_multiple_routes_same_sink.
+        """
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        config = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={"output": SinkSettings(plugin="csv")},
+            gates=[
+                GateSettings(
+                    name="fork_gate",
+                    condition="True",  # Always forks
+                    routes={"path_a": "fork", "path_b": "fork"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            output_sink="output",
+        )
+
+        graph = ExecutionGraph.from_config(config)
+
+        # Validate graph is still valid (DAG, has source and sink)
+        graph.validate()
+
+        # The gate should have edges - at minimum the continue edge to output sink
+        edges = graph.get_edges()
+        gate_edges = [e for e in edges if "config_gate" in e.from_node]
+
+        # Should have at least the continue edge to output sink
+        assert len(gate_edges) >= 1
+
+    def test_gate_multiple_routes_same_sink(self) -> None:
+        """CRITICAL: Gate with multiple route labels to same sink preserves all labels.
+
+        This is the core bug scenario: {"high": "alerts", "medium": "alerts", "low": "alerts"}
+        With DiGraph, only "low" survives. With MultiDiGraph, all three edges exist.
+        """
+        from elspeth.contracts import RoutingMode
+        from elspeth.core.dag import ExecutionGraph
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("gate", node_type="gate", plugin_name="classifier")
+        graph.add_node("alerts", node_type="sink", plugin_name="csv")
+
+        graph.add_edge("source", "gate", label="continue", mode=RoutingMode.MOVE)
+        # Multiple severity levels all route to same alerts sink
+        graph.add_edge("gate", "alerts", label="high", mode=RoutingMode.MOVE)
+        graph.add_edge("gate", "alerts", label="medium", mode=RoutingMode.MOVE)
+        graph.add_edge("gate", "alerts", label="low", mode=RoutingMode.MOVE)
+
+        # All three edges should exist
+        edges = graph.get_edges()
+        alert_edges = [e for e in edges if e.to_node == "alerts"]
+        assert len(alert_edges) == 3
+
+        labels = {e.label for e in alert_edges}
+        assert labels == {"high", "medium", "low"}

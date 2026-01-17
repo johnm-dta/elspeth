@@ -173,7 +173,7 @@ class TestIntegrationAuditFixes:
         passthrough_cls = manager.get_transform_by_name("passthrough")
         assert passthrough_cls is not None
         # Protocols don't define __init__ but concrete classes do
-        transform = passthrough_cls({})  # type: ignore[call-arg]
+        transform = passthrough_cls({"schema": DYNAMIC_SCHEMA})  # type: ignore[call-arg]
         assert hasattr(transform, "node_id")
         transform.node_id = "transform-001"
         assert transform.node_id == "transform-001"

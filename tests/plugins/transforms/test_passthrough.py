@@ -7,6 +7,9 @@ import pytest
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import TransformProtocol
 
+# Common schema config for dynamic field handling (accepts any fields)
+DYNAMIC_SCHEMA = {"fields": "dynamic"}
+
 
 class TestPassThrough:
     """Tests for PassThrough transform plugin."""
@@ -20,22 +23,28 @@ class TestPassThrough:
         """PassThrough implements TransformProtocol."""
         from elspeth.plugins.transforms.passthrough import PassThrough
 
-        transform = PassThrough({})
+        transform = PassThrough({"schema": DYNAMIC_SCHEMA})
         assert isinstance(transform, TransformProtocol)
 
     def test_has_required_attributes(self) -> None:
-        """PassThrough has name and schemas."""
+        """PassThrough has name."""
         from elspeth.plugins.transforms.passthrough import PassThrough
 
         assert PassThrough.name == "passthrough"
-        assert hasattr(PassThrough, "input_schema")
-        assert hasattr(PassThrough, "output_schema")
+
+    def test_instance_has_schemas(self) -> None:
+        """PassThrough instance has input/output schemas."""
+        from elspeth.plugins.transforms.passthrough import PassThrough
+
+        transform = PassThrough({"schema": DYNAMIC_SCHEMA})
+        assert hasattr(transform, "input_schema")
+        assert hasattr(transform, "output_schema")
 
     def test_process_returns_unchanged_row(self, ctx: PluginContext) -> None:
         """process() returns row data unchanged."""
         from elspeth.plugins.transforms.passthrough import PassThrough
 
-        transform = PassThrough({})
+        transform = PassThrough({"schema": DYNAMIC_SCHEMA})
         row = {"id": 1, "name": "alice", "value": 100}
 
         result = transform.process(row, ctx)
@@ -48,7 +57,7 @@ class TestPassThrough:
         """Handles nested structures correctly."""
         from elspeth.plugins.transforms.passthrough import PassThrough
 
-        transform = PassThrough({})
+        transform = PassThrough({"schema": DYNAMIC_SCHEMA})
         row: dict[str, Any] = {"id": 1, "meta": {"source": "test", "tags": ["a", "b"]}}
 
         result = transform.process(row, ctx)
@@ -64,7 +73,7 @@ class TestPassThrough:
         """Handles empty row."""
         from elspeth.plugins.transforms.passthrough import PassThrough
 
-        transform = PassThrough({})
+        transform = PassThrough({"schema": DYNAMIC_SCHEMA})
         row: dict[str, Any] = {}
 
         result = transform.process(row, ctx)
@@ -76,6 +85,14 @@ class TestPassThrough:
         """close() can be called multiple times."""
         from elspeth.plugins.transforms.passthrough import PassThrough
 
-        transform = PassThrough({})
+        transform = PassThrough({"schema": DYNAMIC_SCHEMA})
         transform.close()
         transform.close()  # Should not raise
+
+    def test_requires_schema_config(self) -> None:
+        """PassThrough requires schema configuration."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.transforms.passthrough import PassThrough
+
+        with pytest.raises(PluginConfigError, match="schema"):
+            PassThrough({})

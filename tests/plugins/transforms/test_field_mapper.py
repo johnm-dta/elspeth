@@ -5,6 +5,9 @@ import pytest
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import TransformProtocol
 
+# Common schema config for dynamic field handling (accepts any fields)
+DYNAMIC_SCHEMA = {"fields": "dynamic"}
+
 
 class TestFieldMapper:
     """Tests for FieldMapper transform plugin."""
@@ -18,7 +21,12 @@ class TestFieldMapper:
         """FieldMapper implements TransformProtocol."""
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
-        transform = FieldMapper({"mapping": {"old": "new"}})
+        transform = FieldMapper(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "mapping": {"old": "new"},
+            }
+        )
         assert isinstance(transform, TransformProtocol)
 
     def test_has_required_attributes(self) -> None:
@@ -31,7 +39,12 @@ class TestFieldMapper:
         """Rename a single field."""
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
-        transform = FieldMapper({"mapping": {"old_name": "new_name"}})
+        transform = FieldMapper(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "mapping": {"old_name": "new_name"},
+            }
+        )
         row = {"old_name": "value", "other": 123}
 
         result = transform.process(row, ctx)
@@ -46,10 +59,11 @@ class TestFieldMapper:
 
         transform = FieldMapper(
             {
+                "schema": DYNAMIC_SCHEMA,
                 "mapping": {
                     "first_name": "firstName",
                     "last_name": "lastName",
-                }
+                },
             }
         )
         row = {"first_name": "Alice", "last_name": "Smith", "id": 1}
@@ -65,6 +79,7 @@ class TestFieldMapper:
 
         transform = FieldMapper(
             {
+                "schema": DYNAMIC_SCHEMA,
                 "mapping": {"id": "id", "name": "name"},
                 "select_only": True,
             }
@@ -84,6 +99,7 @@ class TestFieldMapper:
 
         transform = FieldMapper(
             {
+                "schema": DYNAMIC_SCHEMA,
                 "mapping": {"required_field": "output"},
                 "strict": True,
             }
@@ -101,6 +117,7 @@ class TestFieldMapper:
 
         transform = FieldMapper(
             {
+                "schema": DYNAMIC_SCHEMA,
                 "mapping": {"maybe_field": "output"},
                 "strict": False,
             }
@@ -117,7 +134,12 @@ class TestFieldMapper:
         """Default behavior is non-strict (skip missing)."""
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
-        transform = FieldMapper({"mapping": {"missing": "output"}})
+        transform = FieldMapper(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "mapping": {"missing": "output"},
+            }
+        )
         row = {"exists": "value"}
 
         result = transform.process(row, ctx)
@@ -130,6 +152,7 @@ class TestFieldMapper:
 
         transform = FieldMapper(
             {
+                "schema": DYNAMIC_SCHEMA,
                 "mapping": {"meta.source": "origin"},
             }
         )
@@ -146,10 +169,23 @@ class TestFieldMapper:
         """Empty mapping acts as passthrough."""
         from elspeth.plugins.transforms.field_mapper import FieldMapper
 
-        transform = FieldMapper({"mapping": {}})
+        transform = FieldMapper(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "mapping": {},
+            }
+        )
         row = {"a": 1, "b": 2}
 
         result = transform.process(row, ctx)
 
         assert result.status == "success"
         assert result.row == row
+
+    def test_requires_schema_config(self) -> None:
+        """FieldMapper requires schema configuration."""
+        from elspeth.plugins.config_base import PluginConfigError
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        with pytest.raises(PluginConfigError, match="schema"):
+            FieldMapper({"mapping": {"a": "b"}})

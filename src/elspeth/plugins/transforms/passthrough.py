@@ -1,21 +1,34 @@
 """PassThrough transform plugin.
 
 Passes rows through unchanged. Useful for testing and debugging pipelines.
+
+IMPORTANT: Transforms use allow_coercion=False to catch upstream bugs.
+If the source outputs wrong types, the transform crashes immediately.
 """
 
 import copy
 from typing import Any
 
-from elspeth.contracts import PluginSchema
+from pydantic import Field
+
 from elspeth.plugins.base import BaseTransform
+from elspeth.plugins.config_base import DataPluginConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import TransformResult
+from elspeth.plugins.schema_factory import create_schema_from_config
 
 
-class PassThroughSchema(PluginSchema):
-    """Dynamic schema - accepts any fields."""
+class PassThroughConfig(DataPluginConfig):
+    """Configuration for passthrough transform.
 
-    model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic class-level config
+    Requires 'schema' in config to define input/output expectations.
+    Use 'schema: {fields: dynamic}' for dynamic field handling.
+    """
+
+    validate_input: bool = Field(
+        default=False,
+        description="If True, validate input against schema (default: False)",
+    )
 
 
 class PassThrough(BaseTransform):
@@ -27,15 +40,30 @@ class PassThrough(BaseTransform):
     - Placeholder for future transform logic
 
     Config options:
-        None (accepts empty config)
+        schema: Required. Schema for input/output (use {fields: dynamic} for any fields)
+        validate_input: If True, validate input against schema (default: False)
     """
 
     name = "passthrough"
-    input_schema = PassThroughSchema
-    output_schema = PassThroughSchema
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
+        cfg = PassThroughConfig.from_dict(config)
+        self._validate_input = cfg.validate_input
+
+        # DataPluginConfig validates schema_config is not None
+        assert cfg.schema_config is not None
+        self._schema_config = cfg.schema_config
+
+        # Create schema from config
+        # CRITICAL: allow_coercion=False - wrong types are source bugs
+        schema = create_schema_from_config(
+            self._schema_config,
+            "PassThroughSchema",
+            allow_coercion=False,
+        )
+        self.input_schema = schema
+        self.output_schema = schema
 
     def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
         """Return row unchanged (deep copy to prevent mutation).
@@ -46,7 +74,15 @@ class PassThrough(BaseTransform):
 
         Returns:
             TransformResult with unchanged row data
+
+        Raises:
+            ValidationError: If validate_input=True and row fails schema validation.
+                This indicates a bug in the upstream source/transform.
         """
+        # Optional input validation - crash on wrong types (source bug!)
+        if self._validate_input and not self._schema_config.is_dynamic:
+            self.input_schema.model_validate(row)  # Raises on failure
+
         return TransformResult.success(copy.deepcopy(row))
 
     def close(self) -> None:

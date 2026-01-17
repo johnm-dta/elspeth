@@ -41,7 +41,13 @@ class TestRunWithTransforms:
                 "plugin": "csv",
                 "options": {"path": str(sample_csv), "schema": DYNAMIC_SCHEMA},
             },
-            "row_plugins": [{"plugin": "passthrough", "type": "transform"}],
+            "row_plugins": [
+                {
+                    "plugin": "passthrough",
+                    "type": "transform",
+                    "options": {"schema": DYNAMIC_SCHEMA},
+                }
+            ],
             "sinks": {
                 "output": {
                     "plugin": "csv",
@@ -70,6 +76,7 @@ class TestRunWithTransforms:
                     "plugin": "field_mapper",
                     "type": "transform",
                     "options": {
+                        "schema": DYNAMIC_SCHEMA,
                         "mapping": {"name": "full_name", "score": "test_score"},
                     },
                 }
@@ -98,11 +105,18 @@ class TestRunWithTransforms:
                 "options": {"path": str(sample_csv), "schema": DYNAMIC_SCHEMA},
             },
             "row_plugins": [
-                {"plugin": "passthrough", "type": "transform"},
+                {
+                    "plugin": "passthrough",
+                    "type": "transform",
+                    "options": {"schema": DYNAMIC_SCHEMA},
+                },
                 {
                     "plugin": "field_mapper",
                     "type": "transform",
-                    "options": {"mapping": {"name": "person_name"}},
+                    "options": {
+                        "schema": DYNAMIC_SCHEMA,
+                        "mapping": {"name": "person_name"},
+                    },
                 },
             ],
             "sinks": {
@@ -334,7 +348,10 @@ class TestRunWithTransformAndGate:
                 {
                     "plugin": "field_mapper",
                     "type": "transform",
-                    "options": {"mapping": {"points": "score"}},
+                    "options": {
+                        "schema": DYNAMIC_SCHEMA,
+                        "mapping": {"points": "score"},
+                    },
                 },
                 # Then: filter by the renamed field
                 {

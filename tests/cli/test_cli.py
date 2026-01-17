@@ -78,6 +78,9 @@ sinks:
 
 row_plugins:
   - plugin: passthrough
+    options:
+      schema:
+        fields: dynamic
 
 output_sink: results
 
@@ -129,6 +132,8 @@ sinks:
 row_plugins:
   - plugin: field_mapper
     options:
+      schema:
+        fields: dynamic
       mapping:
         old_name: new_name
 

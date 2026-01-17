@@ -32,7 +32,7 @@ class TestPluginTypeDetection:
         """Transforms should be instances of BaseTransform."""
         from elspeth.plugins.transforms.passthrough import PassThrough
 
-        transform = PassThrough({})
+        transform = PassThrough({"schema": {"fields": "dynamic"}})
         assert isinstance(transform, BaseTransform)
 
     def test_aggregation_is_base_aggregation(self) -> None:
@@ -132,7 +132,7 @@ class TestPluginInheritanceHierarchy:
         """Transforms should NOT be instances of BaseGate."""
         from elspeth.plugins.transforms.passthrough import PassThrough
 
-        transform = PassThrough({})
+        transform = PassThrough({"schema": {"fields": "dynamic"}})
         # mypy knows these are incompatible hierarchies - that's what we're verifying
         assert not isinstance(transform, BaseGate)  # type: ignore[unreachable]
 

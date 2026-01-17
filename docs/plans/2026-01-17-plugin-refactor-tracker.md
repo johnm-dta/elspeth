@@ -12,7 +12,7 @@
 | WP | Name | Status | Effort | Dependencies | Unlocks |
 |----|------|--------|--------|--------------|---------|
 | WP-01 | Protocol & Base Class Alignment | 🟢 Complete | 2h | None | WP-03 |
-| WP-02 | Gate Plugin Deletion | 🔴 Not Started | 1h | None | — |
+| WP-02 | Gate Plugin Deletion | 🟢 Complete | 1h | None | WP-09 |
 | WP-03 | Sink Implementation Rewrite | 🟢 Complete | 4h | WP-01 | WP-04, WP-13 |
 | WP-04 | Delete SinkAdapter & SinkLike | 🟢 Complete | 2h | WP-03 | WP-04a, WP-13 |
 | WP-04a | Delete *Like Protocol Duplications | 🟢 Complete | 1.5h | WP-04 | — |
@@ -74,8 +74,8 @@ WP-11.99 ──► WP-12  (config-driven schemas unlock simplified utility conso
 - [ ] WP-10: Quarantine Implementation
 
 ### Sprint 4: Gates & Coalesce
-- [ ] WP-02: Gate Plugin Deletion ← Execute first
-- [ ] WP-09: Engine-Level Gates ← Immediately after WP-02
+- [x] WP-02: Gate Plugin Deletion ✅ Complete (2026-01-18)
+- [ ] WP-09: Engine-Level Gates ← **NEXT** (immediately after WP-02)
 - [ ] WP-08: Coalesce Executor
 
 ### Sprint 5: Verification
@@ -172,30 +172,58 @@ fd0b29a feat(protocols): update SinkProtocol.write() to batch mode
 
 ### WP-02: Gate Plugin Deletion
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete (2026-01-18)
+**Plan:** [2026-01-18-wp02-gate-plugin-deletion.md](./2026-01-18-wp02-gate-plugin-deletion.md)
 **Goal:** Complete removal of plugin-based gates (engine gates come in WP-09)
 
-#### Files to DELETE
-- [ ] `src/elspeth/plugins/gates/filter_gate.py` (249 lines)
-- [ ] `src/elspeth/plugins/gates/field_match_gate.py` (193 lines)
-- [ ] `src/elspeth/plugins/gates/threshold_gate.py` (144 lines)
-- [ ] `src/elspeth/plugins/gates/hookimpl.py` (22 lines)
-- [ ] `src/elspeth/plugins/gates/__init__.py` (11 lines)
-- [ ] `tests/plugins/gates/test_filter_gate.py` (276 lines)
-- [ ] `tests/plugins/gates/test_field_match_gate.py` (230 lines)
-- [ ] `tests/plugins/gates/test_threshold_gate.py` (221 lines)
-- [ ] `tests/plugins/gates/__init__.py` (1 line)
+#### Files DELETED (9 files, ~1,350 lines)
+- [x] `src/elspeth/plugins/gates/filter_gate.py` (249 lines)
+- [x] `src/elspeth/plugins/gates/field_match_gate.py` (193 lines)
+- [x] `src/elspeth/plugins/gates/threshold_gate.py` (144 lines)
+- [x] `src/elspeth/plugins/gates/hookimpl.py` (22 lines)
+- [x] `src/elspeth/plugins/gates/__init__.py` (11 lines)
+- [x] `tests/plugins/gates/test_filter_gate.py` (276 lines)
+- [x] `tests/plugins/gates/test_field_match_gate.py` (230 lines)
+- [x] `tests/plugins/gates/test_threshold_gate.py` (221 lines)
+- [x] `tests/plugins/gates/__init__.py` (1 line)
 
-#### Files to MODIFY
-- [ ] `src/elspeth/cli.py` - Remove gate imports (line 228) and registry (241-245)
-- [ ] `src/elspeth/plugins/manager.py` - Remove builtin_gates import (161) and registration (168)
-- [ ] `tests/plugins/test_base.py` - Remove ThresholdGate tests (74-100)
-- [ ] `tests/plugins/test_protocols.py` - Remove ThresholdGate conformance (145-191)
+#### Files MODIFIED (9 files)
+- [x] `src/elspeth/cli.py` - Remove gate imports and GATE_PLUGINS registry
+- [x] `src/elspeth/plugins/manager.py` - Remove builtin_gates import and registration
+- [x] `tests/plugins/test_base.py` - Remove TestBaseGate class
+- [x] `tests/plugins/test_protocols.py` - Remove TestGateProtocol class
+- [x] `tests/plugins/test_integration.py` - Remove gate from workflow test
+- [x] `tests/engine/test_plugin_detection.py` - Remove gate import tests
+- [x] `tests/plugins/test_hookimpl_registration.py` - Remove gate discovery test
+- [x] `tests/integration/test_audit_integration_fixes.py` - Fix gate assertion
+- [x] `tests/cli/test_run_with_row_plugins.py` - Remove gate CLI tests (plan gap fix)
 
-#### Verification
-- [ ] `grep -r "FilterGate\|FieldMatchGate\|ThresholdGate" src/` returns nothing
-- [ ] No imports of deleted gate plugins anywhere
-- [ ] Tests pass
+#### Preserved for WP-09
+- `GateProtocol` in protocols.py
+- `BaseGate` in base.py
+- `GateResult`, `RoutingAction` in contracts/results.py
+- `PluginManager.get_gates()`, `get_gate_by_name()` infrastructure
+
+#### Commits (11 total)
+```
+c9924af refactor(gates): delete plugin-based gate implementations
+76b21c7 test(gates): delete plugin-based gate tests
+9a03f86 refactor(cli): remove gate plugin references
+01f0a96 refactor(manager): remove gate plugin registration
+61c7879 test(base): remove BaseGate test class
+46d7598 test(protocols): remove GateProtocol conformance test
+647d41e test(integration): remove gate from plugin workflow test
+02eacc4 test(detection): remove gate plugin import tests
+3155ce3 test(plugins): remove gate discovery test (WP-02 Task 9)
+c231f41 test(integration): update gate assertion for WP-02 (Task 10)
+2496151 test(cli): remove gate plugin tests (WP-02 verification fix)
+```
+
+#### Verification (2026-01-18)
+- [x] `grep -r "FilterGate\|FieldMatchGate\|ThresholdGate" src/` returns nothing
+- [x] No imports of deleted gate plugins anywhere
+- [x] mypy passes (84 files, no issues)
+- [x] pytest passes (1203 tests, 2 pre-existing failures unrelated to WP-02)
 
 ---
 
@@ -618,4 +646,5 @@ fd0b29a feat(protocols): update SinkProtocol.write() to batch mode
 | 2026-01-17 | — | Fixed work-packages.md: WP-04, WP-13, WP-14 all updated | Claude |
 | 2026-01-17 | WP-04a | Created detailed plan with Option C: batch state internal to executor | Claude |
 | 2026-01-17 | WP-04a | TransformLike/GateLike already deleted (f08c19a), only AggregationLike remains | Claude |
+| 2026-01-18 | WP-02 | ✅ **COMPLETE** - 9 files deleted, 9 modified, 11 commits. Plan gap fixed (test_run_with_row_plugins.py). Ready for WP-09. | Claude |
 | | | | |

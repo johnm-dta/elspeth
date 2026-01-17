@@ -91,7 +91,7 @@ class TestTransformErrorRouting:
         )
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
-        result, updated_token = executor.execute_transform(
+        result, updated_token, _ = executor.execute_transform(
             transform=transform,
             token=token,
             ctx=ctx,
@@ -154,7 +154,7 @@ class TestTransformErrorRouting:
         )
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
-        result, _ = executor.execute_transform(
+        result, _, _error_sink = executor.execute_transform(
             transform=transform,
             token=token,
             ctx=ctx,
@@ -215,7 +215,7 @@ class TestTransformErrorRouting:
         )
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
-        result, _ = executor.execute_transform(
+        result, _, _error_sink = executor.execute_transform(
             transform=transform,
             token=token,
             ctx=ctx,

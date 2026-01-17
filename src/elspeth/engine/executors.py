@@ -91,7 +91,7 @@ class TransformExecutor:
 
     Example:
         executor = TransformExecutor(recorder, span_factory)
-        result, updated_token = executor.execute_transform(
+        result, updated_token, error_sink = executor.execute_transform(
             transform=my_transform,
             token=token,
             ctx=ctx,
@@ -119,7 +119,7 @@ class TransformExecutor:
         token: TokenInfo,
         ctx: PluginContext,
         step_in_pipeline: int,
-    ) -> tuple[TransformResult, TokenInfo]:
+    ) -> tuple[TransformResult, TokenInfo, str | None]:
         """Execute a transform with full audit recording and error routing.
 
         This method handles a SINGLE ATTEMPT. Retry logic is the caller's
@@ -140,7 +140,11 @@ class TransformExecutor:
             step_in_pipeline: Current position in DAG (Orchestrator is authority)
 
         Returns:
-            Tuple of (TransformResult with audit fields, updated TokenInfo)
+            Tuple of (TransformResult with audit fields, updated TokenInfo, error_sink)
+            where error_sink is:
+            - None if transform succeeded
+            - "discard" if transform errored and _on_error == "discard"
+            - The sink name if transform errored and _on_error is a sink name
 
         Raises:
             Exception: Re-raised from transform.process() after recording failure
@@ -183,6 +187,9 @@ class TransformExecutor:
         result.output_hash = stable_hash(result.row) if result.row else None
         result.duration_ms = duration_ms
 
+        # Initialize error_sink - will be set if transform errors with on_error configured
+        error_sink: str | None = None
+
         # Complete node state
         if result.status == "success":
             # TransformResult.success() always sets row - this is a contract
@@ -220,6 +227,9 @@ class TransformExecutor:
                     f"return errors for this input. Error: {result.reason}"
                 )
 
+            # Set error_sink so caller knows where the error was routed
+            error_sink = on_error
+
             # Record error event (always, even for discard - audit completeness)
             ctx.record_transform_error(
                 token_id=token.token_id,
@@ -239,7 +249,7 @@ class TransformExecutor:
 
             updated_token = token
 
-        return result, updated_token
+        return result, updated_token, error_sink
 
 
 class GateExecutor:

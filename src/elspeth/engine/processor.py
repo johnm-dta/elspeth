@@ -258,7 +258,8 @@ class RowProcessor:
 
             elif isinstance(transform, BaseTransform):
                 # Regular transform
-                result, current_token = self._transform_executor.execute_transform(
+                # Note: error_sink is used in Task 2 to determine correct outcome
+                result, current_token, _ = self._transform_executor.execute_transform(
                     transform=transform,
                     token=current_token,
                     ctx=ctx,

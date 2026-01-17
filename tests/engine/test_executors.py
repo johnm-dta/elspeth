@@ -65,7 +65,7 @@ class TestTransformExecutor:
         )
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
-        result, _updated_token = executor.execute_transform(
+        result, _updated_token, _error_sink = executor.execute_transform(
             transform=transform,
             token=token,
             ctx=ctx,
@@ -127,7 +127,7 @@ class TestTransformExecutor:
         )
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
-        result, _ = executor.execute_transform(
+        result, _, _error_sink = executor.execute_transform(
             transform=transform,
             token=token,
             ctx=ctx,
@@ -249,7 +249,7 @@ class TestTransformExecutor:
         )
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
-        _result, updated_token = executor.execute_transform(
+        _result, updated_token, _error_sink = executor.execute_transform(
             transform=transform,
             token=token,
             ctx=ctx,
@@ -327,6 +327,182 @@ class TestTransformExecutor:
         assert hasattr(state, "output_hash") and state.output_hash is not None
         # Same input/output data means same hashes for identity transform
         assert state.input_hash == state.output_hash
+
+    def test_execute_transform_returns_error_sink_on_discard(self) -> None:
+        """When transform errors with on_error='discard', returns error_sink='discard'."""
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import TransformExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="discarding",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        class DiscardingTransform:
+            name = "discarding"
+            node_id = node.node_id
+            _on_error = "discard"
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.error({"message": "invalid input"})
+
+        transform = DiscardingTransform()
+        ctx = PluginContext(run_id=run.run_id, config={}, landscape=recorder)
+        executor = TransformExecutor(recorder, SpanFactory())
+
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="token-1",
+            row_data={"value": -1},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+
+        result, _updated_token, error_sink = executor.execute_transform(
+            transform=transform,
+            token=token,
+            ctx=ctx,
+            step_in_pipeline=1,
+        )
+
+        assert result.status == "error"
+        assert error_sink == "discard"
+
+    def test_execute_transform_returns_error_sink_name(self) -> None:
+        """When transform errors with on_error=sink_name, returns that sink name."""
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import TransformExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="routing_to_error",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        class ErrorRoutingTransform:
+            name = "routing_to_error"
+            node_id = node.node_id
+            _on_error = "error_sink"  # Routes to named error sink
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.error({"message": "routing to error sink"})
+
+        transform = ErrorRoutingTransform()
+        ctx = PluginContext(run_id=run.run_id, config={}, landscape=recorder)
+        executor = TransformExecutor(recorder, SpanFactory())
+
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="token-1",
+            row_data={"value": "bad"},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+
+        result, _updated_token, error_sink = executor.execute_transform(
+            transform=transform,
+            token=token,
+            ctx=ctx,
+            step_in_pipeline=1,
+        )
+
+        assert result.status == "error"
+        assert error_sink == "error_sink"
+
+    def test_execute_transform_returns_none_error_sink_on_success(self) -> None:
+        """On success, error_sink is None."""
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import TransformExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="successful",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        class SuccessfulTransform:
+            name = "successful"
+            node_id = node.node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success({"result": "ok"})
+
+        transform = SuccessfulTransform()
+        ctx = PluginContext(run_id=run.run_id, config={})
+        executor = TransformExecutor(recorder, SpanFactory())
+
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="token-1",
+            row_data={"value": 42},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+
+        result, _updated_token, error_sink = executor.execute_transform(
+            transform=transform,
+            token=token,
+            ctx=ctx,
+            step_in_pipeline=1,
+        )
+
+        assert result.status == "success"
+        assert error_sink is None
 
 
 class TestGateExecutor:

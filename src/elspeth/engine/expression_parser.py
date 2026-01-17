@@ -158,7 +158,11 @@ class _ExpressionValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Dict(self, node: ast.Dict) -> None:
-        """Allow dict literals for membership checks."""
+        """Allow dict literals for membership checks, but reject spread syntax."""
+        # None keys indicate **spread syntax which we don't support
+        for key in node.keys:
+            if key is None:
+                self.errors.append("Dict spread (**) is forbidden")
         self.generic_visit(node)
 
     def visit_Tuple(self, node: ast.Tuple) -> None:
@@ -218,6 +222,10 @@ class _ExpressionValidator(ast.NodeVisitor):
     def visit_FormattedValue(self, node: ast.FormattedValue) -> None:
         """Formatted values (f-string expressions) are forbidden."""
         self.errors.append("F-string expressions are forbidden")
+
+    def visit_Starred(self, node: ast.Starred) -> None:
+        """Starred expressions (*x) are forbidden."""
+        self.errors.append("Starred expressions (*) are forbidden")
 
 
 class _ExpressionEvaluator(ast.NodeVisitor):

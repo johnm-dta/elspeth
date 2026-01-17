@@ -297,6 +297,26 @@ class TestExpressionParserSecurityRejections:
         with pytest.raises(ExpressionSecurityError, match="keyword arguments"):
             ExpressionParser("row.get(key='field')")
 
+    def test_reject_starred_expression(self) -> None:
+        """Starred expressions (*x) must be rejected at parse time."""
+        with pytest.raises(ExpressionSecurityError, match="Starred expressions"):
+            ExpressionParser("[*row['items']]")
+
+    def test_reject_starred_expression_in_tuple(self) -> None:
+        """Starred expressions in tuples must be rejected."""
+        with pytest.raises(ExpressionSecurityError, match="Starred expressions"):
+            ExpressionParser("(*row['items'],)")
+
+    def test_reject_dict_spread(self) -> None:
+        """Dict spread (**x) must be rejected at parse time."""
+        with pytest.raises(ExpressionSecurityError, match="Dict spread"):
+            ExpressionParser("{**row['data']}")
+
+    def test_reject_dict_spread_mixed(self) -> None:
+        """Dict spread mixed with regular keys must be rejected."""
+        with pytest.raises(ExpressionSecurityError, match="Dict spread"):
+            ExpressionParser("{'key': 1, **row['data']}")
+
 
 class TestExpressionParserSyntaxErrors:
     """Test that syntax errors are handled correctly."""

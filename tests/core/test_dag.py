@@ -541,6 +541,51 @@ class TestExecutionGraphRouteMapping:
         assert route_label == "continue"
 
 
+class TestMultiEdgeSupport:
+    """Tests for MultiDiGraph multi-edge support."""
+
+    def test_multiple_edges_same_node_pair(self) -> None:
+        """MultiDiGraph allows multiple labeled edges between same nodes."""
+        from elspeth.contracts import RoutingMode
+        from elspeth.core.dag import ExecutionGraph
+
+        graph = ExecutionGraph()
+        graph.add_node("gate", node_type="gate", plugin_name="fork_gate")
+        graph.add_node("sink", node_type="sink", plugin_name="output")
+
+        # Add two edges with different labels to SAME destination
+        graph.add_edge("gate", "sink", label="path_a", mode=RoutingMode.COPY)
+        graph.add_edge("gate", "sink", label="path_b", mode=RoutingMode.COPY)
+
+        # Both edges should exist (DiGraph would show 1, MultiDiGraph shows 2)
+        assert graph.edge_count == 2
+
+        edges = graph.get_edges()
+        labels = {e.label for e in edges}
+        assert labels == {"path_a", "path_b"}
+
+    def test_multi_edge_graph_is_acyclic(self) -> None:
+        """Verify is_acyclic() works correctly with MultiDiGraph parallel edges."""
+        from elspeth.contracts import RoutingMode
+        from elspeth.core.dag import ExecutionGraph
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("gate", node_type="gate", plugin_name="classifier")
+        graph.add_node("sink", node_type="sink", plugin_name="csv")
+
+        graph.add_edge("source", "gate", label="continue", mode=RoutingMode.MOVE)
+        # Multiple parallel edges to same sink - still acyclic
+        graph.add_edge("gate", "sink", label="high", mode=RoutingMode.MOVE)
+        graph.add_edge("gate", "sink", label="medium", mode=RoutingMode.MOVE)
+        graph.add_edge("gate", "sink", label="low", mode=RoutingMode.MOVE)
+
+        # Graph with parallel edges should still be detected as acyclic
+        assert graph.is_acyclic() is True
+        # Full validation should also pass
+        graph.validate()
+
+
 class TestEdgeInfoIntegration:
     """Tests for typed edge returns."""
 

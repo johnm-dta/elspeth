@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import networkx as nx
-from networkx import DiGraph
+from networkx import MultiDiGraph
 
 from elspeth.contracts import EdgeInfo, RoutingMode
 
@@ -40,11 +40,13 @@ class NodeInfo:
 class ExecutionGraph:
     """Execution graph for pipeline configuration.
 
-    Wraps NetworkX DiGraph with domain-specific operations.
+    Wraps NetworkX MultiDiGraph with domain-specific operations.
+    Uses MultiDiGraph to support multiple edges between the same node pair
+    (e.g., fork gates routing multiple labels to the same sink).
     """
 
     def __init__(self) -> None:
-        self._graph: DiGraph[str] = nx.DiGraph()
+        self._graph: MultiDiGraph[str] = nx.MultiDiGraph()
         self._sink_id_map: dict[str, str] = {}
         self._transform_id_map: dict[int, str] = {}
         self._config_gate_id_map: dict[str, str] = {}  # gate_name -> node_id
@@ -100,10 +102,11 @@ class ExecutionGraph:
         Args:
             from_node: Source node ID
             to_node: Target node ID
-            label: Edge label (e.g., "continue", "suspicious")
+            label: Edge label (e.g., "continue", "suspicious") - also used as edge key
             mode: Routing mode (MOVE or COPY)
         """
-        self._graph.add_edge(from_node, to_node, label=label, mode=mode)
+        # Use label as key to allow multiple edges between same nodes
+        self._graph.add_edge(from_node, to_node, key=label, label=label, mode=mode)
 
     def is_acyclic(self) -> bool:
         """Check if the graph is acyclic (a valid DAG)."""
@@ -124,7 +127,8 @@ class ExecutionGraph:
         if not self.is_acyclic():
             try:
                 cycle = nx.find_cycle(self._graph)
-                cycle_str = " -> ".join(f"{u}" for u, v in cycle)
+                # MultiDiGraph returns (u, v, key) tuples; extract just u for display
+                cycle_str = " -> ".join(f"{edge[0]}" for edge in cycle)
                 raise GraphValidationError(f"Graph contains a cycle: {cycle_str}")
             except nx.NetworkXNoCycle:
                 raise GraphValidationError("Graph contains a cycle") from None
@@ -209,6 +213,7 @@ class ExecutionGraph:
         Returns:
             List of EdgeInfo contracts (not tuples)
         """
+        # Note: _key is unused but required for MultiDiGraph iteration signature
         return [
             EdgeInfo(
                 from_node=u,
@@ -216,7 +221,7 @@ class ExecutionGraph:
                 label=data["label"],
                 mode=data["mode"],  # Already RoutingMode after add_edge change
             )
-            for u, v, data in self._graph.edges(data=True)
+            for u, v, _key, data in self._graph.edges(data=True, keys=True)
         ]
 
     @classmethod
@@ -377,7 +382,7 @@ class ExecutionGraph:
         # Edge from last node (transform or config gate or source) to output sink
         # Only add if no edge already exists to this sink (gate routes may have created one)
         output_sink_node = sink_ids[config.output_sink]
-        if not graph._graph.has_edge(prev_node_id, output_sink_node):
+        if not graph._graph.has_edge(prev_node_id, output_sink_node, key="continue"):
             graph.add_edge(
                 prev_node_id,
                 output_sink_node,

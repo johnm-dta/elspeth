@@ -137,7 +137,7 @@ def _build_test_graph_with_config_gates(
     # (gate routes may have created one)
     output_sink = "default" if "default" in sink_ids else next(iter(sink_ids))
     output_sink_node = sink_ids[output_sink]
-    if not graph._graph.has_edge(prev, output_sink_node):
+    if not graph._graph.has_edge(prev, output_sink_node, key="continue"):
         graph.add_edge(prev, output_sink_node, label="continue", mode=RoutingMode.MOVE)
 
     # Populate internal maps

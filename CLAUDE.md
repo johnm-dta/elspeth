@@ -79,6 +79,82 @@ THEIR DATA (zero trust)              OUR DATA (full trust)
 - Reading from Landscape tables? Crash on any anomaly.
 - Reading from Source/Transform output? Validate, record, continue.
 
+## Plugin Ownership: System Code, Not User Code
+
+**CRITICAL DISTINCTION:** All plugins (Sources, Transforms, Gates, Aggregations, Sinks) are **system-owned code**, not user-provided extensions.
+
+### What This Means
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│                     SYSTEM-OWNED (Full Trust)                    │
+│                                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
+│  │   Sources    │  │  Transforms  │  │    Sinks     │           │
+│  │  (CSVSource, │  │ (FieldMapper,│  │  (CSVSink,   │           │
+│  │   APISource) │  │  LLMTransform)│  │   DBSink)    │           │
+│  └──────────────┘  └──────────────┘  └──────────────┘           │
+│                                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
+│  │    Engine    │  │  Landscape   │  │   Contracts  │           │
+│  └──────────────┘  └──────────────┘  └──────────────┘           │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ processes
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     USER-OWNED (Zero Trust)                      │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │                      USER DATA                            │   │
+│  │   CSV files, API responses, database rows, LLM outputs    │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Implications for Error Handling
+
+| Scenario | Correct Response | WRONG Response |
+|----------|------------------|----------------|
+| Plugin method throws exception | **CRASH** - bug in our code | Catch and log silently |
+| Plugin returns wrong type | **CRASH** - bug in our code | Coerce to expected type |
+| Plugin missing expected attribute | **CRASH** - interface violation | Use `getattr(x, 'attr', default)` |
+| User data has wrong type | Quarantine row, continue | Crash the pipeline |
+| User data missing field | Quarantine row, continue | Crash the pipeline |
+
+### Why This Matters for Audit Integrity
+
+A defective plugin that silently produces wrong results is **worse than a crash**:
+
+1. **Crash:** Pipeline stops, operator investigates, bug gets fixed
+2. **Silent wrong result:** Data flows through, gets recorded as "correct," auditors see garbage, trust is destroyed
+
+**Example of the problem:**
+```python
+# WRONG - hides plugin bugs, destroys audit integrity
+try:
+    result = transform.process(row, ctx)
+except Exception:
+    result = row  # "just pass through on error"
+    logger.warning("Transform failed, using original row")
+
+# RIGHT - plugin bugs crash immediately
+result = transform.process(row, ctx)  # Let it crash
+```
+
+If `transform.process()` has a bug, we MUST know about it. Silently passing through the original row means the audit trail now contains data that "looks processed" but wasn't - this is evidence tampering.
+
+### NOT a Plugin Marketplace
+
+ELSPETH uses `pluggy` for clean architecture (hooks, extensibility), NOT to accept arbitrary user plugins:
+
+- Plugins are developed, tested, and deployed as part of ELSPETH
+- Plugin code is reviewed with the same rigor as engine code
+- Plugin bugs are system bugs - they get fixed in the codebase
+- Users configure which plugins to use, they don't write their own
+
+If a future version supports user-authored plugins, those would be sandboxed and treated as untrusted - but that's not the current architecture.
+
 ## Core Architecture
 
 ### The SDA Model

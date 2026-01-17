@@ -13,7 +13,7 @@
 |----|------|--------|--------|--------------|---------|
 | WP-01 | Protocol & Base Class Alignment | 🟢 Complete | 2h | None | WP-03 |
 | WP-02 | Gate Plugin Deletion | 🔴 Not Started | 1h | None | — |
-| WP-03 | Sink Implementation Rewrite | 🔴 Not Started | 4h | WP-01 | WP-04, WP-13 |
+| WP-03 | Sink Implementation Rewrite | 🟢 Complete | 4h | WP-01 | WP-04, WP-13 |
 | WP-04 | Sink Adapter Update | 🔴 Not Started | 1h | WP-03 | WP-13 |
 | WP-05 | Audit Schema Enhancement | 🔴 Not Started | 2h | None | WP-06 |
 | WP-06 | Aggregation Triggers | 🔴 Not Started | 6h | WP-05 | WP-14 |
@@ -52,29 +52,31 @@ WP-12       (independent, after WP-02)
 
 ## Sprint Allocation
 
-### Sprint 1: Foundation & Cleanup
+> **IMPORTANT:** WP-02 and WP-09 MUST be back-to-back (no gate gap)
+
+### Sprint 1: Foundation
 - [x] WP-01: Protocol & Base Class Alignment
-- [ ] WP-02: Gate Plugin Deletion
 - [ ] WP-05: Audit Schema Enhancement
-- [ ] WP-11: Orphaned Code Cleanup
+- [ ] WP-11: Orphaned Code Cleanup (split into sub-tasks)
 
 ### Sprint 2: Sink Contract
-- [ ] WP-03: Sink Implementation Rewrite
+- [x] WP-03: Sink Implementation Rewrite
 - [ ] WP-04: Sink Adapter Update
 - [ ] WP-12: Utility Consolidation
 - [ ] WP-13: Sink Test Rewrites
 
 ### Sprint 3: DAG & Aggregation
-- [ ] WP-06: Aggregation Triggers
+- [ ] WP-06: Aggregation Triggers (includes stale code cleanup)
 - [ ] WP-07: Fork Work Queue
 - [ ] WP-10: Quarantine Implementation
 
-### Sprint 4: Advanced Features
+### Sprint 4: Gates & Coalesce
+- [ ] WP-02: Gate Plugin Deletion ← Execute first
+- [ ] WP-09: Engine-Level Gates ← Immediately after WP-02
 - [ ] WP-08: Coalesce Executor
-- [ ] WP-09: Engine-Level Gates
 
 ### Sprint 5: Verification
-- [ ] WP-14: Engine Test Rewrites
+- [ ] WP-14: Engine Test Rewrites (split into WP-14a/b/c/d/e)
 - [ ] Final integration testing
 
 ---
@@ -196,77 +198,98 @@ fd0b29a feat(protocols): update SinkProtocol.write() to batch mode
 
 ### WP-03: Sink Implementation Rewrite
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete
 **Goal:** All sinks conform to batch signature with ArtifactDescriptor return
-**Blocked by:** WP-01
+**Blocked by:** WP-01 ✅
 
 #### Sinks to Rewrite
-- [ ] `src/elspeth/plugins/sinks/csv_sink.py`
-  - [ ] Change `write(row) -> None` to `write(rows) -> ArtifactDescriptor`
-  - [ ] Implement SHA-256 content hashing of written file
-  - [ ] Add `determinism = Determinism.IO_WRITE`
-  - [ ] Add `plugin_version = "1.0.0"`
-  - [ ] Add `on_start()` and `on_complete()` lifecycle hooks
+- [x] `src/elspeth/plugins/sinks/csv_sink.py`
+  - [x] Change `write(row) -> None` to `write(rows) -> ArtifactDescriptor`
+  - [x] Implement SHA-256 content hashing of written file
+  - [x] Add `determinism = Determinism.IO_WRITE`
+  - [x] Add `plugin_version = "1.0.0"`
+  - [x] Add `on_start()` and `on_complete()` lifecycle hooks
 
-- [ ] `src/elspeth/plugins/sinks/json_sink.py`
-  - [ ] Change `write(row) -> None` to `write(rows) -> ArtifactDescriptor`
-  - [ ] Implement SHA-256 content hashing of written file
-  - [ ] Add `determinism = Determinism.IO_WRITE`
-  - [ ] Add `plugin_version = "1.0.0"`
-  - [ ] Add `on_start()` and `on_complete()` lifecycle hooks
+- [x] `src/elspeth/plugins/sinks/json_sink.py`
+  - [x] Change `write(row) -> None` to `write(rows) -> ArtifactDescriptor`
+  - [x] Implement SHA-256 content hashing of written file
+  - [x] Add `determinism = Determinism.IO_WRITE`
+  - [x] Add `plugin_version = "1.0.0"`
+  - [x] Add `on_start()` and `on_complete()` lifecycle hooks
 
-- [ ] `src/elspeth/plugins/sinks/database_sink.py`
-  - [ ] Change `write(row) -> None` to `write(rows) -> ArtifactDescriptor`
-  - [ ] Implement SHA-256 of canonical JSON payload before INSERT
-  - [ ] Add `determinism = Determinism.IO_WRITE`
-  - [ ] Add `plugin_version = "1.0.0"`
-  - [ ] Add `on_start()` and `on_complete()` lifecycle hooks
+- [x] `src/elspeth/plugins/sinks/database_sink.py`
+  - [x] Change `write(row) -> None` to `write(rows) -> ArtifactDescriptor`
+  - [x] Implement SHA-256 of canonical JSON payload before INSERT
+  - [x] Add `determinism = Determinism.IO_WRITE`
+  - [x] Add `plugin_version = "1.0.0"`
+  - [x] Add `on_start()` and `on_complete()` lifecycle hooks
 
-#### Verification
-- [ ] All sinks return ArtifactDescriptor
-- [ ] content_hash is non-empty SHA-256
-- [ ] size_bytes > 0 for non-empty writes
-- [ ] Mypy passes
+#### Commits
+```
+1a4f414 feat(csv-sink): implement batch write with ArtifactDescriptor
+57e2b65 feat(json-sink): implement batch write with ArtifactDescriptor
+58685dd feat(database-sink): implement batch write with ArtifactDescriptor
+5b309ba feat(sinks): add explicit lifecycle hooks to all sinks
+```
+
+#### Verification (2026-01-17)
+- [x] All sinks return ArtifactDescriptor
+- [x] content_hash is non-empty SHA-256
+- [x] size_bytes > 0 for non-empty writes
+- [x] Mypy --strict passes on all sink files
+- [x] 41 sink tests pass
+- [x] No per-row write(row) calls remain in tests
+- [x] All sinks have `on_start()` and `on_complete()` lifecycle hooks
+- [x] All sinks have `determinism == Determinism.IO_WRITE` (inherited from BaseSink)
 
 ---
 
 ### WP-04: Sink Adapter Update
 
 **Status:** 🔴 Not Started
+**Plan:** [2026-01-17-wp04-sink-adapter-update.md](./2026-01-17-wp04-sink-adapter-update.md)
 **Goal:** SinkAdapter delegates to batch write, removes per-row loop
-**Blocked by:** WP-03
+**Blocked by:** WP-03 ✅
 
 #### Tasks
-- [ ] Update `src/elspeth/engine/adapters.py`
-  - [ ] Remove per-row loop in write (lines 183-185)
-  - [ ] Direct delegation to `sink.write(rows)`
-  - [ ] Remove `_rows_written` counter (lines 139-140)
-  - [ ] Capture and return ArtifactDescriptor
+- [ ] Task 1: Define BatchSinkProtocol
+- [ ] Task 2: Create BatchMockSink for testing
+- [ ] Task 3: Update SinkAdapter to delegate to batch sinks
+- [ ] Task 4: Remove _rows_written dependency for batch sinks
+- [ ] Task 5: Update CLI to pass batch sinks (no changes needed - verified)
+- [ ] Task 6: Run full test suite and type checking
 
 #### Verification
-- [ ] `SinkAdapter.write()` returns ArtifactDescriptor
-- [ ] No per-row iteration in adapter
-- [ ] Integration with orchestrator works
+- [ ] `BatchSinkProtocol` is defined and `@runtime_checkable`
+- [ ] `SinkAdapter.write()` delegates directly for batch sinks
+- [ ] `SinkAdapter.write()` still loops for row-wise sinks (backwards compat)
+- [ ] Integration tests pass with real `CSVSink` and `JSONSink`
+- [ ] `mypy --strict` passes on `adapters.py`
 
 ---
 
 ### WP-05: Audit Schema Enhancement
 
 **Status:** 🔴 Not Started
+**Plan:** [2026-01-17-wp05-audit-schema-enhancement.md](./2026-01-17-wp05-audit-schema-enhancement.md)
 **Goal:** Add missing columns and fix types for audit completeness
+**Unlocks:** WP-06
 
 #### Tasks
-- [ ] Add `idempotency_key` column to `artifacts` table (schema.py)
-- [ ] Add `trigger_type` column to `batches` table (schema.py)
-- [ ] Create `TriggerType` enum in `contracts/enums.py`
-- [ ] Fix `Batch.status` type: `str` → `BatchStatus` (models.py:268)
-- [ ] Update model dataclasses to match schema
-- [ ] Generate Alembic migration
+- [ ] Task 1: Add TriggerType enum
+- [ ] Task 2: Add idempotency_key to artifacts table
+- [ ] Task 3: Add trigger_type to batches table
+- [ ] Task 4: Fix Batch.status type from str to BatchStatus
+- [ ] Task 5: Generate Alembic migration
+- [ ] Task 6: Run full verification
 
 #### Verification
+- [ ] `TriggerType` enum exists with 5 values
+- [ ] `artifacts_table` has `idempotency_key` column
+- [ ] `batches_table` has `trigger_type` column
+- [ ] `Batch.status` type is `BatchStatus`
 - [ ] Alembic migration generated
-- [ ] Models match schema
-- [ ] Mypy passes on contracts
+- [ ] All tests pass
 
 ---
 
@@ -391,42 +414,49 @@ fd0b29a feat(protocols): update SinkProtocol.write() to batch mode
 ### WP-11: Orphaned Code Cleanup
 
 **Status:** 🔴 Not Started
-**Goal:** Remove dead code that was never integrated
+**Plan:** [2026-01-17-wp11-orphaned-code-cleanup.md](./2026-01-17-wp11-orphaned-code-cleanup.md)
+**Goal:** Remove dead code, KEEP audit-critical infrastructure
 
-#### Tasks (DELETE)
-- [ ] `engine/retry.py` lines 37-156 (RetryManager) - Decision: DELETE or INTEGRATE?
-- [ ] `contracts/enums.py` lines 144-147 (CallType)
-- [ ] `contracts/enums.py` lines 156-157 (CallStatus)
-- [ ] `contracts/audit.py` lines 237-252 (Call dataclass)
-- [ ] `landscape/recorder.py` lines 1707-1743 (get_calls())
+#### Decisions Made
+- **RetryManager:** KEEP & INTEGRATE (Phase 5)
+- **Call infrastructure:** KEEP (Phase 6)
+- **on_register():** DELETE (never called)
 
-#### Tasks (DEPRECATE)
-- [ ] `plugins/base.py` lines 210-213 (should_trigger()) - Mark deprecated
-- [ ] `plugins/base.py` lines 219-223 (reset()) - Mark deprecated
-- [ ] `plugins/base.py` various (on_register()) - DELETE if never called
+#### Tasks
+- [ ] Task 1: Remove on_register() from 4 base classes
+- [ ] Task 2: Verify RetryManager is ready for integration
+- [ ] Task 3: Verify Call infrastructure is intact
+- [ ] Task 4: Run full verification
 
 #### Verification
-- [ ] No references to deleted code
-- [ ] Tests pass
-- [ ] No import errors
+- [ ] `on_register()` removed from BaseSource, BaseTransform, BaseGate, BaseAggregation
+- [ ] No code calls `on_register()` anywhere
+- [ ] RetryManager tests pass
+- [ ] Call infrastructure intact
+- [ ] All tests pass
 
 ---
 
 ### WP-12: Utility Consolidation
 
 **Status:** 🔴 Not Started
+**Plan:** [2026-01-17-wp12-utility-consolidation.md](./2026-01-17-wp12-utility-consolidation.md)
 **Goal:** Extract duplicated code to shared utilities
 **Recommended after:** WP-02
 
 #### Tasks
-- [ ] Create `src/elspeth/plugins/utils.py`
-- [ ] Extract `_get_nested()` to `get_nested_field()`
-- [ ] Update `field_mapper.py` to import from utils
-- [ ] (Optional) Create `DynamicPluginSchema` factory
+- [ ] Task 1: Create utils.py with get_nested_field()
+- [ ] Task 2: Add DynamicSchema class
+- [ ] Task 3: Update field_mapper.py to use get_nested_field
+- [ ] Task 4: Update sinks to use DynamicSchema
+- [ ] Task 5: Run full verification
 
 #### Verification
-- [ ] `_get_nested` exists in only one location
-- [ ] field_mapper.py works with imported utility
+- [ ] `get_nested_field()` has 9 passing tests
+- [ ] `DynamicSchema` has 4 passing tests
+- [ ] `field_mapper.py` imports from utils, no local `_get_nested`
+- [ ] All sinks use `DynamicSchema` instead of local schema classes
+- [ ] All plugin tests pass
 
 ---
 
@@ -486,5 +516,19 @@ fd0b29a feat(protocols): update SinkProtocol.write() to batch mode
 | Date | WP | Change | Author |
 |------|-----|--------|--------|
 | 2026-01-17 | — | Created tracking document | Claude |
-| 2026-01-17 | WP-01 | ✅ Completed - 4 commits, 32 tests passing, unlocks WP-03 | Claude |
+| 2026-01-17 | WP-01 | ✅ Completed - protocols and base classes aligned | — |
+| 2026-01-17 | WP-03 | ✅ Completed - sinks return ArtifactDescriptor | — |
+| 2026-01-17 | WP-04 | Created detailed plan: wp04-sink-adapter-update.md | Claude |
+| 2026-01-17 | WP-06 | Added stale code cleanup (AcceptResult.trigger, should_trigger, reset) | Claude |
+| 2026-01-17 | WP-11 | Decision: KEEP RetryManager, KEEP Call infrastructure for audit | Claude |
+| 2026-01-17 | WP-14 | Added note to split into WP-14a/b/c/d/e when executed | Claude |
+| 2026-01-17 | — | Resequenced sprints: WP-02 + WP-09 now in Sprint 4 (no gate gap) | Claude |
+| 2026-01-17 | WP-04 | Fixed: use is_batch_sink() instead of runtime_checkable Protocol | Claude |
+| 2026-01-17 | WP-12 | Created detailed plan: wp12-utility-consolidation.md | Claude |
+| 2026-01-17 | WP-12 | Fixed: Task 4 (DynamicSchema in sinks) now required, not optional | Claude |
+| 2026-01-17 | WP-03 | ✅ Verified: 41 tests pass, mypy clean, all checklist items confirmed | Claude |
+| 2026-01-17 | WP-04 | 🟢 READY: Dependencies satisfied (WP-03), plan reviewed against codebase | Claude |
+| 2026-01-17 | WP-12 | 🟢 READY: No blockers, sentinels.py exists, field_mapper.py has _get_nested | Claude |
+| 2026-01-17 | WP-05 | Created detailed plan: wp05-audit-schema-enhancement.md | Claude |
+| 2026-01-17 | WP-11 | Created detailed plan: wp11-orphaned-code-cleanup.md | Claude |
 | | | | |

@@ -25,7 +25,6 @@ Example:
 """
 
 from elspeth.contracts import RowResult, TokenInfo
-from elspeth.engine.adapters import SinkAdapter
 from elspeth.engine.executors import (
     AggregationExecutor,
     GateExecutor,
@@ -57,7 +56,6 @@ __all__ = [
     "RowProcessor",
     "RowResult",
     "RunResult",
-    "SinkAdapter",
     "SinkExecutor",
     "SpanFactory",
     "TokenInfo",

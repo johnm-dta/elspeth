@@ -17,22 +17,22 @@ Work packages are organized to:
 ## Dependency Graph
 
 ```
-WP-01 ──┬──► WP-03 ──► WP-04 ──► WP-13
+WP-01 ──┬──► WP-03 ──► WP-04 ──► WP-04a ──► WP-13
         │
-WP-02   │   (independent)
+WP-02 ──┼──► WP-09       (back-to-back, no gap between deletion and replacement)
         │
 WP-05 ──┴──► WP-06
 
 WP-07 ──┬──► WP-08
         └──► WP-10
 
-WP-09       (independent, large)
-
 WP-11       (independent)
-WP-12       (independent)
+WP-12       (after WP-02)
 
-WP-14       (depends on most above)
+WP-14       (after WP-06, WP-08, WP-09, WP-10)
 ```
+
+**Critical constraint:** WP-02 (delete gate plugins) and WP-09 (engine gates) must execute back-to-back. WP-09's engine gate tests must pass before WP-02 deletions are considered complete.
 
 ---
 
@@ -145,31 +145,86 @@ tests/plugins/gates/__init__.py               (1 line)
 **Dependencies:** WP-01
 **Unlocks:** WP-04, WP-13
 
+**Rollback Trigger:** Any hash mismatch in audit trail verification tests, or any silent data integrity failure.
+
 ---
 
-## WP-04: Sink Adapter Update
+## WP-04: Delete SinkAdapter & SinkLike
 
-**Goal:** SinkAdapter delegates to batch write, removes per-row loop
+**Goal:** Remove the adapter layer entirely - sinks now implement batch interface directly
 
-**Files:**
+**Rationale:** WP-03 made sinks batch-aware with ArtifactDescriptor returns. The `SinkAdapter` wrapper and `SinkLike` protocol are now redundant indirection layers that add complexity without value. Per No Legacy Code Policy, delete them completely.
+
+**Files to DELETE:**
 - `src/elspeth/engine/adapters.py`
+- `tests/engine/test_adapters.py`
 
-**Changes:**
+**Files to MODIFY:**
 
-| Current (lines 183-185) | New |
-|-------------------------|-----|
-| Loop calling `sink.write(row)` per row | Direct `sink.write(rows)` call |
-| `_rows_written` counter | Removed (artifact tracks this) |
-| No return from write | Capture ArtifactDescriptor |
+| File | Change |
+|------|--------|
+| `src/elspeth/engine/executors.py` | Delete `SinkLike` protocol (lines 668-692) |
+| `src/elspeth/engine/executors.py` | Update `SinkExecutor.write()` to use `SinkProtocol` |
+| `src/elspeth/engine/orchestrator.py` | Remove `SinkLike` import, use `SinkProtocol` |
+| `src/elspeth/engine/orchestrator.py` | Update `PipelineConfig.sinks` type hint |
+| `src/elspeth/engine/__init__.py` | Remove `SinkAdapter` export |
+| `src/elspeth/cli.py` | Remove `SinkAdapter` import and usage, use sinks directly |
 
 **Verification:**
-- [ ] `SinkAdapter.write()` returns ArtifactDescriptor
-- [ ] No per-row iteration in adapter
-- [ ] Integration with orchestrator works
+- [ ] `adapters.py` deleted
+- [ ] `test_adapters.py` deleted
+- [ ] No `SinkLike` anywhere in codebase
+- [ ] No `SinkAdapter` anywhere in codebase
+- [ ] CLI creates sinks directly (no wrapper)
+- [ ] Orchestrator uses `SinkProtocol` type hints
+- [ ] All tests pass
+
+**Effort:** Medium (~2 hours)
+**Dependencies:** WP-03
+**Unlocks:** WP-04a, WP-13
+
+---
+
+## WP-04a: Delete Remaining *Like Protocol Duplications
+
+**Goal:** Remove TransformLike, GateLike, AggregationLike protocols from executors.py and rename the TransformLike union alias
+
+**Rationale:** These protocols duplicate the full protocols (TransformProtocol, GateProtocol, AggregationProtocol) and serve no purpose. The `TransformLike` name is also used as a union alias in orchestrator.py causing a name collision. Per No Legacy Code Policy, delete the redundant code.
+
+**Files to MODIFY:**
+
+| File | Change |
+|------|--------|
+| `src/elspeth/engine/executors.py` | Delete `TransformLike` protocol (lines ~75-83) |
+| `src/elspeth/engine/executors.py` | Delete `GateLike` protocol (lines ~212-220) |
+| `src/elspeth/engine/executors.py` | Delete `AggregationLike` protocol (lines ~444-465) |
+| `src/elspeth/engine/executors.py` | Update executor methods to use full protocols |
+| `src/elspeth/engine/orchestrator.py` | Rename `TransformLike = BaseTransform | BaseGate | BaseAggregation` to `RowPlugin` |
+| `src/elspeth/engine/orchestrator.py` | Update all references to use `RowPlugin` |
+
+**Protocol → Full Protocol Mapping:**
+
+| Redundant Protocol | Replace With |
+|--------------------|--------------|
+| `TransformLike` (protocol) | `TransformProtocol` |
+| `GateLike` | `GateProtocol` |
+| `AggregationLike` | `AggregationProtocol` |
+| `TransformLike` (union alias) | Rename to `RowPlugin` |
+
+**Verification:**
+- [ ] No `TransformLike` protocol in executors.py
+- [ ] No `GateLike` in executors.py
+- [ ] No `AggregationLike` in executors.py
+- [ ] `TransformExecutor.execute_transform()` uses `TransformProtocol`
+- [ ] `GateExecutor.execute_gate()` uses `GateProtocol`
+- [ ] `AggregationExecutor.accept()` uses `AggregationProtocol`
+- [ ] orchestrator.py uses `RowPlugin` (not `TransformLike`) for union alias
+- [ ] `mypy --strict` passes
+- [ ] All tests pass
 
 **Effort:** Low (~1 hour)
-**Dependencies:** WP-03
-**Unlocks:** WP-13
+**Dependencies:** WP-04 (same cleanup pattern, avoids merge conflicts)
+**Unlocks:** Nothing (pure cleanup)
 
 ---
 
@@ -238,14 +293,18 @@ class AggregationSettings(BaseModel):
 - AggregationExecutor.accept() only accepts/rejects
 - Trigger decision moves from plugin to engine
 
-**Stale Code After:**
-- `AcceptResult.trigger` field (still generated, not read)
-- `BaseAggregation.should_trigger()` (defined, never called)
+**Cleanup (don't leave stale code):**
+- DELETE `AcceptResult.trigger` field from `contracts/results.py`
+- DELETE `BaseAggregation.should_trigger()` from `plugins/base.py`
+- DELETE `BaseAggregation.reset()` from `plugins/base.py`
+- UPDATE any tests that reference these removed items
 
 **Verification:**
 - [ ] Config validation rejects invalid triggers
 - [ ] All 4 trigger types work: count, timeout, condition, end_of_source
 - [ ] Output modes work: single, passthrough, transform
+- [ ] No references to `AcceptResult.trigger` remain
+- [ ] No references to `should_trigger()` or `reset()` remain
 
 **Effort:** Medium-High (~6 hours)
 **Dependencies:** WP-05
@@ -291,10 +350,13 @@ def process_row(...):
 - [ ] Each child follows its assigned path
 - [ ] Parent FORKED, children reach terminal states
 - [ ] Audit trail shows complete lineage
+- [ ] Max iteration guard prevents infinite loops
 
 **Effort:** High (~8 hours)
 **Dependencies:** None
 **Unlocks:** WP-08, WP-10
+
+**Rollback Trigger:** Any test showing token loss (children created but not processed) or infinite loop detection.
 
 ---
 
@@ -345,8 +407,12 @@ def process_row(...):
 
 **Goal:** Gates become config-driven engine operations with safe expression parsing
 
-**Files:**
-- `src/elspeth/engine/expression_parser.py` (NEW)
+**Files to CREATE:**
+- `src/elspeth/engine/expression_parser.py` (safe expression evaluation)
+- `tests/engine/test_expression_parser.py` (unit tests for parser security)
+- `tests/engine/test_engine_gates.py` (integration tests for gate routing)
+
+**Files to MODIFY:**
 - `src/elspeth/core/config.py` (add GateSettings)
 - `src/elspeth/engine/orchestrator.py` (route resolution refactor)
 - `src/elspeth/engine/executors.py` (simplify GateExecutor)
@@ -382,14 +448,26 @@ gates:
 - Executor just evaluates condition, returns route label
 
 **Verification:**
-- [ ] Expression parser rejects unsafe code
 - [ ] Composite conditions work: `row['a'] > 0 and row['b'] == 'x'`
 - [ ] fork_to creates child tokens
 - [ ] Route labels resolve correctly
 
+**Security Verification (MANDATORY):**
+- [ ] `__import__('os').system('rm -rf /')` → rejected at parse time
+- [ ] `eval('malicious')` → rejected at parse time
+- [ ] `exec('code')` → rejected at parse time
+- [ ] `lambda: ...` → rejected at parse time
+- [ ] `[x for x in ...]` (comprehensions) → rejected at parse time
+- [ ] Attribute access beyond `row[...]` and `row.get(...)` → rejected
+- [ ] Function calls other than `row.get()` → rejected
+- [ ] Assignment expressions (`:=`) → rejected
+- [ ] Fuzz test with 1000+ random malformed inputs → no crashes, no code execution
+
 **Effort:** High (~10 hours)
 **Dependencies:** None (but should come after WP-02)
 **Unlocks:** WP-14 (partial)
+
+**Rollback Trigger:** If engine gates cannot replicate plugin gate behavior for existing test cases, halt and reassess.
 
 ---
 
@@ -424,27 +502,33 @@ gates:
 
 ## WP-11: Orphaned Code Cleanup
 
-**Goal:** Remove dead code that was never integrated
+**Goal:** Remove dead code that was never integrated, KEEP audit-critical infrastructure
+
+> **NOTE:** Split this WP into sub-tasks when execution begins - some items are deletions, others are integrations.
 
 **Files:**
 
 | File | Lines | Item | Action |
 |------|-------|------|--------|
-| `engine/retry.py` | 37-156 | RetryManager | DELETE or integrate |
-| `contracts/enums.py` | 144-147 | CallType | DELETE |
-| `contracts/enums.py` | 156-157 | CallStatus | DELETE |
-| `contracts/audit.py` | 237-252 | Call dataclass | DELETE |
-| `landscape/recorder.py` | 1707-1743 | get_calls() | DELETE |
-| `plugins/base.py` | 210-213 | should_trigger() | Mark deprecated |
-| `plugins/base.py` | 219-223 | reset() | Mark deprecated |
+| `engine/retry.py` | 37-156 | RetryManager | **KEEP & INTEGRATE** (Phase 5 retry audit) |
+| `contracts/enums.py` | 144-147 | CallType | **KEEP** (Phase 6 external call audit) |
+| `contracts/enums.py` | 156-157 | CallStatus | **KEEP** (Phase 6 external call audit) |
+| `contracts/audit.py` | 237-252 | Call dataclass | **KEEP** (Phase 6 external call audit) |
+| `landscape/recorder.py` | 1707-1743 | get_calls() | **KEEP** (Phase 6 external call audit) |
 | `plugins/base.py` | various | on_register() | DELETE (never called) |
 
-**Decision needed:**
-- RetryManager: DELETE (unused) or INTEGRATE (useful for Phase 5)?
-- Call infrastructure: DELETE (Phase 6 feature, rebuild when needed)?
+**Decisions made (2026-01-17):**
+- **RetryManager:** KEEP & INTEGRATE - Retries must be auditable with `(run_id, row_id, transform_seq, attempt)`
+- **Call infrastructure:** KEEP for Phase 6 - External calls (LLMs, APIs) are a major audit surface
+
+**Items moved to WP-06:**
+- `AcceptResult.trigger` field - cleaned up when WP-06 makes it obsolete
+- `BaseAggregation.should_trigger()` - cleaned up when WP-06 makes it obsolete
+- `BaseAggregation.reset()` - cleaned up when WP-06 makes it obsolete
 
 **Verification:**
-- [ ] No references to deleted code
+- [ ] on_register() removed from base classes
+- [ ] RetryManager integrated into engine retry flow
 - [ ] Tests pass
 - [ ] No import errors
 
@@ -506,7 +590,8 @@ def create_dynamic_schema(name: str) -> type[PluginSchema]:
 - `tests/plugins/sinks/test_csv_sink.py`
 - `tests/plugins/sinks/test_json_sink.py`
 - `tests/plugins/sinks/test_database_sink.py`
-- `tests/engine/test_adapters.py` (MockSink class)
+
+**Note:** `test_adapters.py` is deleted in WP-04, so no adapter tests to update.
 
 **Test Pattern Change:**
 
@@ -522,18 +607,35 @@ assert artifact.content_hash  # non-empty
 assert artifact.size_bytes > 0
 ```
 
-**MockSink Update:**
+**MockSink in Engine Tests:**
+
+Any engine test that needs a mock sink should create one inline or use a fixture:
+
 ```python
 class MockSink:
+    name = "mock"
+    input_schema = DynamicSchema
+    determinism = Determinism.IO_WRITE
+    plugin_version = "1.0.0"
+
     def write(self, rows: list[dict], ctx) -> ArtifactDescriptor:
         self.rows_written.extend(rows)
-        return ArtifactDescriptor.for_file(...)
+        return ArtifactDescriptor.for_file(
+            path="/tmp/mock.csv",
+            content_hash="abc123",
+            size_bytes=len(str(rows)),
+        )
+
+    def flush(self) -> None: pass
+    def close(self) -> None: pass
+    def on_start(self, ctx) -> None: pass
+    def on_complete(self, ctx) -> None: pass
 ```
 
 **Verification:**
-- [ ] All sink tests pass
-- [ ] Adapter tests pass
+- [ ] All sink plugin tests pass
 - [ ] No per-row write patterns remain
+- [ ] Engine tests use inline MockSink or fixture
 
 **Effort:** Medium (~4 hours)
 **Dependencies:** WP-03, WP-04
@@ -542,6 +644,14 @@ class MockSink:
 ---
 
 ## WP-14: Engine Test Rewrites
+
+> **NOTE:** Split this WP into sub-packages when execution begins:
+> - WP-14a: Fork/Coalesce tests (after WP-07, WP-08)
+> - WP-14b: Gate tests (after WP-09)
+> - WP-14c: Aggregation tests (after WP-06)
+> - WP-14d: Integration tests (after all above)
+>
+> **Note:** Sink adapter tests deleted in WP-04, so no WP-14 sub-package for adapters.
 
 **Goal:** Engine tests updated for all architectural changes
 
@@ -600,14 +710,13 @@ WP-07 → WP-08
 WP-05 → WP-06
 ```
 
-**Track D: Engine Gates**
+**Track D: Gate Transition (MUST be back-to-back)**
 ```
-WP-09
+WP-02 → WP-09 (no gap!)
 ```
 
 **Track E: Cleanup (Anytime)**
 ```
-WP-02 (early)
 WP-11 (anytime)
 WP-12 (after WP-02)
 ```
@@ -621,9 +730,11 @@ WP-14 (after all others)
 
 ## Suggested Sprint Allocation
 
-### Sprint 1: Foundation & Cleanup
+> **IMPORTANT:** WP-02 (delete gate plugins) and WP-09 (engine gates) MUST be executed
+> back-to-back to minimize the gap where no gates exist. They are grouped in Sprint 4.
+
+### Sprint 1: Foundation
 - WP-01: Protocol & Base Class Alignment
-- WP-02: Gate Plugin Deletion
 - WP-05: Audit Schema Enhancement
 - WP-11: Orphaned Code Cleanup
 
@@ -638,12 +749,13 @@ WP-14 (after all others)
 - WP-07: Fork Work Queue
 - WP-10: Quarantine Implementation
 
-### Sprint 4: Advanced Features
+### Sprint 4: Gates & Coalesce
+- WP-02: Gate Plugin Deletion ← Execute first
+- WP-09: Engine-Level Gates ← Execute immediately after WP-02
 - WP-08: Coalesce Executor
-- WP-09: Engine-Level Gates
 
 ### Sprint 5: Verification
-- WP-14: Engine Test Rewrites
+- WP-14: Engine Test Rewrites (split into WP-14a/b/c/d/e)
 - Final integration testing
 
 ---

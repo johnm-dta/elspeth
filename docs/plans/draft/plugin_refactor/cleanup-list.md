@@ -90,33 +90,45 @@ Sinks changing from `write(row) -> None` to `write(rows) -> ArtifactDescriptor`.
 
 ---
 
-## 3. Orphaned/Unused Code (DELETE)
+## 3. Orphaned/Unused Code (REVIEW DECISIONS)
 
-Code that exists but is never called in production.
+Code that exists but is never called in production. **Decisions finalized 2026-01-17.**
 
-### Critical: Never-Used Implementations
+### KEEP: Phase 5/6 Audit Infrastructure
 
-| File | Lines | Item | Issue |
-|------|-------|------|-------|
-| `src/elspeth/engine/retry.py` | 37-156 | `RetryManager`, `RetryConfig` | Fully implemented, never instantiated |
-| `src/elspeth/contracts/enums.py` | 144-147 | `CallType` enum | LLM, HTTP, SQL, FILESYSTEM - never used |
-| `src/elspeth/contracts/enums.py` | 156-157 | `CallStatus` enum | SUCCESS, ERROR - never used |
-| `src/elspeth/contracts/audit.py` | 237-252 | `Call` dataclass | Defined, never created |
-| `src/elspeth/core/landscape/recorder.py` | 1707-1743 | `get_calls()` | Reads from never-populated table |
+These items are NOT dead code—they are Phase 5/6 features not yet integrated:
 
-### Medium: Lifecycle Hooks Never Called
+| File | Lines | Item | Decision | Rationale |
+|------|-------|------|----------|-----------|
+| `src/elspeth/engine/retry.py` | 37-156 | `RetryManager`, `RetryConfig` | **KEEP & INTEGRATE** | Phase 5: Retries must be auditable with `(run_id, row_id, transform_seq, attempt)` |
+| `src/elspeth/contracts/enums.py` | 144-147 | `CallType` enum | **KEEP** | Phase 6: External call audit (LLMs, APIs) |
+| `src/elspeth/contracts/enums.py` | 156-157 | `CallStatus` enum | **KEEP** | Phase 6: External call audit |
+| `src/elspeth/contracts/audit.py` | 237-252 | `Call` dataclass | **KEEP** | Phase 6: External call audit |
+| `src/elspeth/core/landscape/recorder.py` | 1707-1743 | `get_calls()` | **KEEP** | Phase 6: External call audit |
 
-| File | Lines | Method | Issue |
-|------|-------|--------|-------|
-| `src/elspeth/plugins/base.py` | 210-213 | `BaseAggregation.should_trigger()` | Abstract, never called by engine |
-| `src/elspeth/plugins/base.py` | 219-223 | `BaseAggregation.reset()` | Optional, never called |
-| `src/elspeth/plugins/base.py` | multiple | `on_register()` on all bases | Never called by orchestrator |
+### DELETE: Obsolete Aggregation Hooks
 
-### Low: Backward Compatibility Properties
+These items are cleaned up by WP-06 when it moves trigger logic to the engine:
 
-| File | Lines | Item | Issue |
-|------|-------|------|-------|
-| `src/elspeth/contracts/results.py` | 103-112 | `RowResult.token_id`, `.row_id` | Duplicate of `result.token.token_id` |
+| File | Lines | Method | Decision | Rationale |
+|------|-------|--------|----------|-----------|
+| `src/elspeth/plugins/base.py` | 210-213 | `BaseAggregation.should_trigger()` | **DELETE in WP-06** | Engine evaluates triggers |
+| `src/elspeth/plugins/base.py` | 219-223 | `BaseAggregation.reset()` | **DELETE in WP-06** | Engine manages batch lifecycle |
+| `src/elspeth/contracts/results.py` | varies | `AcceptResult.trigger` field | **DELETE in WP-06** | Engine evaluates triggers |
+
+### DELETE: Never-Called Registration Hook
+
+| File | Lines | Method | Decision | Rationale |
+|------|-------|--------|----------|-----------|
+| `src/elspeth/plugins/base.py` | multiple | `on_register()` on all bases | **DELETE in WP-11** | Never called by orchestrator |
+
+### Low Priority DELETE: Backward Compatibility Properties
+
+Per No Legacy Code Policy, these should be deleted (callers updated to use canonical path):
+
+| File | Lines | Item | Decision | Rationale |
+|------|-------|------|----------|-----------|
+| `src/elspeth/contracts/results.py` | 103-112 | `RowResult.token_id`, `.row_id` | **DELETE** | Use `result.token.token_id` directly |
 
 ---
 

@@ -3,7 +3,7 @@
 > **Created:** 2026-01-17
 > **Source:** work-packages.md, gap-analysis.md
 > **Contract:** plugin-protocol.md v1.1
-> **Total Effort:** ~69 hours
+> **Total Effort:** ~70 hours
 
 ---
 
@@ -14,7 +14,8 @@
 | WP-01 | Protocol & Base Class Alignment | 🟢 Complete | 2h | None | WP-03 |
 | WP-02 | Gate Plugin Deletion | 🔴 Not Started | 1h | None | — |
 | WP-03 | Sink Implementation Rewrite | 🟢 Complete | 4h | WP-01 | WP-04, WP-13 |
-| WP-04 | Sink Adapter Update | 🔴 Not Started | 1h | WP-03 | WP-13 |
+| WP-04 | Delete SinkAdapter & SinkLike | 🔴 Not Started | 2h | WP-03 | WP-04a, WP-13 |
+| WP-04a | Delete *Like Protocol Duplications | 🔴 Not Started | 1h | WP-04 | — |
 | WP-05 | Audit Schema Enhancement | 🔴 Not Started | 2h | None | WP-06 |
 | WP-06 | Aggregation Triggers | 🔴 Not Started | 6h | WP-05 | WP-14 |
 | WP-07 | Fork Work Queue | 🔴 Not Started | 8h | None | WP-08, WP-10 |
@@ -33,10 +34,10 @@
 ## Dependency Graph
 
 ```
-WP-01 ──┬──► WP-03 ──► WP-04 ──► WP-13
-        │
+WP-01 ──┬──► WP-03 ──► WP-04 ──┬──► WP-04a
+        │                      └──► WP-13
 WP-02   │   (independent)
-        │
+
 WP-05 ──┴──► WP-06
                         ╲
 WP-07 ──┬──► WP-08 ──────┬──► WP-14
@@ -59,9 +60,10 @@ WP-12       (independent, after WP-02)
 - [ ] WP-05: Audit Schema Enhancement
 - [ ] WP-11: Orphaned Code Cleanup (split into sub-tasks)
 
-### Sprint 2: Sink Contract
+### Sprint 2: Sink Contract & Interface Cleanup
 - [x] WP-03: Sink Implementation Rewrite
-- [ ] WP-04: Sink Adapter Update
+- [ ] WP-04: Delete SinkAdapter & SinkLike
+- [ ] WP-04a: Delete *Like Protocol Duplications (TransformLike, GateLike, AggregationLike)
 - [ ] WP-12: Utility Consolidation
 - [ ] WP-13: Sink Test Rewrites
 
@@ -244,27 +246,62 @@ fd0b29a feat(protocols): update SinkProtocol.write() to batch mode
 
 ---
 
-### WP-04: Sink Adapter Update
+### WP-04: Delete SinkAdapter & SinkLike
 
 **Status:** 🔴 Not Started
 **Plan:** [2026-01-17-wp04-sink-adapter-update.md](./2026-01-17-wp04-sink-adapter-update.md)
-**Goal:** SinkAdapter delegates to batch write, removes per-row loop
+**Goal:** Remove adapter layer - sinks now implement batch interface directly
 **Blocked by:** WP-03 ✅
 
+**Rationale:** WP-03 made sinks batch-aware with ArtifactDescriptor returns. SinkAdapter and SinkLike are now redundant indirection layers.
+
 #### Tasks
-- [ ] Task 1: Define BatchSinkProtocol
-- [ ] Task 2: Create BatchMockSink for testing
-- [ ] Task 3: Update SinkAdapter to delegate to batch sinks
-- [ ] Task 4: Remove _rows_written dependency for batch sinks
-- [ ] Task 5: Update CLI to pass batch sinks (no changes needed - verified)
-- [ ] Task 6: Run full test suite and type checking
+- [ ] Task 1: Delete `adapters.py` and `test_adapters.py`
+- [ ] Task 2: Delete `SinkLike` from `executors.py`
+- [ ] Task 3: Update `orchestrator.py` to use `SinkProtocol`
+- [ ] Task 4: Update CLI to use sinks directly
+- [ ] Task 5: Remove `SinkAdapter` from `engine/__init__.py` exports
+- [ ] Task 6: Run full verification
 
 #### Verification
-- [ ] `BatchSinkProtocol` is defined and `@runtime_checkable`
-- [ ] `SinkAdapter.write()` delegates directly for batch sinks
-- [ ] `SinkAdapter.write()` still loops for row-wise sinks (backwards compat)
-- [ ] Integration tests pass with real `CSVSink` and `JSONSink`
-- [ ] `mypy --strict` passes on `adapters.py`
+- [ ] `adapters.py` deleted
+- [ ] `test_adapters.py` deleted
+- [ ] No `SinkLike` anywhere in codebase
+- [ ] No `SinkAdapter` anywhere in codebase
+- [ ] CLI creates sinks directly (no wrapper)
+- [ ] Orchestrator uses `SinkProtocol` type hints
+- [ ] All tests pass
+
+---
+
+### WP-04a: Delete *Like Protocol Duplications
+
+**Status:** 🔴 Not Started
+**Goal:** Remove TransformLike, GateLike, AggregationLike protocols and rename union alias
+
+**Rationale:** These protocols in executors.py duplicate the full protocols and serve no purpose. Per No Legacy Code Policy, delete them.
+
+**Files:**
+- `src/elspeth/engine/executors.py`
+- `src/elspeth/engine/orchestrator.py`
+
+#### Tasks
+- [ ] Task 1: Delete `TransformLike` protocol from executors.py (~lines 75-83)
+- [ ] Task 2: Delete `GateLike` protocol from executors.py (~lines 212-220)
+- [ ] Task 3: Delete `AggregationLike` protocol from executors.py (~lines 444-465)
+- [ ] Task 4: Update executor methods to use full protocols (TransformProtocol, GateProtocol, AggregationProtocol)
+- [ ] Task 5: Rename `TransformLike` union alias to `RowPlugin` in orchestrator.py
+- [ ] Task 6: Update all references in orchestrator.py to use `RowPlugin`
+- [ ] Task 7: Run mypy and tests
+
+#### Verification
+- [ ] No `TransformLike` protocol in executors.py
+- [ ] No `GateLike` in executors.py
+- [ ] No `AggregationLike` in executors.py
+- [ ] Executors use full protocols from `elspeth.plugins.protocols`
+- [ ] orchestrator.py uses `RowPlugin` for union alias
+- [ ] `mypy --strict` passes
+- [ ] All tests pass
 
 ---
 
@@ -466,16 +503,18 @@ fd0b29a feat(protocols): update SinkProtocol.write() to batch mode
 **Goal:** All sink tests use batch signature
 **Blocked by:** WP-03, WP-04
 
+**Note:** `test_adapters.py` is deleted in WP-04, so no adapter tests to update.
+
 #### Tasks
 - [ ] Rewrite `tests/plugins/sinks/test_csv_sink.py`
 - [ ] Rewrite `tests/plugins/sinks/test_json_sink.py`
 - [ ] Rewrite `tests/plugins/sinks/test_database_sink.py`
-- [ ] Update `tests/engine/test_adapters.py` (MockSink class)
+- [ ] Create MockSink fixture for engine tests that need it
 
 #### Verification
-- [ ] All sink tests pass
-- [ ] Adapter tests pass
+- [ ] All sink plugin tests pass
 - [ ] No per-row write patterns remain
+- [ ] Engine tests use inline MockSink or fixture
 
 ---
 
@@ -522,6 +561,7 @@ fd0b29a feat(protocols): update SinkProtocol.write() to batch mode
 | 2026-01-17 | WP-06 | Added stale code cleanup (AcceptResult.trigger, should_trigger, reset) | Claude |
 | 2026-01-17 | WP-11 | Decision: KEEP RetryManager, KEEP Call infrastructure for audit | Claude |
 | 2026-01-17 | WP-14 | Added note to split into WP-14a/b/c/d/e when executed | Claude |
+| 2026-01-17 | WP-04a | **NEW**: Added WP-04a to delete TransformLike/GateLike/AggregationLike (from paused interface-unification plan) | Claude |
 | 2026-01-17 | — | Resequenced sprints: WP-02 + WP-09 now in Sprint 4 (no gate gap) | Claude |
 | 2026-01-17 | WP-04 | Fixed: use is_batch_sink() instead of runtime_checkable Protocol | Claude |
 | 2026-01-17 | WP-12 | Created detailed plan: wp12-utility-consolidation.md | Claude |
@@ -531,4 +571,8 @@ fd0b29a feat(protocols): update SinkProtocol.write() to batch mode
 | 2026-01-17 | WP-12 | 🟢 READY: No blockers, sentinels.py exists, field_mapper.py has _get_nested | Claude |
 | 2026-01-17 | WP-05 | Created detailed plan: wp05-audit-schema-enhancement.md | Claude |
 | 2026-01-17 | WP-11 | Created detailed plan: wp11-orphaned-code-cleanup.md | Claude |
+| 2026-01-17 | WP-04 | **MAJOR FIX**: Changed from "update adapter" to "delete adapter & SinkLike" | Claude |
+| 2026-01-17 | WP-13 | Fixed: Removed test_adapters.py reference (deleted in WP-04) | Claude |
+| 2026-01-17 | WP-14 | Fixed: Removed WP-14a (sink adapter tests) - no longer exists | Claude |
+| 2026-01-17 | — | Fixed work-packages.md: WP-04, WP-13, WP-14 all updated | Claude |
 | | | | |

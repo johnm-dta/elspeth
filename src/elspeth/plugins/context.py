@@ -156,3 +156,28 @@ class PluginContext:
             error_id=error_id,
             destination=destination,
         )
+
+    def route_to_sink(
+        self,
+        sink_name: str,
+        row: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Route a row to a named sink.
+
+        NOTE: This is a Phase 2 stub. Currently logs the routing action.
+        Full implementation will integrate with DAG executor to actually
+        deliver rows to the named sink.
+
+        Args:
+            sink_name: Name of the destination sink
+            row: The row data to route
+            metadata: Optional metadata about why row was routed
+        """
+        # Phase 2 stub - log the action
+        logger.info(
+            "route_to_sink: %s -> %s (metadata=%s)",
+            self.node_id,
+            sink_name,
+            metadata,
+        )

@@ -120,6 +120,14 @@ class CSVSource(BaseSource):
                     schema_mode=self._schema_config.mode or "dynamic",
                     destination=self._on_validation_failure,
                 )
+
+                # Route to quarantine sink if not discarding
+                if self._on_validation_failure != "discard":
+                    ctx.route_to_sink(
+                        sink_name=self._on_validation_failure,
+                        row=row,
+                        metadata={"validation_error": str(e)},
+                    )
                 # Skip invalid row - don't yield
                 continue
 

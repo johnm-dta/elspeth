@@ -224,3 +224,44 @@ class TestValidationErrorDestination:
         )
 
         assert token.destination == "discard"
+
+
+class TestRouteToSink:
+    """Tests for route_to_sink method."""
+
+    def test_route_to_sink_exists(self) -> None:
+        """PluginContext has route_to_sink method."""
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="test-run", config={}, node_id="test_node")
+        assert hasattr(ctx, "route_to_sink")
+        assert callable(ctx.route_to_sink)
+
+    def test_route_to_sink_logs_action(
+        self, caplog: "pytest.LogCaptureFixture"
+    ) -> None:
+        """route_to_sink logs the routing action."""
+        import logging
+
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="test-run", config={}, node_id="source_node")
+
+        with caplog.at_level(logging.INFO):
+            ctx.route_to_sink(
+                sink_name="quarantine",
+                row={"id": 1, "bad": "data"},
+                metadata={"reason": "validation failed"},
+            )
+
+        assert "route_to_sink" in caplog.text
+        assert "quarantine" in caplog.text
+
+    def test_route_to_sink_accepts_none_metadata(self) -> None:
+        """route_to_sink works without metadata."""
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="test-run", config={}, node_id="test_node")
+
+        # Should not raise
+        ctx.route_to_sink(sink_name="error_sink", row={"id": 42})

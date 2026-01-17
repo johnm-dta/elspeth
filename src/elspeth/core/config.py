@@ -6,10 +6,14 @@ Uses Pydantic for validation and Dynaconf for multi-source loading.
 Settings are frozen (immutable) after construction.
 """
 
+import re
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+# Compiled regex for validating route destination identifiers
+_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 class GateSettings(BaseModel):
@@ -69,24 +73,15 @@ class GateSettings(BaseModel):
 
     @field_validator("routes")
     @classmethod
-    def validate_routes_not_empty(cls, v: dict[str, str]) -> dict[str, str]:
-        """Routes must have at least one entry."""
+    def validate_routes(cls, v: dict[str, str]) -> dict[str, str]:
+        """Routes must have at least one entry with valid destinations."""
         if not v:
             raise ValueError("routes must have at least one entry")
-        return v
-
-    @field_validator("routes")
-    @classmethod
-    def validate_route_destinations(cls, v: dict[str, str]) -> dict[str, str]:
-        """Route destinations must be 'continue', 'fork', or valid identifiers."""
-        import re
-
-        identifier_pattern = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
         for label, destination in v.items():
             if destination in ("continue", "fork"):
                 continue
-            if not identifier_pattern.match(destination):
+            if not _IDENTIFIER_PATTERN.match(destination):
                 raise ValueError(
                     f"Route destination '{destination}' for label '{label}' "
                     "must be 'continue', 'fork', or a valid identifier"

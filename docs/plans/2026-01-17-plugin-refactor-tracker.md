@@ -14,8 +14,8 @@
 | WP-01 | Protocol & Base Class Alignment | 🟢 Complete | 2h | None | WP-03 |
 | WP-02 | Gate Plugin Deletion | 🔴 Not Started | 1h | None | — |
 | WP-03 | Sink Implementation Rewrite | 🟢 Complete | 4h | WP-01 | WP-04, WP-13 |
-| WP-04 | Delete SinkAdapter & SinkLike | 🔴 Not Started | 2h | WP-03 | WP-04a, WP-13 |
-| WP-04a | Delete *Like Protocol Duplications | 🔴 Not Started | 1h | WP-04 | — |
+| WP-04 | Delete SinkAdapter & SinkLike | 🟢 Complete | 2h | WP-03 | WP-04a, WP-13 |
+| WP-04a | Delete *Like Protocol Duplications | 🟢 Complete | 1.5h | WP-04 | — |
 | WP-05 | Audit Schema Enhancement | 🔴 Not Started | 2h | None | WP-06 |
 | WP-06 | Aggregation Triggers | 🔴 Not Started | 6h | WP-05 | WP-14 |
 | WP-07 | Fork Work Queue | 🔴 Not Started | 8h | None | WP-08, WP-10 |
@@ -23,7 +23,8 @@
 | WP-09 | Engine-Level Gates | 🔴 Not Started | 10h | (after WP-02) | WP-14 |
 | WP-10 | Quarantine Implementation | 🔴 Not Started | 4h | WP-07 | WP-14 |
 | WP-11 | Orphaned Code Cleanup | 🔴 Not Started | 2h | None | — |
-| WP-12 | Utility Consolidation | 🔴 Not Started | 1h | (after WP-02) | — |
+| WP-11.99 | Config-Driven Plugin Schemas | 🔴 Not Started | 4-6h | None | WP-12 |
+| WP-12 | Utility Consolidation | 🔴 Not Started | 0.5h | WP-11.99 | — |
 | WP-13 | Sink Test Rewrites | 🔴 Not Started | 4h | WP-03, WP-04 | — |
 | WP-14 | Engine Test Rewrites | 🔴 Not Started | 16h | WP-06,07,08,09,10 | — |
 
@@ -46,7 +47,7 @@ WP-07 ──┬──► WP-08 ──────┬──► WP-14
 WP-09 ──────────────────╱
 
 WP-11       (independent)
-WP-12       (independent, after WP-02)
+WP-11.99 ──► WP-12  (config-driven schemas unlock simplified utility consolidation)
 ```
 
 ---
@@ -248,60 +249,62 @@ fd0b29a feat(protocols): update SinkProtocol.write() to batch mode
 
 ### WP-04: Delete SinkAdapter & SinkLike
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete
 **Plan:** [2026-01-17-wp04-sink-adapter-update.md](./2026-01-17-wp04-sink-adapter-update.md)
 **Goal:** Remove adapter layer - sinks now implement batch interface directly
 **Blocked by:** WP-03 ✅
+**Completed:** 2026-01-17 (commit f08c19a)
 
 **Rationale:** WP-03 made sinks batch-aware with ArtifactDescriptor returns. SinkAdapter and SinkLike are now redundant indirection layers.
 
 #### Tasks
-- [ ] Task 1: Delete `adapters.py` and `test_adapters.py`
-- [ ] Task 2: Delete `SinkLike` from `executors.py`
-- [ ] Task 3: Update `orchestrator.py` to use `SinkProtocol`
-- [ ] Task 4: Update CLI to use sinks directly
-- [ ] Task 5: Remove `SinkAdapter` from `engine/__init__.py` exports
-- [ ] Task 6: Run full verification
+- [x] Task 1: Delete `adapters.py` and `test_adapters.py`
+- [x] Task 2: Delete `SinkLike` from `executors.py`
+- [x] Task 3: Update `orchestrator.py` to use `SinkProtocol`
+- [x] Task 4: Update CLI to use sinks directly
+- [x] Task 5: Remove `SinkAdapter` from `engine/__init__.py` exports
+- [x] Task 6: Run full verification
 
 #### Verification
-- [ ] `adapters.py` deleted
-- [ ] `test_adapters.py` deleted
-- [ ] No `SinkLike` anywhere in codebase
-- [ ] No `SinkAdapter` anywhere in codebase
-- [ ] CLI creates sinks directly (no wrapper)
-- [ ] Orchestrator uses `SinkProtocol` type hints
-- [ ] All tests pass
+- [x] `adapters.py` deleted
+- [x] `test_adapters.py` deleted
+- [x] No `SinkLike` anywhere in codebase
+- [x] No `SinkAdapter` anywhere in codebase
+- [x] CLI creates sinks directly (no wrapper)
+- [x] Orchestrator uses `SinkProtocol` type hints
+- [x] All tests pass (167 engine tests)
 
 ---
 
 ### WP-04a: Delete *Like Protocol Duplications
 
-**Status:** 🔴 Not Started
-**Goal:** Remove TransformLike, GateLike, AggregationLike protocols and rename union alias
-
-**Rationale:** These protocols in executors.py duplicate the full protocols and serve no purpose. Per No Legacy Code Policy, delete them.
-
-**Files:**
-- `src/elspeth/engine/executors.py`
-- `src/elspeth/engine/orchestrator.py`
+**Status:** 🟢 Complete
+**Plan:** [2026-01-17-wp04a-delete-like-protocols.md](./2026-01-17-wp04a-delete-like-protocols.md)
+**Goal:** Delete AggregationLike protocol, move batch state to executor, rename TransformLike alias
+**Completed:** 2026-01-17 (commits 6ff0d49, 2b82bf2, f9153d0, 3657d92)
 
 #### Tasks
-- [ ] Task 1: Delete `TransformLike` protocol from executors.py (~lines 75-83)
-- [ ] Task 2: Delete `GateLike` protocol from executors.py (~lines 212-220)
-- [ ] Task 3: Delete `AggregationLike` protocol from executors.py (~lines 444-465)
-- [ ] Task 4: Update executor methods to use full protocols (TransformProtocol, GateProtocol, AggregationProtocol)
-- [ ] Task 5: Rename `TransformLike` union alias to `RowPlugin` in orchestrator.py
-- [ ] Task 6: Update all references in orchestrator.py to use `RowPlugin`
-- [ ] Task 7: Run mypy and tests
+- [x] TransformLike protocol deleted (commit f08c19a)
+- [x] GateLike protocol deleted (commit f08c19a)
+- [x] Task 1: Refactor AggregationExecutor to store batch state internally (Option C)
+- [x] Task 2: Delete AggregationLike protocol
+- [x] Task 3: Rename TransformLike union alias to RowPlugin
+- [x] Task 4: Update tests (use executor.get_batch_id() instead of aggregation._batch_id)
+- [x] Task 5: Final verification
+
+**Files Changed:**
+- `src/elspeth/engine/executors.py` - Added `_batch_ids` dict (line 467), `get_batch_id()` helper (line 474), deleted AggregationLike
+- `src/elspeth/engine/orchestrator.py` - RowPlugin alias at line 29
+- `tests/engine/test_executors.py` - Updated assertions
+- `tests/engine/test_processor.py` - Removed _batch_id from mocks
 
 #### Verification
-- [ ] No `TransformLike` protocol in executors.py
-- [ ] No `GateLike` in executors.py
-- [ ] No `AggregationLike` in executors.py
-- [ ] Executors use full protocols from `elspeth.plugins.protocols`
-- [ ] orchestrator.py uses `RowPlugin` for union alias
-- [ ] `mypy --strict` passes
-- [ ] All tests pass
+- [x] AggregationExecutor._batch_ids dict manages batch state
+- [x] No AggregationLike in executors.py
+- [x] orchestrator.py uses RowPlugin alias (line 29)
+- [x] No aggregation._batch_id references remain
+- [x] `mypy --strict` passes (Success: no issues)
+- [x] All tests pass (167 engine tests)
 
 ---
 
@@ -474,26 +477,64 @@ fd0b29a feat(protocols): update SinkProtocol.write() to batch mode
 
 ---
 
+### WP-11.99: Config-Driven Plugin Schemas
+
+**Status:** 🔴 Not Started
+**Plan:** [2026-01-17-wp11.99-config-driven-schemas.md](./2026-01-17-wp11.99-config-driven-schemas.md)
+**Goal:** Replace hardcoded schemas with mandatory config-driven definitions
+**Unlocks:** WP-12
+
+**Architecture:** Every data-processing plugin must declare `schema` in config:
+- `fields: dynamic` - Accept anything (logged for audit)
+- Explicit fields with `mode: strict` (exactly these) or `mode: free` (at least these)
+
+**Trust Boundaries:**
+| Plugin | On Schema Violation |
+|--------|---------------------|
+| Source | Quarantine row, continue (THEIR DATA) |
+| Transform | Crash (OUR CODE bug) |
+| Sink | Crash (transform bug) |
+
+#### Tasks
+- [ ] Task 1: Create SchemaConfig and FieldDefinition in contracts/schema.py
+- [ ] Task 2: Create schema factory in plugins/schema_factory.py
+- [ ] Task 3: Add DataPluginConfig with required schema
+- [ ] Task 4: Add schema recording to landscape recorder
+- [ ] Task 5: Update source plugins (csv, json)
+- [ ] Task 6: Update sink plugins (csv, json, database)
+- [ ] Task 7: Update transform plugins (field_mapper, passthrough)
+- [ ] Task 8: Run full verification
+
+#### Verification
+- [ ] SchemaConfig and FieldDefinition types created
+- [ ] Schema factory creates Pydantic models from config
+- [ ] All data plugins require schema in config
+- [ ] Schema choices recorded in audit trail (nodes table)
+- [ ] Source validates + coerces at boundary
+- [ ] No hardcoded `extra="allow"` schemas in plugin files
+- [ ] All tests pass
+- [ ] mypy --strict passes
+
+---
+
 ### WP-12: Utility Consolidation
 
 **Status:** 🔴 Not Started
 **Plan:** [2026-01-17-wp12-utility-consolidation.md](./2026-01-17-wp12-utility-consolidation.md)
-**Goal:** Extract duplicated code to shared utilities
-**Recommended after:** WP-02
+**Goal:** Extract `get_nested_field()` utility to shared module
+**Blocked by:** WP-11.99
+
+> **Note:** Schema consolidation is handled by WP-11.99. This WP only extracts the `_get_nested()` utility.
 
 #### Tasks
 - [ ] Task 1: Create utils.py with get_nested_field()
-- [ ] Task 2: Add DynamicSchema class
-- [ ] Task 3: Update field_mapper.py to use get_nested_field
-- [ ] Task 4: Update sinks to use DynamicSchema
-- [ ] Task 5: Run full verification
+- [ ] Task 2: Update field_mapper.py to use shared utility
+- [ ] Task 3: Run verification
 
 #### Verification
-- [ ] `get_nested_field()` has 9 passing tests
-- [ ] `DynamicSchema` has 4 passing tests
+- [ ] `get_nested_field()` has tests
 - [ ] `field_mapper.py` imports from utils, no local `_get_nested`
-- [ ] All sinks use `DynamicSchema` instead of local schema classes
-- [ ] All plugin tests pass
+- [ ] field_mapper tests pass
 
 ---
 
@@ -575,4 +616,6 @@ fd0b29a feat(protocols): update SinkProtocol.write() to batch mode
 | 2026-01-17 | WP-13 | Fixed: Removed test_adapters.py reference (deleted in WP-04) | Claude |
 | 2026-01-17 | WP-14 | Fixed: Removed WP-14a (sink adapter tests) - no longer exists | Claude |
 | 2026-01-17 | — | Fixed work-packages.md: WP-04, WP-13, WP-14 all updated | Claude |
+| 2026-01-17 | WP-04a | Created detailed plan with Option C: batch state internal to executor | Claude |
+| 2026-01-17 | WP-04a | TransformLike/GateLike already deleted (f08c19a), only AggregationLike remains | Claude |
 | | | | |

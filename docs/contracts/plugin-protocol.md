@@ -1,6 +1,6 @@
 # ELSPETH Plugin Protocol Contract
 
-> **Status:** FINAL (v1.1)
+> **Status:** FINAL (v1.3)
 > **Last Updated:** 2026-01-17
 > **Authority:** This document is the master reference for all plugin interactions.
 
@@ -66,27 +66,57 @@ ELSPETH doesn't dictate internal timing. Plugins may:
 
 The contract specifies WHEN methods are called, not HOW FAST plugins must respond.
 
-### 3. Exception Handling: Their Data vs Our Code
+### 3. Exception Handling: Three-Tier Trust Model
 
-This mirrors ELSPETH's core Data Manifesto: **Their Data** (user input) gets tolerance, **Our Data/Code** gets zero tolerance.
+ELSPETH uses a three-tier trust model that determines how exceptions should be handled:
+
+| Tier | Trust Level | Coercion | Exception Handling |
+|------|-------------|----------|-------------------|
+| **External Data** (Source input) | Zero trust | ✅ Allowed | Validate, coerce, quarantine failures |
+| **Pipeline Data** (Post-source rows) | Elevated ("probably ok") | ❌ Forbidden | Types trusted, wrap VALUE operations |
+| **Our Code** (Plugin internals) | Full trust | ❌ N/A | Let it crash - bugs must surface |
+
+#### The Key Insight: Type-Safe ≠ Operation-Safe
+
+Data that passed source validation has correct **types**, but **values** can still cause operation failures:
+
+```python
+# Pipeline data is type-valid (int), but operation fails
+row = {"divisor": 0}  # Passed source validation ✓
+result = 100 / row["divisor"]  # 💥 ZeroDivisionError - WRAP THIS
+
+# Pipeline data is type-valid (str), but content is problematic
+row = {"date": "not-a-date"}  # Passed as str ✓
+parsed = datetime.fromisoformat(row["date"])  # 💥 ValueError - WRAP THIS
+```
 
 #### The Divide-By-Zero Test
 
 ```python
-# THEIR DATA caused the error → TOLERATE
+# THEIR DATA value caused the error → WRAP AND HANDLE
 def process(self, row, ctx):
     try:
-        result = row["value"] / row["divisor"]  # User passed divisor=0
+        result = row["value"] / row["divisor"]  # User's divisor=0
     except ZeroDivisionError:
         return TransformResult.error({"reason": "division_by_zero", "field": "divisor"})
     return TransformResult.success({"result": result})
 
-# OUR CODE caused the error → CRASH
+# OUR CODE caused the error → LET IT CRASH
 def process(self, row, ctx):
     # If _batch_count is 0, that's MY bug - I should have initialized it
     average = self._total / self._batch_count  # Let it crash!
     return TransformResult.success({"average": average})
 ```
+
+#### Coercion Rules by Plugin Type
+
+| Plugin Type | May Coerce Types? | Why |
+|-------------|-------------------|-----|
+| **Source** | ✅ Yes | Normalizes external data at ingestion boundary (`"42"` → `42`) |
+| **Transform** | ❌ No | Receives validated data; wrong types = upstream bug |
+| **Sink** | ❌ No | Receives validated data; wrong types = upstream bug |
+
+If a transform receives `"42"` when its `input_schema` says `int`, that's a bug in the source or upstream transform. The correct fix is to fix the upstream plugin, NOT to coerce in the transform.
 
 #### The Boundary
 
@@ -95,17 +125,28 @@ def process(self, row, ctx):
 │                     PLUGIN PROCESSING                                │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
-│  THEIR DATA (row fields, external input)                            │
-│  ─────────────────────────────────────────                          │
-│  • Wrap operations in try/catch                                      │
+│  THEIR DATA VALUES (row field values, external responses)           │
+│  ─────────────────────────────────────────────────────────          │
+│  • Types are trusted (source validated them)                        │
+│  • Values may still cause operation failures                        │
+│  • Wrap OPERATIONS in try/catch                                     │
 │  • Return error result on failure                                    │
 │  • Row gets quarantined, pipeline continues                          │
 │                                                                      │
 │  Examples:                                                           │
-│  • row["field"] doesn't exist → catch KeyError, return error        │
 │  • row["value"] / row["divisor"] → catch ZeroDivisionError          │
-│  • int(row["count"]) → catch ValueError                             │
+│  • datetime.fromisoformat(row["date"]) → catch ValueError           │
 │  • external_api.call(row["id"]) → catch ApiError                    │
+│  • json.loads(row["payload"]) → catch JSONDecodeError               │
+│                                                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  THEIR DATA TYPES (at Source boundary ONLY)                         │
+│  ─────────────────────────────────────────────────────────          │
+│  • External data may have wrong types                               │
+│  • Sources MAY coerce: "42" → 42, "true" → True                     │
+│  • Sources MUST quarantine rows that can't be coerced               │
+│  • Transforms/Sinks MUST NOT coerce types                           │
 │                                                                      │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
@@ -127,14 +168,18 @@ def process(self, row, ctx):
 
 | Zone | On Error | Plugin Action | ELSPETH Action |
 |------|----------|---------------|----------------|
-| **Their Data** | User row causes error | Catch, return error result | Quarantine row, continue |
+| **Their Data Values** | Row value causes operation error | Catch, return error result | Quarantine row, continue |
+| **Their Data Types** | Wrong type at Source boundary | Coerce if possible, else error | Quarantine row, continue |
+| **Their Data Types** | Wrong type at Transform/Sink | — | This is an upstream bug, should crash |
 | **Our Code** | Internal state causes error | Let it crash | Record in audit, halt pipeline |
 | **Lifecycle** | `on_start`/`on_complete`/`close` fails | Let it crash | Halt pipeline (config/code bug) |
 
 **Rules:**
-- Plugins MUST wrap operations on user-provided data and return error results
+- Plugins MUST wrap operations on row values and return error results on failure
+- Sources MAY coerce external data types; Transforms/Sinks MUST NOT
 - Plugins MUST NOT wrap operations on internal state - let bugs surface
 - If you're tempted to add `try/except` around your own logic, you have a bug to fix
+- If a transform receives wrong types, that's an upstream bug to fix, not something to coerce
 
 ### 4. Forced Pass for Lifecycle Hooks
 
@@ -161,6 +206,37 @@ node_id: str | None                # Set by orchestrator after registration
 determinism: Determinism           # DETERMINISTIC, NON_DETERMINISTIC, or EXTERNAL
 plugin_version: str                # Semantic version for reproducibility
 ```
+
+#### Required Configuration
+
+```yaml
+sources:
+  my_source:
+    type: csv_source
+    path: data/input.csv
+    schema:
+      mode: strict
+      fields:
+        name: {type: string}
+        age: {type: integer}
+    # REQUIRED: Where do non-conformant rows go?
+    on_validation_failure: quarantine_sink  # Sink name, or "discard"
+```
+
+**`on_validation_failure`** (REQUIRED):
+- Specifies destination for rows that fail schema validation/coercion
+- Value must be a sink name or `"discard"` for explicit drop
+- Cannot be omitted, empty, or null - operator must acknowledge bad data handling
+- Even when `"discard"`, a `QuarantineEvent` is recorded in the audit trail
+
+**Quarantine behavior:**
+1. Source attempts to validate/coerce row against `output_schema`
+2. If validation fails:
+   - `QuarantineEvent` recorded (always, even for discard)
+   - Row routed to configured sink OR dropped if `"discard"`
+   - Row does NOT enter the pipeline
+3. If validation succeeds:
+   - Row enters pipeline as normal
 
 #### Required Methods
 
@@ -237,7 +313,13 @@ close()                 ← Release resources
 - Each row yielded (row_id, content_hash)
 - `on_complete` called timestamp
 - Total rows produced
-- Any errors encountered
+- **QuarantineEvent** for each validation failure:
+  - `run_id`, `source_id`, `row_index`
+  - `raw_row` (original data before coercion attempt)
+  - `failure_reason` (why validation failed)
+  - `field_errors` (per-field error details)
+  - `destination` (sink name or "discard")
+  - `timestamp`
 
 ---
 
@@ -256,6 +338,41 @@ output_schema: type[PluginSchema]
 node_id: str | None
 determinism: Determinism
 plugin_version: str
+```
+
+#### Optional Configuration
+
+```yaml
+transforms:
+  price_calculator:
+    type: custom_transform
+    # OPTIONAL: Where do rows go when transform returns error?
+    on_error: failed_calculations  # Sink name, or "discard"
+```
+
+**`on_error`** (OPTIONAL):
+- Specifies destination for rows where transform returns `TransformResult.error()`
+- Value must be a sink name or `"discard"` for explicit drop
+- If omitted and transform returns an error → `ConfigurationError` (pipeline crashes)
+- Even when `"discard"`, a `TransformErrorEvent` is recorded in the audit trail
+
+**Error vs Bug distinction:**
+
+| Scenario | Signal | Behavior |
+|----------|--------|----------|
+| **Processing Error** | `TransformResult.error(...)` | Route to `on_error` sink |
+| **Transform Bug** | Exception thrown | CRASH immediately |
+
+```python
+# PROCESSING ERROR - legitimate, uses on_error routing
+def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+    if row["quantity"] == 0:
+        return TransformResult.error({"reason": "division_by_zero"})
+    return TransformResult.success({"unit_price": row["total"] / row["quantity"]})
+
+# TRANSFORM BUG - crashes, does NOT use on_error routing
+def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+    return TransformResult.success({"value": row["nonexistent"]})  # KeyError = BUG
 ```
 
 #### Required Methods
@@ -344,6 +461,13 @@ close()
 
 - Each `process()` call: input_hash, output_hash, duration_ms, status
 - Errors: exception type, message, retryable flag
+- **TransformErrorEvent** for each `TransformResult.error()`:
+  - `run_id`, `token_id`, `transform_id`
+  - `row` (input row data)
+  - `error_details` (from TransformResult.error())
+  - `destination` (sink name or "discard")
+  - `input_hash` (for traceability)
+  - `timestamp`
 
 ---
 
@@ -861,9 +985,17 @@ These operations are engine-level because:
 | `on_start` | CODE BUG → crash |
 | `on_complete` | CODE BUG → crash |
 | `close` | Log error, don't raise |
-| `process` (Transform) | Data error → return error result; Code bug → raise |
+| `load` (Source) | Validation failure → quarantine via `on_validation_failure`; Code bug → crash |
+| `process` (Transform) | Processing error → route via `on_error`; Code bug → crash |
 | `write` (Sink) | Data error → return error result; Code bug → raise |
-| `load` (Source) | May raise StopIteration (normal), other errors → crash |
+
+### Error Routing Summary
+
+| Plugin Type | Config Field | Required? | On Missing Config + Error |
+|-------------|--------------|-----------|---------------------------|
+| **Source** | `on_validation_failure` | Yes | N/A (config validation fails) |
+| **Transform** | `on_error` | No | `ConfigurationError` - pipeline crashes |
+| **Sink** | N/A | N/A | Sinks don't route errors |
 
 ---
 
@@ -929,5 +1061,7 @@ Plugins make calls; the engine throttles them.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.3 | 2026-01-17 | Source `on_validation_failure` (required), Transform `on_error` (optional), QuarantineEvent, TransformErrorEvent |
+| 1.2 | 2026-01-17 | Three-tier trust model, coercion rules by plugin type, type-safe ≠ operation-safe |
 | 1.1 | 2026-01-17 | Add content_hash requirements, expression safety, engine concerns |
 | 1.0 | 2026-01-17 | Initial contract - Source, Transform, Sink + System Operations |

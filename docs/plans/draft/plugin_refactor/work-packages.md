@@ -187,44 +187,39 @@ tests/plugins/gates/__init__.py               (1 line)
 
 ## WP-04a: Delete Remaining *Like Protocol Duplications
 
-**Goal:** Remove TransformLike, GateLike, AggregationLike protocols from executors.py and rename the TransformLike union alias
+**Goal:** Delete AggregationLike protocol, move batch state to executor internal storage, rename TransformLike union alias
 
-**Rationale:** These protocols duplicate the full protocols (TransformProtocol, GateProtocol, AggregationProtocol) and serve no purpose. The `TransformLike` name is also used as a union alias in orchestrator.py causing a name collision. Per No Legacy Code Policy, delete the redundant code.
+**Prior Progress:**
+- ✅ TransformLike protocol - DELETED (commit f08c19a)
+- ✅ GateLike protocol - DELETED (commit f08c19a)
+- ❌ AggregationLike protocol - Still exists (has `_batch_id` attribute)
+
+**Rationale:** `AggregationLike` exists solely to declare `_batch_id: str | None`, which the executor monkey-patches onto plugins. This is a design smell. **Option C:** Move batch state tracking entirely into `AggregationExecutor._batch_ids` dict, then delete the redundant protocol.
 
 **Files to MODIFY:**
 
 | File | Change |
 |------|--------|
-| `src/elspeth/engine/executors.py` | Delete `TransformLike` protocol (lines ~75-83) |
-| `src/elspeth/engine/executors.py` | Delete `GateLike` protocol (lines ~212-220) |
-| `src/elspeth/engine/executors.py` | Delete `AggregationLike` protocol (lines ~444-465) |
-| `src/elspeth/engine/executors.py` | Update executor methods to use full protocols |
-| `src/elspeth/engine/orchestrator.py` | Rename `TransformLike = BaseTransform | BaseGate | BaseAggregation` to `RowPlugin` |
-| `src/elspeth/engine/orchestrator.py` | Update all references to use `RowPlugin` |
-
-**Protocol → Full Protocol Mapping:**
-
-| Redundant Protocol | Replace With |
-|--------------------|--------------|
-| `TransformLike` (protocol) | `TransformProtocol` |
-| `GateLike` | `GateProtocol` |
-| `AggregationLike` | `AggregationProtocol` |
-| `TransformLike` (union alias) | Rename to `RowPlugin` |
+| `src/elspeth/engine/executors.py` | Add `_batch_ids: dict[str, str \| None]` to AggregationExecutor |
+| `src/elspeth/engine/executors.py` | Replace `aggregation._batch_id` with `self._batch_ids[node_id]` |
+| `src/elspeth/engine/executors.py` | Add `get_batch_id(node_id)` helper for test access |
+| `src/elspeth/engine/executors.py` | Delete `AggregationLike` protocol (~lines 428-449) |
+| `src/elspeth/engine/orchestrator.py` | Rename `TransformLike` alias to `RowPlugin` (lines 29, 45, 182, 224) |
+| `tests/engine/test_executors.py` | Update assertions to use `executor.get_batch_id()` |
+| `tests/engine/test_processor.py` | Remove `_batch_id` from mock aggregations |
 
 **Verification:**
-- [ ] No `TransformLike` protocol in executors.py
-- [ ] No `GateLike` in executors.py
+- [ ] `AggregationExecutor._batch_ids` dict manages batch state
+- [ ] No `aggregation._batch_id` references in codebase
 - [ ] No `AggregationLike` in executors.py
-- [ ] `TransformExecutor.execute_transform()` uses `TransformProtocol`
-- [ ] `GateExecutor.execute_gate()` uses `GateProtocol`
 - [ ] `AggregationExecutor.accept()` uses `AggregationProtocol`
 - [ ] orchestrator.py uses `RowPlugin` (not `TransformLike`) for union alias
 - [ ] `mypy --strict` passes
 - [ ] All tests pass
 
-**Effort:** Low (~1 hour)
+**Effort:** Medium (~1.5-2 hours)
 **Dependencies:** WP-04 (same cleanup pattern, avoids merge conflicts)
-**Unlocks:** Nothing (pure cleanup)
+**Unlocks:** Nothing (pure cleanup, but enables cleaner WP-06 aggregation work)
 
 ---
 
@@ -538,9 +533,78 @@ gates:
 
 ---
 
+## WP-11.99: Config-Driven Plugin Schemas
+
+**Goal:** Replace hardcoded `extra="allow"` schemas with mandatory config-driven schema definitions
+
+**Architecture:** Every plugin that processes row data must declare `schema` in config. Two modes:
+- `fields: dynamic` - Accept anything (logged for audit)
+- Explicit fields with `mode: strict` (exactly these) or `mode: free` (at least these)
+
+**Schema Configuration Syntax:**
+```yaml
+plugins:
+  csv_source:
+    path: data.csv
+    schema:
+      fields: dynamic  # Accept anything - logged for audit
+
+  # OR explicit schema:
+  csv_source:
+    path: data.csv
+    schema:
+      mode: strict      # Exactly these fields (extras rejected)
+      fields:
+        - id: int
+        - name: str
+        - score: float?  # ? = optional/nullable
+```
+
+**Trust Boundaries:**
+| Plugin Type | Schema Role | On Violation |
+|-------------|-------------|--------------|
+| **Source** | Validates + coerces THEIR DATA | Quarantine row, continue |
+| **Transform** | Contract: must output valid data | Crash (OUR CODE bug) |
+| **Sink** | Expects clean data | Crash (transform bug) |
+
+**Files to CREATE:**
+- `src/elspeth/contracts/schema.py` - SchemaConfig, FieldDefinition
+- `src/elspeth/plugins/schema_factory.py` - Dynamic Pydantic model creation
+- Tests for above
+
+**Files to MODIFY:**
+- `src/elspeth/plugins/config_base.py` - Add DataPluginConfig with required schema
+- `src/elspeth/core/landscape/schema.py` - Add schema_mode, schema_fields columns
+- `src/elspeth/contracts/audit.py` - Add schema fields to Node dataclass
+- `src/elspeth/core/landscape/recorder.py` - Record schema config in register_node
+- All 7 plugins with hardcoded schemas (sources, sinks, transforms)
+
+**Audit Trail:**
+Schema configuration recorded at run start in `nodes` table:
+- `schema_mode`: "dynamic", "strict", or "free"
+- `schema_fields`: JSON array of field definitions (if explicit)
+
+**Verification:**
+- [ ] SchemaConfig and FieldDefinition types created
+- [ ] Schema factory creates Pydantic models from config
+- [ ] All data plugins require schema in config
+- [ ] Schema choices recorded in audit trail
+- [ ] Source validates + coerces at boundary
+- [ ] No hardcoded `extra="allow"` schemas remain
+- [ ] All tests pass
+
+**Effort:** Medium-High (~4-6 hours)
+**Dependencies:** None
+**Unlocks:** WP-12 (simplified)
+**Plan:** [2026-01-17-wp11.99-config-driven-schemas.md](../../2026-01-17-wp11.99-config-driven-schemas.md)
+
+---
+
 ## WP-12: Utility Consolidation
 
-**Goal:** Extract duplicated code to shared utilities
+**Goal:** Extract `get_nested_field()` utility to shared module
+
+> **Note:** Schema consolidation is now handled by WP-11.99. This WP only extracts the `_get_nested()` utility function.
 
 **Files:**
 - `src/elspeth/plugins/utils.py` (NEW)
@@ -548,7 +612,7 @@ gates:
 
 **Duplicated Code:**
 
-`_get_nested()` - Extract to utils.py:
+`_get_nested()` exists in 4 files (3 gate files + field_mapper). Extract to utils.py:
 ```python
 def get_nested_field(data: dict, path: str, default: Any = MISSING) -> Any:
     """Traverse nested dict using dot notation path."""
@@ -561,23 +625,18 @@ def get_nested_field(data: dict, path: str, default: Any = MISSING) -> Any:
     return current
 ```
 
-**Optional:** DynamicPluginSchema factory
-```python
-def create_dynamic_schema(name: str) -> type[PluginSchema]:
-    """Create a schema that accepts any fields."""
-    return type(name, (PluginSchema,), {"model_config": {"extra": "allow"}})
-```
-
 **Update field_mapper.py:**
-- Import from utils instead of defining locally
-- (Gate files already deleted in WP-02)
+- Import `get_nested_field` from utils instead of defining locally
+- (Gate files already deleted in WP-02, so only field_mapper needs updating)
 
 **Verification:**
-- [ ] `_get_nested` exists in only one location
-- [ ] field_mapper.py works with imported utility
+- [ ] `get_nested_field()` in utils.py with tests
+- [ ] `_get_nested` removed from field_mapper.py
+- [ ] field_mapper tests pass
+- [ ] No duplicate implementations remain
 
-**Effort:** Low (~1 hour)
-**Dependencies:** None (but after WP-02)
+**Effort:** Low (~30 minutes)
+**Dependencies:** WP-11.99 (schema factory also in plugins module)
 **Unlocks:** Nothing (pure cleanup)
 
 ---

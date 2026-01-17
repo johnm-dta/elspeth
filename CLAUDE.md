@@ -29,11 +29,11 @@ ELSPETH is built for **high-stakes accountability**. The audit trail must withst
 
 This is more storage than minimal, but it means `explain()` queries are simple and complete.
 
-## Data Manifesto: Our Data vs Their Data
+## Data Manifesto: Three-Tier Trust Model
 
-ELSPETH has two fundamentally different data zones with opposite trust models:
+ELSPETH has three fundamentally different trust tiers with distinct handling rules:
 
-### Our Data (Audit Database / Landscape)
+### Tier 1: Our Data (Audit Database / Landscape) - FULL TRUST
 
 **Must be 100% pristine at all times.** We wrote it, we own it, we trust it completely.
 
@@ -44,40 +44,85 @@ ELSPETH has two fundamentally different data zones with opposite trust models:
 
 **Why:** The audit trail is the legal record. Silently coercing bad data is evidence tampering. If an auditor asks "why did row 42 get routed here?" and we give a confident wrong answer because we coerced garbage into a valid-looking value, we've committed fraud.
 
-### Their Data (Sources, Sinks, Transform Outputs)
+### Tier 2: Pipeline Data (Post-Source) - ELEVATED TRUST ("Probably OK")
 
-**Can be literal trash.** We don't control what users feed us or what transforms produce.
+**Type-valid but potentially operation-unsafe.** Data that passed source validation.
+
+- Types are trustworthy (source validated and/or coerced them)
+- Values might still cause operation failures (division by zero, invalid date formats, etc.)
+- Transforms/sinks **expect conformance** - if types are wrong, that's an upstream plugin bug
+- **No coercion** at transform/sink level - if a transform receives `"42"` when it expected `int`, that's a bug in the source or upstream transform
+
+**Why:** Plugins have contractual obligations. If a transform's `output_schema` says `int` and it outputs `str`, that's a bug we fix by fixing the plugin, not by coercing downstream.
+
+**Critical nuance:** Type-safe doesn't mean operation-safe:
+```python
+# Data is type-valid (int), but operation fails
+row = {"divisor": 0}  # Passed source validation ✓
+result = 100 / row["divisor"]  # 💥 ZeroDivisionError - wrap this!
+
+# Data is type-valid (str), but content is problematic
+row = {"date": "not-a-date"}  # Passed as str ✓
+parsed = datetime.fromisoformat(row["date"])  # 💥 ValueError - wrap this!
+```
+
+### Tier 3: External Data (Source Input) - ZERO TRUST
+
+**Can be literal trash.** We don't control what external systems feed us.
 
 - Malformed CSV rows, NULLs everywhere, wrong types, unexpected JSON structures
-- **Validate at the boundary, record what we got, continue processing**
-- Quarantine bad rows, don't crash the pipeline
+- **Validate at the boundary, coerce where possible, record what we got**
+- Sources MAY coerce: `"42"` → `42`, `"true"` → `True` (normalizing external data)
+- Quarantine rows that can't be coerced/validated
 - The audit trail records "row 42 was quarantined because field X was NULL" - that's a valid audit outcome
 
 **Why:** User data is a trust boundary. A CSV with garbage in row 500 shouldn't crash the entire pipeline - we record the problem, quarantine the row, and keep processing the other 10,000 rows.
 
-### The Boundary
+### The Trust Flow
 
 ```text
-THEIR DATA (zero trust)              OUR DATA (full trust)
+EXTERNAL DATA              PIPELINE DATA              AUDIT TRAIL
+(zero trust)               (elevated trust)           (full trust)
+                           "probably ok"
 
-┌─────────────────────┐              ┌─────────────────────────────┐
-│ Source Plugin       │              │                             │
-│ - Validate          │──────────────│  Audit Database (Landscape) │
-│ - Quarantine bad    │   writes     │  - Strict types             │
-│ - Record issues     │   pristine   │  - Crash on anomaly         │
-└─────────────────────┘   data       │  - No coercion ever         │
-                                     │                             │
-┌─────────────────────┐              │                             │
-│ Transform Output    │              │                             │
-│ - Could be garbage  │──────────────│  If we wrote garbage here,  │
-│ - We record as-is   │   record     │  that's OUR bug to fix      │
-│ - Hash the content  │   what we    │                             │
-└─────────────────────┘   observed   └─────────────────────────────┘
+┌─────────────────┐        ┌─────────────────┐        ┌─────────────────┐
+│ External Source │        │ Transform/Sink  │        │ Landscape DB    │
+│                 │        │                 │        │                 │
+│ • Coerce OK     │───────►│ • No coercion   │───────►│ • Crash on      │
+│ • Validate      │ types  │ • Expect types  │ record │   any anomaly   │
+│ • Quarantine    │ valid  │ • Wrap ops on   │ what   │ • No coercion   │
+│   failures      │        │   row values    │ we     │   ever          │
+│                 │        │ • Bug if types  │ saw    │                 │
+│                 │        │   are wrong     │        │                 │
+└─────────────────┘        └─────────────────┘        └─────────────────┘
+         │                          │
+         │                          │
+    Source is the              Operations on row
+    ONLY place coercion        values need wrapping
+    is allowed                 (values can still fail)
 ```
+
+### Coercion Rules by Plugin Type
+
+| Plugin Type | Coercion Allowed? | Rationale |
+|-------------|-------------------|-----------|
+| **Source** | ✅ Yes | Normalizes external data at ingestion boundary |
+| **Transform** | ❌ No | Receives validated data; wrong types = upstream bug |
+| **Sink** | ❌ No | Receives validated data; wrong types = upstream bug |
+
+### Operation Wrapping Rules
+
+| What You're Accessing | Wrap in try/except? | Why |
+|----------------------|---------------------|-----|
+| `self._config.field` | ❌ No | Our code, our config - crash on bug |
+| `self._internal_state` | ❌ No | Our code - crash on bug |
+| `row["field"]` arithmetic/parsing | ✅ Yes | Their data values can fail operations |
+| `external_api.call(row["id"])` | ✅ Yes | External system, anything can happen |
 
 **Rule of thumb:**
 - Reading from Landscape tables? Crash on any anomaly.
-- Reading from Source/Transform output? Validate, record, continue.
+- Operating on row field values? Wrap, return error result, quarantine row.
+- Accessing internal state? Let it crash - that's a bug to fix.
 
 ## Plugin Ownership: System Code, Not User Code
 
@@ -447,12 +492,55 @@ No Bug-Hiding Patterns: This codebase prohibits defensive patterns that mask bug
 
 ### Legitimate Uses
 
-This prohibition does not extend to genuine use cases where type handling is necessary at trust boundaries, such as:
+This prohibition does not extend to genuine use cases where defensive handling is necessary:
+
+**1. Operations on Row Values (Their Data)**
+
+Even type-valid row data can cause operation failures. Wrap these operations:
+
+```python
+# CORRECT - wrapping operations on their data
+def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+    try:
+        result = row["numerator"] / row["denominator"]  # Their data can be 0
+    except ZeroDivisionError:
+        return TransformResult.error({"reason": "division_by_zero"})
+    return TransformResult.success({"result": result})
+
+# WRONG - wrapping access to OUR internal state
+def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+    try:
+        batch_avg = self._total / self._batch_count  # OUR bug if _batch_count is 0
+    except ZeroDivisionError:
+        batch_avg = 0  # NO! This hides our initialization bug
+```
+
+**The distinction:** Wrapping `row["x"] / row["y"]` is correct because `row` is their data. Wrapping `self._x / self._y` is wrong because `self` is our code.
+
+**2. External System Boundaries**
 
 - **External API responses**: Validating JSON structure from LLM providers or HTTP endpoints before processing
+- **Source plugin input**: Coercing/validating external data at ingestion (see Three-Tier Trust Model above)
+
+**3. Framework Boundaries**
+
 - **Plugin schema contracts**: Type checking at plugin boundaries where external code meets the framework
-- **Pandas dtype normalization**: Converting `numpy.int64` → `int` in canonicalization (already documented above)
 - **Configuration validation**: Pydantic validators rejecting malformed config at load time
+
+**4. Serialization**
+
+- **Pandas dtype normalization**: Converting `numpy.int64` → `int` in canonicalization (already documented above)
 - **Serialization polymorphism**: Handling `datetime`, `Decimal`, `bytes` in canonical JSON
 
-**The test**: Ask yourself "is this defensive programming to hide a bug that should not be possible in a well-designed system, or is this legitimate type handling at a trust boundary?" If the former, remove it and fix the underlying issue.
+### The Decision Test
+
+Ask yourself:
+
+| Question | If Yes | If No |
+|----------|--------|-------|
+| Is this protecting against user-provided data values? | ✅ Wrap it | — |
+| Is this at an external system boundary (API, file, DB)? | ✅ Wrap it | — |
+| Would this fail due to a bug in code we control? | — | ❌ Let it crash |
+| Am I adding this because "something might be None"? | — | ❌ Fix the root cause |
+
+If you're wrapping to hide a bug that "shouldn't happen," remove the wrapper and fix the bug.

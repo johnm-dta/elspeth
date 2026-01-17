@@ -1,16 +1,38 @@
 # WP-12: Utility Consolidation
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task.
 
-**Goal:** Extract duplicated utility code to a shared module, reducing copy-paste and ensuring consistent behavior.
+**Goal:** Extract `get_nested_field()` utility to shared module.
 
-**Architecture:** Create `src/elspeth/plugins/utils.py` containing:
-1. `get_nested_field()` - Dot-notation field access with MISSING sentinel support
-2. `DynamicSchema` - Factory/class for "accept any fields" schemas (replaces 3 identical classes)
+**Architecture:** Create `src/elspeth/plugins/utils.py` containing the `get_nested_field()` function currently duplicated in multiple files.
 
-**Tech Stack:** Python 3.12, Pydantic, typing
+**Tech Stack:** Python 3.12, typing
 
-**Scope Note:** Gate files (`filter_gate.py`, `field_match_gate.py`, `threshold_gate.py`) also contain `_get_nested()` but will be deleted in WP-02. Only update `field_mapper.py`.
+---
+
+## Key Architectural Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| No coercion in utility | Utility handles pipeline data (elevated trust) - retrieval only |
+| MISSING sentinel for absent fields | Distinguishes "field missing" from "field is None" |
+| Default parameter support | Allows caller to specify fallback without sentinel checking |
+| isinstance() check is legitimate | Traversing nested structures requires type checking |
+
+---
+
+## Scope
+
+**In scope:**
+- Extract `_get_nested()` from `field_mapper.py` to shared `utils.py`
+- Rename to `get_nested_field()` for clearer public API
+
+**Out of scope:**
+- Schema consolidation (handled by WP-11.99's `create_schema_from_config()`)
+- Gate files (`filter_gate.py`, `field_match_gate.py`, `threshold_gate.py`) contain `_get_nested()` but are deleted in WP-02
+
+**Depends on:** WP-11.99 (establishes plugin module structure)
+**Risk:** Low - pure refactoring with identical behavior
 
 ---
 
@@ -26,8 +48,6 @@ Create `tests/plugins/test_utils.py`:
 
 ```python
 """Tests for plugin utilities."""
-
-from typing import Any
 
 import pytest
 
@@ -131,7 +151,7 @@ to avoid code duplication and ensure consistent behavior.
 
 from typing import Any
 
-from elspeth.plugins.sentinels import MISSING, MissingSentinel
+from elspeth.plugins.sentinels import MISSING
 
 
 def get_nested_field(
@@ -143,6 +163,10 @@ def get_nested_field(
 
     Traverses a nested dictionary structure using a dot-separated path.
     Returns the MISSING sentinel (or custom default) if the path doesn't exist.
+
+    This function does NOT coerce values - it returns exactly what is found
+    or the default if the path is missing. This is appropriate for pipeline
+    data which has elevated trust (validated at source boundaries).
 
     Args:
         data: Source dictionary to traverse
@@ -156,8 +180,9 @@ def get_nested_field(
         >>> data = {"user": {"name": "Alice", "age": 30}}
         >>> get_nested_field(data, "user.name")
         'Alice'
-        >>> get_nested_field(data, "user.email")
-        <MISSING>
+        >>> from elspeth.plugins.sentinels import MISSING
+        >>> get_nested_field(data, "user.email") is MISSING
+        True
         >>> get_nested_field(data, "user.email", default="unknown")
         'unknown'
     """
@@ -180,121 +205,24 @@ Expected: All 9 tests pass
 
 **Step 5: Commit**
 
-```
-git add -A && git commit -m "feat(plugins): add get_nested_field utility
+```bash
+git add src/elspeth/plugins/utils.py tests/plugins/test_utils.py
+git commit -m "$(cat <<'EOF'
+feat(plugins): add get_nested_field utility
 
 Extracts the common nested field access pattern to a shared utility.
 Supports dot notation paths, MISSING sentinel, and custom defaults.
 
-Co-Authored-By: Claude <noreply@anthropic.com>"
+Part of WP-12: Utility Consolidation
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
+EOF
+)"
 ```
 
 ---
 
-## Task 2: Add DynamicSchema factory
-
-**Files:**
-- Modify: `src/elspeth/plugins/utils.py`
-- Test: `tests/plugins/test_utils.py`
-
-**Step 1: Write the failing test**
-
-Add to `tests/plugins/test_utils.py`:
-
-```python
-class TestDynamicSchema:
-    """Tests for DynamicSchema utility."""
-
-    def test_dynamic_schema_exists(self) -> None:
-        """DynamicSchema can be imported."""
-        from elspeth.plugins.utils import DynamicSchema
-
-        assert DynamicSchema is not None
-
-    def test_dynamic_schema_accepts_any_fields(self) -> None:
-        """DynamicSchema accepts any fields without validation errors."""
-        from elspeth.plugins.utils import DynamicSchema
-
-        # Should not raise
-        instance = DynamicSchema(foo="bar", count=42, nested={"a": 1})
-
-        assert instance.foo == "bar"
-        assert instance.count == 42
-        assert instance.nested == {"a": 1}
-
-    def test_dynamic_schema_is_plugin_schema(self) -> None:
-        """DynamicSchema is a valid PluginSchema."""
-        from elspeth.contracts import PluginSchema
-        from elspeth.plugins.utils import DynamicSchema
-
-        assert issubclass(DynamicSchema, PluginSchema)
-
-    def test_dynamic_schema_empty_is_valid(self) -> None:
-        """DynamicSchema accepts empty initialization."""
-        from elspeth.plugins.utils import DynamicSchema
-
-        instance = DynamicSchema()
-        assert instance is not None
-```
-
-**Step 2: Run test to verify it fails**
-
-Run: `pytest tests/plugins/test_utils.py::TestDynamicSchema::test_dynamic_schema_exists -v`
-
-Expected: FAIL with `ImportError: cannot import name 'DynamicSchema'`
-
-**Step 3: Implement DynamicSchema**
-
-Add to `src/elspeth/plugins/utils.py`:
-
-```python
-from elspeth.contracts import PluginSchema
-
-
-class DynamicSchema(PluginSchema):
-    """A PluginSchema that accepts any fields.
-
-    Use this as input_schema for plugins that accept arbitrary row structures
-    (e.g., sinks that write whatever they receive).
-
-    This replaces the pattern of creating multiple identical classes:
-        class CSVInputSchema(PluginSchema):
-            model_config = {"extra": "allow"}
-
-        class JSONInputSchema(PluginSchema):
-            model_config = {"extra": "allow"}
-
-    Now just use:
-        input_schema = DynamicSchema
-
-    Attributes are accessible directly on instances:
-        schema = DynamicSchema(name="Alice", age=30)
-        assert schema.name == "Alice"
-    """
-
-    model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic pattern
-```
-
-**Step 4: Run tests to verify they pass**
-
-Run: `pytest tests/plugins/test_utils.py::TestDynamicSchema -v`
-
-Expected: All 4 tests pass
-
-**Step 5: Commit**
-
-```
-git add -A && git commit -m "feat(plugins): add DynamicSchema for arbitrary field acceptance
-
-Provides a reusable PluginSchema subclass that accepts any fields.
-Replaces the duplicated CSVInputSchema, JSONInputSchema, DatabaseInputSchema pattern.
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
-
----
-
-## Task 3: Update field_mapper.py to use get_nested_field
+## Task 2: Update field_mapper.py to use get_nested_field
 
 **Files:**
 - Modify: `src/elspeth/plugins/transforms/field_mapper.py`
@@ -302,41 +230,28 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 **Step 1: Read current implementation**
 
-The current `field_mapper.py` has `_get_nested()` as an instance method (lines 90-108).
+The current `field_mapper.py` has `_get_nested()` as an instance method (lines 115-133).
 
-**Step 2: Replace with import**
+**Step 2: Add import and remove method**
 
-Change:
-
+At top of file, add:
 ```python
-# REMOVE this method from the class:
-def _get_nested(self, data: dict[str, Any], path: str) -> Any:
-    """Get value from nested dict using dot notation.
-    ...
-    """
-    parts = path.split(".")
-    current: Any = data
-
-    for part in parts:
-        if not isinstance(current, dict) or part not in current:
-            return MISSING
-        current = current[part]
-
-    return current
-```
-
-To:
-
-```python
-# ADD import at top of file:
 from elspeth.plugins.utils import get_nested_field
-
-# UPDATE call sites from self._get_nested() to get_nested_field()
 ```
 
-**Step 3: Find and update call sites**
+**Delete the entire `_get_nested()` method** (lines 115-133). Do not comment it out or rename it - per the no legacy code policy, old code is deleted completely.
 
-In `field_mapper.py`, find all uses of `self._get_nested(` and replace with `get_nested_field(`.
+**Step 3: Update call sites**
+
+Find all uses of `self._get_nested(` and replace with `get_nested_field(`:
+
+```python
+# OLD:
+value = self._get_nested(row, source)
+
+# NEW:
+value = get_nested_field(row, source)
+```
 
 **Step 4: Run existing tests**
 
@@ -346,77 +261,24 @@ Expected: All tests pass (behavior unchanged)
 
 **Step 5: Commit**
 
-```
-git add -A && git commit -m "refactor(field_mapper): use shared get_nested_field utility
+```bash
+git add src/elspeth/plugins/transforms/field_mapper.py
+git commit -m "$(cat <<'EOF'
+refactor(field_mapper): use shared get_nested_field utility
 
 Removes duplicated _get_nested method in favor of shared utility.
 Behavior is identical - this is a pure consolidation.
 
-Co-Authored-By: Claude <noreply@anthropic.com>"
+Part of WP-12: Utility Consolidation
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
+EOF
+)"
 ```
 
 ---
 
-## Task 4: Update sinks to use DynamicSchema
-
-**Files:**
-- Modify: `src/elspeth/plugins/sinks/csv_sink.py`
-- Modify: `src/elspeth/plugins/sinks/json_sink.py`
-- Modify: `src/elspeth/plugins/sinks/database_sink.py`
-
-**Rationale:** Three identical schema classes violate DRY. Since we're consolidating utilities, we consolidate fully.
-
-**Step 1: Update CSVSink**
-
-In `csv_sink.py`, replace:
-
-```python
-class CSVInputSchema(PluginSchema):
-    """Dynamic schema - accepts any row structure."""
-
-    model_config = {"extra": "allow"}  # noqa: RUF012 - Pydantic pattern
-```
-
-With:
-
-```python
-from elspeth.plugins.utils import DynamicSchema
-
-# Remove CSVInputSchema class entirely
-# Update class attribute:
-class CSVSink(BaseSink):
-    ...
-    input_schema = DynamicSchema
-```
-
-**Step 2: Update JSONSink**
-
-Same pattern - remove `JSONInputSchema`, use `DynamicSchema`.
-
-**Step 3: Update DatabaseSink**
-
-Same pattern - remove `DatabaseInputSchema`, use `DynamicSchema`.
-
-**Step 4: Run sink tests**
-
-Run: `pytest tests/plugins/sinks/ -v`
-
-Expected: All 41 tests pass
-
-**Step 5: Commit**
-
-```
-git add -A && git commit -m "refactor(sinks): use shared DynamicSchema for input schemas
-
-Removes three identical schema classes in favor of the shared DynamicSchema.
-Reduces duplication and ensures consistent behavior.
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
-
----
-
-## Task 5: Run full verification
+## Task 3: Final Verification
 
 **Step 1: Run mypy**
 
@@ -434,37 +296,23 @@ pytest tests/plugins/ -v
 
 Expected: All tests pass
 
-**Step 3: Verify no duplicates remain**
+**Step 3: Verify no duplicates remain in field_mapper**
 
 ```bash
-# Should only find utils.py and the deleted gate files (if WP-02 not done yet)
-grep -r "_get_nested\|def get_nested" src/elspeth/plugins/ --include="*.py"
+grep -n "_get_nested" src/elspeth/plugins/transforms/field_mapper.py
 ```
 
-Expected: Only `utils.py` contains `get_nested_field`
+Expected: No results (method deleted)
 
-**Step 4: Final commit**
-
-```
-git add -A && git commit -m "chore: verify WP-12 utility consolidation complete
-
-- get_nested_field extracted to utils.py
-- DynamicSchema available for arbitrary-field schemas
-- field_mapper.py updated to use shared utility
-- All tests pass
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
-```
+**Note:** Gate files (`filter_gate.py`, `field_match_gate.py`, `threshold_gate.py`) still contain `_get_nested()` - they are deleted in WP-02, not updated here.
 
 ---
 
 ## Verification Checklist
 
-- [ ] `src/elspeth/plugins/utils.py` exists with `get_nested_field()` and `DynamicSchema`
+- [ ] `src/elspeth/plugins/utils.py` exists with `get_nested_field()`
 - [ ] `get_nested_field()` has 9 passing tests
-- [ ] `DynamicSchema` has 4 passing tests
 - [ ] `field_mapper.py` imports from utils, no local `_get_nested`
-- [ ] All sinks use `DynamicSchema` instead of local schema classes
 - [ ] `mypy --strict` passes on utils.py and field_mapper.py
 - [ ] All plugin tests pass
 
@@ -474,17 +322,15 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 | File | Change Type | Description |
 |------|-------------|-------------|
-| `src/elspeth/plugins/utils.py` | CREATE | New utility module |
+| `src/elspeth/plugins/utils.py` | CREATE | New utility module with `get_nested_field()` |
 | `tests/plugins/test_utils.py` | CREATE | Tests for utilities |
-| `src/elspeth/plugins/transforms/field_mapper.py` | MODIFY | Use get_nested_field import |
-| `src/elspeth/plugins/sinks/csv_sink.py` | MODIFY | Use DynamicSchema |
-| `src/elspeth/plugins/sinks/json_sink.py` | MODIFY | Use DynamicSchema |
-| `src/elspeth/plugins/sinks/database_sink.py` | MODIFY | Use DynamicSchema |
+| `src/elspeth/plugins/transforms/field_mapper.py` | MODIFY | Use shared utility, delete `_get_nested()` |
 
 ---
 
 ## Dependency Notes
 
-- **Depends on:** Nothing (but recommended after WP-02 so gate files are already deleted)
+- **Depends on:** WP-11.99 (establishes plugin module patterns)
 - **Unlocks:** Nothing (pure cleanup)
 - **Risk:** Low - pure refactoring with no behavior change
+- **Estimated Effort:** 30 minutes

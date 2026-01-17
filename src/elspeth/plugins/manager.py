@@ -109,10 +109,11 @@ class PluginSpec:
                 f"Add: plugin_version = '1.0.0' to the class."
             ) from None
 
-        # Optional: determinism (legitimate default - most are deterministic)
-        determinism = getattr(plugin_cls, "determinism", Determinism.DETERMINISTIC)
+        # All protocols define determinism with defaults in base classes.
+        determinism = plugin_cls.determinism  # type: ignore[attr-defined]
 
-        # Optional: schemas (None is valid - means any schema accepted)
+        # Schemas vary by plugin type: sources have only output_schema,
+        # sinks have only input_schema, transforms have both.
         input_schema = getattr(plugin_cls, "input_schema", None)
         output_schema = getattr(plugin_cls, "output_schema", None)
 

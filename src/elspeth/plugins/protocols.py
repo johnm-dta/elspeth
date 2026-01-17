@@ -102,6 +102,11 @@ class TransformProtocol(Protocol):
         - process(row, ctx): Called for each row
         - close(): Called at pipeline completion for cleanup
 
+    Error Routing (WP-11.99b):
+        Transforms that can return TransformResult.error() must set _on_error
+        to specify where errored rows go. If _on_error is None and the transform
+        returns an error, the executor raises RuntimeError.
+
     Example:
         class EnrichTransform:
             name = "enrich"
@@ -121,6 +126,11 @@ class TransformProtocol(Protocol):
     # Metadata for Phase 3 audit/reproducibility
     determinism: Determinism
     plugin_version: str
+
+    # Error routing configuration (WP-11.99b)
+    # Transforms extending TransformDataConfig set this from config.
+    # None means: transform doesn't return errors, OR errors are bugs.
+    _on_error: str | None
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""

@@ -208,8 +208,8 @@ class TransformExecutor:
                 error=result.reason,
             )
 
-            # Handle error routing
-            on_error = getattr(transform, "_on_error", None)
+            # Handle error routing - _on_error is part of TransformProtocol
+            on_error = transform._on_error
 
             if on_error is None:
                 raise RuntimeError(

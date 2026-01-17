@@ -179,37 +179,37 @@ allow_hits:
   # names is intentional, not a bug-hiding pattern.
   # ============================================================
 
-  - key: "plugins/manager.py:R1:PluginManager:get_source_by_name:line=293"
+  - key: "plugins/manager.py:R1:PluginManager:get_source_by_name:line=294"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_transform_by_name:line=297"
+  - key: "plugins/manager.py:R1:PluginManager:get_transform_by_name:line=298"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_gate_by_name:line=301"
+  - key: "plugins/manager.py:R1:PluginManager:get_gate_by_name:line=302"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_aggregation_by_name:line=305"
+  - key: "plugins/manager.py:R1:PluginManager:get_aggregation_by_name:line=306"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_coalesce_by_name:line=309"
+  - key: "plugins/manager.py:R1:PluginManager:get_coalesce_by_name:line=310"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_sink_by_name:line=313"
+  - key: "plugins/manager.py:R1:PluginManager:get_sink_by_name:line=314"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
@@ -219,27 +219,14 @@ allow_hits:
   # TRANSFORM/GATE CLEANUP (Permanent)
   # ============================================================
   # The orchestrator calls close() on transforms/gates in a finally block.
-  # Old plugins may not have close() method, so hasattr check is required.
   # Cleanup should be best-effort - one plugin failure shouldn't crash the
   # whole cleanup process.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R3:Orchestrator:_cleanup_transforms:line=168"
-    owner: "architecture"
-    reason: "Trust boundary: old plugins may not implement close() method"
-    safety: "Duck-typing at plugin boundary - graceful skip for legacy plugins"
-    expires: null  # Permanent - intentional design
-
-  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=170"
+  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=166"
     owner: "architecture"
     reason: "Best-effort cleanup: one plugin failure shouldn't prevent others from cleanup"
     safety: "Logged with warning, other plugins still get close() called"
-    expires: null  # Permanent - intentional design
-
-  - key: "engine/orchestrator.py:R2:Orchestrator:_cleanup_transforms:line=174"
-    owner: "architecture"
-    reason: "Trust boundary: plugin may not have name attribute"
-    safety: "Fallback to str() for log message - never raises"
     expires: null  # Permanent - intentional design
 
   # ============================================================
@@ -249,37 +236,18 @@ allow_hits:
   # messages. These lookups are for UI/diagnostic purposes only.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=203"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=199"
     owner: "architecture"
     reason: "Building lookup for gate names - only gates (not transforms) are in map"
     safety: "None means 'not a gate at this sequence' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=215"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=211"
     owner: "architecture"
     reason: "Fallback for error message - use node_id if gate name not found"
     safety: "Error message still produced with node_id as fallback"
     expires: null  # Permanent - intentional design
 
-  # ============================================================
-  # PLUGIN METADATA EXTRACTION (Permanent)
-  # ============================================================
-  # The orchestrator extracts optional plugin metadata (version, determinism)
-  # using getattr because plugins may not define these attributes. This is
-  # legitimate duck-typing at a plugin trust boundary.
-  # ============================================================
-
-  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=414"
-    owner: "architecture"
-    reason: "Trust boundary: plugins may not define plugin_version attribute"
-    safety: "Duck-typing at plugin boundary - fallback to '0.0.0' is documented behavior"
-    expires: null  # Permanent - intentional design
-
-  - key: "engine/orchestrator.py:R2:Orchestrator:_execute_run:line=419"
-    owner: "architecture"
-    reason: "Trust boundary: plugins may not define determinism attribute"
-    safety: "Duck-typing at plugin boundary - fallback to DETERMINISTIC is documented"
-    expires: null  # Permanent - intentional design
 
   # ============================================================
   # ENVIRONMENT VARIABLE LOOKUP (Permanent)
@@ -288,23 +256,10 @@ allow_hits:
   # variables. This is explicitly checked and raises if missing when required.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=654"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=640"
     owner: "architecture"
     reason: "Standard pattern: optional environment variable with explicit check"
     safety: "Raises ValueError with clear message if signing enabled but key missing"
-    expires: null  # Permanent - intentional design
-
-  # ============================================================
-  # TRANSFORM ERROR ROUTING (Permanent)
-  # ============================================================
-  # TransformExecutor checks for optional _on_error attribute to route
-  # TransformResult.error() rows. RuntimeError if error without on_error.
-  # ============================================================
-
-  - key: "engine/executors.py:R2:TransformExecutor:execute_transform:line=212"
-    owner: "architecture"
-    reason: "Trust boundary: transforms optionally define _on_error attribute"
-    safety: "Raises RuntimeError if transform errors without on_error config"
     expires: null  # Permanent - intentional design
 
   # ============================================================
@@ -373,57 +328,52 @@ allow_hits:
     safety: "Graceful fallback to None - non-Pydantic plugins don't have schema hashes"
     expires: null  # Permanent - intentional design
 
-  # PluginSpec.from_plugin - OPTIONAL attributes only (name/version now required)
-  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=113"
-    owner: "architecture"
-    reason: "Trust boundary: plugins may not define determinism attribute"
-    safety: "Duck-typing at plugin boundary - fallback to DETERMINISTIC is documented default"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=116"
-    owner: "architecture"
-    reason: "Trust boundary: plugins may not define input_schema attribute"
-    safety: "Duck-typing at plugin boundary - fallback to None (any schema accepted)"
-    expires: null  # Permanent - intentional design
-
+  # PluginSpec.from_plugin - schemas vary by plugin type (not all have both)
+  # Sources only have output_schema, sinks only have input_schema
   - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=117"
     owner: "architecture"
-    reason: "Trust boundary: plugins may not define output_schema attribute"
-    safety: "Duck-typing at plugin boundary - fallback to None (any schema accepted)"
+    reason: "Polymorphic: sources don't have input_schema, sinks don't have output_schema"
+    safety: "Legitimate Optional return - None means 'accepts any schema'"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=118"
+    owner: "architecture"
+    reason: "Polymorphic: sources don't have input_schema, sinks don't have output_schema"
+    safety: "Legitimate Optional return - None means 'accepts any schema'"
     expires: null  # Permanent - intentional design
 
   # PluginManager._refresh_caches - uses getattr for name fallback to __name__
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=197"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=198"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=207"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=208"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=217"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=218"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=227"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=228"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=237"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=238"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=247"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=248"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"

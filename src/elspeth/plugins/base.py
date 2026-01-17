@@ -46,6 +46,11 @@ class BaseTransform(ABC):
     determinism: Determinism = Determinism.DETERMINISTIC
     plugin_version: str = "0.0.0"
 
+    # Error routing configuration (WP-11.99b)
+    # Transforms extending TransformDataConfig override this from config.
+    # None means: transform doesn't return errors, OR errors are bugs.
+    _on_error: str | None = None
+
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration."""
         self.config = config
@@ -66,6 +71,13 @@ class BaseTransform(ABC):
             TransformResult with processed row or error
         """
         ...
+
+    def close(self) -> None:  # noqa: B027
+        """Clean up resources after pipeline completion.
+
+        Called once after all rows have been processed. Override for closing
+        connections, flushing buffers, or releasing external resources.
+        """
 
     # === Lifecycle Hooks (Phase 3) ===
     # These are intentionally empty - optional hooks for subclasses to override
@@ -138,6 +150,13 @@ class BaseGate(ABC):
             GateResult with routing decision
         """
         ...
+
+    def close(self) -> None:  # noqa: B027
+        """Clean up resources after pipeline completion.
+
+        Called once after all rows have been processed. Override for closing
+        connections, flushing buffers, or releasing external resources.
+        """
 
     # === Lifecycle Hooks (Phase 3) ===
 
@@ -221,6 +240,9 @@ class BaseAggregation(ABC):
 
         Override if you have state beyond what __init__ sets up.
         """
+
+    def close(self) -> None:  # noqa: B027
+        """Clean up resources after pipeline completion."""
 
     # === Lifecycle Hooks (Phase 3) ===
 

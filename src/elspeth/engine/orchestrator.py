@@ -15,7 +15,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from elspeth.contracts import Determinism, NodeType, RowOutcome, RunStatus
+from elspeth.contracts import NodeType, RowOutcome, RunStatus
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 from elspeth.engine.processor import RowProcessor
@@ -155,9 +155,6 @@ class Orchestrator:
 
         Called in finally block to ensure cleanup happens even on failure.
         Logs but doesn't raise if individual cleanup fails.
-
-        The hasattr check is acceptable here because old plugins might not
-        have close() yet (graceful degradation at plugin trust boundary).
         """
         import structlog
 
@@ -165,13 +162,12 @@ class Orchestrator:
 
         for transform in config.transforms:
             try:
-                if hasattr(transform, "close"):
-                    transform.close()
+                transform.close()
             except Exception as e:
                 # Log but don't raise - cleanup should be best-effort
                 logger.warning(
                     "Transform cleanup failed",
-                    transform=getattr(transform, "name", str(transform)),
+                    transform=transform.name,
                     error=str(e),
                 )
 
@@ -408,20 +404,10 @@ class Orchestrator:
             # A KeyError here indicates a bug in graph construction or node_to_plugin building.
             plugin = node_to_plugin[node_id]
 
-            # Extract plugin metadata with type validation at plugin trust boundary.
-            # plugin_version: Required for transforms/gates/aggregations/sinks per protocols.py,
-            # but NOT required for sources (SourceProtocol doesn't define it).
-            raw_version = getattr(plugin, "plugin_version", None)
-            plugin_version = raw_version if isinstance(raw_version, str) else "0.0.0"
-
-            # determinism: Most plugins are deterministic, so default is legitimate.
-            # Type check filters invalid values (e.g., MagicMock in tests).
-            raw_determinism = getattr(plugin, "determinism", None)
-            determinism: Determinism | str = (
-                raw_determinism
-                if isinstance(raw_determinism, Determinism | str)
-                else Determinism.DETERMINISTIC
-            )
+            # Extract plugin metadata - all protocols define these attributes,
+            # all base classes provide defaults. Direct access is safe.
+            plugin_version = plugin.plugin_version
+            determinism = plugin.determinism
 
             # Get schema_config from node_info config or default to dynamic
             # Schema is specified in pipeline config, not plugin attributes

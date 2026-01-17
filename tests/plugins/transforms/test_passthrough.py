@@ -96,3 +96,65 @@ class TestPassThrough:
 
         with pytest.raises(PluginConfigError, match="schema"):
             PassThrough({})
+
+    def test_validate_input_rejects_wrong_type(self, ctx: PluginContext) -> None:
+        """validate_input=True crashes on wrong types (upstream bug).
+
+        Per three-tier trust model: transforms use allow_coercion=False,
+        so string "42" is NOT coerced to int 42 - it raises ValidationError.
+        """
+        from pydantic import ValidationError
+
+        from elspeth.plugins.transforms.passthrough import PassThrough
+
+        transform = PassThrough(
+            {
+                "schema": {"mode": "strict", "fields": ["count: int"]},
+                "validate_input": True,
+            }
+        )
+
+        with pytest.raises(ValidationError):
+            transform.process({"count": "not_an_int"}, ctx)
+
+    def test_validate_input_disabled_passes_wrong_type(
+        self, ctx: PluginContext
+    ) -> None:
+        """validate_input=False (default) passes wrong types through.
+
+        When validation is disabled, the transform doesn't check types.
+        This is the default to avoid breaking existing pipelines.
+        """
+        from elspeth.plugins.transforms.passthrough import PassThrough
+
+        transform = PassThrough(
+            {
+                "schema": {"mode": "strict", "fields": ["count: int"]},
+                "validate_input": False,  # Explicit default
+            }
+        )
+
+        # String passes through without validation
+        result = transform.process({"count": "not_an_int"}, ctx)
+        assert result.status == "success"
+        assert result.row["count"] == "not_an_int"
+
+    def test_validate_input_skipped_for_dynamic_schema(
+        self, ctx: PluginContext
+    ) -> None:
+        """validate_input=True with dynamic schema skips validation.
+
+        Dynamic schemas accept anything, so validation is a no-op.
+        """
+        from elspeth.plugins.transforms.passthrough import PassThrough
+
+        transform = PassThrough(
+            {
+                "schema": {"fields": "dynamic"},
+                "validate_input": True,  # Would validate, but schema is dynamic
+            }
+        )
+
+        # Any data passes with dynamic schema
+        result = transform.process({"anything": "goes", "count": "string"}, ctx)
+        assert result.status == "success"

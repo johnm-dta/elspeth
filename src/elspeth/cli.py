@@ -6,7 +6,6 @@ Entry point for the elspeth CLI tool.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import typer
 from pydantic import ValidationError
@@ -223,7 +222,6 @@ def _execute_pipeline(
     """
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import Orchestrator, PipelineConfig
-    from elspeth.engine.adapters import SinkAdapter
     from elspeth.plugins.base import BaseGate, BaseSink, BaseSource, BaseTransform
     from elspeth.plugins.gates import FieldMatchGate, FilterGate, ThresholdGate
     from elspeth.plugins.sinks.csv_sink import CSVSink
@@ -256,40 +254,23 @@ def _execute_pipeline(
     else:
         raise ValueError(f"Unknown source plugin: {source_plugin}")
 
-    # Instantiate sinks and wrap in SinkAdapter for Phase 3B compatibility
-    sinks: dict[str, SinkAdapter] = {}
+    # Instantiate sinks directly - they implement batch write with ArtifactDescriptor
+    sinks: dict[str, BaseSink] = {}
     for sink_name, sink_settings in config.sinks.items():
         sink_plugin = sink_settings.plugin
         sink_options = dict(sink_settings.options)
 
-        raw_sink: BaseSink
-        artifact_descriptor: dict[str, Any]
+        sink: BaseSink
         if sink_plugin == "csv":
-            # CSVSink validates path in __init__, so direct access is safe
-            raw_sink = CSVSink(sink_options)
-            artifact_descriptor = {"kind": "file", "path": sink_options["path"]}
+            sink = CSVSink(sink_options)
         elif sink_plugin == "json":
-            # JSONSink validates path in __init__, so direct access is safe
-            raw_sink = JSONSink(sink_options)
-            artifact_descriptor = {"kind": "file", "path": sink_options["path"]}
+            sink = JSONSink(sink_options)
         elif sink_plugin == "database":
-            # DatabaseSink validates url/table in __init__, so direct access is safe
-            raw_sink = DatabaseSink(sink_options)
-            artifact_descriptor = {
-                "kind": "database",
-                "url": sink_options["url"],
-                "table": sink_options["table"],
-            }
+            sink = DatabaseSink(sink_options)
         else:
             raise ValueError(f"Unknown sink plugin: {sink_plugin}")
 
-        # Wrap Phase 2 sink in adapter for Phase 3B SinkLike interface
-        sinks[sink_name] = SinkAdapter(
-            raw_sink,
-            plugin_name=sink_plugin,
-            sink_name=sink_name,
-            artifact_descriptor=artifact_descriptor,
-        )
+        sinks[sink_name] = sink
 
     # Get database URL from settings
     db_url = config.landscape.url
@@ -316,7 +297,7 @@ def _execute_pipeline(
     # NOTE: Type ignores needed because:
     # - Source plugins implement SourceProtocol structurally but mypy doesn't recognize it
     # - list is invariant so list[BaseTransform | BaseGate] != list[TransformLike]
-    # - SinkAdapter implements SinkLike which differs from SinkProtocol
+    # - Sinks implement SinkProtocol structurally but mypy doesn't recognize it
     pipeline_config = PipelineConfig(
         source=source,  # type: ignore[arg-type]
         transforms=transforms,  # type: ignore[arg-type]

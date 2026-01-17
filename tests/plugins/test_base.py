@@ -147,7 +147,7 @@ class TestBaseSink:
     """Base class for sinks."""
 
     def test_base_sink_implementation(self) -> None:
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import ArtifactDescriptor, PluginSchema
         from elspeth.plugins.base import BaseSink
         from elspeth.plugins.context import PluginContext
 
@@ -163,8 +163,15 @@ class TestBaseSink:
                 super().__init__(config)
                 self.rows: list[dict[str, Any]] = []
 
-            def write(self, row: dict[str, Any], ctx: PluginContext) -> None:
-                self.rows.append(row)
+            def write(
+                self, rows: list[dict[str, Any]], ctx: PluginContext
+            ) -> ArtifactDescriptor:
+                self.rows.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="/tmp/memory",
+                    content_hash="test",
+                    size_bytes=len(str(rows)),
+                )
 
             def flush(self) -> None:
                 pass
@@ -175,11 +182,73 @@ class TestBaseSink:
         sink = MemorySink({})
         ctx = PluginContext(run_id="test", config={})
 
-        sink.write({"value": 1}, ctx)
-        sink.write({"value": 2}, ctx)
+        artifact = sink.write([{"value": 1}, {"value": 2}], ctx)
 
         assert len(sink.rows) == 2
         assert sink.rows[0] == {"value": 1}
+        assert isinstance(artifact, ArtifactDescriptor)
+
+    def test_base_sink_batch_write_signature(self) -> None:
+        """BaseSink.write() accepts batch and returns ArtifactDescriptor."""
+        import inspect
+
+        from elspeth.plugins.base import BaseSink
+
+        sig = inspect.signature(BaseSink.write)
+        params = list(sig.parameters.keys())
+
+        assert "rows" in params, "write() should accept 'rows' (batch)"
+        assert "row" not in params, "write() should NOT have 'row' parameter"
+
+    def test_base_sink_batch_implementation(self) -> None:
+        """Test BaseSink subclass with batch write."""
+        from elspeth.contracts import ArtifactDescriptor, PluginSchema
+        from elspeth.plugins.base import BaseSink
+        from elspeth.plugins.context import PluginContext
+
+        class InputSchema(PluginSchema):
+            value: int
+
+        class BatchMemorySink(BaseSink):
+            name = "batch_memory"
+            input_schema = InputSchema
+            idempotent = True
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                super().__init__(config)
+                self.rows: list[dict[str, Any]] = []
+
+            def write(
+                self, rows: list[dict[str, Any]], ctx: PluginContext
+            ) -> ArtifactDescriptor:
+                self.rows.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="/tmp/batch",
+                    content_hash="hash123",
+                    size_bytes=100,
+                )
+
+            def flush(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        sink = BatchMemorySink({})
+        ctx = PluginContext(run_id="test", config={})
+
+        artifact = sink.write([{"value": 1}, {"value": 2}, {"value": 3}], ctx)
+
+        assert len(sink.rows) == 3
+        assert isinstance(artifact, ArtifactDescriptor)
+        assert artifact.content_hash == "hash123"
+
+    def test_base_sink_has_io_write_determinism(self) -> None:
+        """BaseSink should have IO_WRITE determinism by default."""
+        from elspeth.contracts import Determinism
+        from elspeth.plugins.base import BaseSink
+
+        assert BaseSink.determinism == Determinism.IO_WRITE
 
 
 class TestBaseSource:

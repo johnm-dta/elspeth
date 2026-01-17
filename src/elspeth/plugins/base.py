@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from typing import Any
 
-from elspeth.contracts import Determinism, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import (
     AcceptResult,
@@ -245,8 +245,14 @@ class BaseSink(ABC):
             input_schema = RowSchema
             idempotent = False
 
-            def write(self, row, ctx) -> None:
-                self._writer.writerow(row)
+            def write(self, rows: list[dict], ctx: PluginContext) -> ArtifactDescriptor:
+                for row in rows:
+                    self._writer.writerow(row)
+                return ArtifactDescriptor.for_file(
+                    path=self._path,
+                    content_hash=self._compute_hash(),
+                    size_bytes=self._file.tell(),
+                )
 
             def flush(self) -> None:
                 self._file.flush()
@@ -261,7 +267,7 @@ class BaseSink(ABC):
     node_id: str | None = None  # Set by orchestrator after registration
 
     # Metadata for Phase 3 audit/reproducibility
-    determinism: Determinism = Determinism.DETERMINISTIC
+    determinism: Determinism = Determinism.IO_WRITE
     plugin_version: str = "0.0.0"
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -271,10 +277,18 @@ class BaseSink(ABC):
     @abstractmethod
     def write(
         self,
-        row: dict[str, Any],
+        rows: list[dict[str, Any]],
         ctx: PluginContext,
-    ) -> None:
-        """Write a row to the sink."""
+    ) -> ArtifactDescriptor:
+        """Write a batch of rows to the sink.
+
+        Args:
+            rows: List of row dicts to write
+            ctx: Plugin context
+
+        Returns:
+            ArtifactDescriptor with content_hash and size_bytes
+        """
         ...
 
     @abstractmethod

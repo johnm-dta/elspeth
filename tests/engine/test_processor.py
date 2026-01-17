@@ -248,6 +248,7 @@ class TestRowProcessor:
             name = "validator"
             input_schema = _TestSchema
             output_schema = _TestSchema
+            _on_error = "discard"  # Required for transforms that return errors
 
             def __init__(self, node_id: str) -> None:
                 super().__init__({})
@@ -262,7 +263,7 @@ class TestRowProcessor:
                     )
                 return TransformResult.success(row)
 
-        ctx = PluginContext(run_id=run.run_id, config={})
+        ctx = PluginContext(run_id=run.run_id, config={}, landscape=recorder)
         processor = RowProcessor(
             recorder=recorder,
             span_factory=SpanFactory(),

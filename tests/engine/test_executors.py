@@ -102,6 +102,7 @@ class TestTransformExecutor:
         class FailingTransform:
             name = "failing"
             node_id = node.node_id
+            _on_error = "discard"  # Required for transforms that return errors
 
             def process(
                 self, row: dict[str, Any], ctx: PluginContext
@@ -109,7 +110,7 @@ class TestTransformExecutor:
                 return TransformResult.error({"message": "validation failed"})
 
         transform = FailingTransform()
-        ctx = PluginContext(run_id=run.run_id, config={})
+        ctx = PluginContext(run_id=run.run_id, config={}, landscape=recorder)
         executor = TransformExecutor(recorder, SpanFactory())
 
         token = TokenInfo(

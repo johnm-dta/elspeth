@@ -118,12 +118,18 @@ class TransformExecutor:
         ctx: PluginContext,
         step_in_pipeline: int,
     ) -> tuple[TransformResult, TokenInfo]:
-        """Execute a transform with full audit recording.
+        """Execute a transform with full audit recording and error routing.
 
         This method handles a SINGLE ATTEMPT. Retry logic is the caller's
         responsibility (e.g., RetryManager wraps this for retryable transforms).
         Each attempt gets its own node_state record with attempt number tracked
         by the caller.
+
+        Error Routing:
+        - TransformResult.error() is a LEGITIMATE processing failure
+        - Routes to configured sink via transform._on_error
+        - RuntimeError if transform errors without on_error config
+        - Exceptions are BUGS and propagate (not routed)
 
         Args:
             transform: Transform plugin to execute
@@ -136,6 +142,7 @@ class TransformExecutor:
 
         Raises:
             Exception: Re-raised from transform.process() after recording failure
+            RuntimeError: Transform returned error but has no on_error configured
         """
         assert transform.node_id is not None, "node_id must be set by orchestrator"
         input_hash = stable_hash(token.row_data)
@@ -193,12 +200,41 @@ class TransformExecutor:
             )
         else:
             # Transform returned error status (not exception)
+            # This is a LEGITIMATE processing failure, not a bug
             self._recorder.complete_node_state(
                 state_id=state.state_id,
                 status="failed",
                 duration_ms=duration_ms,
                 error=result.reason,
             )
+
+            # Handle error routing
+            on_error = getattr(transform, "_on_error", None)
+
+            if on_error is None:
+                raise RuntimeError(
+                    f"Transform '{transform.name}' returned error but has no on_error "
+                    f"configured. Either configure on_error or fix the transform to not "
+                    f"return errors for this input. Error: {result.reason}"
+                )
+
+            # Record error event (always, even for discard - audit completeness)
+            ctx.record_transform_error(
+                token_id=token.token_id,
+                transform_id=transform.name,
+                row=token.row_data,
+                error_details=result.reason or {},
+                destination=on_error,
+            )
+
+            # Route to sink if not discarding
+            if on_error != "discard":
+                ctx.route_to_sink(
+                    sink_name=on_error,
+                    row=token.row_data,
+                    metadata={"transform_error": result.reason},
+                )
+
             updated_token = token
 
         return result, updated_token

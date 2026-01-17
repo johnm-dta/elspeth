@@ -295,25 +295,38 @@ allow_hits:
     expires: null  # Permanent - intentional design
 
   # ============================================================
+  # TRANSFORM ERROR ROUTING (Permanent)
+  # ============================================================
+  # TransformExecutor checks for optional _on_error attribute to route
+  # TransformResult.error() rows. RuntimeError if error without on_error.
+  # ============================================================
+
+  - key: "engine/executors.py:R2:TransformExecutor:execute_transform:line=212"
+    owner: "architecture"
+    reason: "Trust boundary: transforms optionally define _on_error attribute"
+    safety: "Raises RuntimeError if transform errors without on_error config"
+    expires: null  # Permanent - intentional design
+
+  # ============================================================
   # GATE ROUTING LOOKUPS (Permanent)
   # ============================================================
   # Gate executors look up routing destinations and edge IDs. Missing
   # entries raise MissingEdgeError with clear diagnostics.
   # ============================================================
 
-  - key: "engine/executors.py:R1:GateExecutor:execute_gate:line=327"
+  - key: "engine/executors.py:R1:GateExecutor:execute_gate:line=363"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=403"
+  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=439"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=417"
+  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=453"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
@@ -327,19 +340,19 @@ allow_hits:
   # are valid (no batch yet) or raise ValueError with clear diagnostics.
   # ============================================================
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_batch_id:line=474"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_batch_id:line=510"
     owner: "architecture"
     reason: "Intentional Optional API: returns None if no batch exists for node_id"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:accept:line=504"
+  - key: "engine/executors.py:R1:AggregationExecutor:accept:line=540"
     owner: "architecture"
     reason: "Checking if batch exists to decide whether to create one"
     safety: "None means 'create new batch' - explicit conditional logic follows"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:flush:line=606"
+  - key: "engine/executors.py:R1:AggregationExecutor:flush:line=642"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises ValueError if no batch to flush"
     safety: "Raises immediately with node_id for debugging"

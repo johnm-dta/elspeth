@@ -4,7 +4,7 @@
 Coordinates:
 - Token creation
 - Transform execution
-- Gate evaluation
+- Gate evaluation (plugin and config-driven)
 - Aggregation handling
 - Final outcome recording
 """
@@ -13,6 +13,7 @@ from typing import Any
 
 from elspeth.contracts import RowOutcome, RowResult
 from elspeth.contracts.enums import RoutingKind
+from elspeth.core.config import GateSettings
 from elspeth.core.landscape import LandscapeRecorder
 from elspeth.engine.executors import (
     AggregationExecutor,
@@ -30,13 +31,22 @@ class RowProcessor:
 
     Handles:
     1. Creating initial tokens from source rows
-    2. Executing transforms in sequence
-    3. Evaluating gates for routing decisions
+    2. Executing transforms in sequence (including plugin gates)
+    3. Executing config-driven gates (after transforms)
     4. Accepting rows into aggregations
     5. Recording final outcomes
 
+    Pipeline order:
+    - Plugin transforms/gates (from config.transforms)
+    - Config-driven gates (from config.gates)
+    - Output sink
+
     Example:
-        processor = RowProcessor(recorder, span_factory, run_id, source_node_id)
+        processor = RowProcessor(
+            recorder, span_factory, run_id, source_node_id,
+            config_gates=[GateSettings(...)],
+            config_gate_id_map={"gate_name": "node_id"},
+        )
 
         result = processor.process_row(
             row_index=0,
@@ -55,6 +65,8 @@ class RowProcessor:
         *,
         edge_map: dict[tuple[str, str], str] | None = None,
         route_resolution_map: dict[tuple[str, str], str] | None = None,
+        config_gates: list[GateSettings] | None = None,
+        config_gate_id_map: dict[str, str] | None = None,
     ) -> None:
         """Initialize processor.
 
@@ -65,11 +77,15 @@ class RowProcessor:
             source_node_id: Source node ID
             edge_map: Map of (node_id, label) -> edge_id
             route_resolution_map: Map of (node_id, label) -> "continue" | sink_name
+            config_gates: List of config-driven gate settings
+            config_gate_id_map: Map of gate name -> node_id for config gates
         """
         self._recorder = recorder
         self._spans = span_factory
         self._run_id = run_id
         self._source_node_id = source_node_id
+        self._config_gates = config_gates or []
+        self._config_gate_id_map = config_gate_id_map or {}
 
         self._token_manager = TokenManager(recorder)
         self._transform_executor = TransformExecutor(recorder, span_factory)
@@ -186,6 +202,41 @@ class RowProcessor:
                     raise TypeError(
                         f"Unknown transform type: {type(transform).__name__}. "
                         f"Expected BaseTransform, BaseGate, or BaseAggregation."
+                    )
+
+            # Process config-driven gates (after all plugin transforms)
+            # Step continues from where transforms left off
+            config_gate_start_step = len(transforms) + 1
+            for gate_idx, gate_config in enumerate(self._config_gates):
+                step = config_gate_start_step + gate_idx
+
+                # Get the node_id for this config gate
+                node_id = self._config_gate_id_map[gate_config.name]
+
+                outcome = self._gate_executor.execute_config_gate(
+                    gate_config=gate_config,
+                    node_id=node_id,
+                    token=current_token,
+                    ctx=ctx,
+                    step_in_pipeline=step,
+                    token_manager=self._token_manager,
+                )
+                current_token = outcome.updated_token
+
+                # Check if gate routed to a sink
+                if outcome.sink_name is not None:
+                    return RowResult(
+                        token=current_token,
+                        final_data=current_token.row_data,
+                        outcome=RowOutcome.ROUTED,
+                        sink_name=outcome.sink_name,
+                    )
+                elif outcome.result.action.kind == RoutingKind.FORK_TO_PATHS:
+                    # For full DAG support, we'd push child_tokens to a work queue
+                    return RowResult(
+                        token=current_token,
+                        final_data=current_token.row_data,
+                        outcome=RowOutcome.FORKED,
                     )
 
             return RowResult(

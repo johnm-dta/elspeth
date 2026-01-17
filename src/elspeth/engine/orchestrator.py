@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts import NodeType, RowOutcome, RunStatus
+from elspeth.core.config import GateSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 from elspeth.engine.processor import RowProcessor
@@ -40,12 +41,20 @@ class PipelineConfig:
 
     All plugin fields are now properly typed for IDE support and
     static type checking.
+
+    Attributes:
+        source: Source plugin instance
+        transforms: List of transform/gate plugin instances (processed first)
+        sinks: Dict of sink_name -> sink plugin instance
+        config: Additional run configuration
+        gates: Config-driven gates (processed AFTER transforms, BEFORE sinks)
     """
 
     source: SourceProtocol
     transforms: list[RowPlugin]
     sinks: dict[str, SinkProtocol]  # Sinks implement batch write directly
     config: dict[str, Any] = field(default_factory=dict)
+    gates: list[GateSettings] = field(default_factory=list)
 
 
 @dataclass
@@ -177,6 +186,8 @@ class Orchestrator:
         available_sinks: set[str],
         transform_id_map: dict[int, str],
         transforms: list[RowPlugin],
+        config_gate_id_map: dict[str, str] | None = None,
+        config_gates: list[GateSettings] | None = None,
     ) -> None:
         """Validate all route destinations reference existing sinks.
 
@@ -188,6 +199,8 @@ class Orchestrator:
             available_sinks: Set of sink names from PipelineConfig
             transform_id_map: Maps transform sequence -> node_id
             transforms: List of transform plugins
+            config_gate_id_map: Maps config gate name -> node_id
+            config_gates: List of config gate settings
 
         Raises:
             RouteValidationError: If any route references a non-existent sink
@@ -200,10 +213,21 @@ class Orchestrator:
                 if node_id is not None:
                     node_id_to_gate_name[node_id] = transform.name
 
+        # Add config gates to the lookup
+        if config_gate_id_map and config_gates:
+            for gate_config in config_gates:
+                node_id = config_gate_id_map.get(gate_config.name)
+                if node_id is not None:
+                    node_id_to_gate_name[node_id] = gate_config.name
+
         # Check each route destination
         for (gate_node_id, route_label), destination in route_resolution_map.items():
             # "continue" means proceed to next transform, not a sink
             if destination == "continue":
+                continue
+
+            # "fork" means fork to multiple paths, not a sink
+            if destination == "fork":
                 continue
 
             # destination should be a sink name
@@ -384,7 +408,9 @@ class Orchestrator:
         source_id = graph.get_source()
         transform_id_map = graph.get_transform_id_map()
         sink_id_map = graph.get_sink_id_map()
+        config_gate_id_map = graph.get_config_gate_id_map()
 
+        # Map plugin instances (not config gates - they don't have instances)
         node_to_plugin: dict[str, Any] = {}
         if source_id is not None:
             node_to_plugin[source_id] = config.source
@@ -395,28 +421,35 @@ class Orchestrator:
             if sink_name in sink_id_map:
                 node_to_plugin[sink_id_map[sink_name]] = sink
 
+        # Config gates are identified by their node IDs (no plugin instances)
+        config_gate_node_ids = set(config_gate_id_map.values())
+
         # Register nodes with Landscape using graph's node IDs and actual plugin metadata
+        from elspeth.contracts import Determinism
+        from elspeth.contracts.schema import SchemaConfig
+
         for node_id in execution_order:
             node_info = graph.get_node_info(node_id)
 
-            # Direct access - if node_id is in execution_order (from graph.topological_order()),
-            # it MUST be in node_to_plugin (built from the same graph's source, transforms, sinks).
-            # A KeyError here indicates a bug in graph construction or node_to_plugin building.
-            plugin = node_to_plugin[node_id]
+            # Config gates have metadata in graph node, not plugin instances
+            if node_id in config_gate_node_ids:
+                # Config gates are deterministic (expression evaluation is deterministic)
+                plugin_version = "1.0.0"
+                determinism = Determinism.DETERMINISTIC
+            else:
+                # Direct access - if node_id is in execution_order (from graph.topological_order()),
+                # it MUST be in node_to_plugin (built from the same graph's source, transforms, sinks).
+                # A KeyError here indicates a bug in graph construction or node_to_plugin building.
+                plugin = node_to_plugin[node_id]
 
-            # Extract plugin metadata - all protocols define these attributes,
-            # all base classes provide defaults. Direct access is safe.
-            plugin_version = plugin.plugin_version
-            determinism = plugin.determinism
+                # Extract plugin metadata - all protocols define these attributes,
+                # all base classes provide defaults. Direct access is safe.
+                plugin_version = plugin.plugin_version
+                determinism = plugin.determinism
 
             # Get schema_config from node_info config or default to dynamic
             # Schema is specified in pipeline config, not plugin attributes
-            from elspeth.contracts.schema import SchemaConfig
-
-            if "schema" in node_info.config:  # noqa: SIM401
-                schema_dict = node_info.config["schema"]
-            else:
-                schema_dict = {"fields": "dynamic"}
+            schema_dict = node_info.config.get("schema", {"fields": "dynamic"})
             schema_config = SchemaConfig.from_dict(schema_dict)
 
             recorder.register_node(
@@ -450,11 +483,14 @@ class Orchestrator:
 
         # Validate all route destinations BEFORE processing any rows
         # This catches config errors early instead of after partial processing
+        # Note: config gates also add to route_resolution_map, validated the same way
         self._validate_route_destinations(
             route_resolution_map=route_resolution_map,
             available_sinks=set(config.sinks.keys()),
             transform_id_map=transform_id_map,
             transforms=config.transforms,
+            config_gate_id_map=config_gate_id_map,
+            config_gates=config.gates,
         )
 
         # Get explicit node ID mappings from graph
@@ -463,6 +499,7 @@ class Orchestrator:
             raise ValueError("Graph has no source node")
         sink_id_map = graph.get_sink_id_map()
         transform_id_map = graph.get_transform_id_map()
+        config_gate_id_map = graph.get_config_gate_id_map()
         output_sink_name = graph.get_output_sink()
 
         # Assign node_ids to all plugins
@@ -490,7 +527,7 @@ class Orchestrator:
         for sink in config.sinks.values():
             sink.on_start(ctx)
 
-        # Create processor
+        # Create processor with config gates info
         processor = RowProcessor(
             recorder=recorder,
             span_factory=self._span_factory,
@@ -498,6 +535,8 @@ class Orchestrator:
             source_node_id=source_id,
             edge_map=edge_map,
             route_resolution_map=route_resolution_map,
+            config_gates=config.gates,
+            config_gate_id_map=config_gate_id_map,
         )
 
         # Process rows - Buffer TOKENS, not dicts, to preserve identity
@@ -524,16 +563,20 @@ class Orchestrator:
 
                     # Determine the last node that processed this row
                     # (used for checkpoint to know where to resume from)
-                    # node_id is guaranteed set - we assigned it above (lines 422)
-                    # source_id is guaranteed set - validated at lines 404-406
-                    last_node_id = (
-                        config.transforms[-1].node_id
-                        if config.transforms
-                        else source_id
-                    )
-                    assert (
-                        last_node_id is not None
-                    )  # Set by orchestrator before processing
+                    # For config gates, the last node is the last config gate if any
+                    last_node_id: str
+                    if config.gates:
+                        # Get the last config gate's node ID
+                        last_gate_name = config.gates[-1].name
+                        last_node_id = config_gate_id_map[last_gate_name]
+                    elif config.transforms:
+                        # node_id is guaranteed set - we assigned it above
+                        transform_node_id = config.transforms[-1].node_id
+                        assert transform_node_id is not None
+                        last_node_id = transform_node_id
+                    else:
+                        # source_id is guaranteed set - validated above
+                        last_node_id = source_id
 
                     if result.outcome == RowOutcome.COMPLETED:
                         rows_succeeded += 1
@@ -567,7 +610,8 @@ class Orchestrator:
 
             # Write to sinks using SinkExecutor
             sink_executor = SinkExecutor(recorder, self._span_factory, run_id)
-            step = len(config.transforms) + 1
+            # Step = transforms + config gates + 1 (for sink)
+            step = len(config.transforms) + len(config.gates) + 1
 
             for sink_name, tokens in pending_tokens.items():
                 if tokens and sink_name in config.sinks:

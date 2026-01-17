@@ -47,6 +47,7 @@ class ExecutionGraph:
         self._graph: DiGraph[str] = nx.DiGraph()
         self._sink_id_map: dict[str, str] = {}
         self._transform_id_map: dict[int, str] = {}
+        self._config_gate_id_map: dict[str, str] = {}  # gate_name -> node_id
         self._output_sink: str = ""
         self._route_label_map: dict[
             tuple[str, str], str
@@ -316,10 +317,64 @@ class ExecutionGraph:
         # Store explicit mapping for get_transform_id_map()
         graph._transform_id_map = transform_ids
 
+        # Build config-driven gates (processed AFTER transforms, BEFORE output sink)
+        config_gate_ids: dict[str, str] = {}
+        for gate_config in config.gates:
+            gid = node_id("config_gate", gate_config.name)
+            config_gate_ids[gate_config.name] = gid
+
+            # Store condition in node config for audit trail
+            gate_node_config = {
+                "condition": gate_config.condition,
+                "routes": dict(gate_config.routes),
+            }
+            if gate_config.fork_to:
+                gate_node_config["fork_to"] = list(gate_config.fork_to)
+
+            graph.add_node(
+                gid,
+                node_type="gate",
+                plugin_name=f"config_gate:{gate_config.name}",
+                config=gate_node_config,
+            )
+
+            # Edge from previous node (last transform or source)
+            graph.add_edge(prev_node_id, gid, label="continue", mode=RoutingMode.MOVE)
+
+            # Config gate routes to sinks
+            for route_label, target in gate_config.routes.items():
+                # Store route resolution: (gate_node, route_label) -> target
+                graph._route_resolution_map[(gid, route_label)] = target
+
+                if target == "continue":
+                    continue  # Not a sink route - no edge to create
+                if target == "fork":
+                    # Fork routes don't create edges to sinks - they create child tokens
+                    # The fork_to paths are handled by the executor
+                    # No edges to create for fork destinations
+                    continue
+                if target not in sink_ids:
+                    raise GraphValidationError(
+                        f"Config gate '{gate_config.name}' routes '{route_label}' "
+                        f"to unknown sink '{target}'. "
+                        f"Available sinks: {list(sink_ids.keys())}"
+                    )
+                # Edge label = route_label
+                graph.add_edge(
+                    gid, sink_ids[target], label=route_label, mode=RoutingMode.MOVE
+                )
+                # Store reverse mapping: (gate_node, sink_name) -> route_label
+                graph._route_label_map[(gid, target)] = route_label
+
+            prev_node_id = gid
+
+        # Store explicit mapping for get_config_gate_id_map()
+        graph._config_gate_id_map = config_gate_ids
+
         # Store output_sink for reference
         graph._output_sink = config.output_sink
 
-        # Edge from last transform (or source) to output sink
+        # Edge from last node (transform or config gate or source) to output sink
         # Only add if no edge already exists to this sink (gate routes may have created one)
         output_sink_node = sink_ids[config.output_sink]
         if not graph._graph.has_edge(prev_node_id, output_sink_node):
@@ -348,6 +403,14 @@ class ExecutionGraph:
             Dict mapping transform sequence position (0-indexed) to node ID.
         """
         return dict(self._transform_id_map)
+
+    def get_config_gate_id_map(self) -> dict[str, str]:
+        """Get explicit gate_name -> node_id mapping for config-driven gates.
+
+        Returns:
+            Dict mapping gate name to its graph node ID.
+        """
+        return dict(self._config_gate_id_map)
 
     def get_output_sink(self) -> str:
         """Get the output sink name."""

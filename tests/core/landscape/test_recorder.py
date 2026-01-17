@@ -4,6 +4,10 @@
 from pathlib import Path
 
 from elspeth.contracts import RoutingMode
+from elspeth.contracts.schema import SchemaConfig
+
+# Dynamic schema for tests that don't care about specific fields
+DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
 
 
 class TestLandscapeRecorderRuns:
@@ -233,6 +237,7 @@ class TestLandscapeRecorderNodes:
             plugin_version="1.0.0",
             config={"path": "data.csv"},
             sequence=0,
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         assert node.node_id is not None
@@ -256,6 +261,7 @@ class TestLandscapeRecorderNodes:
             node_type=NodeType.TRANSFORM,  # Enum
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         node_from_str = recorder.register_node(
             run_id=run.run_id,
@@ -263,6 +269,7 @@ class TestLandscapeRecorderNodes:
             node_type="transform",  # String
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Both should store the same string value
@@ -287,6 +294,7 @@ class TestLandscapeRecorderNodes:
                 node_type="transfom",  # Typo! Should fail fast
                 plugin_version="1.0.0",
                 config={},
+                schema_config=DYNAMIC_SCHEMA,
             )
 
     def test_register_edge(self) -> None:
@@ -303,6 +311,7 @@ class TestLandscapeRecorderNodes:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         transform = recorder.register_node(
             run_id=run.run_id,
@@ -310,6 +319,7 @@ class TestLandscapeRecorderNodes:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         edge = recorder.register_edge(
@@ -337,6 +347,7 @@ class TestLandscapeRecorderNodes:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -344,6 +355,7 @@ class TestLandscapeRecorderNodes:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         nodes = recorder.get_nodes(run.run_id)
@@ -366,6 +378,7 @@ class TestLandscapeRecorderTokens:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         row = recorder.create_row(
@@ -392,6 +405,7 @@ class TestLandscapeRecorderTokens:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -419,6 +433,7 @@ class TestLandscapeRecorderTokens:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -454,6 +469,7 @@ class TestLandscapeRecorderTokens:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -491,6 +507,7 @@ class TestLandscapeRecorderTokens:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -532,6 +549,7 @@ class TestLandscapeRecorderTokens:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -580,6 +598,7 @@ class TestLandscapeRecorderNodeStates:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -614,6 +633,7 @@ class TestLandscapeRecorderNodeStates:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -655,6 +675,7 @@ class TestLandscapeRecorderNodeStates:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -694,6 +715,7 @@ class TestLandscapeRecorderNodeStates:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -744,6 +766,7 @@ class TestLandscapeRecorderRouting:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         gate = recorder.register_node(
             run_id=run.run_id,
@@ -751,6 +774,7 @@ class TestLandscapeRecorderRouting:
             node_type="gate",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         sink = recorder.register_node(
             run_id=run.run_id,
@@ -758,6 +782,7 @@ class TestLandscapeRecorderRouting:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         edge = recorder.register_edge(
             run_id=run.run_id,
@@ -809,6 +834,7 @@ class TestLandscapeRecorderRouting:
             node_type="gate",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         sink_a = recorder.register_node(
             run_id=run.run_id,
@@ -816,6 +842,7 @@ class TestLandscapeRecorderRouting:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         sink_b = recorder.register_node(
             run_id=run.run_id,
@@ -823,6 +850,7 @@ class TestLandscapeRecorderRouting:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         edge_a = recorder.register_edge(
             run_id=run.run_id,
@@ -887,6 +915,7 @@ class TestLandscapeRecorderBatches:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         batch = recorder.create_batch(
@@ -912,6 +941,7 @@ class TestLandscapeRecorderBatches:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         batch = recorder.create_batch(
@@ -955,6 +985,7 @@ class TestLandscapeRecorderBatches:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         batch = recorder.create_batch(
@@ -987,6 +1018,7 @@ class TestLandscapeRecorderBatches:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Create batch in draft
@@ -1046,6 +1078,7 @@ class TestLandscapeRecorderBatches:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         batch1 = recorder.create_batch(
@@ -1081,6 +1114,7 @@ class TestLandscapeRecorderArtifacts:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -1122,6 +1156,7 @@ class TestLandscapeRecorderArtifacts:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -1172,6 +1207,7 @@ class TestLandscapeRecorderArtifacts:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         for i in range(3):
@@ -1200,6 +1236,7 @@ class TestLandscapeRecorderArtifacts:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -1233,6 +1270,7 @@ class TestLandscapeRecorderArtifacts:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         node2 = recorder.register_node(
             run_id=run.run_id,
@@ -1240,6 +1278,7 @@ class TestLandscapeRecorderArtifacts:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -1290,6 +1329,7 @@ class TestLandscapeRecorderEdges:
             node_type="source",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -1298,6 +1338,7 @@ class TestLandscapeRecorderEdges:
             node_type="sink",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Register edge
@@ -1350,6 +1391,7 @@ class TestLandscapeRecorderEdges:
             node_type="source",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -1358,6 +1400,7 @@ class TestLandscapeRecorderEdges:
             node_type="gate",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -1366,6 +1409,7 @@ class TestLandscapeRecorderEdges:
             node_type="sink",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -1374,6 +1418,7 @@ class TestLandscapeRecorderEdges:
             node_type="sink",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Register edges
@@ -1421,6 +1466,7 @@ class TestLandscapeRecorderQueryMethods:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -1458,6 +1504,7 @@ class TestLandscapeRecorderQueryMethods:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -1495,6 +1542,7 @@ class TestLandscapeRecorderQueryMethods:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -1536,6 +1584,7 @@ class TestLandscapeRecorderQueryMethods:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         sink = recorder.register_node(
             run_id=run.run_id,
@@ -1543,6 +1592,7 @@ class TestLandscapeRecorderQueryMethods:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         edge = recorder.register_edge(
             run_id=run.run_id,
@@ -1592,6 +1642,7 @@ class TestLandscapeRecorderQueryMethods:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -1629,6 +1680,7 @@ class TestExplainGracefulDegradation:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Store row data in payload store
@@ -1677,6 +1729,7 @@ class TestExplainGracefulDegradation:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Store row data in payload store
@@ -1723,6 +1776,7 @@ class TestExplainGracefulDegradation:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Store row data in payload store
@@ -1780,6 +1834,7 @@ class TestExplainGracefulDegradation:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         row = recorder.create_row(
@@ -1816,6 +1871,7 @@ class TestExplainGracefulDegradation:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Create row without payload_ref
@@ -1854,6 +1910,7 @@ class TestExplainGracefulDegradation:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Store corrupted (non-JSON) data directly to payload store
@@ -1902,6 +1959,7 @@ class TestExplainGracefulDegradation:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Create row in run1
@@ -1955,6 +2013,7 @@ class TestReproducibilityGradeComputation:
             plugin_version="1.0",
             config={},
             determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -1963,6 +2022,7 @@ class TestReproducibilityGradeComputation:
             plugin_version="1.0",
             config={},
             determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -1971,6 +2031,7 @@ class TestReproducibilityGradeComputation:
             plugin_version="1.0",
             config={},
             determinism=Determinism.SEEDED,  # seeded counts as reproducible
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -1979,6 +2040,7 @@ class TestReproducibilityGradeComputation:
             plugin_version="1.0",
             config={},
             determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         grade = recorder.compute_reproducibility_grade(run.run_id)
@@ -2004,6 +2066,7 @@ class TestReproducibilityGradeComputation:
             plugin_version="1.0",
             config={},
             determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -2012,6 +2075,7 @@ class TestReproducibilityGradeComputation:
             plugin_version="1.0",
             config={},
             determinism=Determinism.EXTERNAL_CALL,  # LLM call
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -2020,6 +2084,7 @@ class TestReproducibilityGradeComputation:
             plugin_version="1.0",
             config={},
             determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         grade = recorder.compute_reproducibility_grade(run.run_id)
@@ -2045,6 +2110,7 @@ class TestReproducibilityGradeComputation:
             plugin_version="1.0",
             config={},
             determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -2053,6 +2119,7 @@ class TestReproducibilityGradeComputation:
             plugin_version="1.0",
             config={},
             determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         completed_run = recorder.finalize_run(run.run_id, status="completed")
@@ -2086,6 +2153,7 @@ class TestReproducibilityGradeComputation:
             plugin_version="1.0",
             config={},
             determinism=Determinism.EXTERNAL_CALL,
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Finalize with REPLAY_REPRODUCIBLE grade
@@ -2128,6 +2196,7 @@ class TestReproducibilityGradeComputation:
             plugin_version="1.0",
             config={},
             determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Finalize with FULL_REPRODUCIBLE grade
@@ -2196,6 +2265,7 @@ class TestReproducibilityGradeComputation:
             plugin_version="1.0",
             config={},
             determinism=Determinism.EXTERNAL_CALL,
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Finalize and degrade to ATTRIBUTABLE_ONLY
@@ -2237,6 +2307,7 @@ class TestReproducibilityGradeComputation:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
             # determinism not specified - should default to DETERMINISTIC
         )
         recorder.register_node(
@@ -2245,6 +2316,7 @@ class TestReproducibilityGradeComputation:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
             # determinism not specified - should default to DETERMINISTIC
         )
 

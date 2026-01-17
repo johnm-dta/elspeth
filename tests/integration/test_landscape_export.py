@@ -15,6 +15,10 @@ import yaml
 from typer.testing import CliRunner
 
 from elspeth.contracts import RoutingMode
+from elspeth.contracts.schema import SchemaConfig
+
+# Dynamic schema for tests that don't care about specific fields
+DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
 
 runner = CliRunner()
 
@@ -249,6 +253,7 @@ class TestSignedExportDeterminism:
                 node_type="transform",
                 plugin_version="1.0.0",
                 config={"index": i},
+                schema_config=DYNAMIC_SCHEMA,
             )
 
         # Multiple edges

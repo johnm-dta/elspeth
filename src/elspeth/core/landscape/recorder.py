@@ -431,7 +431,7 @@ class LandscapeRecorder:
         sequence: int | None = None,
         schema_hash: str | None = None,
         determinism: Determinism | str = Determinism.DETERMINISTIC,
-        schema_config: "SchemaConfig | None" = None,
+        schema_config: "SchemaConfig",
     ) -> Node:
         """Register a plugin instance (node) in the execution graph.
 
@@ -464,23 +464,20 @@ class LandscapeRecorder:
         now = _now()
 
         # Extract schema info for audit (WP-11.99)
-        schema_mode: str | None = None
         schema_fields_json: str | None = None
         schema_fields_list: list[dict[str, object]] | None = None
 
-        if schema_config is not None:
-            if schema_config.is_dynamic:
-                schema_mode = "dynamic"
-                schema_fields_json = None
-                schema_fields_list = None
-            else:
-                schema_mode = schema_config.mode
-                if schema_config.fields:
-                    # FieldDefinition.to_dict() returns dict[str, str | bool]
-                    # Cast each dict to wider type for storage
-                    field_dicts = [f.to_dict() for f in schema_config.fields]
-                    schema_fields_list = [dict(d) for d in field_dicts]
-                    schema_fields_json = canonical_json(field_dicts)
+        if schema_config.is_dynamic:
+            schema_mode = "dynamic"
+        else:
+            # mode is non-None when is_dynamic is False
+            schema_mode = schema_config.mode or "free"  # Fallback shouldn't happen
+            if schema_config.fields:
+                # FieldDefinition.to_dict() returns dict[str, str | bool]
+                # Cast each dict to wider type for storage
+                field_dicts = [f.to_dict() for f in schema_config.fields]
+                schema_fields_list = [dict(d) for d in field_dicts]
+                schema_fields_json = canonical_json(field_dicts)
 
         node = Node(
             node_id=node_id,

@@ -1,6 +1,11 @@
 # tests/engine/test_tokens.py
 """Tests for TokenManager."""
 
+from elspeth.contracts.schema import SchemaConfig
+
+# Dynamic schema for tests that don't care about specific fields
+DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
 
 class TestTokenManager:
     """High-level token management."""
@@ -18,6 +23,7 @@ class TestTokenManager:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         manager = TokenManager(recorder)
@@ -46,6 +52,7 @@ class TestTokenManager:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         manager = TokenManager(recorder)
@@ -82,6 +89,7 @@ class TestTokenManager:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         manager = TokenManager(recorder)
@@ -117,6 +125,7 @@ class TestTokenManagerCoalesce:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         manager = TokenManager(recorder)
@@ -174,6 +183,7 @@ class TestTokenManagerEdgeCases:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         manager = TokenManager(recorder)
@@ -208,6 +218,7 @@ class TestTokenManagerEdgeCases:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         manager = TokenManager(recorder)
@@ -245,6 +256,7 @@ class TestTokenManagerEdgeCases:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         manager = TokenManager(recorder)
@@ -283,6 +295,7 @@ class TestTokenManagerStepInPipeline:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         manager = TokenManager(recorder)
@@ -322,6 +335,7 @@ class TestTokenManagerStepInPipeline:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         manager = TokenManager(recorder)

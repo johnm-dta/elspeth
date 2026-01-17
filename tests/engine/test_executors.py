@@ -6,6 +6,10 @@ from typing import Any
 import pytest
 
 from elspeth.contracts import RoutingMode
+from elspeth.contracts.schema import SchemaConfig
+
+# Dynamic schema for tests that don't care about specific fields
+DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
 
 
 class TestTransformExecutor:
@@ -28,6 +32,7 @@ class TestTransformExecutor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Mock transform plugin
@@ -91,6 +96,7 @@ class TestTransformExecutor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class FailingTransform:
@@ -148,6 +154,7 @@ class TestTransformExecutor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class ExplodingTransform:
@@ -211,6 +218,7 @@ class TestTransformExecutor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class EnrichTransform:
@@ -271,6 +279,7 @@ class TestTransformExecutor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class IdentityTransform:
@@ -340,6 +349,7 @@ class TestGateExecutor:
             node_type="gate",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Mock gate that continues
@@ -418,6 +428,7 @@ class TestGateExecutor:
             node_type="gate",
             plugin_version="1.0",
             config={"threshold": 100},
+            schema_config=DYNAMIC_SCHEMA,
         )
         sink_node = recorder.register_node(
             run_id=run.run_id,
@@ -425,6 +436,7 @@ class TestGateExecutor:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Register edge from gate to sink using route label
@@ -516,6 +528,7 @@ class TestGateExecutor:
             node_type="gate",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Mock gate that routes to a label that has no route resolution
@@ -585,6 +598,7 @@ class TestGateExecutor:
             node_type="gate",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         path_a_node = recorder.register_node(
             run_id=run.run_id,
@@ -592,6 +606,7 @@ class TestGateExecutor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         path_b_node = recorder.register_node(
             run_id=run.run_id,
@@ -599,6 +614,7 @@ class TestGateExecutor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Register edges
@@ -706,6 +722,7 @@ class TestGateExecutor:
             node_type="gate",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         path_a_node = recorder.register_node(
             run_id=run.run_id,
@@ -713,6 +730,7 @@ class TestGateExecutor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         path_b_node = recorder.register_node(
             run_id=run.run_id,
@@ -720,6 +738,7 @@ class TestGateExecutor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Register edges
@@ -800,6 +819,7 @@ class TestGateExecutor:
             node_type="gate",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class ExplodingGate:
@@ -865,6 +885,7 @@ class TestAggregationExecutor:
             node_type="aggregation",
             plugin_version="1.0",
             config={"batch_size": 2},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Mock aggregation that collects values
@@ -953,6 +974,7 @@ class TestAggregationExecutor:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Mock aggregation
@@ -1030,6 +1052,7 @@ class TestAggregationExecutor:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Mock aggregation that computes average
@@ -1116,6 +1139,7 @@ class TestAggregationExecutor:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class NoBatchAggregation:
@@ -1159,6 +1183,7 @@ class TestAggregationExecutor:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class ExplodingAggregation:
@@ -1218,6 +1243,7 @@ class TestAggregationExecutor:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class ExplodingFlushAggregation:
@@ -1285,6 +1311,7 @@ class TestAggregationExecutor:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class BatchCounterAggregation:
@@ -1373,6 +1400,7 @@ class TestSinkExecutor:
             node_type="sink",
             plugin_version="1.0",
             config={"path": "/tmp/output.csv"},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Mock sink that writes rows and returns artifact info
@@ -1460,6 +1488,7 @@ class TestSinkExecutor:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class EmptySink:
@@ -1507,6 +1536,7 @@ class TestSinkExecutor:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class ExplodingSink:
@@ -1580,6 +1610,7 @@ class TestSinkExecutor:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class BatchSink:
@@ -1660,6 +1691,7 @@ class TestSinkExecutor:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class LinkedSink:

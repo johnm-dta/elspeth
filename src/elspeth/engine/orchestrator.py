@@ -423,6 +423,16 @@ class Orchestrator:
                 else Determinism.DETERMINISTIC
             )
 
+            # Get schema_config from node_info config or default to dynamic
+            # Schema is specified in pipeline config, not plugin attributes
+            from elspeth.contracts.schema import SchemaConfig
+
+            if "schema" in node_info.config:  # noqa: SIM401
+                schema_dict = node_info.config["schema"]
+            else:
+                schema_dict = {"fields": "dynamic"}
+            schema_config = SchemaConfig.from_dict(schema_dict)
+
             recorder.register_node(
                 run_id=run_id,
                 node_id=node_id,  # Use graph's ID
@@ -431,6 +441,7 @@ class Orchestrator:
                 plugin_version=plugin_version,
                 config=node_info.config,
                 determinism=determinism,
+                schema_config=schema_config,
             )
 
         # Register edges from graph - key by (from_node, label) for lookup

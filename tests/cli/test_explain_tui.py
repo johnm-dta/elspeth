@@ -1,10 +1,14 @@
 """Tests for explain command TUI integration."""
 
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.tui.screens.explain_screen import (
     LoadedState,
     LoadingFailedState,
     UninitializedState,
 )
+
+# Dynamic schema for tests that don't care about specific fields
+DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
 
 
 class TestExplainScreen:
@@ -63,6 +67,7 @@ class TestExplainScreen:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Screen should load this data
@@ -113,6 +118,7 @@ class TestExplainScreen:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -120,6 +126,7 @@ class TestExplainScreen:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         screen = ExplainScreen(db=db, run_id=run.run_id)

@@ -8,6 +8,7 @@ because the processor uses isinstance() for type-safe plugin detection.
 from typing import Any
 
 from elspeth.contracts import PluginSchema, RoutingMode
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import (
@@ -17,6 +18,9 @@ from elspeth.plugins.results import (
     RowOutcome,
     TransformResult,
 )
+
+# Dynamic schema for tests that don't care about specific fields
+DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
 
 
 # Shared schema for test plugins
@@ -45,6 +49,7 @@ class TestRowProcessor:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         transform1 = recorder.register_node(
             run_id=run.run_id,
@@ -52,6 +57,7 @@ class TestRowProcessor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         transform2 = recorder.register_node(
             run_id=run.run_id,
@@ -59,6 +65,7 @@ class TestRowProcessor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class DoubleTransform(BaseTransform):
@@ -127,6 +134,7 @@ class TestRowProcessor:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         transform = recorder.register_node(
             run_id=run.run_id,
@@ -134,6 +142,7 @@ class TestRowProcessor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class EnricherTransform(BaseTransform):
@@ -187,6 +196,7 @@ class TestRowProcessor:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -223,6 +233,7 @@ class TestRowProcessor:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         transform = recorder.register_node(
             run_id=run.run_id,
@@ -230,6 +241,7 @@ class TestRowProcessor:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class ValidatorTransform(BaseTransform):
@@ -289,6 +301,7 @@ class TestRowProcessorGates:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         gate = recorder.register_node(
             run_id=run.run_id,
@@ -296,6 +309,7 @@ class TestRowProcessorGates:
             node_type="gate",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         transform = recorder.register_node(
             run_id=run.run_id,
@@ -303,6 +317,7 @@ class TestRowProcessorGates:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class PassGate(BaseGate):
@@ -365,6 +380,7 @@ class TestRowProcessorGates:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         gate = recorder.register_node(
             run_id=run.run_id,
@@ -372,6 +388,7 @@ class TestRowProcessorGates:
             node_type="gate",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         sink = recorder.register_node(
             run_id=run.run_id,
@@ -379,6 +396,7 @@ class TestRowProcessorGates:
             node_type="sink",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Register edge using route label
@@ -447,6 +465,7 @@ class TestRowProcessorGates:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         gate = recorder.register_node(
             run_id=run.run_id,
@@ -454,6 +473,7 @@ class TestRowProcessorGates:
             node_type="gate",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         path_a = recorder.register_node(
             run_id=run.run_id,
@@ -461,6 +481,7 @@ class TestRowProcessorGates:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         path_b = recorder.register_node(
             run_id=run.run_id,
@@ -468,6 +489,7 @@ class TestRowProcessorGates:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         # Register edges for fork
@@ -545,6 +567,7 @@ class TestRowProcessorAggregation:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         agg = recorder.register_node(
             run_id=run.run_id,
@@ -552,6 +575,7 @@ class TestRowProcessorAggregation:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class CounterAggregation(BaseAggregation):
@@ -609,6 +633,7 @@ class TestRowProcessorAggregation:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         agg = recorder.register_node(
             run_id=run.run_id,
@@ -616,6 +641,7 @@ class TestRowProcessorAggregation:
             node_type="aggregation",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         flush_called: list[bool] = []
@@ -693,6 +719,7 @@ class TestRowProcessorTokenIdentity:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -736,6 +763,7 @@ class TestRowProcessorTokenIdentity:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         transform1 = recorder.register_node(
             run_id=run.run_id,
@@ -743,6 +771,7 @@ class TestRowProcessorTokenIdentity:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         transform2 = recorder.register_node(
             run_id=run.run_id,
@@ -750,6 +779,7 @@ class TestRowProcessorTokenIdentity:
             node_type="transform",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class IdentityTransform(BaseTransform):
@@ -815,6 +845,7 @@ class TestRowProcessorUnknownType:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
 
         class NotAPlugin:

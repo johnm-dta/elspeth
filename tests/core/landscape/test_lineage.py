@@ -2,6 +2,11 @@
 
 from datetime import UTC, datetime
 
+from elspeth.contracts.schema import SchemaConfig
+
+# Dynamic schema for tests that don't care about specific fields
+DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
 
 class TestLineageResult:
     """Tests for LineageResult data structure."""
@@ -70,6 +75,7 @@ class TestExplainFunction:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -103,6 +109,7 @@ class TestExplainFunction:
             node_type="source",
             plugin_version="1.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,

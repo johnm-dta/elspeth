@@ -4,8 +4,12 @@
 import pytest
 
 from elspeth.contracts import RoutingMode
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 from elspeth.core.landscape.exporter import LandscapeExporter
+
+# Dynamic schema for tests that don't care about specific fields
+DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
 
 
 @pytest.fixture
@@ -23,6 +27,7 @@ def populated_db() -> tuple[LandscapeDB, str]:
         node_type="source",
         plugin_version="1.0.0",
         config={"path": "input.csv"},
+        schema_config=DYNAMIC_SCHEMA,
     )
 
     recorder.create_row(
@@ -162,6 +167,7 @@ class TestLandscapeExporterComplexRun:
             node_type="source",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -170,6 +176,7 @@ class TestLandscapeExporterComplexRun:
             node_type="sink",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_edge(
             run_id=run.run_id,
@@ -203,6 +210,7 @@ class TestLandscapeExporterComplexRun:
             node_type="source",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -234,6 +242,7 @@ class TestLandscapeExporterComplexRun:
             node_type="transform",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -278,6 +287,7 @@ class TestLandscapeExporterComplexRun:
             node_type="sink",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -325,6 +335,7 @@ class TestLandscapeExporterComplexRun:
             node_type="aggregation",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         batch = recorder.create_batch(
             run_id=run.run_id,
@@ -359,6 +370,7 @@ class TestLandscapeExporterComplexRun:
             node_type="aggregation",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -399,6 +411,7 @@ class TestLandscapeExporterComplexRun:
             node_type="gate",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         recorder.register_node(
             run_id=run.run_id,
@@ -407,6 +420,7 @@ class TestLandscapeExporterComplexRun:
             node_type="sink",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         edge = recorder.register_edge(
             run_id=run.run_id,
@@ -457,6 +471,7 @@ class TestLandscapeExporterComplexRun:
             node_type="source",
             plugin_version="1.0.0",
             config={},
+            schema_config=DYNAMIC_SCHEMA,
         )
         row = recorder.create_row(
             run_id=run.run_id,
@@ -625,6 +640,7 @@ class TestLandscapeExporterSigning:
                 node_type="transform",
                 plugin_version="1.0.0",
                 config={"index": i},
+                schema_config=DYNAMIC_SCHEMA,
             )
 
         # Multiple edges (tests get_edges ordering)
@@ -720,6 +736,7 @@ class TestLandscapeExporterSigning:
                 node_type="transform",
                 plugin_version="1.0.0",
                 config={},
+                schema_config=DYNAMIC_SCHEMA,
             )
         recorder.complete_run(run.run_id, status="completed")
 

@@ -222,8 +222,7 @@ def _execute_pipeline(
     """
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import Orchestrator, PipelineConfig
-    from elspeth.plugins.base import BaseGate, BaseSink, BaseSource, BaseTransform
-    from elspeth.plugins.gates import FieldMatchGate, FilterGate, ThresholdGate
+    from elspeth.plugins.base import BaseSink, BaseSource, BaseTransform
     from elspeth.plugins.sinks.csv_sink import CSVSink
     from elspeth.plugins.sinks.database_sink import DatabaseSink
     from elspeth.plugins.sinks.json_sink import JSONSink
@@ -235,11 +234,6 @@ def _execute_pipeline(
     TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
         "passthrough": PassThrough,
         "field_mapper": FieldMapper,
-    }
-    GATE_PLUGINS: dict[str, type[BaseGate]] = {
-        "threshold_gate": ThresholdGate,
-        "field_match_gate": FieldMatchGate,
-        "filter_gate": FilterGate,
     }
 
     # Instantiate source from new schema
@@ -276,27 +270,21 @@ def _execute_pipeline(
     db_url = config.landscape.url
     db = LandscapeDB.from_url(db_url)
 
-    # Instantiate transforms/gates from row_plugins
-    transforms: list[BaseTransform | BaseGate] = []
+    # Instantiate transforms from row_plugins
+    transforms: list[BaseTransform] = []
     for plugin_config in config.row_plugins:
         plugin_name = plugin_config.plugin
         plugin_options = dict(plugin_config.options)
 
-        if plugin_config.type == "gate":
-            if plugin_name not in GATE_PLUGINS:
-                raise typer.BadParameter(f"Unknown gate plugin: {plugin_name}")
-            gate_class = GATE_PLUGINS[plugin_name]
-            transforms.append(gate_class(plugin_options))
-        else:
-            if plugin_name not in TRANSFORM_PLUGINS:
-                raise typer.BadParameter(f"Unknown transform plugin: {plugin_name}")
-            transform_class = TRANSFORM_PLUGINS[plugin_name]
-            transforms.append(transform_class(plugin_options))
+        if plugin_name not in TRANSFORM_PLUGINS:
+            raise typer.BadParameter(f"Unknown transform plugin: {plugin_name}")
+        transform_class = TRANSFORM_PLUGINS[plugin_name]
+        transforms.append(transform_class(plugin_options))
 
     # Build PipelineConfig with resolved configuration for audit
     # NOTE: Type ignores needed because:
     # - Source plugins implement SourceProtocol structurally but mypy doesn't recognize it
-    # - list is invariant so list[BaseTransform | BaseGate] != list[TransformLike]
+    # - list is invariant so list[BaseTransform] != list[TransformLike]
     # - Sinks implement SinkProtocol structurally but mypy doesn't recognize it
     pipeline_config = PipelineConfig(
         source=source,  # type: ignore[arg-type]
@@ -393,18 +381,6 @@ PLUGIN_REGISTRY: dict[str, list[PluginInfo]] = {
             name="field_mapper", description="Rename, select, and reorganize fields"
         ),
     ],
-    "gate": [
-        PluginInfo(
-            name="threshold_gate", description="Route rows based on numeric threshold"
-        ),
-        PluginInfo(
-            name="field_match_gate",
-            description="Route rows based on field value matching",
-        ),
-        PluginInfo(
-            name="filter_gate", description="Filter rows based on field conditions"
-        ),
-    ],
     "sink": [
         PluginInfo(name="csv", description="Write rows to CSV files"),
         PluginInfo(name="json", description="Write rows to JSON/JSONL files"),
@@ -419,7 +395,7 @@ def plugins_list(
         None,
         "--type",
         "-t",
-        help="Filter by plugin type (source, transform, gate, sink).",
+        help="Filter by plugin type (source, transform, sink).",
     ),
 ) -> None:
     """List available plugins."""

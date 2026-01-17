@@ -408,6 +408,87 @@ class TestCoalesceExecutorQuorum:
             "model_b": {"score": 0.85},
         }
 
+    def test_quorum_does_not_merge_on_timeout_if_quorum_not_met(
+        self,
+        recorder: LandscapeRecorder,
+        run: Run,
+    ) -> None:
+        """QUORUM should NOT merge on timeout if quorum not met."""
+        import time
+
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="source_1",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="coalesce_1",
+            plugin_name="quorum_merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = CoalesceSettings(
+            name="quorum_merge",
+            branches=["model_a", "model_b", "model_c"],
+            policy="quorum",
+            quorum_count=2,  # Need 2 of 3
+            merge="nested",
+            timeout_seconds=0.1,
+        )
+
+        executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        executor.register_coalesce(settings, coalesce_node.node_id)
+
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data={},
+        )
+        children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["model_a", "model_b", "model_c"],
+            step_in_pipeline=1,
+        )
+
+        # Accept only ONE token (quorum needs 2)
+        token_a = TokenInfo(
+            row_id=children[0].row_id,
+            token_id=children[0].token_id,
+            row_data={"score": 0.9},
+            branch_name="model_a",
+        )
+
+        outcome = executor.accept(token_a, "quorum_merge", step_in_pipeline=2)
+        assert outcome.held is True
+
+        # Wait for timeout
+        time.sleep(0.15)
+
+        # check_timeouts should return empty list (quorum not met)
+        timed_out = executor.check_timeouts("quorum_merge", step_in_pipeline=2)
+        assert len(timed_out) == 0
+
 
 class TestCoalesceExecutorBestEffort:
     """Test BEST_EFFORT policy with timeout."""
@@ -495,3 +576,25 @@ class TestCoalesceExecutorBestEffort:
         assert len(timed_out) == 1
         assert timed_out[0].merged_token is not None
         assert timed_out[0].merged_token.row_data == {"a_result": 1}
+
+    def test_check_timeouts_unregistered_raises(
+        self,
+        recorder: LandscapeRecorder,
+        run: Run,
+    ) -> None:
+        """check_timeouts should raise ValueError for unregistered coalesce."""
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+
+        with pytest.raises(ValueError, match="not registered"):
+            executor.check_timeouts("nonexistent", step_in_pipeline=2)

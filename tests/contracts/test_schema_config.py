@@ -66,6 +66,13 @@ class TestFieldDefinition:
         with pytest.raises(ValueError, match=r"data_field.*instead"):
             FieldDefinition.parse("data.field: str")
 
+    def test_parse_numeric_prefix_raises(self) -> None:
+        """Field names starting with digits raise error."""
+        from elspeth.contracts.schema import FieldDefinition
+
+        with pytest.raises(ValueError, match="cannot start with a digit"):
+            FieldDefinition.parse("123field: int")
+
 
 class TestSchemaConfig:
     """Tests for SchemaConfig parsing."""
@@ -144,3 +151,15 @@ class TestSchemaConfig:
 
         with pytest.raises(ValueError, match="at least one field"):
             SchemaConfig.from_dict({"mode": "strict", "fields": []})
+
+    def test_duplicate_field_names_raises(self) -> None:
+        """Duplicate field names raise error."""
+        from elspeth.contracts.schema import SchemaConfig
+
+        with pytest.raises(ValueError, match="Duplicate field names"):
+            SchemaConfig.from_dict(
+                {
+                    "mode": "strict",
+                    "fields": ["id: int", "id: str"],
+                }
+            )

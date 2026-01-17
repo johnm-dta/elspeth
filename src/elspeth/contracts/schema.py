@@ -96,6 +96,16 @@ class FieldDefinition:
             )
 
         name, field_type, optional_marker = match.groups()
+
+        # Validate that name is a valid Python identifier
+        # (regex allows numeric-prefixed names like "123field" which aren't valid)
+        if not name.isidentifier():
+            raise ValueError(
+                f"Invalid field name '{name}' in field spec '{spec}'. "
+                f"Field names must be valid Python identifiers "
+                f"(cannot start with a digit)."
+            )
+
         return cls(
             name=name,
             field_type=field_type,  # type: ignore[arg-type]
@@ -184,6 +194,14 @@ class SchemaConfig:
             )
 
         parsed_fields = tuple(FieldDefinition.parse(f) for f in fields_value)
+
+        # Check for duplicate field names
+        names = [f.name for f in parsed_fields]
+        if len(names) != len(set(names)):
+            duplicates = [n for n in names if names.count(n) > 1]
+            raise ValueError(
+                f"Duplicate field names in schema: {', '.join(sorted(set(duplicates)))}"
+            )
 
         return cls(
             mode=mode,

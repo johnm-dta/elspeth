@@ -222,6 +222,8 @@ class CoalesceExecutor:
         key: tuple[str, str],
     ) -> CoalesceOutcome:
         """Execute the merge and create merged token."""
+        now = time.monotonic()
+
         # Merge row data according to strategy
         merged_data = self._merge_data(settings, pending.arrived)
 
@@ -250,6 +252,24 @@ class CoalesceExecutor:
                 duration_ms=0,
             )
 
+        # Build audit metadata
+        coalesce_metadata = {
+            "policy": settings.policy,
+            "merge_strategy": settings.merge,
+            "expected_branches": settings.branches,
+            "branches_arrived": list(pending.arrived.keys()),
+            "arrival_order": [
+                {
+                    "branch": branch,
+                    "arrival_offset_ms": (t - pending.first_arrival) * 1000,
+                }
+                for branch, t in sorted(
+                    pending.arrival_times.items(), key=lambda x: x[1]
+                )
+            ],
+            "wait_duration_ms": (now - pending.first_arrival) * 1000,
+        }
+
         # Clean up pending state
         del self._pending[key]
 
@@ -257,6 +277,7 @@ class CoalesceExecutor:
             held=False,
             merged_token=merged_token,
             consumed_tokens=consumed_tokens,
+            coalesce_metadata=coalesce_metadata,
         )
 
     def _merge_data(

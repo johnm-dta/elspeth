@@ -598,3 +598,110 @@ class TestCoalesceExecutorBestEffort:
 
         with pytest.raises(ValueError, match="not registered"):
             executor.check_timeouts("nonexistent", step_in_pipeline=2)
+
+
+class TestCoalesceAuditMetadata:
+    """Test coalesce audit metadata recording."""
+
+    def test_coalesce_records_audit_metadata(
+        self,
+        recorder: LandscapeRecorder,
+        run: Run,
+    ) -> None:
+        """Coalesce should record audit metadata with policy, strategy, and timing."""
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        # Register nodes
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="source_1",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="coalesce_1",
+            plugin_name="merge_results",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = CoalesceSettings(
+            name="merge_results",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+        )
+
+        executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        executor.register_coalesce(settings, coalesce_node.node_id)
+
+        # Create tokens from both paths
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data={"original": True},
+        )
+        children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["path_a", "path_b"],
+            step_in_pipeline=1,
+        )
+
+        # Simulate different processing on each branch
+        token_a = TokenInfo(
+            row_id=children[0].row_id,
+            token_id=children[0].token_id,
+            row_data={"sentiment": "positive"},
+            branch_name="path_a",
+        )
+        token_b = TokenInfo(
+            row_id=children[1].row_id,
+            token_id=children[1].token_id,
+            row_data={"entities": ["ACME"]},
+            branch_name="path_b",
+        )
+
+        # Accept first token - should hold
+        outcome1 = executor.accept(token_a, "merge_results", step_in_pipeline=2)
+        assert outcome1.held is True
+
+        # Accept second token - should merge
+        outcome2 = executor.accept(token_b, "merge_results", step_in_pipeline=2)
+        assert outcome2.held is False
+        assert outcome2.merged_token is not None
+
+        # Verify coalesce_metadata is populated
+        assert outcome2.coalesce_metadata is not None
+        metadata = outcome2.coalesce_metadata
+
+        # Check required fields
+        assert metadata["policy"] == "require_all"
+        assert metadata["merge_strategy"] == "union"
+        assert metadata["expected_branches"] == ["path_a", "path_b"]
+        assert set(metadata["branches_arrived"]) == {"path_a", "path_b"}
+        assert metadata["wait_duration_ms"] >= 0
+
+        # Check arrival_order structure
+        assert "arrival_order" in metadata
+        assert len(metadata["arrival_order"]) == 2
+        for entry in metadata["arrival_order"]:
+            assert "branch" in entry
+            assert "arrival_offset_ms" in entry
+            assert entry["arrival_offset_ms"] >= 0

@@ -14,14 +14,14 @@ SOURCE (Sense) → DECIDE → SINK (Act)
 
 **Critical distinction:**
 
-| Layer | What | Who Writes It |
-|-------|------|---------------|
-| **User Plugins** | External system integration + business logic | Plugin authors |
-| **System Operations** | Token routing, batching, forking, merging | ELSPETH (config-driven) |
+| Layer | What | Requires Code? |
+|-------|------|----------------|
+| **Plugins** | External system integration + business logic | Yes (validated system code) |
+| **System Operations** | Token routing, batching, forking, merging | No (config-driven) |
 
-### User Plugins (This Document)
+### Plugins (This Document)
 
-These are **code** that plugin authors write:
+Plugins are **system code** developed by the same team that operates ELSPETH. They are independently validated and treated as trusted components. This is NOT a plugin marketplace—arbitrary external code is not accepted.
 
 | Plugin | Purpose | Touches |
 |--------|---------|---------|
@@ -31,7 +31,7 @@ These are **code** that plugin authors write:
 
 ### System Operations (NOT Plugins)
 
-These are **config-driven** infrastructure provided by ELSPETH:
+These are **config-driven** infrastructure provided by the ELSPETH engine:
 
 | Operation | Purpose | Config Example |
 |-----------|---------|----------------|
@@ -40,8 +40,8 @@ These are **config-driven** infrastructure provided by ELSPETH:
 | **Fork** | Split token to parallel paths | Routing action |
 | **Coalesce** | Merge tokens from parallel paths | `policy: require_all` |
 
-System operations work on **wrapped data** (tokens, metadata) and are 100% ELSPETH code.
-User plugins work on **row contents** (the actual data) and are plugin author code.
+System operations work on **wrapped data** (tokens, metadata) and require no custom code.
+Plugins work on **row contents** (the actual data) and are validated system code.
 
 ---
 

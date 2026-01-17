@@ -10,6 +10,7 @@ Phase 3 Integration Points:
 - payload_store: PayloadStore for large blob storage
 """
 
+import logging
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,20 @@ if TYPE_CHECKING:
 
     from elspeth.core.landscape.recorder import LandscapeRecorder
     from elspeth.core.payload_store import PayloadStore
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ValidationErrorToken:
+    """Token returned when recording a validation error.
+
+    Allows tracking the quarantined row through the audit trail.
+    """
+
+    row_id: str
+    node_id: str
+    error_id: str | None = None  # Set if recorded to landscape
 
 
 @dataclass
@@ -85,3 +100,53 @@ class PluginContext:
         if self.tracer is None:
             return nullcontext()
         return self.tracer.start_as_current_span(name)
+
+    def record_validation_error(
+        self,
+        row: dict[str, Any],
+        error: str,
+        schema_mode: str,
+    ) -> ValidationErrorToken:
+        """Record a validation error for audit trail.
+
+        Called by sources when row validation fails. The row will be
+        quarantined (not processed further) but the error is recorded
+        for complete audit coverage.
+
+        Args:
+            row: The row data that failed validation
+            error: Description of the validation failure
+            schema_mode: "strict", "free", or "dynamic"
+
+        Returns:
+            ValidationErrorToken for tracking the quarantined row
+        """
+        from elspeth.core.canonical import stable_hash
+
+        # Generate row_id from content hash if not present
+        row_id = str(row["id"]) if "id" in row else stable_hash(row)[:16]
+
+        if self.landscape is None:
+            logger.warning(
+                "Validation error not recorded (no landscape): %s",
+                error,
+            )
+            return ValidationErrorToken(
+                row_id=row_id,
+                node_id=self.node_id or "unknown",
+            )
+
+        # Record to landscape audit trail
+        error_id = self.landscape.record_validation_error(
+            run_id=self.run_id,
+            node_id=self.node_id,
+            row_data=row,
+            error=error,
+            schema_mode=schema_mode,
+        )
+
+        return ValidationErrorToken(
+            row_id=row_id,
+            node_id=self.node_id or "unknown",
+            error_id=error_id,
+        )

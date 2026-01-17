@@ -59,6 +59,7 @@ from elspeth.core.landscape.schema import (
     runs_table,
     token_parents_table,
     tokens_table,
+    validation_errors_table,
 )
 
 E = TypeVar("E", bound=Enum)
@@ -1890,3 +1891,47 @@ class LandscapeRecorder:
         """
         grade = self.compute_reproducibility_grade(run_id)
         return self.complete_run(run_id, status, reproducibility_grade=grade.value)
+
+    # === Validation Error Recording (WP-11.99) ===
+
+    def record_validation_error(
+        self,
+        run_id: str,
+        node_id: str | None,
+        row_data: dict[str, Any],
+        error: str,
+        schema_mode: str,
+    ) -> str:
+        """Record a validation error in the audit trail.
+
+        Called when a source row fails schema validation. The row is
+        quarantined (not processed further) but we record what we saw
+        for complete audit coverage.
+
+        Args:
+            run_id: Current run ID
+            node_id: Node where validation failed
+            row_data: The row that failed validation
+            error: Error description
+            schema_mode: Schema mode that caught the error ("strict", "free", "dynamic")
+
+        Returns:
+            error_id for tracking
+        """
+        error_id = f"verr_{_generate_id()[:12]}"
+
+        with self._db.connection() as conn:
+            conn.execute(
+                validation_errors_table.insert().values(
+                    error_id=error_id,
+                    run_id=run_id,
+                    node_id=node_id,
+                    row_hash=stable_hash(row_data),
+                    row_data_json=canonical_json(row_data),
+                    error=error,
+                    schema_mode=schema_mode,
+                    created_at=_now(),
+                )
+            )
+
+        return error_id

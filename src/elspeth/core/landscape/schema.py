@@ -269,6 +269,24 @@ Index("ix_node_states_node", node_states_table.c.node_id)
 Index("ix_calls_state", calls_table.c.state_id)
 Index("ix_artifacts_run", artifacts_table.c.run_id)
 
+# === Validation Errors (WP-11.99: Config-Driven Plugin Schemas) ===
+
+validation_errors_table = Table(
+    "validation_errors",
+    metadata,
+    Column("error_id", String(32), primary_key=True),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("node_id", String(64)),  # Source node where validation failed
+    Column("row_hash", String(64), nullable=False),
+    Column("row_data_json", Text),  # Store the row for debugging
+    Column("error", Text, nullable=False),
+    Column("schema_mode", String(16), nullable=False),  # "strict", "free", "dynamic"
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+Index("ix_validation_errors_run", validation_errors_table.c.run_id)
+Index("ix_validation_errors_node", validation_errors_table.c.node_id)
+
 # === Checkpoints (Phase 5: Production Hardening) ===
 
 checkpoints_table = Table(

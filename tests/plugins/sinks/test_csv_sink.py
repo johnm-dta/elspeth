@@ -207,3 +207,51 @@ class TestCSVSink:
 
         sink = CSVSink({"path": "/tmp/test.csv"})
         assert sink.determinism == Determinism.IO_WRITE
+
+    def test_cumulative_hash_after_multiple_writes(
+        self, tmp_path: Path, ctx: PluginContext
+    ) -> None:
+        """Each write() returns hash of cumulative file contents, not just new rows.
+
+        For audit integrity, the ArtifactDescriptor returned from each write()
+        must accurately reflect the complete file state at that moment.
+        """
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = CSVSink({"path": str(output_file)})
+
+        # First write
+        artifact1 = sink.write([{"id": "1", "name": "alice"}], ctx)
+        hash_after_first = artifact1.content_hash
+
+        # Verify first hash matches file contents at this point
+        file_content_after_first = output_file.read_bytes()
+        expected_hash_after_first = hashlib.sha256(file_content_after_first).hexdigest()
+        assert hash_after_first == expected_hash_after_first
+
+        # Second write
+        artifact2 = sink.write([{"id": "2", "name": "bob"}], ctx)
+        hash_after_second = artifact2.content_hash
+
+        # Verify second hash matches cumulative file contents (not just new rows)
+        file_content_after_second = output_file.read_bytes()
+        expected_hash_after_second = hashlib.sha256(
+            file_content_after_second
+        ).hexdigest()
+        assert hash_after_second == expected_hash_after_second
+
+        # Third write
+        artifact3 = sink.write([{"id": "3", "name": "carol"}], ctx)
+        hash_after_third = artifact3.content_hash
+
+        # Verify third hash matches full cumulative contents
+        file_content_after_third = output_file.read_bytes()
+        expected_hash_after_third = hashlib.sha256(file_content_after_third).hexdigest()
+        assert hash_after_third == expected_hash_after_third
+
+        sink.close()
+
+        # Sanity check: each hash should be different (file grew each time)
+        assert hash_after_first != hash_after_second
+        assert hash_after_second != hash_after_third

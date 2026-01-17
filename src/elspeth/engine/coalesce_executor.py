@@ -378,3 +378,86 @@ class CoalesceExecutor:
                     results.append(outcome)
 
         return results
+
+    def flush_pending(
+        self,
+        step_in_pipeline: int,
+    ) -> list[CoalesceOutcome]:
+        """Flush all pending coalesces (called at end-of-source or shutdown).
+
+        For best_effort policy: merges whatever arrived.
+        For quorum policy: merges if quorum met, returns failure otherwise.
+        For require_all policy: returns failure (never partial merge).
+        For first policy: should never have pending (merges immediately).
+
+        Args:
+            step_in_pipeline: Current position in DAG
+
+        Returns:
+            List of CoalesceOutcomes for all pending coalesces
+        """
+        results: list[CoalesceOutcome] = []
+        keys_to_process = list(self._pending.keys())
+
+        for key in keys_to_process:
+            coalesce_name, _row_id = key
+            settings = self._settings[coalesce_name]
+            node_id = self._node_ids[coalesce_name]
+            pending = self._pending[key]
+
+            if settings.policy == "best_effort":
+                # Always merge whatever arrived
+                if len(pending.arrived) > 0:
+                    outcome = self._execute_merge(
+                        settings=settings,
+                        node_id=node_id,
+                        pending=pending,
+                        step_in_pipeline=step_in_pipeline,
+                        key=key,
+                    )
+                    results.append(outcome)
+
+            elif settings.policy == "quorum":
+                assert settings.quorum_count is not None
+                if len(pending.arrived) >= settings.quorum_count:
+                    outcome = self._execute_merge(
+                        settings=settings,
+                        node_id=node_id,
+                        pending=pending,
+                        step_in_pipeline=step_in_pipeline,
+                        key=key,
+                    )
+                    results.append(outcome)
+                else:
+                    # Quorum not met - record failure
+                    del self._pending[key]
+                    results.append(
+                        CoalesceOutcome(
+                            held=False,
+                            failure_reason="quorum_not_met",
+                            coalesce_metadata={
+                                "policy": settings.policy,
+                                "quorum_required": settings.quorum_count,
+                                "branches_arrived": list(pending.arrived.keys()),
+                            },
+                        )
+                    )
+
+            elif settings.policy == "require_all":
+                # require_all never does partial merge
+                del self._pending[key]
+                results.append(
+                    CoalesceOutcome(
+                        held=False,
+                        failure_reason="incomplete_branches",
+                        coalesce_metadata={
+                            "policy": settings.policy,
+                            "expected_branches": settings.branches,
+                            "branches_arrived": list(pending.arrived.keys()),
+                        },
+                    )
+                )
+
+            # first policy: should never have pending entries (merges immediately)
+
+        return results

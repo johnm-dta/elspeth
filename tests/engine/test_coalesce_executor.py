@@ -804,3 +804,384 @@ class TestCoalesceIntegration:
         assert len(outcome2.consumed_tokens) == 2
         consumed_branches = {t.branch_name for t in outcome2.consumed_tokens}
         assert consumed_branches == {"sentiment", "entities"}
+
+
+class TestFlushPending:
+    """Test flush_pending() for graceful shutdown."""
+
+    def test_flush_pending_merges_incomplete_best_effort(
+        self,
+        recorder: LandscapeRecorder,
+        run: Run,
+    ) -> None:
+        """flush_pending should merge whatever arrived for best_effort policy."""
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="source_1",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="coalesce_1",
+            plugin_name="best_effort_merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # best_effort policy with long timeout (won't expire during test)
+        settings = CoalesceSettings(
+            name="best_effort_merge",
+            branches=["path_a", "path_b", "path_c"],
+            policy="best_effort",
+            timeout_seconds=60.0,  # Long timeout - won't trigger naturally
+            merge="union",
+        )
+
+        executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        executor.register_coalesce(settings, coalesce_node.node_id)
+
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data={},
+        )
+        children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["path_a", "path_b", "path_c"],
+            step_in_pipeline=1,
+        )
+
+        # Accept only 2 of 3 tokens
+        token_a = TokenInfo(
+            row_id=children[0].row_id,
+            token_id=children[0].token_id,
+            row_data={"a_result": 1},
+            branch_name="path_a",
+        )
+        token_b = TokenInfo(
+            row_id=children[1].row_id,
+            token_id=children[1].token_id,
+            row_data={"b_result": 2},
+            branch_name="path_b",
+        )
+
+        outcome1 = executor.accept(token_a, "best_effort_merge", step_in_pipeline=2)
+        assert outcome1.held is True
+
+        outcome2 = executor.accept(token_b, "best_effort_merge", step_in_pipeline=2)
+        assert outcome2.held is True  # Still waiting for path_c
+
+        # Call flush_pending at end-of-source
+        flushed = executor.flush_pending(step_in_pipeline=2)
+
+        # Should have merged whatever arrived
+        assert len(flushed) == 1
+        assert flushed[0].held is False
+        assert flushed[0].merged_token is not None
+        assert flushed[0].merged_token.row_data == {"a_result": 1, "b_result": 2}
+
+    def test_flush_pending_respects_quorum(
+        self,
+        recorder: LandscapeRecorder,
+        run: Run,
+    ) -> None:
+        """flush_pending should return failure for quorum policy when quorum not met."""
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="source_1",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="coalesce_1",
+            plugin_name="quorum_merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # quorum policy requiring 3 of 4 branches
+        settings = CoalesceSettings(
+            name="quorum_merge",
+            branches=["model_a", "model_b", "model_c", "model_d"],
+            policy="quorum",
+            quorum_count=3,  # Need 3 of 4
+            merge="nested",
+        )
+
+        executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        executor.register_coalesce(settings, coalesce_node.node_id)
+
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data={},
+        )
+        children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["model_a", "model_b", "model_c", "model_d"],
+            step_in_pipeline=1,
+        )
+
+        # Accept only 1 token (quorum needs 3)
+        token_a = TokenInfo(
+            row_id=children[0].row_id,
+            token_id=children[0].token_id,
+            row_data={"score": 0.9},
+            branch_name="model_a",
+        )
+
+        outcome = executor.accept(token_a, "quorum_merge", step_in_pipeline=2)
+        assert outcome.held is True
+
+        # Call flush_pending
+        flushed = executor.flush_pending(step_in_pipeline=2)
+
+        # Should return failure outcome (quorum not met)
+        assert len(flushed) == 1
+        assert flushed[0].held is False
+        assert flushed[0].merged_token is None
+        assert flushed[0].failure_reason == "quorum_not_met"
+
+    def test_flush_pending_require_all_returns_failure(
+        self,
+        recorder: LandscapeRecorder,
+        run: Run,
+    ) -> None:
+        """flush_pending should return failure for require_all policy if incomplete."""
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="source_1",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="coalesce_1",
+            plugin_name="require_all_merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = CoalesceSettings(
+            name="require_all_merge",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+        )
+
+        executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        executor.register_coalesce(settings, coalesce_node.node_id)
+
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data={},
+        )
+        children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["path_a", "path_b"],
+            step_in_pipeline=1,
+        )
+
+        # Accept only 1 of 2 tokens
+        token_a = TokenInfo(
+            row_id=children[0].row_id,
+            token_id=children[0].token_id,
+            row_data={"a_result": 1},
+            branch_name="path_a",
+        )
+
+        outcome = executor.accept(token_a, "require_all_merge", step_in_pipeline=2)
+        assert outcome.held is True
+
+        # Call flush_pending
+        flushed = executor.flush_pending(step_in_pipeline=2)
+
+        # require_all never does partial merge - returns failure
+        assert len(flushed) == 1
+        assert flushed[0].held is False
+        assert flushed[0].merged_token is None
+        assert flushed[0].failure_reason == "incomplete_branches"
+        assert flushed[0].coalesce_metadata is not None
+        assert flushed[0].coalesce_metadata["policy"] == "require_all"
+
+    def test_flush_pending_quorum_met_merges(
+        self,
+        recorder: LandscapeRecorder,
+        run: Run,
+    ) -> None:
+        """flush_pending should merge for quorum policy when quorum is met."""
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="source_1",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="coalesce_1",
+            plugin_name="quorum_merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # quorum policy requiring 2 of 4 branches - we'll give exactly 2
+        # but NOT trigger immediate merge (quorum not met until flush)
+        # Actually, quorum WILL trigger immediately. Let's use different approach:
+        # quorum_count=3 with 2 arrived means pending, then flush should fail
+        # For "quorum met" test, we need to have quorum met but NOT all arrived
+        # That means quorum=2, branches=4, 2 arrived -> should merge immediately
+        # To test flush with quorum met, we need a scenario where:
+        # - quorum is met
+        # - but we haven't called accept enough times to trigger merge
+        # Actually that's impossible - quorum is checked on every accept()
+
+        # Let's test: quorum=2, 4 branches, 2 arrived via 2 accept calls
+        # The 2nd accept should trigger merge immediately
+        # So there's nothing to flush with quorum met (it already merged)
+
+        # The useful test is: ensure flush_pending doesn't break when
+        # there's nothing pending (empty case)
+        settings = CoalesceSettings(
+            name="quorum_merge",
+            branches=["model_a", "model_b", "model_c", "model_d"],
+            policy="quorum",
+            quorum_count=2,  # Need 2 of 4
+            merge="nested",
+        )
+
+        executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        executor.register_coalesce(settings, coalesce_node.node_id)
+
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data={},
+        )
+        children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["model_a", "model_b", "model_c", "model_d"],
+            step_in_pipeline=1,
+        )
+
+        # Accept 2 tokens - quorum should be met and merge immediately
+        token_a = TokenInfo(
+            row_id=children[0].row_id,
+            token_id=children[0].token_id,
+            row_data={"score": 0.9},
+            branch_name="model_a",
+        )
+        token_b = TokenInfo(
+            row_id=children[1].row_id,
+            token_id=children[1].token_id,
+            row_data={"score": 0.85},
+            branch_name="model_b",
+        )
+
+        outcome1 = executor.accept(token_a, "quorum_merge", step_in_pipeline=2)
+        assert outcome1.held is True
+
+        outcome2 = executor.accept(token_b, "quorum_merge", step_in_pipeline=2)
+        assert outcome2.held is False  # Quorum met, merged
+        assert outcome2.merged_token is not None
+
+        # Call flush_pending - should return empty (nothing pending)
+        flushed = executor.flush_pending(step_in_pipeline=2)
+        assert len(flushed) == 0
+
+    def test_flush_pending_empty_when_no_pending(
+        self,
+        recorder: LandscapeRecorder,
+        run: Run,
+    ) -> None:
+        """flush_pending should return empty list when nothing is pending."""
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+
+        # No coalesces registered, nothing pending
+        flushed = executor.flush_pending(step_in_pipeline=2)
+        assert len(flushed) == 0

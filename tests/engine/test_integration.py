@@ -1047,3 +1047,227 @@ class TestAuditTrailCompleteness:
         artifact_hashes = {a.content_hash for a in artifacts}
         assert "default_output_hash" in artifact_hashes
         assert "high_output_hash" in artifact_hashes
+
+
+class TestForkIntegration:
+    """Integration tests for fork execution through full pipeline.
+
+    Note on DiGraph limitation: NetworkX DiGraph doesn't support multiple edges
+    between the same node pair. For fork operations where multiple children go
+    to the same destination, we manually register edges with the LandscapeRecorder
+    rather than relying on graph-based edge registration.
+    """
+
+    def test_full_pipeline_with_fork_writes_all_children_to_sink(self) -> None:
+        """Full pipeline should write all fork children to sink.
+
+        This test verifies end-to-end fork behavior:
+        - 2 rows from source
+        - Each row forks into 2 children via ForkGate
+        - All 4 children (2 rows x 2 forks) continue processing and reach sink
+
+        Fork behavior: Fork creates child tokens that continue processing through
+        the remaining transforms. If no more transforms exist, children reach
+        COMPLETED state and go to the output sink.
+
+        Implementation note: Uses RowProcessor directly with manually registered
+        edges to work around DiGraph's single-edge limitation between node pairs.
+        """
+        from elspeth.contracts import PluginSchema, RowOutcome
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import GateResult, RoutingAction
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Start a run
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        # Register nodes
+        source_node = recorder.register_node(
+            run_id=run_id,
+            plugin_name="list_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=SchemaConfig.from_dict({"fields": "dynamic"}),
+        )
+
+        gate_node = recorder.register_node(
+            run_id=run_id,
+            plugin_name="fork_gate",
+            node_type="gate",
+            plugin_version="1.0",
+            config={},
+            schema_config=SchemaConfig.from_dict({"fields": "dynamic"}),
+        )
+
+        # Register path nodes for fork destinations
+        path_a_node = recorder.register_node(
+            run_id=run_id,
+            plugin_name="path_a",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=SchemaConfig.from_dict({"fields": "dynamic"}),
+        )
+        path_b_node = recorder.register_node(
+            run_id=run_id,
+            plugin_name="path_b",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=SchemaConfig.from_dict({"fields": "dynamic"}),
+        )
+
+        # Register sink node (not used in processor but required for complete graph)
+        recorder.register_node(
+            run_id=run_id,
+            plugin_name="collect_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+            schema_config=SchemaConfig.from_dict({"fields": "dynamic"}),
+        )
+
+        # Register edges (including fork paths to distinct intermediate nodes)
+        edge_a = recorder.register_edge(
+            run_id=run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=path_a_node.node_id,
+            label="path_a",
+            mode=RoutingMode.COPY,
+        )
+        edge_b = recorder.register_edge(
+            run_id=run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=path_b_node.node_id,
+            label="path_b",
+            mode=RoutingMode.COPY,
+        )
+
+        # Build edge_map for GateExecutor
+        edge_map = {
+            (gate_node.node_id, "path_a"): edge_a.edge_id,
+            (gate_node.node_id, "path_b"): edge_b.edge_id,
+        }
+
+        # Route resolution map: fork paths resolve to "fork"
+        route_resolution_map: dict[tuple[str, str], str] = {
+            (gate_node.node_id, "path_a"): "fork",
+            (gate_node.node_id, "path_b"): "fork",
+        }
+
+        class ForkGate(BaseGate):
+            """Gate that forks every row into two parallel paths."""
+
+            name = "fork_gate"
+            input_schema = ValueSchema
+            output_schema = ValueSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
+                return GateResult(
+                    row=row,
+                    action=RoutingAction.fork_to_paths(
+                        ["path_a", "path_b"],
+                        reason={"fork_reason": "parallel processing"},
+                    ),
+                )
+
+        # Create processor
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run_id,
+            source_node_id=source_node.node_id,
+            edge_map=edge_map,
+            route_resolution_map=route_resolution_map,
+        )
+
+        # Create gate with node_id set
+        gate = ForkGate(gate_node.node_id)
+
+        # Create context
+        ctx = PluginContext(run_id=run_id, config={})
+
+        # Process 2 rows from source
+        source_rows = [{"value": 1}, {"value": 2}]
+        all_results = []
+        for row_index, row_data in enumerate(source_rows):
+            results = processor.process_row(
+                row_index=row_index,
+                row_data=row_data,
+                transforms=[gate],
+                ctx=ctx,
+            )
+            all_results.extend(results)
+
+        # Count outcomes
+        completed_count = sum(
+            1 for r in all_results if r.outcome == RowOutcome.COMPLETED
+        )
+        forked_count = sum(1 for r in all_results if r.outcome == RowOutcome.FORKED)
+
+        # Verify:
+        # - 2 parent tokens with FORKED outcome
+        # - 4 child tokens with COMPLETED outcome
+        assert forked_count == 2, f"Expected 2 FORKED, got {forked_count}"
+        assert completed_count == 4, f"Expected 4 COMPLETED, got {completed_count}"
+
+        # Collect the COMPLETED tokens (these are what would go to sink)
+        completed_tokens = [
+            r.token for r in all_results if r.outcome == RowOutcome.COMPLETED
+        ]
+        assert len(completed_tokens) == 4
+
+        # Verify correct values: each source value appears twice (once per fork path)
+        values = [t.row_data["value"] for t in completed_tokens]
+        assert (
+            values.count(1) == 2
+        ), f"Expected value 1 to appear 2 times, got {values.count(1)}"
+        assert (
+            values.count(2) == 2
+        ), f"Expected value 2 to appear 2 times, got {values.count(2)}"
+
+        # Verify audit trail completeness
+        rows = recorder.get_rows(run_id)
+        assert len(rows) == 2, f"Expected 2 source rows, got {len(rows)}"
+
+        # Verify tokens: 2 parent + 4 children = 6 total
+        total_tokens = 0
+        for row in rows:
+            tokens = recorder.get_tokens(row.row_id)
+            total_tokens += len(tokens)
+        assert (
+            total_tokens == 6
+        ), f"Expected 6 tokens (2 parents + 4 children), got {total_tokens}"
+
+        # Verify routing events were recorded for fork operations
+        routing_event_count = 0
+        for row in rows:
+            tokens = recorder.get_tokens(row.row_id)
+            for token in tokens:
+                states = recorder.get_node_states_for_token(token.token_id)
+                for state in states:
+                    events = recorder.get_routing_events(state.state_id)
+                    routing_event_count += len(events)
+
+        # Each fork creates 2 routing events (one per path), 2 rows x 2 events = 4
+        assert (
+            routing_event_count == 4
+        ), f"Expected 4 routing events, got {routing_event_count}"
+
+        # Complete the run
+        recorder.complete_run(run_id, status="completed")

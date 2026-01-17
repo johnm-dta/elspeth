@@ -1415,3 +1415,29 @@ class TestCoalesceSettings:
         )
 
         assert settings.timeout_seconds == 30.0
+
+    def test_coalesce_settings_timeout_negative_rejected(self) -> None:
+        """Negative timeout values should be rejected."""
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError):
+            CoalesceSettings(
+                name="test",
+                branches=["branch_a", "branch_b"],
+                policy="best_effort",
+                merge="union",
+                timeout_seconds=-1.0,
+            )
+
+    def test_coalesce_settings_quorum_count_negative_rejected(self) -> None:
+        """Negative quorum count should be rejected."""
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError):
+            CoalesceSettings(
+                name="test",
+                branches=["branch_a", "branch_b"],
+                policy="quorum",
+                merge="union",
+                quorum_count=-1,
+            )

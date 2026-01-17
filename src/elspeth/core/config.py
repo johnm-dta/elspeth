@@ -451,6 +451,12 @@ class ElspethSettings(BaseModel):
         description="Engine-level gates for config-driven routing (evaluated by ExpressionParser)",
     )
 
+    # Optional - coalesce configuration (for merging fork paths)
+    coalesce: list[CoalesceSettings] = Field(
+        default_factory=list,
+        description="Coalesce configurations for merging forked paths",
+    )
+
     # Optional - subsystem configuration with defaults
     landscape: LandscapeSettings = Field(
         default_factory=LandscapeSettings,

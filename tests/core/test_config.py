@@ -1441,3 +1441,70 @@ class TestCoalesceSettings:
                 merge="union",
                 quorum_count=-1,
             )
+
+
+class TestElspethSettingsWithCoalesce:
+    """Tests for ElspethSettings with coalesce configuration."""
+
+    def test_elspeth_settings_with_coalesce(self) -> None:
+        """ElspethSettings should accept coalesce configuration."""
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(
+                plugin="csv_local", options={"path": "test.csv"}
+            ),
+            sinks={"default": SinkSettings(plugin="csv", options={"path": "out.csv"})},
+            output_sink="default",
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches=["path_a", "path_b"],
+                    policy="require_all",
+                    merge="union",
+                ),
+            ],
+        )
+
+        assert len(settings.coalesce) == 1
+        assert settings.coalesce[0].name == "merge_results"
+
+    def test_elspeth_settings_coalesce_default_empty(self) -> None:
+        """Coalesce defaults to empty list."""
+        from elspeth.core.config import ElspethSettings
+
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+        )
+        assert settings.coalesce == []
+
+    def test_resolve_config_includes_coalesce(self) -> None:
+        """resolve_config preserves coalesce configuration."""
+        from elspeth.core.config import ElspethSettings, resolve_config
+
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            coalesce=[
+                {
+                    "name": "merge_results",
+                    "branches": ["path_a", "path_b"],
+                    "policy": "require_all",
+                    "merge": "union",
+                },
+            ],
+        )
+
+        resolved = resolve_config(settings)
+
+        assert "coalesce" in resolved
+        assert len(resolved["coalesce"]) == 1
+        assert resolved["coalesce"][0]["name"] == "merge_results"

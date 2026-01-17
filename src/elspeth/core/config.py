@@ -99,6 +99,99 @@ class GateSettings(BaseModel):
         return self
 
 
+class CoalesceSettings(BaseModel):
+    """Configuration for coalesce (token merging) operations.
+
+    Coalesce merges tokens from parallel fork paths back into a single token.
+    Tokens are correlated by row_id (same source row that was forked).
+
+    Example YAML:
+        coalesce:
+          - name: merge_analysis
+            branches:
+              - sentiment_path
+              - entity_path
+            policy: require_all
+            merge: union
+
+          - name: quorum_merge
+            branches:
+              - fast_model
+              - slow_model
+              - fallback_model
+            policy: quorum
+            quorum_count: 2
+            merge: nested
+            timeout_seconds: 30
+    """
+
+    model_config = {"frozen": True}
+
+    name: str = Field(description="Unique identifier for this coalesce point")
+    branches: list[str] = Field(
+        min_length=2,
+        description="Branch names to wait for (from fork_to paths)",
+    )
+    policy: Literal["require_all", "quorum", "best_effort", "first"] = Field(
+        default="require_all",
+        description="How to handle partial arrivals",
+    )
+    merge: Literal["union", "nested", "select"] = Field(
+        default="union",
+        description="How to combine row data from branches",
+    )
+    timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description="Max wait time (required for best_effort, optional for quorum)",
+    )
+    quorum_count: int | None = Field(
+        default=None,
+        gt=0,
+        description="Minimum branches required (required for quorum policy)",
+    )
+    select_branch: str | None = Field(
+        default=None,
+        description="Which branch to take for 'select' merge strategy",
+    )
+
+    @model_validator(mode="after")
+    def validate_policy_requirements(self) -> "CoalesceSettings":
+        """Validate policy-specific requirements."""
+        if self.policy == "quorum" and self.quorum_count is None:
+            raise ValueError(
+                f"Coalesce '{self.name}': quorum policy requires quorum_count"
+            )
+        if (
+            self.policy == "quorum"
+            and self.quorum_count is not None
+            and self.quorum_count > len(self.branches)
+        ):
+            raise ValueError(
+                f"Coalesce '{self.name}': quorum_count ({self.quorum_count}) "
+                f"cannot exceed number of branches ({len(self.branches)})"
+            )
+        if self.policy == "best_effort" and self.timeout_seconds is None:
+            raise ValueError(
+                f"Coalesce '{self.name}': best_effort policy requires timeout_seconds"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_merge_requirements(self) -> "CoalesceSettings":
+        """Validate merge strategy requirements."""
+        if self.merge == "select" and self.select_branch is None:
+            raise ValueError(
+                f"Coalesce '{self.name}': select merge strategy requires select_branch"
+            )
+        if self.select_branch is not None and self.select_branch not in self.branches:
+            raise ValueError(
+                f"Coalesce '{self.name}': select_branch '{self.select_branch}' "
+                f"must be one of the expected branches: {self.branches}"
+            )
+        return self
+
+
 class DatasourceSettings(BaseModel):
     """Source plugin configuration per architecture."""
 

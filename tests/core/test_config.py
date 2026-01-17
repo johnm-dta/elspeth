@@ -1209,3 +1209,209 @@ gates:
         assert settings.gates[0].name == "parallel_analysis"
         assert settings.gates[0].routes == {"all": "fork"}
         assert settings.gates[0].fork_to == ["path_a", "path_b"]
+
+
+class TestCoalesceSettings:
+    """Test CoalesceSettings configuration model."""
+
+    def test_coalesce_settings_basic(self) -> None:
+        """Basic coalesce configuration should validate."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="merge_results",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+        )
+
+        assert settings.name == "merge_results"
+        assert settings.branches == ["path_a", "path_b"]
+        assert settings.policy == "require_all"
+        assert settings.merge == "union"
+        assert settings.timeout_seconds is None
+        assert settings.quorum_count is None
+
+    def test_coalesce_settings_quorum_requires_count(self) -> None:
+        """Quorum policy requires quorum_count."""
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError, match="quorum_count"):
+            CoalesceSettings(
+                name="quorum_merge",
+                branches=["a", "b", "c"],
+                policy="quorum",
+                merge="union",
+                # Missing quorum_count
+            )
+
+    def test_coalesce_settings_quorum_with_count(self) -> None:
+        """Quorum policy with count should validate."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="quorum_merge",
+            branches=["a", "b", "c"],
+            policy="quorum",
+            merge="union",
+            quorum_count=2,
+        )
+
+        assert settings.quorum_count == 2
+
+    def test_coalesce_settings_best_effort_requires_timeout(self) -> None:
+        """Best effort policy requires timeout."""
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError, match="timeout"):
+            CoalesceSettings(
+                name="best_effort_merge",
+                branches=["a", "b"],
+                policy="best_effort",
+                merge="union",
+                # Missing timeout_seconds
+            )
+
+    def test_coalesce_settings_nested_merge_strategy(self) -> None:
+        """Nested merge strategy should validate."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="nested_merge",
+            branches=["sentiment", "entities"],
+            policy="require_all",
+            merge="nested",
+        )
+
+        assert settings.merge == "nested"
+
+    def test_coalesce_settings_select_merge_strategy(self) -> None:
+        """Select merge requires select_branch."""
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError, match="select_branch"):
+            CoalesceSettings(
+                name="select_merge",
+                branches=["a", "b"],
+                policy="require_all",
+                merge="select",
+                # Missing select_branch
+            )
+
+    def test_coalesce_settings_select_with_branch(self) -> None:
+        """Select merge with branch should validate."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="select_merge",
+            branches=["primary", "fallback"],
+            policy="require_all",
+            merge="select",
+            select_branch="primary",
+        )
+
+        assert settings.select_branch == "primary"
+
+    def test_coalesce_settings_quorum_count_cannot_exceed_branches(self) -> None:
+        """Quorum count cannot exceed number of branches."""
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError, match="cannot exceed"):
+            CoalesceSettings(
+                name="quorum_merge",
+                branches=["a", "b"],
+                policy="quorum",
+                merge="union",
+                quorum_count=3,  # More than 2 branches
+            )
+
+    def test_coalesce_settings_select_branch_must_be_in_branches(self) -> None:
+        """Select branch must be one of the defined branches."""
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError, match="must be one of"):
+            CoalesceSettings(
+                name="select_merge",
+                branches=["a", "b"],
+                policy="require_all",
+                merge="select",
+                select_branch="c",  # Not in branches
+            )
+
+    def test_coalesce_settings_branches_minimum_two(self) -> None:
+        """Branches must have at least 2 entries."""
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError):
+            CoalesceSettings(
+                name="single_branch",
+                branches=["only_one"],
+                policy="require_all",
+                merge="union",
+            )
+
+    def test_coalesce_settings_timeout_must_be_positive(self) -> None:
+        """Timeout must be positive when provided."""
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError):
+            CoalesceSettings(
+                name="bad_timeout",
+                branches=["a", "b"],
+                policy="best_effort",
+                merge="union",
+                timeout_seconds=0,
+            )
+
+    def test_coalesce_settings_quorum_count_must_be_positive(self) -> None:
+        """Quorum count must be positive when provided."""
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError):
+            CoalesceSettings(
+                name="bad_quorum",
+                branches=["a", "b", "c"],
+                policy="quorum",
+                merge="union",
+                quorum_count=0,
+            )
+
+    def test_coalesce_settings_frozen(self) -> None:
+        """CoalesceSettings is immutable."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="merge_results",
+            branches=["a", "b"],
+            policy="require_all",
+            merge="union",
+        )
+        with pytest.raises(ValidationError):
+            settings.name = "other"  # type: ignore[misc]
+
+    def test_coalesce_settings_first_policy(self) -> None:
+        """First policy should validate without additional requirements."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="first_wins",
+            branches=["fast_model", "slow_model"],
+            policy="first",
+            merge="union",
+        )
+
+        assert settings.policy == "first"
+
+    def test_coalesce_settings_best_effort_with_timeout(self) -> None:
+        """Best effort policy with timeout should validate."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="best_effort_merge",
+            branches=["a", "b"],
+            policy="best_effort",
+            merge="union",
+            timeout_seconds=30.0,
+        )
+
+        assert settings.timeout_seconds == 30.0

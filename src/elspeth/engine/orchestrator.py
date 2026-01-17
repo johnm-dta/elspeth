@@ -25,8 +25,9 @@ from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import SinkProtocol, SourceProtocol
 
-# Type alias for transform-like plugins
-TransformLike = BaseTransform | BaseGate | BaseAggregation
+# Type alias for row-processing plugins in the transforms pipeline
+RowPlugin = BaseTransform | BaseGate | BaseAggregation
+"""Union of all row-processing plugin types for pipeline transforms list."""
 
 if TYPE_CHECKING:
     from elspeth.core.checkpoint import CheckpointManager
@@ -42,7 +43,7 @@ class PipelineConfig:
     """
 
     source: SourceProtocol
-    transforms: list[TransformLike]
+    transforms: list[RowPlugin]
     sinks: dict[str, SinkProtocol]  # Sinks implement batch write directly
     config: dict[str, Any] = field(default_factory=dict)
 
@@ -179,7 +180,7 @@ class Orchestrator:
         route_resolution_map: dict[tuple[str, str], str],
         available_sinks: set[str],
         transform_id_map: dict[int, str],
-        transforms: list[TransformLike],
+        transforms: list[RowPlugin],
     ) -> None:
         """Validate all route destinations reference existing sinks.
 
@@ -221,7 +222,7 @@ class Orchestrator:
     def _assign_plugin_node_ids(
         self,
         source: SourceProtocol,
-        transforms: list[TransformLike],
+        transforms: list[RowPlugin],
         sinks: dict[str, SinkProtocol],
         source_id: str,
         transform_id_map: dict[int, str],

@@ -141,3 +141,13 @@ class DatabaseSink(BaseSink):
             self._engine = None
             self._table = None
             self._metadata = None
+
+    # === Lifecycle Hooks ===
+
+    def on_start(self, ctx: PluginContext) -> None:
+        """Called before processing begins."""
+        pass
+
+    def on_complete(self, ctx: PluginContext) -> None:
+        """Called after processing completes."""
+        pass

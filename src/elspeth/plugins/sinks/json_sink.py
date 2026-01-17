@@ -139,3 +139,13 @@ class JSONSink(BaseSink):
             self._file.close()
             self._file = None
             self._rows = []
+
+    # === Lifecycle Hooks ===
+
+    def on_start(self, ctx: PluginContext) -> None:
+        """Called before processing begins."""
+        pass
+
+    def on_complete(self, ctx: PluginContext) -> None:
+        """Called after processing completes."""
+        pass

@@ -215,3 +215,37 @@ class TestBaseSource:
         rows = list(source.load(ctx))
         assert len(rows) == 2
         assert rows[0] == {"value": 1}
+
+    def test_base_source_has_metadata_attributes(self) -> None:
+        from elspeth.contracts import Determinism
+        from elspeth.plugins.base import BaseSource
+
+        # Direct attribute access - will fail with AttributeError if missing
+        assert BaseSource.determinism == Determinism.IO_READ
+        assert BaseSource.plugin_version == "0.0.0"
+
+    def test_subclass_can_override_metadata(self) -> None:
+        from collections.abc import Iterator
+
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.base import BaseSource
+        from elspeth.plugins.context import PluginContext
+
+        class OutputSchema(PluginSchema):
+            value: int
+
+        class CustomSource(BaseSource):
+            name = "custom"
+            output_schema = OutputSchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "2.0.0"
+
+            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
+                yield {"value": 1}
+
+            def close(self) -> None:
+                pass
+
+        source = CustomSource({})
+        assert source.determinism == Determinism.DETERMINISTIC
+        assert source.plugin_version == "2.0.0"

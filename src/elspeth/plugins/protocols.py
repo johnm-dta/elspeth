@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from elspeth.contracts import Determinism
 
 if TYPE_CHECKING:
-    from elspeth.contracts import PluginSchema
+    from elspeth.contracts import ArtifactDescriptor, PluginSchema
     from elspeth.plugins.context import PluginContext
     from elspeth.plugins.results import AcceptResult, GateResult, TransformResult
 
@@ -461,8 +461,14 @@ class SinkProtocol(Protocol):
             input_schema = RowSchema
             idempotent = False  # Appends are not idempotent
 
-            def write(self, row: dict, ctx: PluginContext) -> None:
-                self._writer.writerow(row)
+            def write(self, rows: list[dict], ctx: PluginContext) -> ArtifactDescriptor:
+                for row in rows:
+                    self._writer.writerow(row)
+                return ArtifactDescriptor.for_file(
+                    path=self._path,
+                    content_hash=self._compute_hash(),
+                    size_bytes=self._file.tell(),
+                )
 
             def flush(self) -> None:
                 self._file.flush()
@@ -483,14 +489,17 @@ class SinkProtocol(Protocol):
 
     def write(
         self,
-        row: dict[str, Any],
+        rows: list[dict[str, Any]],
         ctx: "PluginContext",
-    ) -> None:
-        """Write a row to the sink.
+    ) -> "ArtifactDescriptor":
+        """Write a batch of rows to the sink.
 
         Args:
-            row: Row data to write
+            rows: List of row dicts to write
             ctx: Plugin context
+
+        Returns:
+            ArtifactDescriptor with content_hash and size_bytes (REQUIRED for audit)
         """
         ...
 

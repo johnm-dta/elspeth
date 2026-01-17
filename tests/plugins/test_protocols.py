@@ -442,10 +442,90 @@ class TestCoalesceProtocol:
 class TestSinkProtocol:
     """Sink plugin protocol."""
 
+    def test_sink_batch_write_signature(self) -> None:
+        """Sink.write() accepts batch and returns ArtifactDescriptor."""
+        import inspect
+
+        from elspeth.plugins.protocols import SinkProtocol
+
+        # Get the write method signature
+        sig = inspect.signature(SinkProtocol.write)
+        params = list(sig.parameters.keys())
+
+        # Should have 'rows' not 'row'
+        assert "rows" in params, "write() should accept 'rows' (batch), not 'row'"
+        assert "row" not in params, "write() should NOT have 'row' parameter"
+
+        # Return annotation should be ArtifactDescriptor (may be forward ref string)
+        return_annotation = sig.return_annotation
+        # Handle both string forward reference and actual class
+        if isinstance(return_annotation, str):
+            assert return_annotation == "ArtifactDescriptor"
+        else:
+            from elspeth.contracts import ArtifactDescriptor
+
+            assert return_annotation == ArtifactDescriptor
+
+    def test_batch_sink_implementation(self) -> None:
+        """Test sink with batch write returning ArtifactDescriptor."""
+        from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import SinkProtocol
+
+        class InputSchema(PluginSchema):
+            value: int
+
+        class BatchMemorySink:
+            name = "batch_memory"
+            input_schema = InputSchema
+            idempotent = True
+            node_id: str | None = None
+            determinism = Determinism.IO_WRITE
+            plugin_version = "1.0.0"
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.rows: list[dict[str, Any]] = []
+
+            def write(
+                self, rows: list[dict[str, Any]], ctx: PluginContext
+            ) -> ArtifactDescriptor:
+                self.rows.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="/tmp/test.json",
+                    content_hash="abc123",
+                    size_bytes=len(str(rows)),
+                )
+
+            def flush(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def on_register(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
+        sink = BatchMemorySink({})
+        assert isinstance(sink, SinkProtocol)
+
+        ctx = PluginContext(run_id="test", config={})
+        artifact = sink.write([{"value": 1}, {"value": 2}], ctx)
+
+        assert isinstance(artifact, ArtifactDescriptor)
+        assert artifact.content_hash == "abc123"
+        assert len(sink.rows) == 2
+
     def test_sink_implementation(self) -> None:
+        """Test sink conforming to updated batch protocol."""
         from typing import ClassVar
 
-        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.protocols import SinkProtocol
 
@@ -459,7 +539,7 @@ class TestSinkProtocol:
             input_schema = InputSchema
             idempotent = True
             node_id: str | None = None  # Set by orchestrator
-            determinism = Determinism.DETERMINISTIC
+            determinism = Determinism.IO_WRITE
             plugin_version = "1.0.0"
             rows: ClassVar[list[dict[str, Any]]] = []
 
@@ -467,8 +547,15 @@ class TestSinkProtocol:
                 self.instance_rows: list[dict[str, Any]] = []
                 self.config = config
 
-            def write(self, row: dict[str, Any], ctx: PluginContext) -> None:
-                self.rows.append(row)
+            def write(
+                self, rows: list[dict[str, Any]], ctx: PluginContext
+            ) -> ArtifactDescriptor:
+                self.rows.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="/tmp/memory",
+                    content_hash="test",
+                    size_bytes=len(str(rows)),
+                )
 
             def flush(self) -> None:
                 pass
@@ -492,11 +579,12 @@ class TestSinkProtocol:
 
         ctx = PluginContext(run_id="test", config={})
 
-        sink.write({"value": 1}, ctx)
-        sink.write({"value": 2}, ctx)
+        # Batch write
+        artifact = sink.write([{"value": 1}, {"value": 2}], ctx)
 
         assert len(sink.rows) == 2
         assert sink.rows[0] == {"value": 1}
+        assert isinstance(artifact, ArtifactDescriptor)
 
     def test_sink_has_idempotency_support(self) -> None:
         """Sinks should support idempotency keys."""

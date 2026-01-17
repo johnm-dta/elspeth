@@ -32,6 +32,11 @@ from elspeth.engine.executors import (
     SinkExecutor,
     TransformExecutor,
 )
+from elspeth.engine.expression_parser import (
+    ExpressionParser,
+    ExpressionSecurityError,
+    ExpressionSyntaxError,
+)
 from elspeth.engine.orchestrator import (
     Orchestrator,
     PipelineConfig,
@@ -45,6 +50,9 @@ from elspeth.engine.tokens import TokenManager
 
 __all__ = [
     "AggregationExecutor",
+    "ExpressionParser",
+    "ExpressionSecurityError",
+    "ExpressionSyntaxError",
     "GateExecutor",
     "MaxRetriesExceeded",
     "MissingEdgeError",

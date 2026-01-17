@@ -15,7 +15,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from elspeth.contracts import NodeStateStatus, RunStatus
+from elspeth.contracts import (
+    Determinism,
+    ExportStatus,
+    NodeStateStatus,
+    NodeType,
+    RoutingMode,
+    RunStatus,
+)
 
 
 @dataclass
@@ -31,9 +38,7 @@ class Run:
     completed_at: datetime | None = None
     reproducibility_grade: str | None = None
     # Export tracking - separate from run status
-    # TODO: Convert export_status to ExportStatus enum (pending, completed, failed)
-    # following the RunStatus pattern. Also update set_export_status() in recorder.py.
-    export_status: str | None = None
+    export_status: ExportStatus | None = None
     export_error: str | None = None
     exported_at: datetime | None = None
     export_format: str | None = None  # csv, json
@@ -47,9 +52,9 @@ class Node:
     node_id: str
     run_id: str
     plugin_name: str
-    node_type: str  # source, transform, gate, aggregation, coalesce, sink
+    node_type: NodeType
     plugin_version: str
-    determinism: str  # From Determinism enum: deterministic, seeded, nondeterministic
+    determinism: Determinism
     config_hash: str
     config_json: str
     registered_at: datetime
@@ -66,7 +71,7 @@ class Edge:
     from_node_id: str
     to_node_id: str
     label: str  # "continue", route name, etc.
-    default_mode: str  # "move" or "copy"
+    default_mode: RoutingMode
     created_at: datetime
 
 

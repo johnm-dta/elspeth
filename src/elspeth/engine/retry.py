@@ -10,7 +10,7 @@ Provides configurable retry behavior for transform execution:
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import TypeVar
 
 from tenacity import (
     RetryError,
@@ -19,6 +19,8 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential_jitter,
 )
+
+from elspeth.contracts import RetryPolicy
 
 T = TypeVar("T")
 
@@ -55,7 +57,7 @@ class RetryConfig:
         return cls(max_attempts=1)
 
     @classmethod
-    def from_policy(cls, policy: dict[str, Any] | None) -> "RetryConfig":
+    def from_policy(cls, policy: RetryPolicy | None) -> "RetryConfig":
         """Factory from plugin policy dict with safe defaults.
 
         Handles missing/malformed policy gracefully.

@@ -82,6 +82,7 @@ from elspeth.contracts.config import (
     RowPluginSettings,
     SinkSettings,
 )
+from elspeth.contracts.engine import RetryPolicy
 
 __all__ = [
     # audit
@@ -152,4 +153,6 @@ __all__ = [
     "SchemaValidationError",
     "check_compatibility",
     "validate_row",
+    # engine
+    "RetryPolicy",
 ]

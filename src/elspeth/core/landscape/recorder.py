@@ -5,12 +5,14 @@ This is the main interface for recording audit trail entries during
 pipeline execution. It wraps the low-level database operations.
 """
 
+import json
 import uuid
 from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
+    from elspeth.contracts.schema import SchemaConfig
     from elspeth.core.landscape.reproducibility import ReproducibilityGrade
 
 from sqlalchemy import select
@@ -429,6 +431,7 @@ class LandscapeRecorder:
         sequence: int | None = None,
         schema_hash: str | None = None,
         determinism: Determinism | str = Determinism.DETERMINISTIC,
+        schema_config: "SchemaConfig | None" = None,
     ) -> Node:
         """Register a plugin instance (node) in the execution graph.
 
@@ -443,6 +446,7 @@ class LandscapeRecorder:
             sequence: Position in pipeline
             schema_hash: Optional input/output schema hash
             determinism: Reproducibility grade (Determinism enum or string)
+            schema_config: Schema configuration for audit trail (WP-11.99)
 
         Returns:
             Node model
@@ -459,6 +463,25 @@ class LandscapeRecorder:
         config_hash = stable_hash(config)
         now = _now()
 
+        # Extract schema info for audit (WP-11.99)
+        schema_mode: str | None = None
+        schema_fields_json: str | None = None
+        schema_fields_list: list[dict[str, object]] | None = None
+
+        if schema_config is not None:
+            if schema_config.is_dynamic:
+                schema_mode = "dynamic"
+                schema_fields_json = None
+                schema_fields_list = None
+            else:
+                schema_mode = schema_config.mode
+                if schema_config.fields:
+                    # FieldDefinition.to_dict() returns dict[str, str | bool]
+                    # Cast each dict to wider type for storage
+                    field_dicts = [f.to_dict() for f in schema_config.fields]
+                    schema_fields_list = [dict(d) for d in field_dicts]
+                    schema_fields_json = canonical_json(field_dicts)
+
         node = Node(
             node_id=node_id,
             run_id=run_id,
@@ -471,6 +494,8 @@ class LandscapeRecorder:
             schema_hash=schema_hash,
             sequence_in_pipeline=sequence,
             registered_at=now,
+            schema_mode=schema_mode,
+            schema_fields=schema_fields_list,
         )
 
         with self._db.connection() as conn:
@@ -487,6 +512,8 @@ class LandscapeRecorder:
                     schema_hash=node.schema_hash,
                     sequence_in_pipeline=node.sequence_in_pipeline,
                     registered_at=node.registered_at,
+                    schema_mode=node.schema_mode,
+                    schema_fields_json=schema_fields_json,
                 )
             )
 
@@ -549,6 +576,56 @@ class LandscapeRecorder:
 
         return edge
 
+    def _row_to_node(self, row: Any) -> Node:
+        """Convert a database row to a Node model.
+
+        Args:
+            row: Database row from nodes table
+
+        Returns:
+            Node model with all fields including schema info
+        """
+        # Parse schema_fields_json back to list
+        schema_fields: list[dict[str, object]] | None = None
+        if row.schema_fields_json is not None:
+            schema_fields = json.loads(row.schema_fields_json)
+
+        return Node(
+            node_id=row.node_id,
+            run_id=row.run_id,
+            plugin_name=row.plugin_name,
+            node_type=NodeType(row.node_type),  # Coerce DB string to enum
+            plugin_version=row.plugin_version,
+            determinism=Determinism(row.determinism),  # Coerce DB string to enum
+            config_hash=row.config_hash,
+            config_json=row.config_json,
+            schema_hash=row.schema_hash,
+            sequence_in_pipeline=row.sequence_in_pipeline,
+            registered_at=row.registered_at,
+            schema_mode=row.schema_mode,
+            schema_fields=schema_fields,
+        )
+
+    def get_node(self, node_id: str) -> Node | None:
+        """Get a node by ID.
+
+        Args:
+            node_id: Node ID to retrieve
+
+        Returns:
+            Node model or None if not found
+        """
+        with self._db.connection() as conn:
+            result = conn.execute(
+                select(nodes_table).where(nodes_table.c.node_id == node_id)
+            )
+            row = result.fetchone()
+
+        if row is None:
+            return None
+
+        return self._row_to_node(row)
+
     def get_nodes(self, run_id: str) -> list[Node]:
         """Get all nodes for a run.
 
@@ -568,22 +645,7 @@ class LandscapeRecorder:
             )
             rows = result.fetchall()
 
-        return [
-            Node(
-                node_id=row.node_id,
-                run_id=row.run_id,
-                plugin_name=row.plugin_name,
-                node_type=NodeType(row.node_type),  # Coerce DB string to enum
-                plugin_version=row.plugin_version,
-                determinism=Determinism(row.determinism),  # Coerce DB string to enum
-                config_hash=row.config_hash,
-                config_json=row.config_json,
-                schema_hash=row.schema_hash,
-                sequence_in_pipeline=row.sequence_in_pipeline,
-                registered_at=row.registered_at,
-            )
-            for row in rows
-        ]
+        return [self._row_to_node(row) for row in rows]
 
     def get_edges(self, run_id: str) -> list[Edge]:
         """Get all edges for a run.

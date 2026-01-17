@@ -64,6 +64,9 @@ nodes_table = Table(
     Column("schema_hash", String(64)),
     Column("sequence_in_pipeline", Integer),
     Column("registered_at", DateTime(timezone=True), nullable=False),
+    # Schema configuration for audit trail (WP-11.99)
+    Column("schema_mode", String(16)),  # "dynamic", "strict", "free", or NULL
+    Column("schema_fields_json", Text),  # JSON array of field definitions, or NULL
 )
 
 # === Edges ===

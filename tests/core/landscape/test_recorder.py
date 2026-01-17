@@ -2252,3 +2252,134 @@ class TestReproducibilityGradeComputation:
 
         # Since defaults are DETERMINISTIC, should get FULL_REPRODUCIBLE
         assert grade == ReproducibilityGrade.FULL_REPRODUCIBLE
+
+
+class TestSchemaRecording:
+    """Tests for schema configuration recording in audit trail."""
+
+    def test_register_node_with_dynamic_schema(self) -> None:
+        """Dynamic schema recorded in node registration."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        schema_config = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0.0",
+            config={"path": "data.csv"},
+            schema_config=schema_config,
+        )
+
+        retrieved = recorder.get_node(node.node_id)
+        assert retrieved is not None
+        assert retrieved.schema_mode == "dynamic"
+        assert retrieved.schema_fields is None
+
+    def test_register_node_with_explicit_schema(self) -> None:
+        """Explicit schema fields recorded in node registration."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        schema_config = SchemaConfig.from_dict(
+            {
+                "mode": "strict",
+                "fields": ["id: int", "name: str"],
+            }
+        )
+
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0.0",
+            config={"path": "data.csv"},
+            schema_config=schema_config,
+        )
+
+        retrieved = recorder.get_node(node.node_id)
+        assert retrieved is not None
+        assert retrieved.schema_mode == "strict"
+        assert retrieved.schema_fields is not None
+        assert len(retrieved.schema_fields) == 2
+        assert retrieved.schema_fields[0]["name"] == "id"
+        assert retrieved.schema_fields[1]["name"] == "name"
+
+    def test_register_node_with_free_schema(self) -> None:
+        """Free schema (at least these fields) recorded in node registration."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        schema_config = SchemaConfig.from_dict(
+            {
+                "mode": "free",
+                "fields": ["id: int", "name: str", "score: float?"],
+            }
+        )
+
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0.0",
+            config={"path": "data.csv"},
+            schema_config=schema_config,
+        )
+
+        retrieved = recorder.get_node(node.node_id)
+        assert retrieved is not None
+        assert retrieved.schema_mode == "free"
+        assert retrieved.schema_fields is not None
+        assert len(retrieved.schema_fields) == 3
+        # Verify optional field is marked correctly
+        assert retrieved.schema_fields[2]["name"] == "score"
+        assert retrieved.schema_fields[2]["required"] is False
+
+    def test_get_nodes_includes_schema_info(self) -> None:
+        """get_nodes() returns nodes with schema information."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register one node with explicit schema
+        schema_config = SchemaConfig.from_dict(
+            {
+                "mode": "strict",
+                "fields": ["value: int"],
+            }
+        )
+        recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type="source",
+            plugin_version="1.0.0",
+            config={},
+            schema_config=schema_config,
+        )
+
+        nodes = recorder.get_nodes(run.run_id)
+        assert len(nodes) == 1
+        assert nodes[0].schema_mode == "strict"
+        assert nodes[0].schema_fields is not None
+        assert len(nodes[0].schema_fields) == 1

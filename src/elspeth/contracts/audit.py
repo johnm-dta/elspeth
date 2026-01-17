@@ -64,6 +64,11 @@ class Node:
     registered_at: datetime
     schema_hash: str | None = None
     sequence_in_pipeline: int | None = None
+    # Schema configuration for audit trail (WP-11.99)
+    schema_mode: str | None = None  # "dynamic", "strict", "free"
+    schema_fields: list[dict[str, object]] | None = (
+        None  # Field definitions if explicit
+    )
 
 
 @dataclass

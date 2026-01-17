@@ -179,37 +179,37 @@ allow_hits:
   # names is intentional, not a bug-hiding pattern.
   # ============================================================
 
-  - key: "plugins/manager.py:R1:PluginManager:get_source_by_name:line=294"
+  - key: "plugins/manager.py:R1:PluginManager:get_source_by_name:line=292"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_transform_by_name:line=298"
+  - key: "plugins/manager.py:R1:PluginManager:get_transform_by_name:line=296"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_gate_by_name:line=302"
+  - key: "plugins/manager.py:R1:PluginManager:get_gate_by_name:line=300"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_aggregation_by_name:line=306"
+  - key: "plugins/manager.py:R1:PluginManager:get_aggregation_by_name:line=304"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_coalesce_by_name:line=310"
+  - key: "plugins/manager.py:R1:PluginManager:get_coalesce_by_name:line=308"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_sink_by_name:line=314"
+  - key: "plugins/manager.py:R1:PluginManager:get_sink_by_name:line=312"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
@@ -343,37 +343,37 @@ allow_hits:
     expires: null  # Permanent - intentional design
 
   # PluginManager._refresh_caches - uses getattr for name fallback to __name__
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=198"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=196"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=208"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=206"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=218"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=216"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=228"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=226"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=238"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=236"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=248"
+  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=246"
     owner: "architecture"
     reason: "Trust boundary: plugins may not define name attribute"
     safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
@@ -396,21 +396,6 @@ allow_hits:
     owner: "architecture"
     reason: "Type introspection: not all types have __name__ attribute"
     safety: "Graceful fallback to str() - error message still produced"
-    expires: null  # Permanent - intentional design
-
-  # ============================================================
-  # FIELD MATCH GATE LOOKUP (Permanent)
-  # ============================================================
-  # The _find_matching_label method returns Optional[str] by design.
-  # When looking up user-provided values in the matches dict, returning
-  # None is the correct response for "no match found". This is not
-  # bug-hiding but legitimate Optional return type semantics.
-  # ============================================================
-
-  - key: "plugins/gates/field_match_gate.py:R1:FieldMatchGate:_find_matching_label:line=169"
-    owner: "architecture"
-    reason: "Intentional Optional API: returns None when value not in matches dict"
-    safety: "Caller checks return value - None triggers default_label path"
     expires: null  # Permanent - intentional design
 
   # ============================================================

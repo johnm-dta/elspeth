@@ -20,6 +20,7 @@ from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 from elspeth.engine.executors import SinkLike
 from elspeth.engine.processor import RowProcessor
+from elspeth.engine.schema_validator import validate_pipeline_schemas
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
@@ -240,6 +241,29 @@ class Orchestrator:
             raise ValueError(
                 "ExecutionGraph is required. "
                 "Build with ExecutionGraph.from_config(settings)"
+            )
+
+        # Validate schema compatibility (opt-in, skip if schemas not defined)
+        source_output = getattr(config.source, "output_schema", None)
+        transform_inputs = [
+            getattr(t, "input_schema", None) for t in config.transforms
+        ]
+        transform_outputs = [
+            getattr(t, "output_schema", None) for t in config.transforms
+        ]
+        sink_inputs = [
+            getattr(s, "input_schema", None) for s in config.sinks.values()
+        ]
+
+        schema_errors = validate_pipeline_schemas(
+            source_output=source_output,
+            transform_inputs=transform_inputs,
+            transform_outputs=transform_outputs,
+            sink_inputs=sink_inputs,
+        )
+        if schema_errors:
+            raise ValueError(
+                f"Pipeline schema incompatibility: {'; '.join(schema_errors)}"
             )
 
         recorder = LandscapeRecorder(self._db)

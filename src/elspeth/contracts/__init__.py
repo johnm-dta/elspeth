@@ -83,6 +83,7 @@ from elspeth.contracts.config import (
     SinkSettings,
 )
 from elspeth.contracts.engine import RetryPolicy
+from elspeth.contracts.cli import ExecutionResult
 
 __all__ = [
     # audit
@@ -155,4 +156,6 @@ __all__ = [
     "validate_row",
     # engine
     "RetryPolicy",
+    # cli
+    "ExecutionResult",
 ]

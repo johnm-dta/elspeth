@@ -12,6 +12,7 @@ import typer
 from pydantic import ValidationError
 
 from elspeth import __version__
+from elspeth.contracts import ExecutionResult
 from elspeth.core.config import ElspethSettings, load_settings, resolve_config
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
@@ -208,7 +209,9 @@ def explain(
     tui_app.run()
 
 
-def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> dict[str, Any]:
+def _execute_pipeline(
+    config: ElspethSettings, verbose: bool = False
+) -> ExecutionResult:
     """Execute a pipeline from configuration.
 
     Args:
@@ -216,7 +219,7 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> dict[st
         verbose: Show detailed output.
 
     Returns:
-        Dict with run_id, status, rows_processed.
+        ExecutionResult with run_id, status, rows_processed.
     """
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import Orchestrator, PipelineConfig

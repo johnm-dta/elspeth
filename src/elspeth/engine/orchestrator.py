@@ -589,15 +589,8 @@ class Orchestrator:
                         )
                     elif result.outcome == RowOutcome.ROUTED:
                         rows_routed += 1
-                        # sink_name is guaranteed valid by _validate_route_destinations()
-                        # which runs before any rows are processed
-                        if result.sink_name is None:
-                            # This indicates a bug in GateExecutor - ROUTED outcome
-                            # should always have a sink_name set
-                            raise RuntimeError(
-                                f"Row outcome is ROUTED but sink_name is None "
-                                f"for token {result.token.token_id}"
-                            )
+                        # GateExecutor contract: ROUTED outcome always has sink_name set
+                        assert result.sink_name is not None
                         pending_tokens[result.sink_name].append(result.token)
                         # Checkpoint after successful routing
                         self._maybe_checkpoint(

@@ -275,7 +275,7 @@ allow_hits:
   # variables. This is explicitly checked and raises if missing when required.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=684"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=677"
     owner: "architecture"
     reason: "Standard pattern: optional environment variable with explicit check"
     safety: "Raises ValueError with clear message if signing enabled but key missing"
@@ -294,13 +294,13 @@ allow_hits:
     safety: "Raises immediately with node_id and label for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=646"
+  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=634"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=660"
+  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=648"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
@@ -314,19 +314,19 @@ allow_hits:
   # are valid (no batch yet) or raise ValueError with clear diagnostics.
   # ============================================================
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_batch_id:line=717"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_batch_id:line=705"
     owner: "architecture"
     reason: "Intentional Optional API: returns None if no batch exists for node_id"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:accept:line=747"
+  - key: "engine/executors.py:R1:AggregationExecutor:accept:line=735"
     owner: "architecture"
     reason: "Checking if batch exists to decide whether to create one"
     safety: "None means 'create new batch' - explicit conditional logic follows"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:flush:line=849"
+  - key: "engine/executors.py:R1:AggregationExecutor:flush:line=837"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises ValueError if no batch to flush"
     safety: "Raises immediately with node_id for debugging"

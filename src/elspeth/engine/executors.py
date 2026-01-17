@@ -533,22 +533,10 @@ class GateExecutor:
             action = RoutingAction.continue_(reason=reason)
 
         elif destination == "fork":
-            # Fork to multiple paths
-            if gate_config.fork_to is None:
-                # This should be caught by Pydantic validation, but be defensive
-                error = {
-                    "exception": "fork destination requires fork_to paths",
-                    "type": "ValueError",
-                }
-                self._recorder.complete_node_state(
-                    state_id=state.state_id,
-                    status="failed",
-                    duration_ms=duration_ms,
-                    error=error,
-                )
-                raise ValueError(
-                    f"Gate '{gate_config.name}' routes to 'fork' but fork_to is not configured"
-                )
+            # Fork to multiple paths - fork_to guaranteed by GateSettings.validate_fork_consistency()
+            assert (
+                gate_config.fork_to is not None
+            )  # Pydantic validation guarantees this
 
             if token_manager is None:
                 error = {

@@ -121,7 +121,9 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str) -> None:
         current_grade = row[0]
 
         # Only REPLAY_REPRODUCIBLE needs to degrade
-        # Also guard against NULL grades (shouldn't happen, but defensive)
+        # TODO: Remove defensive NULL grade handling - Landscape is Tier 1 (FULL TRUST).
+        # If grade is NULL, that's database corruption or a bug in our code - should crash,
+        # not silently skip the update. See CLAUDE.md Three-Tier Trust Model.
         if current_grade == ReproducibilityGrade.REPLAY_REPRODUCIBLE.value:
             conn.execute(
                 runs_table.update()

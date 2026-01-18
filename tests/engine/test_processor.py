@@ -1,20 +1,19 @@
 # tests/engine/test_processor.py
 """Tests for RowProcessor.
 
-All test plugins inherit from base classes (BaseTransform, BaseGate, BaseAggregation)
+Test plugins inherit from base classes (BaseTransform, BaseAggregation)
 because the processor uses isinstance() for type-safe plugin detection.
+Gates are config-driven using GateSettings.
 """
 
 from typing import Any
 
 from elspeth.contracts import PluginSchema, RoutingMode
 from elspeth.contracts.schema import SchemaConfig
-from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
+from elspeth.plugins.base import BaseAggregation, BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import (
     AcceptResult,
-    GateResult,
-    RoutingAction,
     RowOutcome,
     TransformResult,
 )
@@ -446,7 +445,8 @@ class TestRowProcessorGates:
     """Gate handling in RowProcessor."""
 
     def test_gate_continue_proceeds(self) -> None:
-        """Gate returning continue proceeds to next transform."""
+        """Gate returning continue proceeds to completion."""
+        from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
@@ -463,14 +463,6 @@ class TestRowProcessorGates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        gate = recorder.register_node(
-            run_id=run.run_id,
-            plugin_name="pass_gate",
-            node_type="gate",
-            plugin_version="1.0",
-            config={},
-            schema_config=DYNAMIC_SCHEMA,
-        )
         transform = recorder.register_node(
             run_id=run.run_id,
             plugin_name="final",
@@ -479,18 +471,14 @@ class TestRowProcessorGates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-
-        class PassGate(BaseGate):
-            name = "pass_gate"
-            input_schema = _TestSchema
-            output_schema = _TestSchema
-
-            def __init__(self, node_id: str) -> None:
-                super().__init__({})
-                self.node_id = node_id
-
-            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
-                return GateResult(row=row, action=RoutingAction.continue_())
+        gate = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="pass_gate",
+            node_type="gate",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
 
         class FinalTransform(BaseTransform):
             name = "final"
@@ -506,18 +494,27 @@ class TestRowProcessorGates:
             ) -> TransformResult:
                 return TransformResult.success({**row, "final": True})
 
+        # Config-driven gate: always continues
+        pass_gate = GateSettings(
+            name="pass_gate",
+            condition="True",
+            routes={"true": "continue"},
+        )
+
         ctx = PluginContext(run_id=run.run_id, config={})
         processor = RowProcessor(
             recorder=recorder,
             span_factory=SpanFactory(),
             run_id=run.run_id,
             source_node_id=source.node_id,
+            config_gates=[pass_gate],
+            config_gate_id_map={"pass_gate": gate.node_id},
         )
 
         results = processor.process_row(
             row_index=0,
             row_data={"value": 42},
-            transforms=[PassGate(gate.node_id), FinalTransform(transform.node_id)],
+            transforms=[FinalTransform(transform.node_id)],
             ctx=ctx,
         )
 
@@ -530,6 +527,7 @@ class TestRowProcessorGates:
 
     def test_gate_route_to_sink(self) -> None:
         """Gate routing via route label returns routed outcome with sink name."""
+        from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
@@ -568,31 +566,21 @@ class TestRowProcessorGates:
             run_id=run.run_id,
             from_node_id=gate.node_id,
             to_node_id=sink.node_id,
-            label="above",  # Route label, not sink name
+            label="true",  # Route label for true condition
             mode=RoutingMode.MOVE,
         )
 
-        class RouterGate(BaseGate):
-            name = "router"
-            input_schema = _TestSchema
-            output_schema = _TestSchema
-
-            def __init__(self, node_id: str) -> None:
-                super().__init__({})
-                self.node_id = node_id
-
-            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
-                if row.get("value", 0) > 100:
-                    return GateResult(
-                        row=row,
-                        action=RoutingAction.route("above"),  # Route label
-                    )
-                return GateResult(row=row, action=RoutingAction.continue_())
+        # Config-driven gate: routes values > 100 to sink, else continues
+        router_gate = GateSettings(
+            name="router",
+            condition="row['value'] > 100",
+            routes={"true": "high_values", "false": "continue"},
+        )
 
         ctx = PluginContext(run_id=run.run_id, config={})
-        edge_map = {(gate.node_id, "above"): edge.edge_id}
+        edge_map = {(gate.node_id, "true"): edge.edge_id}
         # Route resolution map: label -> sink_name
-        route_resolution_map = {(gate.node_id, "above"): "high_values"}
+        route_resolution_map = {(gate.node_id, "true"): "high_values"}
         processor = RowProcessor(
             recorder=recorder,
             span_factory=SpanFactory(),
@@ -600,12 +588,14 @@ class TestRowProcessorGates:
             source_node_id=source.node_id,
             edge_map=edge_map,
             route_resolution_map=route_resolution_map,
+            config_gates=[router_gate],
+            config_gate_id_map={"router": gate.node_id},
         )
 
         results = processor.process_row(
             row_index=0,
             row_data={"value": 150},
-            transforms=[RouterGate(gate.node_id)],
+            transforms=[],
             ctx=ctx,
         )
 
@@ -619,6 +609,7 @@ class TestRowProcessorGates:
 
     def test_gate_fork_returns_forked(self) -> None:
         """Gate forking returns forked outcome (linear pipeline mode)."""
+        from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
@@ -676,20 +667,13 @@ class TestRowProcessorGates:
             mode=RoutingMode.COPY,
         )
 
-        class SplitterGate(BaseGate):
-            name = "splitter"
-            input_schema = _TestSchema
-            output_schema = _TestSchema
-
-            def __init__(self, node_id: str) -> None:
-                super().__init__({})
-                self.node_id = node_id
-
-            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.fork_to_paths(["path_a", "path_b"]),
-                )
+        # Config-driven fork gate: always forks to path_a and path_b
+        splitter_gate = GateSettings(
+            name="splitter",
+            condition="True",
+            routes={"true": "fork"},
+            fork_to=["path_a", "path_b"],
+        )
 
         ctx = PluginContext(run_id=run.run_id, config={})
         edge_map = {
@@ -702,12 +686,14 @@ class TestRowProcessorGates:
             run_id=run.run_id,
             source_node_id=source.node_id,
             edge_map=edge_map,
+            config_gates=[splitter_gate],
+            config_gate_id_map={"splitter": gate.node_id},
         )
 
         results = processor.process_row(
             row_index=0,
             row_data={"value": 42},
-            transforms=[SplitterGate(gate.node_id)],
+            transforms=[],
             ctx=ctx,
         )
 
@@ -1075,14 +1061,15 @@ class TestRowProcessorNestedForks:
     def test_nested_forks_all_children_executed(self) -> None:
         """Nested forks should execute all descendants.
 
-        Pipeline: source -> gate1 (fork 2) -> gate2 (fork 2) -> transform
+        Pipeline: source -> transform -> gate1 (fork 2) -> gate2 (fork 2)
 
         Expected token tree:
-        - 1 parent FORKED at gate1
-        - 2 children FORKED at gate2
-        - 4 grandchildren COMPLETED at transform
+        - 1 parent FORKED at gate1 (with count=1 from transform)
+        - 2 children FORKED at gate2 (inherit count=1)
+        - 4 grandchildren COMPLETED (inherit count=1)
         Total: 7 results
         """
+        from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
@@ -1091,11 +1078,19 @@ class TestRowProcessorNestedForks:
         recorder = LandscapeRecorder(db)
         run = recorder.begin_run(config={}, canonical_version="v1")
 
-        # Setup nodes for: source -> gate1 (fork 2) -> gate2 (fork 2) -> transform
+        # Setup nodes for: source -> transform -> gate1 (fork 2) -> gate2 (fork 2)
         source_node = recorder.register_node(
             run_id=run.run_id,
             plugin_name="test_source",
             node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="marker",
+            node_type="transform",
             plugin_version="1.0",
             config={},
             schema_config=DYNAMIC_SCHEMA,
@@ -1112,14 +1107,6 @@ class TestRowProcessorNestedForks:
             run_id=run.run_id,
             plugin_name="fork_gate_2",
             node_type="gate",
-            plugin_version="1.0",
-            config={},
-            schema_config=DYNAMIC_SCHEMA,
-        )
-        transform_node = recorder.register_node(
-            run_id=run.run_id,
-            plugin_name="marker",
-            node_type="transform",
             plugin_version="1.0",
             config={},
             schema_config=DYNAMIC_SCHEMA,
@@ -1155,21 +1142,6 @@ class TestRowProcessorNestedForks:
             mode=RoutingMode.COPY,
         )
 
-        class ForkGate(BaseGate):
-            name = "fork_gate"
-            input_schema = _TestSchema
-            output_schema = _TestSchema
-
-            def __init__(self, node_id: str) -> None:
-                super().__init__({})
-                self.node_id = node_id
-
-            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.fork_to_paths(["left", "right"]),
-                )
-
         class MarkerTransform(BaseTransform):
             name = "marker"
             input_schema = _TestSchema
@@ -1187,8 +1159,20 @@ class TestRowProcessorNestedForks:
                     {**row, "count": row.get("count", 0) + 1}
                 )
 
-        gate1 = ForkGate(gate1_node.node_id)
-        gate2 = ForkGate(gate2_node.node_id)
+        # Config-driven fork gates
+        gate1_config = GateSettings(
+            name="fork_gate_1",
+            condition="True",
+            routes={"true": "fork"},
+            fork_to=["left", "right"],
+        )
+        gate2_config = GateSettings(
+            name="fork_gate_2",
+            condition="True",
+            routes={"true": "fork"},
+            fork_to=["left", "right"],
+        )
+
         transform = MarkerTransform(transform_node.node_id)
 
         processor = RowProcessor(
@@ -1202,13 +1186,18 @@ class TestRowProcessorNestedForks:
                 (gate2_node.node_id, "left"): edge2a.edge_id,
                 (gate2_node.node_id, "right"): edge2b.edge_id,
             },
+            config_gates=[gate1_config, gate2_config],
+            config_gate_id_map={
+                "fork_gate_1": gate1_node.node_id,
+                "fork_gate_2": gate2_node.node_id,
+            },
         )
 
         ctx = PluginContext(run_id=run.run_id, config={})
         results = processor.process_row(
             row_index=0,
             row_data={"value": 42},
-            transforms=[gate1, gate2, transform],
+            transforms=[transform],
             ctx=ctx,
         )
 
@@ -1221,11 +1210,10 @@ class TestRowProcessorNestedForks:
         assert forked_count == 3  # Parent + 2 first-level children
         assert completed_count == 4  # 4 grandchildren
 
-        # All completed tokens should have been processed by transform
+        # All tokens should have count=1 (transform runs first, data inherited through forks)
         for result in results:
-            if result.outcome == RowOutcome.COMPLETED:
-                # .get() allowed on row data (their data, Tier 2)
-                assert result.final_data.get("count") == 1
+            # .get() allowed on row data (their data, Tier 2)
+            assert result.final_data.get("count") == 1
 
 
 class TestRowProcessorWorkQueue:
@@ -1284,6 +1272,7 @@ class TestRowProcessorWorkQueue:
 
     def test_fork_children_are_executed_through_work_queue(self) -> None:
         """Fork child tokens should be processed, not orphaned."""
+        from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
@@ -1292,7 +1281,7 @@ class TestRowProcessorWorkQueue:
         recorder = LandscapeRecorder(db)
         run = recorder.begin_run(config={}, canonical_version="v1")
 
-        # Register nodes
+        # Register nodes (transform before gate since config gates run after transforms)
         source_node = recorder.register_node(
             run_id=run.run_id,
             plugin_name="test_source",
@@ -1301,18 +1290,18 @@ class TestRowProcessorWorkQueue:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
-        gate_node = recorder.register_node(
-            run_id=run.run_id,
-            plugin_name="splitter",
-            node_type="gate",
-            plugin_version="1.0",
-            config={},
-            schema_config=DYNAMIC_SCHEMA,
-        )
         transform_node = recorder.register_node(
             run_id=run.run_id,
             plugin_name="enricher",
             node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        gate_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="splitter",
+            node_type="gate",
             plugin_version="1.0",
             config={},
             schema_config=DYNAMIC_SCHEMA,
@@ -1334,22 +1323,6 @@ class TestRowProcessorWorkQueue:
             mode=RoutingMode.COPY,
         )
 
-        # Create gate that forks
-        class SplitterGate(BaseGate):
-            name = "splitter"
-            input_schema = _TestSchema
-            output_schema = _TestSchema
-
-            def __init__(self, node_id: str) -> None:
-                super().__init__({})
-                self.node_id = node_id
-
-            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.fork_to_paths(["path_a", "path_b"]),
-                )
-
         # Create transform that marks execution
         class MarkerTransform(BaseTransform):
             name = "enricher"
@@ -1365,7 +1338,14 @@ class TestRowProcessorWorkQueue:
             ) -> TransformResult:
                 return TransformResult.success({**row, "processed": True})
 
-        gate = SplitterGate(gate_node.node_id)
+        # Config-driven fork gate
+        splitter_gate = GateSettings(
+            name="splitter",
+            condition="True",
+            routes={"true": "fork"},
+            fork_to=["path_a", "path_b"],
+        )
+
         transform = MarkerTransform(transform_node.node_id)
 
         processor = RowProcessor(
@@ -1377,6 +1357,8 @@ class TestRowProcessorWorkQueue:
                 (gate_node.node_id, "path_a"): edge_a.edge_id,
                 (gate_node.node_id, "path_b"): edge_b.edge_id,
             },
+            config_gates=[splitter_gate],
+            config_gate_id_map={"splitter": gate_node.node_id},
         )
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -1385,7 +1367,7 @@ class TestRowProcessorWorkQueue:
         results = processor.process_row(
             row_index=0,
             row_data={"value": 42},
-            transforms=[gate, transform],
+            transforms=[transform],
             ctx=ctx,
         )
 
@@ -1397,7 +1379,7 @@ class TestRowProcessorWorkQueue:
         forked_results = [r for r in results if r.outcome == RowOutcome.FORKED]
         assert len(forked_results) == 1
 
-        # Children should be COMPLETED and processed
+        # Children should be COMPLETED and processed (all tokens have processed=True)
         completed_results = [r for r in results if r.outcome == RowOutcome.COMPLETED]
         assert len(completed_results) == 2
         for result in completed_results:
@@ -1795,17 +1777,17 @@ class TestRowProcessorCoalesce:
     def test_fork_then_coalesce_require_all(self) -> None:
         """Fork children should coalesce when all branches arrive.
 
-        Pipeline: source -> fork_gate -> (path_a, path_b) -> coalesce -> completed
+        Pipeline: source -> enrich_a -> enrich_b -> fork_gate -> coalesce -> completed
 
-        This test verifies the full fork→coalesce flow:
-        1. Gate forks to two paths (path_a, path_b)
-        2. Each path enriches data differently (sentiment vs entities)
+        This test verifies the full fork->coalesce flow using config gates:
+        1. Transforms enrich data (sentiment, entities)
+        2. Gate forks to two paths (path_a, path_b) - children inherit enriched data
         3. Coalesce merges both paths with require_all policy
         4. Parent token becomes FORKED, children become COALESCED
-        5. Merged token has fields from both paths
+        5. Merged token has fields from both transforms
         """
         from elspeth.contracts import NodeType, RoutingMode
-        from elspeth.core.config import CoalesceSettings
+        from elspeth.core.config import CoalesceSettings, GateSettings
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.coalesce_executor import CoalesceExecutor
         from elspeth.engine.processor import RowProcessor
@@ -1817,19 +1799,11 @@ class TestRowProcessorCoalesce:
         run = recorder.begin_run(config={}, canonical_version="v1")
         token_manager = TokenManager(recorder)
 
-        # Register nodes
+        # Register nodes (transforms before gate since config gates run after transforms)
         source = recorder.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
-            plugin_version="1.0",
-            config={},
-            schema_config=DYNAMIC_SCHEMA,
-        )
-        fork_gate = recorder.register_node(
-            run_id=run.run_id,
-            plugin_name="splitter",
-            node_type=NodeType.GATE,
             plugin_version="1.0",
             config={},
             schema_config=DYNAMIC_SCHEMA,
@@ -1850,6 +1824,14 @@ class TestRowProcessorCoalesce:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
+        fork_gate = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="splitter",
+            node_type=NodeType.GATE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
         coalesce_node = recorder.register_node(
             run_id=run.run_id,
             plugin_name="merger",
@@ -1863,14 +1845,14 @@ class TestRowProcessorCoalesce:
         edge_a = recorder.register_edge(
             run_id=run.run_id,
             from_node_id=fork_gate.node_id,
-            to_node_id=transform_a.node_id,
+            to_node_id=coalesce_node.node_id,
             label="path_a",
             mode=RoutingMode.COPY,
         )
         edge_b = recorder.register_edge(
             run_id=run.run_id,
             from_node_id=fork_gate.node_id,
-            to_node_id=transform_b.node_id,
+            to_node_id=coalesce_node.node_id,
             label="path_b",
             mode=RoutingMode.COPY,
         )
@@ -1890,22 +1872,7 @@ class TestRowProcessorCoalesce:
         )
         coalesce_executor.register_coalesce(coalesce_settings, coalesce_node.node_id)
 
-        # Create gate and transforms (inline test classes)
-        class ForkGate(BaseGate):
-            name = "splitter"
-            input_schema = _TestSchema
-            output_schema = _TestSchema
-
-            def __init__(self, node_id: str) -> None:
-                super().__init__({})
-                self.node_id = node_id
-
-            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.fork_to_paths(["path_a", "path_b"]),
-                )
-
+        # Transforms enrich data before the fork
         class EnrichA(BaseTransform):
             name = "enrich_a"
             input_schema = _TestSchema
@@ -1934,6 +1901,14 @@ class TestRowProcessorCoalesce:
             ) -> TransformResult:
                 return TransformResult.success({**row, "entities": ["ACME"]})
 
+        # Config-driven fork gate
+        fork_gate_config = GateSettings(
+            name="splitter",
+            condition="True",
+            routes={"true": "fork"},
+            fork_to=["path_a", "path_b"],
+        )
+
         processor = RowProcessor(
             recorder=recorder,
             span_factory=SpanFactory(),
@@ -1945,25 +1920,26 @@ class TestRowProcessorCoalesce:
             },
             coalesce_executor=coalesce_executor,
             coalesce_node_ids={"merger": coalesce_node.node_id},
+            config_gates=[fork_gate_config],
+            config_gate_id_map={"splitter": fork_gate.node_id},
         )
 
         ctx = PluginContext(run_id=run.run_id, config={})
 
         # Process should:
-        # 1. Fork at gate (parent FORKED)
-        # 2. Process path_a (add sentiment)
-        # 3. Process path_b (add entities)
+        # 1. EnrichA adds sentiment
+        # 2. EnrichB adds entities
+        # 3. Fork at config gate (parent FORKED with both fields)
         # 4. Coalesce both paths (merged token COALESCED)
         results = processor.process_row(
             row_index=0,
             row_data={"text": "ACME earnings"},
             transforms=[
-                ForkGate(fork_gate.node_id),
                 EnrichA(transform_a.node_id),
                 EnrichB(transform_b.node_id),
             ],
             ctx=ctx,
-            coalesce_at_step=3,  # After both transforms
+            coalesce_at_step=3,  # After config gate (step 3 = transforms(2) + gate(1))
             coalesce_name="merger",
         )
 
@@ -1976,7 +1952,7 @@ class TestRowProcessorCoalesce:
         coalesced = [r for r in results if r.outcome == RowOutcome.COALESCED]
         assert len(coalesced) == 1
 
-        # Verify merged data
+        # Verify merged data (both fields present from transforms before fork)
         merged_data = coalesced[0].final_data
         assert merged_data["sentiment"] == "positive"
         assert merged_data["entities"] == ["ACME"]
@@ -1984,18 +1960,19 @@ class TestRowProcessorCoalesce:
     def test_coalesced_token_audit_trail_complete(self) -> None:
         """Coalesced tokens should have complete audit trail for explain().
 
-        After fork -> process -> coalesce, querying explain() on the merged
+        After enrich -> fork -> coalesce, querying explain() on the merged
         token should show:
         - Original source row
+        - Transform processing steps
         - Fork point (parent token for forked children)
-        - Both branch processing steps (node_states for each consumed token)
+        - Both branch paths
         - Coalesce point with parent relationships
 
         This test verifies the audit infrastructure captures the complete
         lineage for a coalesced token, enabling explain() queries.
         """
         from elspeth.contracts import NodeType, RoutingMode
-        from elspeth.core.config import CoalesceSettings
+        from elspeth.core.config import CoalesceSettings, GateSettings
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.coalesce_executor import CoalesceExecutor
         from elspeth.engine.processor import RowProcessor
@@ -2007,19 +1984,11 @@ class TestRowProcessorCoalesce:
         run = recorder.begin_run(config={}, canonical_version="v1")
         token_manager = TokenManager(recorder)
 
-        # Register nodes
+        # Register nodes (transforms before gate since config gates run after transforms)
         source = recorder.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
-            plugin_version="1.0",
-            config={},
-            schema_config=DYNAMIC_SCHEMA,
-        )
-        fork_gate = recorder.register_node(
-            run_id=run.run_id,
-            plugin_name="splitter",
-            node_type=NodeType.GATE,
             plugin_version="1.0",
             config={},
             schema_config=DYNAMIC_SCHEMA,
@@ -2040,6 +2009,14 @@ class TestRowProcessorCoalesce:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
+        fork_gate = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="splitter",
+            node_type=NodeType.GATE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
         coalesce_node = recorder.register_node(
             run_id=run.run_id,
             plugin_name="merger",
@@ -2053,14 +2030,14 @@ class TestRowProcessorCoalesce:
         edge_a = recorder.register_edge(
             run_id=run.run_id,
             from_node_id=fork_gate.node_id,
-            to_node_id=transform_a.node_id,
+            to_node_id=coalesce_node.node_id,
             label="path_a",
             mode=RoutingMode.COPY,
         )
         edge_b = recorder.register_edge(
             run_id=run.run_id,
             from_node_id=fork_gate.node_id,
-            to_node_id=transform_b.node_id,
+            to_node_id=coalesce_node.node_id,
             label="path_b",
             mode=RoutingMode.COPY,
         )
@@ -2080,22 +2057,7 @@ class TestRowProcessorCoalesce:
         )
         coalesce_executor.register_coalesce(coalesce_settings, coalesce_node.node_id)
 
-        # Create gate and transforms (inline test classes)
-        class ForkGate(BaseGate):
-            name = "splitter"
-            input_schema = _TestSchema
-            output_schema = _TestSchema
-
-            def __init__(self, node_id: str) -> None:
-                super().__init__({})
-                self.node_id = node_id
-
-            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.fork_to_paths(["path_a", "path_b"]),
-                )
-
+        # Transforms enrich data before the fork
         class EnrichA(BaseTransform):
             name = "enrich_a"
             input_schema = _TestSchema
@@ -2124,6 +2086,14 @@ class TestRowProcessorCoalesce:
             ) -> TransformResult:
                 return TransformResult.success({**row, "entities": ["ACME"]})
 
+        # Config-driven fork gate
+        fork_gate_config = GateSettings(
+            name="splitter",
+            condition="True",
+            routes={"true": "fork"},
+            fork_to=["path_a", "path_b"],
+        )
+
         processor = RowProcessor(
             recorder=recorder,
             span_factory=SpanFactory(),
@@ -2135,21 +2105,22 @@ class TestRowProcessorCoalesce:
             },
             coalesce_executor=coalesce_executor,
             coalesce_node_ids={"merger": coalesce_node.node_id},
+            config_gates=[fork_gate_config],
+            config_gate_id_map={"splitter": fork_gate.node_id},
         )
 
         ctx = PluginContext(run_id=run.run_id, config={})
 
-        # Process the row through fork -> enrich -> coalesce
+        # Process the row through enrich -> fork -> coalesce
         results = processor.process_row(
             row_index=0,
             row_data={"text": "ACME earnings"},
             transforms=[
-                ForkGate(fork_gate.node_id),
                 EnrichA(transform_a.node_id),
                 EnrichB(transform_b.node_id),
             ],
             ctx=ctx,
-            coalesce_at_step=3,
+            coalesce_at_step=3,  # After config gate (step 3 = transforms(2) + gate(1))
             coalesce_name="merger",
         )
 

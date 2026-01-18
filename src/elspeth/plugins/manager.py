@@ -37,14 +37,21 @@ def _schema_hash(schema_cls: Any) -> str | None:
 
     Returns:
         SHA-256 hex digest of field names/types, or None if no schema
+
+    Raises:
+        TypeError: If schema_cls is not None and not a Pydantic model
     """
     if schema_cls is None:
         return None
 
     # Use Pydantic model_fields for accurate field introspection
-    # This is legitimate type checking at a plugin boundary
+    # All schemas MUST be PluginSchema subclasses (Pydantic models)
+    # A non-Pydantic schema is a protocol violation - crash immediately
     if not hasattr(schema_cls, "model_fields"):
-        return None
+        raise TypeError(
+            f"Schema {schema_cls} must be a PluginSchema (Pydantic BaseModel) subclass. "
+            f"All plugin schemas must inherit from elspeth.contracts.data.PluginSchema."
+        )
 
     # Build deterministic representation
     fields_repr = {

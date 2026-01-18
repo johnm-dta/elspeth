@@ -179,37 +179,37 @@ allow_hits:
   # names is intentional, not a bug-hiding pattern.
   # ============================================================
 
-  - key: "plugins/manager.py:R1:PluginManager:get_source_by_name:line=292"
+  - key: "plugins/manager.py:R1:PluginManager:get_source_by_name:line=299"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_transform_by_name:line=296"
+  - key: "plugins/manager.py:R1:PluginManager:get_transform_by_name:line=303"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_gate_by_name:line=300"
+  - key: "plugins/manager.py:R1:PluginManager:get_gate_by_name:line=307"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_aggregation_by_name:line=304"
+  - key: "plugins/manager.py:R1:PluginManager:get_aggregation_by_name:line=311"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_coalesce_by_name:line=308"
+  - key: "plugins/manager.py:R1:PluginManager:get_coalesce_by_name:line=315"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_sink_by_name:line=312"
+  - key: "plugins/manager.py:R1:PluginManager:get_sink_by_name:line=319"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
@@ -365,21 +365,21 @@ allow_hits:
   # fail loudly if missing (Task 9).
   # ============================================================
 
-  - key: "plugins/manager.py:R3:_schema_hash:line=46"
+  - key: "plugins/manager.py:R3:_schema_hash:line=50"
     owner: "architecture"
     reason: "Trust boundary: checking if plugin class has Pydantic model_fields"
-    safety: "Graceful fallback to None - non-Pydantic plugins don't have schema hashes"
+    safety: "Raises TypeError if not Pydantic - fails fast on protocol violation"
     expires: null  # Permanent - intentional design
 
   # PluginSpec.from_plugin - schemas vary by plugin type (not all have both)
   # Sources only have output_schema, sinks only have input_schema
-  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=117"
+  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=124"
     owner: "architecture"
     reason: "Polymorphic: sources don't have input_schema, sinks don't have output_schema"
     safety: "Legitimate Optional return - None means 'accepts any schema'"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=118"
+  - key: "plugins/manager.py:R2:PluginSpec:from_plugin:line=125"
     owner: "architecture"
     reason: "Polymorphic: sources don't have input_schema, sinks don't have output_schema"
     safety: "Legitimate Optional return - None means 'accepts any schema'"

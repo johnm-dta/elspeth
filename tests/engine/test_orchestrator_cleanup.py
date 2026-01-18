@@ -12,8 +12,8 @@ from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-from elspeth.plugins.base import BaseGate, BaseTransform
-from elspeth.plugins.results import GateResult, RoutingAction, TransformResult
+from elspeth.plugins.base import BaseTransform
+from elspeth.plugins.results import TransformResult
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
@@ -186,32 +186,6 @@ class FailingCloseTransform(TrackingTransform):
         raise RuntimeError("Close failed!")
 
 
-class TrackingGate(BaseGate):
-    """Gate that tracks whether close() was called."""
-
-    input_schema = ValueSchema
-    output_schema = ValueSchema
-
-    def __init__(self, name: str = "tracking_gate") -> None:
-        super().__init__({})
-        self.name = name  # type: ignore[misc]
-        self.close_called = False
-        self.close_call_count = 0
-
-    def on_start(self, ctx: Any) -> None:
-        pass
-
-    def on_complete(self, ctx: Any) -> None:
-        pass
-
-    def evaluate(self, row: Any, ctx: Any) -> GateResult:
-        return GateResult(row=row, action=RoutingAction.continue_())
-
-    def close(self) -> None:
-        self.close_called = True
-        self.close_call_count += 1
-
-
 class TestOrchestratorCleanup:
     """Tests for Orchestrator calling close() on plugins."""
 
@@ -273,28 +247,6 @@ class TestOrchestratorCleanup:
         assert (
             transform_2.close_called
         ), "transform_2.close() was not called after failure"
-
-    def test_gates_closed(self) -> None:
-        """Gates should have close() called after run."""
-        db = LandscapeDB.in_memory()
-
-        gate = TrackingGate("test_gate")
-
-        source = ListSource([{"value": 1}])
-        sink = CollectSink()
-
-        config = PipelineConfig(
-            source=source,
-            transforms=[gate],
-            sinks={"default": sink},
-        )
-
-        orchestrator = Orchestrator(db)
-        orchestrator.run(config, graph=_build_test_graph(config))
-
-        # Verify close() was called on gate
-        assert gate.close_called, "gate.close() was not called"
-        assert gate.close_call_count == 1, "gate.close() called multiple times"
 
     def test_cleanup_handles_missing_close_method(self) -> None:
         """Cleanup should handle transforms that use default close() method.

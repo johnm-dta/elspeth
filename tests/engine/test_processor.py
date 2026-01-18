@@ -2512,6 +2512,306 @@ class TestRowProcessorCoalesce:
         assert outcome3.held is True
         assert outcome3.merged_token is None
 
+    def test_nested_fork_coalesce(self) -> None:
+        """Test fork within fork, with coalesce at each level.
+
+        DAG structure:
+        source → gate1 (fork A,B) → [
+            path_a → gate2 (fork A1,A2) → [A1, A2] → coalesce_inner → ...
+            path_b → transform_b
+        ] → coalesce_outer
+
+        Should produce:
+        - 1 parent FORKED (gate1)
+        - 2 level-1 children (path_a FORKED, path_b continues)
+        - 2 level-2 children from path_a (A1, A2)
+        - 1 inner COALESCED (A1+A2)
+        - 1 outer COALESCED (inner+path_b)
+
+        This test uses CoalesceExecutor directly to simulate the nested DAG flow,
+        providing clear control over the token hierarchy at each level.
+        """
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.core.config import CoalesceSettings
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        token_manager = TokenManager(recorder)
+
+        # Register nodes for the nested DAG
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        inner_coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="inner_merger",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        outer_coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="outer_merger",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # === Setup two coalesce points: inner (A1+A2) and outer (inner+path_b) ===
+        inner_coalesce_settings = CoalesceSettings(
+            name="inner_merger",
+            branches=["path_a1", "path_a2"],
+            policy="require_all",
+            merge="nested",  # Use nested to see branch structure
+        )
+        outer_coalesce_settings = CoalesceSettings(
+            name="outer_merger",
+            branches=["path_a_merged", "path_b"],  # inner result + path_b
+            policy="require_all",
+            merge="nested",
+        )
+
+        coalesce_executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        coalesce_executor.register_coalesce(
+            inner_coalesce_settings, inner_coalesce_node.node_id
+        )
+        coalesce_executor.register_coalesce(
+            outer_coalesce_settings, outer_coalesce_node.node_id
+        )
+
+        # === Level 0: Create initial token (source row) ===
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            row_data={"text": "Document for nested processing"},
+        )
+
+        # === Level 1: Fork to path_a and path_b (gate1) ===
+        level1_children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["path_a", "path_b"],
+            step_in_pipeline=1,
+        )
+        assert len(level1_children) == 2
+        path_a_token = level1_children[0]  # branch_name="path_a"
+        path_b_token = level1_children[1]  # branch_name="path_b"
+
+        # Verify initial token is now the FORKED parent
+        initial_token_record = recorder.get_token(initial_token.token_id)
+        assert initial_token_record is not None
+
+        # Verify children have correct branch names
+        assert path_a_token.branch_name == "path_a"
+        assert path_b_token.branch_name == "path_b"
+
+        # === Level 2: path_a forks again to A1 and A2 (gate2) ===
+        level2_children = token_manager.fork_token(
+            parent_token=path_a_token,
+            branches=["path_a1", "path_a2"],
+            step_in_pipeline=2,
+        )
+        assert len(level2_children) == 2
+        path_a1_token = level2_children[0]  # branch_name="path_a1"
+        path_a2_token = level2_children[1]  # branch_name="path_a2"
+
+        # path_a token is now FORKED (has children)
+        path_a_record = recorder.get_token(path_a_token.token_id)
+        assert path_a_record is not None
+
+        # Verify level 2 branch names
+        assert path_a1_token.branch_name == "path_a1"
+        assert path_a2_token.branch_name == "path_a2"
+
+        # === Process level 2 children (simulate transform enrichment) ===
+        # A1 adds sentiment analysis
+        enriched_a1 = TokenInfo(
+            row_id=path_a1_token.row_id,
+            token_id=path_a1_token.token_id,
+            row_data={
+                "text": "Document for nested processing",
+                "sentiment": "positive",
+            },
+            branch_name="path_a1",
+        )
+        # A2 adds entity extraction
+        enriched_a2 = TokenInfo(
+            row_id=path_a2_token.row_id,
+            token_id=path_a2_token.token_id,
+            row_data={
+                "text": "Document for nested processing",
+                "entities": ["ACME", "2024"],
+            },
+            branch_name="path_a2",
+        )
+
+        # === Inner coalesce: merge A1 + A2 ===
+        inner_outcome1 = coalesce_executor.accept(
+            enriched_a1, "inner_merger", step_in_pipeline=3
+        )
+        assert inner_outcome1.held is True  # First arrival, waiting for A2
+
+        inner_outcome2 = coalesce_executor.accept(
+            enriched_a2, "inner_merger", step_in_pipeline=3
+        )
+        assert inner_outcome2.held is False  # Both arrived, merge triggered
+        assert inner_outcome2.merged_token is not None
+        assert inner_outcome2.failure_reason is None
+
+        inner_merged_token = inner_outcome2.merged_token
+
+        # Verify inner merge consumed both A1 and A2
+        assert len(inner_outcome2.consumed_tokens) == 2
+        consumed_inner_ids = {t.token_id for t in inner_outcome2.consumed_tokens}
+        assert enriched_a1.token_id in consumed_inner_ids
+        assert enriched_a2.token_id in consumed_inner_ids
+
+        # Verify inner merged data has nested structure
+        inner_merged_data = inner_merged_token.row_data
+        assert "path_a1" in inner_merged_data
+        assert "path_a2" in inner_merged_data
+        assert inner_merged_data["path_a1"]["sentiment"] == "positive"
+        assert inner_merged_data["path_a2"]["entities"] == ["ACME", "2024"]
+
+        # === Process path_b (simulate transform enrichment) ===
+        enriched_b = TokenInfo(
+            row_id=path_b_token.row_id,
+            token_id=path_b_token.token_id,
+            row_data={
+                "text": "Document for nested processing",
+                "category": "financial",
+            },
+            branch_name="path_b",
+        )
+
+        # === Outer coalesce: merge inner_merged + path_b ===
+        # First, prepare inner merged token for outer coalesce
+        # It needs branch_name="path_a_merged" to match outer coalesce config
+        inner_for_outer = TokenInfo(
+            row_id=inner_merged_token.row_id,
+            token_id=inner_merged_token.token_id,
+            row_data=inner_merged_token.row_data,
+            branch_name="path_a_merged",  # Assign branch for outer coalesce
+        )
+
+        outer_outcome1 = coalesce_executor.accept(
+            inner_for_outer, "outer_merger", step_in_pipeline=4
+        )
+        assert outer_outcome1.held is True  # Waiting for path_b
+
+        outer_outcome2 = coalesce_executor.accept(
+            enriched_b, "outer_merger", step_in_pipeline=4
+        )
+        assert outer_outcome2.held is False  # Both arrived, final merge triggered
+        assert outer_outcome2.merged_token is not None
+        assert outer_outcome2.failure_reason is None
+
+        outer_merged_token = outer_outcome2.merged_token
+
+        # Verify outer merge consumed both inner_merged and path_b
+        assert len(outer_outcome2.consumed_tokens) == 2
+        consumed_outer_ids = {t.token_id for t in outer_outcome2.consumed_tokens}
+        assert inner_for_outer.token_id in consumed_outer_ids
+        assert enriched_b.token_id in consumed_outer_ids
+
+        # === Verify final merged data has complete nested hierarchy ===
+        final_data = outer_merged_token.row_data
+        assert "path_a_merged" in final_data
+        assert "path_b" in final_data
+
+        # path_b branch has category
+        assert final_data["path_b"]["category"] == "financial"
+
+        # path_a_merged branch has the inner merge results (nested A1+A2)
+        inner_result = final_data["path_a_merged"]
+        assert "path_a1" in inner_result
+        assert "path_a2" in inner_result
+        assert inner_result["path_a1"]["sentiment"] == "positive"
+        assert inner_result["path_a2"]["entities"] == ["ACME", "2024"]
+
+        # === Verify token hierarchy through audit trail ===
+        # All tokens should trace back to the same row_id
+        assert initial_token.row_id == path_a_token.row_id
+        assert initial_token.row_id == path_b_token.row_id
+        assert initial_token.row_id == path_a1_token.row_id
+        assert initial_token.row_id == path_a2_token.row_id
+        assert initial_token.row_id == inner_merged_token.row_id
+        assert initial_token.row_id == outer_merged_token.row_id
+
+        # Verify parent-child relationships at each level
+        # Level 1 children (path_a, path_b) should have initial_token as parent
+        path_a_parents = recorder.get_token_parents(path_a_token.token_id)
+        assert len(path_a_parents) == 1
+        assert path_a_parents[0].parent_token_id == initial_token.token_id
+
+        path_b_parents = recorder.get_token_parents(path_b_token.token_id)
+        assert len(path_b_parents) == 1
+        assert path_b_parents[0].parent_token_id == initial_token.token_id
+
+        # Level 2 children (A1, A2) should have path_a as parent
+        a1_parents = recorder.get_token_parents(path_a1_token.token_id)
+        assert len(a1_parents) == 1
+        assert a1_parents[0].parent_token_id == path_a_token.token_id
+
+        a2_parents = recorder.get_token_parents(path_a2_token.token_id)
+        assert len(a2_parents) == 1
+        assert a2_parents[0].parent_token_id == path_a_token.token_id
+
+        # Inner merged token should have A1 and A2 as parents
+        inner_merged_parents = recorder.get_token_parents(inner_merged_token.token_id)
+        assert len(inner_merged_parents) == 2
+        inner_parent_ids = {p.parent_token_id for p in inner_merged_parents}
+        assert path_a1_token.token_id in inner_parent_ids
+        assert path_a2_token.token_id in inner_parent_ids
+
+        # Outer merged token should have inner_merged and path_b as parents
+        outer_merged_parents = recorder.get_token_parents(outer_merged_token.token_id)
+        assert len(outer_merged_parents) == 2
+        outer_parent_ids = {p.parent_token_id for p in outer_merged_parents}
+        assert inner_merged_token.token_id in outer_parent_ids
+        assert path_b_token.token_id in outer_parent_ids
+
+        # === Verify coalesce metadata captures the hierarchy ===
+        assert inner_outcome2.coalesce_metadata is not None
+        assert inner_outcome2.coalesce_metadata["policy"] == "require_all"
+        assert set(inner_outcome2.coalesce_metadata["branches_arrived"]) == {
+            "path_a1",
+            "path_a2",
+        }
+
+        assert outer_outcome2.coalesce_metadata is not None
+        assert outer_outcome2.coalesce_metadata["policy"] == "require_all"
+        assert set(outer_outcome2.coalesce_metadata["branches_arrived"]) == {
+            "path_a_merged",
+            "path_b",
+        }
+
+        # === Verify merged tokens have join_group_id ===
+        inner_merged_record = recorder.get_token(inner_merged_token.token_id)
+        assert inner_merged_record is not None
+        assert inner_merged_record.join_group_id is not None
+
+        outer_merged_record = recorder.get_token(outer_merged_token.token_id)
+        assert outer_merged_record is not None
+        assert outer_merged_record.join_group_id is not None
+
 
 class TestRowProcessorRetry:
     """Tests for retry integration in RowProcessor."""

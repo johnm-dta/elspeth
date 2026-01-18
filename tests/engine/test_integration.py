@@ -2255,6 +2255,307 @@ class TestAggregationIntegration:
             batches[0].trigger_reason == "timeout"
         ), f"Expected trigger_reason='timeout', got '{batches[0].trigger_reason}'"
 
+    def test_multiple_aggregations_in_pipeline(self) -> None:
+        """Two sequential aggregations in the same pipeline.
+
+        Pipeline: source (5 rows) -> agg1 (count=2) -> agg2 (count=3) -> sink
+        - agg1 groups by 2: [1,2] -> sum=3, [3,4] -> sum=7, [5] -> sum=5 (end_of_source)
+        - agg2 groups by 3: [3,7,5] -> sum=15
+        - Final result: sink receives 1 row with value=15
+
+        Verifies that aggregation outputs can feed into another aggregation,
+        with proper token creation at each stage.
+        """
+        from elspeth.contracts import NodeType, PluginSchema, TokenInfo
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.executors import AggregationExecutor, SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+        from elspeth.plugins.base import BaseAggregation
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import AcceptResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Start a run
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        # Register nodes
+        source_node = recorder.register_node(
+            run_id=run_id,
+            node_id="source",
+            plugin_name="list_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        agg1_node = recorder.register_node(
+            run_id=run_id,
+            node_id="sum_agg_1",
+            plugin_name="sum_agg",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        agg2_node = recorder.register_node(
+            run_id=run_id,
+            node_id="sum_agg_2",
+            plugin_name="sum_agg",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="output_sink",
+            plugin_name="collect_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        class SumAggregation(BaseAggregation):
+            """Aggregation that sums values."""
+
+            name = "sum_agg"
+            input_schema = RowSchema
+            output_schema = RowSchema
+            plugin_version = "1.0.0"
+
+            def __init__(self) -> None:
+                super().__init__({})
+                self._values: list[int] = []
+
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
+                self._values.append(row["value"])
+                return AcceptResult(accepted=True)
+
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+                total = sum(self._values)
+                self._values = []
+                # output_mode=single means we return exactly ONE aggregated result
+                return [{"value": total}]
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://output", size_bytes=0, content_hash="test_hash"
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Configure aggregation 1: flush after 2 rows, output_mode=single
+        agg1_settings = AggregationSettings(
+            name="sum_agg_1",
+            plugin="sum_agg",
+            trigger=TriggerConfig(count=2),
+            output_mode="single",
+        )
+
+        # Configure aggregation 2: flush after 3 rows, output_mode=single
+        agg2_settings = AggregationSettings(
+            name="sum_agg_2",
+            plugin="sum_agg",
+            trigger=TriggerConfig(count=3),
+            output_mode="single",
+        )
+
+        # Create aggregation instances and assign node_ids
+        aggregation1 = SumAggregation()
+        aggregation1.node_id = agg1_node.node_id
+
+        aggregation2 = SumAggregation()
+        aggregation2.node_id = agg2_node.node_id
+
+        # Create sink instance and assign node_id
+        sink = CollectSink()
+        sink.node_id = sink_node.node_id
+
+        # Create executors
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        agg1_executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            run_id=run_id,
+            aggregation_settings={agg1_node.node_id: agg1_settings},
+        )
+
+        agg2_executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            run_id=run_id,
+            aggregation_settings={agg2_node.node_id: agg2_settings},
+        )
+
+        sink_executor = SinkExecutor(recorder, span_factory, run_id)
+
+        ctx = PluginContext(run_id=run_id, config={})
+
+        # Source: 5 rows with values 1, 2, 3, 4, 5
+        source_rows = [{"value": i} for i in range(1, 6)]
+
+        # Track intermediate outputs from agg1
+        agg1_outputs: list[dict[str, Any]] = []
+
+        # Process source rows through agg1
+        for row_index, row_data in enumerate(source_rows):
+            # Create token for each source row
+            token = token_manager.create_initial_token(
+                run_id=run_id,
+                source_node_id=source_node.node_id,
+                row_index=row_index,
+                row_data=row_data,
+            )
+
+            # Accept row into aggregation 1
+            result = agg1_executor.accept(
+                aggregation=aggregation1,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=1,
+            )
+            assert result.accepted is True
+
+            # Check if trigger condition is met (after 2 rows)
+            if agg1_executor.should_flush(agg1_node.node_id):
+                output_rows = agg1_executor.flush(
+                    aggregation=aggregation1,
+                    ctx=ctx,
+                    trigger_reason="count_reached",
+                    step_in_pipeline=2,
+                )
+                agg1_outputs.extend(output_rows)
+
+        # Flush remaining rows from agg1 (end_of_source)
+        remaining_rows = agg1_executor.flush(
+            aggregation=aggregation1,
+            ctx=ctx,
+            trigger_reason="end_of_source",
+            step_in_pipeline=2,
+        )
+        agg1_outputs.extend(remaining_rows)
+
+        # Verify agg1 output: [3, 7, 5]
+        # - Batch 1: 1+2 = 3
+        # - Batch 2: 3+4 = 7
+        # - Batch 3 (end_of_source): 5
+        assert len(agg1_outputs) == 3, (
+            f"Expected 3 outputs from agg1, got {len(agg1_outputs)}. "
+            "agg1 should produce 3 sums: [1+2=3, 3+4=7, 5]."
+        )
+        agg1_values = [r["value"] for r in agg1_outputs]
+        assert agg1_values == [3, 7, 5], (
+            f"Expected agg1 values [3, 7, 5], got {agg1_values}. "
+            "agg1 groups by 2 with end_of_source flush for the last row."
+        )
+
+        # Feed agg1 outputs into agg2
+        for idx, agg1_output in enumerate(agg1_outputs):
+            # Create new token for agg1 output (intermediate token)
+            agg1_output_token = TokenInfo(
+                row_id=f"agg1_output_{idx}",
+                token_id=f"agg1_token_{idx}",
+                row_data=agg1_output,
+            )
+
+            # Accept into aggregation 2
+            result = agg2_executor.accept(
+                aggregation=aggregation2,
+                token=agg1_output_token,
+                ctx=ctx,
+                step_in_pipeline=3,
+            )
+            assert result.accepted is True
+
+            # Check if trigger condition is met (after 3 rows)
+            if agg2_executor.should_flush(agg2_node.node_id):
+                output_rows = agg2_executor.flush(
+                    aggregation=aggregation2,
+                    ctx=ctx,
+                    trigger_reason="count_reached",
+                    step_in_pipeline=4,
+                )
+
+                # Write agg2 output to sink
+                for sink_idx, sink_row in enumerate(output_rows):
+                    sink_output_token = TokenInfo(
+                        row_id=f"agg2_output_{sink_idx}",
+                        token_id=f"agg2_token_{sink_idx}",
+                        row_data=sink_row,
+                    )
+                    sink_executor.write(
+                        sink=sink,
+                        tokens=[sink_output_token],
+                        ctx=ctx,
+                        step_in_pipeline=5,
+                    )
+
+        # agg2 should have flushed exactly when count=3 was reached
+        # (after receiving all 3 outputs from agg1)
+
+        # CRITICAL VERIFICATION: Sink received 1 row with value=15
+        assert len(sink.results) == 1, (
+            f"Expected 1 final aggregated row, got {len(sink.results)}. "
+            "agg2 should sum the 3 outputs from agg1 into one row."
+        )
+        assert sink.results[0]["value"] == 15, (
+            f"Expected final value 15 (3+7+5), got {sink.results[0]['value']}. "
+            "agg2 should sum all agg1 outputs: 3+7+5=15."
+        )
+
+        # Complete the run
+        recorder.complete_run(run_id, status="completed")
+
+        # Verify audit trail completeness
+        # Source rows
+        rows = recorder.get_rows(run_id)
+        assert len(rows) == 5, f"Expected 5 source rows, got {len(rows)}"
+
+        # Verify batches were created:
+        # agg1: 3 batches (2 count-triggered, 1 end_of_source)
+        # agg2: 1 batch (count-triggered when reaching 3)
+        batches = recorder.get_batches(run_id)
+        assert (
+            len(batches) == 4
+        ), f"Expected 4 batches total (3 from agg1, 1 from agg2), got {len(batches)}"
+
+        # Verify artifact was recorded for sink
+        artifacts = recorder.get_artifacts(run_id)
+        assert len(artifacts) == 1
+        assert artifacts[0].content_hash == "test_hash"
+
 
 class TestForkCoalescePipelineIntegration:
     """End-to-end fork -> coalesce -> sink tests.

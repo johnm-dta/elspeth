@@ -26,7 +26,7 @@
 | WP-11.99 | Config-Driven Plugin Schemas | 🟢 Complete | 4-6h | None | WP-12 |
 | WP-12 | Utility Consolidation | 🟢 Complete | 0.5h | WP-11.99 | — |
 | WP-13 | Sink Test Rewrites | 🟢 Complete | 4h | WP-03, WP-04 | — |
-| WP-14 | Engine Test Rewrites | 🔴 Not Started | 16h | WP-06,07,08,09,10 | — |
+| WP-14 | Engine Test Rewrites | 🟡 In Progress | 16h | WP-06,07,08,09,10 | — |
 | WP-15 | RetryManager Integration | 🟢 Complete | 4h | None | — |
 
 **Legend:** 🔴 Not Started | 🟡 In Progress | 🟢 Complete | ⏸️ Blocked
@@ -81,7 +81,7 @@ WP-15       (independent - RetryManager integration)
 - [x] WP-08: Coalesce Executor ✅ Complete (2026-01-18)
 
 ### Sprint 5: Verification & Integration
-- [ ] WP-14: Engine Test Rewrites (split into WP-14a/b/c/d/e)
+- [ ] WP-14: Engine Test Rewrites 🟡 In Progress - WP-14a ✅, WP-14b/c/d remaining
 - [x] WP-15: RetryManager Integration ✅ Complete (2026-01-18)
 - [ ] Final integration testing
 
@@ -761,21 +761,123 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 
 ### WP-14: Engine Test Rewrites
 
-**Status:** 🔴 Not Started
+**Status:** 🟡 In Progress
 **Goal:** Engine tests updated for all architectural changes
-**Blocked by:** WP-06, WP-07, WP-08, WP-09, WP-10
+**Blocked by:** WP-06 ✅, WP-07 ✅, WP-08 ✅, WP-09 ✅, WP-10 ✅
 
-#### Files to Update
-- [ ] `tests/engine/test_processor.py` (828 lines) - Fork work queue, coalesce, quarantine
-- [ ] `tests/engine/test_executors.py` (1956 lines) - Aggregation triggers, gate routing
-- [ ] `tests/engine/test_orchestrator.py` (3920+ lines) - Engine gates, route resolution
-- [ ] `tests/engine/test_integration.py` (1048 lines) - End-to-end with new architecture
-- [ ] `tests/plugins/test_integration.py` (237 lines) - Plugin integration
+#### Sub-packages
 
-#### Verification
-- [ ] All tests pass
-- [ ] Coverage maintained
-- [ ] No references to old patterns
+| Sub-WP | Scope | Status |
+|--------|-------|--------|
+| WP-14a | Fork/Coalesce Test Rewrites | 🟢 Complete |
+| WP-14b | Gate Test Rewrites | 🔴 Not Started |
+| WP-14c | Aggregation Trigger Tests | 🔴 Not Started |
+| WP-14d | End-to-End Integration Tests | 🔴 Not Started |
+
+---
+
+#### WP-14a: Fork/Coalesce Test Rewrites ✅
+
+**Status:** 🟢 Complete (2026-01-18)
+**Plan:** [2026-01-18-wp-14a-fork-coalesce-tests.md](./2026-01-18-wp-14a-fork-coalesce-tests.md)
+**Scope:** CoalesceExecutor integration into RowProcessor with full test coverage
+
+**Files Modified:**
+- `src/elspeth/engine/processor.py` - Added coalesce_executor, coalesce_node_ids parameters; coalesce handling in _process_single_token()
+- `tests/engine/test_processor.py` - Added TestRowProcessorCoalesce class with 6 tests
+- `tests/engine/test_integration.py` - Added TestForkCoalescePipelineIntegration class with 2 tests
+
+**Tasks:**
+- [x] Task 1: Add coalesce_executor parameter to RowProcessor constructor
+- [x] Task 2: Add test_fork_then_coalesce_require_all (TDD red phase)
+- [x] Task 3: Implement coalesce integration in RowProcessor._process_single_token()
+- [x] Task 4: Add test_coalesce_best_effort_with_quarantined_child
+- [x] Task 5: Add test_coalesced_token_audit_trail_complete
+- [x] Task 6: Add test_coalesce_quorum_merges_at_threshold
+- [x] Task 7: Add test_nested_fork_coalesce
+- [x] Task 8: Add TestForkCoalescePipelineIntegration (2 tests)
+- [x] Task 9: Final verification - all tests pass
+
+**Commits (10 total):**
+```
+e9a5c94 feat(processor): accept coalesce_executor parameter
+1043585 style(processor): add blank line after TYPE_CHECKING block
+dd13013 test(processor): add fork -> coalesce require_all test
+2d20c10 feat(processor): integrate CoalesceExecutor for fork/join
+ff95189 test(coalesce): add best_effort policy test
+c8437e3 refactor(test): remove all unused variables from best_effort test
+a6a429d test(coalesce): verify audit trail complete for coalesced tokens
+7bd254a test(coalesce): verify quorum policy merges at threshold
+ad8c6f5 test(coalesce): verify nested fork/coalesce DAG handling
+9a6b790 test(integration): add fork -> coalesce -> sink pipeline test
+```
+
+**Verification ✅:**
+- [x] RowProcessor accepts coalesce_executor and coalesce_node_ids parameters
+- [x] process_row() accepts coalesce_at_step and coalesce_name parameters
+- [x] _WorkItem dataclass extended with coalesce fields
+- [x] Fork children correctly submitted to CoalesceExecutor
+- [x] Held tokens return None (no RowResult until merged)
+- [x] Merged tokens return RowOutcome.COALESCED
+- [x] All 4 coalesce policies tested (require_all, best_effort, quorum, first)
+- [x] Audit trail complete for coalesced tokens (parent_token_id, join_group_id)
+- [x] Nested fork/coalesce DAGs work correctly
+- [x] End-to-end pipeline test: fork → coalesce → sink
+- [x] 23 new fork/coalesce tests added
+- [x] 364 engine tests pass
+- [x] 87% coverage (aggregation edge cases are the gap, not fork/coalesce)
+- [x] mypy --strict passes
+- [x] ruff lint clean
+
+---
+
+#### WP-14b: Gate Test Rewrites
+
+**Status:** 🔴 Not Started
+**Plan:** [2026-01-18-wp-14b-gate-tests.md](./2026-01-18-wp-14b-gate-tests.md)
+**Scope:** Complete test coverage for engine-level gates (WP-09), focusing on integration gaps
+
+**Existing coverage:** ~2700 lines across `test_expression_parser.py`, `test_engine_gates.py`, `test_config_gates.py` (117 tests)
+
+**Gaps to fill:**
+- [ ] Config gate fork execution (now that WP-07 is done)
+- [ ] Audit trail for gate decisions
+- [ ] Runtime condition errors (KeyError for missing fields)
+- [ ] Plugin gate + config gate interaction
+- [ ] Non-boolean condition results (integer route labels)
+
+**Estimated time:** ~3 hours
+
+---
+
+#### WP-14c: Aggregation Trigger Tests
+
+**Status:** 🔴 Not Started
+**Plan:** [2026-01-18-wp-14c-aggregation-tests.md](./2026-01-18-wp-14c-aggregation-tests.md)
+**Scope:** Complete test coverage for config-driven aggregation triggers (WP-06)
+
+**Existing coverage:** ~600+ lines in `test_triggers.py`, `test_executors.py`, `test_processor.py`
+
+**Gaps to fill:**
+- [ ] output_mode tests (single, passthrough, transform)
+- [ ] end_of_source implicit trigger
+- [ ] Timeout trigger in real pipeline
+- [ ] Multiple aggregations in pipeline
+- [ ] Aggregation + gate routing interaction
+- [ ] Audit trail for CONSUMED_IN_BATCH tokens
+
+**Estimated time:** ~5 hours
+
+---
+
+#### WP-14d: End-to-End Integration Tests
+
+**Status:** 🔴 Not Started
+**Scope:** Comprehensive integration tests combining all new architecture
+
+**Files to Update:**
+- [ ] `tests/engine/test_integration.py` - Full pipeline tests
+- [ ] `tests/plugins/test_integration.py` - Plugin integration tests
 
 ---
 
@@ -891,4 +993,6 @@ a708bb8 docs(tracker): mark WP-15 RetryManager Integration complete (WP-15 Task 
 | 2026-01-18 | WP-11 | ✅ **COMPLETE** - 7 commits, 8 tasks. Removed `on_register()` from 4 base classes, removed defensive getattr (6 occurrences), fixed `_schema_hash()` to crash on non-Pydantic, fixed TUI `.get()` patterns, added exception logging. Updated PHASE3_INTEGRATION.md. 297 plugin tests, 348 engine tests, 43 TUI tests all pass. | Claude |
 | 2026-01-18 | WP-15 | **CREATED** - New work package to integrate RetryManager into transform execution. Plan at `2026-01-18-wp15-retry-manager-integration.md`. 8 tasks covering: factory method, attempt tracking, RowProcessor integration, MaxRetriesExceeded handling, Orchestrator wiring. Independent - can run anytime. | Claude |
 | 2026-01-18 | WP-15 | ✅ **COMPLETE** - 10 commits, 9 tasks. RetryConfig.from_settings() factory, attempt parameter to execute_transform(), retry wrapper in RowProcessor, MaxRetriesExceeded → FAILED outcome, Orchestrator wiring, 3 integration tests proving attempts 0,1,2 recorded in node_states. Task 9 added type-safe `FailureInfo` dataclass replacing `dict[str, Any]` for audit-safe error capture. | Claude |
+| 2026-01-18 | WP-14a | ✅ **COMPLETE** - 10 commits, 9 tasks. CoalesceExecutor integration into RowProcessor: coalesce_executor/coalesce_node_ids parameters, coalesce_at_step/coalesce_name in process_row(), _WorkItem extended, fork children submitted to coalesce, held tokens return None until merged, COALESCED outcome for merged tokens. TestRowProcessorCoalesce (6 tests) + TestForkCoalescePipelineIntegration (2 tests). 23 new tests, 364 engine tests pass, 87% coverage. WP-14b/c/d remaining. | Claude |
+| 2026-01-18 | WP-14 | **FIX**: Swapped WP-14b/14c naming to match plan files. WP-14b = Gate Tests (was aggregation), WP-14c = Aggregation Tests (was gates). Added plan file links, existing coverage stats, and gap checklists to both sections. | Claude |
 | | | | |

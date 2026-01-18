@@ -69,6 +69,7 @@ class RunResult:
     rows_failed: int
     rows_routed: int
     rows_quarantined: int = 0
+    rows_forked: int = 0
 
 
 class RouteValidationError(Exception):
@@ -559,6 +560,7 @@ class Orchestrator:
         rows_failed = 0
         rows_routed = 0
         rows_quarantined = 0
+        rows_forked = 0
         pending_tokens: dict[str, list[TokenInfo]] = {name: [] for name in config.sinks}
 
         try:
@@ -624,7 +626,7 @@ class Orchestrator:
                         elif result.outcome == RowOutcome.QUARANTINED:
                             rows_quarantined += 1
                         elif result.outcome == RowOutcome.FORKED:
-                            # Parent token - don't count as succeeded/failed
+                            rows_forked += 1
                             # Children are counted separately when they reach terminal state
                             pass
                         elif result.outcome == RowOutcome.CONSUMED_IN_BATCH:
@@ -673,6 +675,7 @@ class Orchestrator:
             rows_failed=rows_failed,
             rows_routed=rows_routed,
             rows_quarantined=rows_quarantined,
+            rows_forked=rows_forked,
         )
 
     def _export_landscape(

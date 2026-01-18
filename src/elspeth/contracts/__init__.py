@@ -57,6 +57,7 @@ from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.results import (
     AcceptResult,
     ArtifactDescriptor,
+    FailureInfo,
     GateResult,
     RowResult,
     TransformResult,
@@ -143,6 +144,7 @@ __all__ = [
     # results
     "AcceptResult",
     "ArtifactDescriptor",
+    "FailureInfo",
     "GateResult",
     "RowResult",
     "TransformResult",

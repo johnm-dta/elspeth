@@ -6,14 +6,55 @@ IMPORTANT:
 - TransformResult.status uses Literal["success", "error"], NOT an enum
 - TransformResult and GateResult KEEP audit fields (input_hash, output_hash, duration_ms)
 - ArtifactDescriptor matches architecture schema (artifact_type, content_hash REQUIRED, size_bytes REQUIRED)
+- FailureInfo provides type-safe error details for RowResult
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from elspeth.engine.retry import MaxRetriesExceeded
 
 from elspeth.contracts.enums import RowOutcome
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.routing import RoutingAction
+
+
+@dataclass
+class FailureInfo:
+    """Type-safe error details for RowResult.
+
+    Captures structured failure information for FAILED outcomes.
+    Use factory methods for common error types.
+
+    Fields:
+        exception_type: The exception class name (required)
+        message: Human-readable error message (required)
+        attempts: Number of retry attempts (optional, for retry failures)
+        last_error: The underlying error message (optional)
+    """
+
+    exception_type: str
+    message: str
+    attempts: int | None = None
+    last_error: str | None = None
+
+    @classmethod
+    def from_max_retries_exceeded(cls, e: "MaxRetriesExceeded") -> "FailureInfo":
+        """Create FailureInfo from MaxRetriesExceeded exception.
+
+        Args:
+            e: The MaxRetriesExceeded exception
+
+        Returns:
+            FailureInfo with all retry details
+        """
+        return cls(
+            exception_type="MaxRetriesExceeded",
+            message=str(e),
+            attempts=e.attempts,
+            last_error=str(e.last_error),
+        )
 
 
 @dataclass
@@ -99,14 +140,14 @@ class RowResult:
         final_data: Final row data after processing (may be original if failed early)
         outcome: Terminal state (COMPLETED, FAILED, QUARANTINED, etc.)
         sink_name: For ROUTED outcomes, the destination sink name
-        error: For FAILED outcomes, error details for audit
+        error: For FAILED outcomes, type-safe error details for audit
     """
 
     token: TokenInfo
     final_data: dict[str, Any]
     outcome: RowOutcome
     sink_name: str | None = None
-    error: dict[str, Any] | None = None
+    error: FailureInfo | None = None
 
     @property
     def token_id(self) -> str:

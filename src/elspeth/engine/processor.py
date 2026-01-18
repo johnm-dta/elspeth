@@ -15,6 +15,7 @@ from typing import Any
 
 from elspeth.contracts import RowOutcome, RowResult, TokenInfo, TransformResult
 from elspeth.contracts.enums import RoutingKind
+from elspeth.contracts.results import FailureInfo
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape import LandscapeRecorder
 from elspeth.engine.executors import (
@@ -348,12 +349,7 @@ class RowProcessor:
                             token=current_token,
                             final_data=current_token.row_data,
                             outcome=RowOutcome.FAILED,
-                            error={
-                                "exception": "MaxRetriesExceeded",
-                                "message": str(e),
-                                "attempts": e.attempts,
-                                "last_error": str(e.last_error),
-                            },
+                            error=FailureInfo.from_max_retries_exceeded(e),
                         ),
                         child_items,
                     )

@@ -7,6 +7,8 @@ Tests for:
 - GateResult creation and audit fields
 - AcceptResult creation
 - RowResult creation with TokenInfo
+- RowResult.error uses FailureInfo (not dict)
+- FailureInfo creation and factory methods
 - ArtifactDescriptor required fields (content_hash, size_bytes)
 - ArtifactDescriptor uses artifact_type (not kind)
 - ArtifactDescriptor factory methods
@@ -18,10 +20,12 @@ from elspeth.contracts import RoutingAction, RowOutcome, TokenInfo
 from elspeth.contracts.results import (
     AcceptResult,
     ArtifactDescriptor,
+    FailureInfo,
     GateResult,
     RowResult,
     TransformResult,
 )
+from elspeth.engine.retry import MaxRetriesExceeded
 
 
 class TestTransformResult:
@@ -405,3 +409,94 @@ class TestArtifactDescriptorTypes:
             response_code=200,
         )
         assert descriptor.artifact_type == "webhook"
+
+
+class TestFailureInfo:
+    """Tests for FailureInfo dataclass."""
+
+    def test_creation_with_required_fields_only(self) -> None:
+        """FailureInfo can be created with only required fields."""
+        info = FailureInfo(
+            exception_type="ValueError",
+            message="Invalid value provided",
+        )
+
+        assert info.exception_type == "ValueError"
+        assert info.message == "Invalid value provided"
+        assert info.attempts is None
+        assert info.last_error is None
+
+    def test_creation_with_all_fields(self) -> None:
+        """FailureInfo can be created with all fields."""
+        info = FailureInfo(
+            exception_type="MaxRetriesExceeded",
+            message="Max retries (3) exceeded: Connection refused",
+            attempts=3,
+            last_error="Connection refused",
+        )
+
+        assert info.exception_type == "MaxRetriesExceeded"
+        assert info.message == "Max retries (3) exceeded: Connection refused"
+        assert info.attempts == 3
+        assert info.last_error == "Connection refused"
+
+    def test_from_max_retries_exceeded_factory(self) -> None:
+        """from_max_retries_exceeded creates FailureInfo from exception."""
+        original_error = ConnectionError("Connection refused")
+        exc = MaxRetriesExceeded(attempts=3, last_error=original_error)
+
+        info = FailureInfo.from_max_retries_exceeded(exc)
+
+        assert info.exception_type == "MaxRetriesExceeded"
+        assert info.message == str(exc)
+        assert info.attempts == 3
+        assert info.last_error == "Connection refused"
+
+    def test_is_not_frozen(self) -> None:
+        """FailureInfo is NOT frozen (matches other result types)."""
+        info = FailureInfo(
+            exception_type="TestError",
+            message="Test message",
+        )
+
+        # Should be mutable (no FrozenInstanceError)
+        info.attempts = 5
+        assert info.attempts == 5
+
+
+class TestRowResultWithFailureInfo:
+    """Tests for RowResult.error field using FailureInfo."""
+
+    def test_failed_outcome_with_failure_info(self) -> None:
+        """FAILED outcome includes FailureInfo error details."""
+        token = TokenInfo(row_id="row-1", token_id="tok-1", row_data={"x": 1})
+        error = FailureInfo(
+            exception_type="MaxRetriesExceeded",
+            message="Max retries (3) exceeded",
+            attempts=3,
+            last_error="Connection refused",
+        )
+
+        result = RowResult(
+            token=token,
+            final_data={"x": 1},
+            outcome=RowOutcome.FAILED,
+            error=error,
+        )
+
+        assert result.outcome == RowOutcome.FAILED
+        assert result.error is not None
+        assert result.error.exception_type == "MaxRetriesExceeded"
+        assert result.error.attempts == 3
+
+    def test_error_field_type_is_failure_info(self) -> None:
+        """RowResult.error field is typed as FailureInfo | None."""
+        from dataclasses import fields
+
+        row_result_fields = {f.name: f for f in fields(RowResult)}
+        error_field = row_result_fields["error"]
+
+        # The type annotation should be FailureInfo | None
+        # We verify by checking that FailureInfo is in the string representation
+        type_str = str(error_field.type)
+        assert "FailureInfo" in type_str or error_field.type is FailureInfo

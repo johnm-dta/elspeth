@@ -1731,6 +1731,173 @@ class TestProcessorAggregationTriggers:
         assert len(flushed_values[0]) == 3
         assert flushed_values[0] == [{"value": 1}, {"value": 2}, {"value": 3}]
 
+    def test_aggregated_tokens_audit_trail(self) -> None:
+        """Tokens consumed by aggregation have complete audit trail.
+
+        For any row that was aggregated, the audit trail should show:
+        - Source row entry
+        - Aggregation accept (CONSUMED_IN_BATCH status)
+        - Link to batch that consumed it
+        - Batch output row
+
+        This test verifies:
+        1. Each token has a node_state for the aggregation node
+        2. The state status is "completed" (accept succeeded)
+        3. The output_hash matches expected structure containing batch_id
+        4. The batch_members table links token to batch with ordinal
+        """
+        from elspeth.contracts import NodeType
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register source and aggregation nodes
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="sum_aggregator",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Track processed tokens for later verification
+        processed_token_ids: list[str] = []
+
+        class SumAggregation(BaseAggregation):
+            """Aggregation that sums values."""
+
+            name = "sum_aggregator"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+                self._values: list[int] = []
+
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
+                self._values.append(row["value"])
+                return AcceptResult(accepted=True)
+
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+                total = sum(self._values)
+                self._values = []
+                return [{"sum": total}]
+
+        # Configure trigger: flush after 3 rows
+        aggregation_settings = {
+            agg_node.node_id: AggregationSettings(
+                name="sum_aggregator",
+                plugin="sum_aggregator",
+                trigger=TriggerConfig(count=3),
+            ),
+        }
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+        aggregation = SumAggregation(agg_node.node_id)
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            aggregation_settings=aggregation_settings,
+        )
+
+        # Process 3 rows - should trigger flush after 3rd
+        for i in range(3):
+            results = processor.process_row(
+                row_index=i,
+                row_data={"value": (i + 1) * 10},
+                transforms=[aggregation],
+                ctx=ctx,
+            )
+            # Each result has a token_id
+            for result in results:
+                processed_token_ids.append(result.token_id)
+
+        assert len(processed_token_ids) == 3
+
+        # === Verify batch_members table links tokens to batch ===
+        # Get all batches for this run
+        batches = recorder.get_batches(run.run_id)
+        assert len(batches) == 1, "Should have exactly one batch"
+        batch = batches[0]
+        assert batch.aggregation_node_id == agg_node.node_id
+        assert batch.status == "completed", "Batch should be completed after flush"
+
+        # Verify batch members
+        members = recorder.get_batch_members(batch.batch_id)
+        assert len(members) == 3, "Batch should have 3 members"
+
+        # Map token_id -> member for verification
+        member_by_token = {m.token_id: m for m in members}
+
+        # === Verify each token's audit trail ===
+        for idx, token_id in enumerate(processed_token_ids):
+            # 1. Token should be in batch_members
+            assert token_id in member_by_token, f"Token {token_id} not in batch_members"
+            member = member_by_token[token_id]
+            assert member.batch_id == batch.batch_id
+            assert (
+                member.ordinal == idx
+            ), f"Expected ordinal {idx}, got {member.ordinal}"
+
+            # 2. Token should have node_state for the aggregation node
+            states = recorder.get_node_states_for_token(token_id)
+            assert (
+                len(states) >= 1
+            ), f"Token {token_id} should have at least one node_state"
+
+            # Find the aggregation node state
+            agg_states = [s for s in states if s.node_id == agg_node.node_id]
+            assert (
+                len(agg_states) == 1
+            ), "Token should have exactly one aggregation state"
+            agg_state = agg_states[0]
+
+            # 2. State should be "completed" (accept succeeded)
+            assert (
+                agg_state.status == "completed"
+            ), f"Aggregation state should be 'completed', got '{agg_state.status}'"
+
+            # 3. Output hash should match expected output_data with batch_id
+            # The output_data is canonicalized and stored as a hash for audit integrity.
+            # We verify the hash matches the expected structure containing batch_id.
+            from elspeth.core.canonical import stable_hash
+
+            expected_output = {
+                "row": {"value": (idx + 1) * 10},
+                "batch_id": batch.batch_id,
+                "ordinal": idx,
+            }
+            expected_hash = stable_hash(expected_output)
+            assert (
+                agg_state.output_hash == expected_hash
+            ), f"output_hash mismatch for token {idx}: expected hash of {expected_output}"
+
+            # 4. Verify the node is indeed an aggregation
+            node = recorder.get_node(agg_state.node_id)
+            assert node is not None
+            assert node.node_type == NodeType.AGGREGATION
+
+        # === Verify batch output was recorded ===
+        # The batch should have a completed status with trigger reason
+        assert batch.trigger_reason is not None, "Batch should have trigger_reason"
+
 
 class TestRowProcessorCoalesce:
     """Test RowProcessor integration with CoalesceExecutor."""

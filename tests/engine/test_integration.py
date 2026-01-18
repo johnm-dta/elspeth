@@ -4941,3 +4941,361 @@ class TestComplexDAGIntegration:
             "high_sink",
         }
         assert expected_nodes <= node_ids, f"Missing nodes: {expected_nodes - node_ids}"
+
+
+class TestRetryIntegration:
+    """End-to-end retry behavior tests.
+
+    These tests verify retry integration with the full pipeline:
+    - Transient failures that succeed after retries
+    - Permanent failures that exhaust retries and get quarantined
+    - Audit trail records all attempts
+    """
+
+    def test_transient_failure_retries_and_succeeds(self) -> None:
+        """Transform that fails twice then succeeds should complete.
+
+        Pipeline: source -> flaky_transform (fails 2x, succeeds 3rd) -> sink
+
+        Verifies:
+        - RetryManager triggers retries on ConnectionError
+        - Audit trail records all attempts (attempt 0, 1, 2)
+        - Final success reaches sink
+        - All rows complete successfully
+        """
+        from collections import defaultdict
+
+        from sqlalchemy import select
+
+        from elspeth.contracts import PluginSchema, RunStatus
+        from elspeth.core.config import ElspethSettings
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.core.landscape.schema import node_states_table
+        from elspeth.engine import Orchestrator, PipelineConfig
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource(_TestSourceBase):
+            name = "test_source"
+            output_schema = ValueSchema
+
+            def __init__(self, data: list[dict[str, Any]]) -> None:
+                self._data = data
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def load(self, ctx: Any) -> Any:
+                yield from self._data
+
+            def close(self) -> None:
+                pass
+
+        # Track attempt counts per row
+        attempt_counts: dict[int, int] = defaultdict(int)
+
+        class FlakyTransform(BaseTransform):
+            """Transform that fails first 2 times with ConnectionError, succeeds on 3rd."""
+
+            name = "flaky_transform"
+            input_schema = ValueSchema
+            output_schema = ValueSchema
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def process(self, row: dict[str, Any], ctx: Any) -> TransformResult:
+                row_value = row["value"]
+                attempt_counts[row_value] += 1
+
+                if attempt_counts[row_value] < 3:
+                    # Raise ConnectionError - this is retryable
+                    raise ConnectionError(
+                        f"Transient failure attempt {attempt_counts[row_value]}"
+                    )
+
+                return TransformResult.success({"value": row_value, "processed": True})
+
+        class CollectSink(_TestSinkBase):
+            name = "output_sink"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://output", size_bytes=100, content_hash="retry_test"
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Create pipeline
+        source = ListSource([{"value": 1}, {"value": 2}])
+        transform = FlakyTransform()
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[transform],
+            sinks={"default": sink},
+        )
+
+        # Create settings with retry enabled (fast delays for testing)
+        # ElspethSettings requires datasource, sinks, output_sink but
+        # those are not used when orchestrator.run() already has PipelineConfig
+        settings = ElspethSettings(
+            datasource={"plugin": "memory"},
+            sinks={"default": {"plugin": "memory"}},
+            output_sink="default",
+            retry={
+                "max_attempts": 5,
+                "initial_delay_seconds": 0.001,
+                "max_delay_seconds": 0.01,
+            },
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(
+            config, graph=_build_test_graph(config), settings=settings
+        )
+
+        # Verify run completed successfully
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 2
+        assert result.rows_succeeded == 2
+
+        # Both rows should have been retried (3 attempts each)
+        assert attempt_counts[1] == 3
+        assert attempt_counts[2] == 3
+
+        # Sink received both rows
+        assert len(sink.results) == 2
+        assert all(r["processed"] for r in sink.results)
+
+        # Verify audit trail records all attempts
+        recorder = LandscapeRecorder(db)
+        nodes = recorder.get_nodes(result.run_id)
+        transform_node = next(n for n in nodes if n.plugin_name == "flaky_transform")
+
+        with db.engine.connect() as conn:
+            stmt = (
+                select(node_states_table)
+                .where(node_states_table.c.node_id == transform_node.node_id)
+                .order_by(node_states_table.c.token_id, node_states_table.c.attempt)
+            )
+            states = list(conn.execute(stmt))
+
+        # Should have 3 attempts per row = 6 node_states
+        assert (
+            len(states) == 6
+        ), f"Expected 6 node_states (3 per row), got {len(states)}"
+
+        # Verify attempt numbers: each row has attempts 0, 1, 2
+        # Group by token_id and check attempts
+        attempts_by_token: dict[str, list[int]] = defaultdict(list)
+        for state in states:
+            attempts_by_token[state.token_id].append(state.attempt)
+
+        for token_id, attempts in attempts_by_token.items():
+            assert (
+                sorted(attempts) == [0, 1, 2]
+            ), f"Token {token_id} should have attempts [0, 1, 2], got {sorted(attempts)}"
+
+        # Verify final attempts are successful
+        final_states = [s for s in states if s.attempt == 2]
+        assert all(
+            s.status == "completed" for s in final_states
+        ), "All final attempts should be 'completed'"
+
+    def test_permanent_failure_quarantines_after_max_retries(self) -> None:
+        """Transform that always fails should quarantine row after max retries.
+
+        Pipeline: source -> always_fail_transform -> sink
+
+        Verifies:
+        - RetryManager exhausts retries (max_attempts=3)
+        - Failed row is FAILED, not lost
+        - Other rows (from different source) still succeed
+        - Audit trail shows all failed attempts
+        """
+        from collections import defaultdict
+
+        from sqlalchemy import select
+
+        from elspeth.contracts import PluginSchema, RunStatus
+        from elspeth.core.config import ElspethSettings
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.core.landscape.schema import node_states_table
+        from elspeth.engine import Orchestrator, PipelineConfig
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource(_TestSourceBase):
+            name = "test_source"
+            output_schema = ValueSchema
+
+            def __init__(self, data: list[dict[str, Any]]) -> None:
+                self._data = data
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def load(self, ctx: Any) -> Any:
+                yield from self._data
+
+            def close(self) -> None:
+                pass
+
+        # Track attempt counts per row
+        attempt_counts: dict[int, int] = defaultdict(int)
+
+        class SelectiveFailTransform(BaseTransform):
+            """Transform that always fails for value=1 but succeeds for value=2."""
+
+            name = "selective_fail"
+            input_schema = ValueSchema
+            output_schema = ValueSchema
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def process(self, row: dict[str, Any], ctx: Any) -> TransformResult:
+                row_value = row["value"]
+                attempt_counts[row_value] += 1
+
+                if row_value == 1:
+                    # Always fail with ConnectionError (retryable)
+                    raise ConnectionError(
+                        f"Permanent failure for value=1, attempt {attempt_counts[row_value]}"
+                    )
+
+                return TransformResult.success({"value": row_value, "processed": True})
+
+        class CollectSink(_TestSinkBase):
+            name = "output_sink"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://output",
+                    size_bytes=100,
+                    content_hash="quarantine_test",
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Create pipeline with 2 rows: value=1 (fails) and value=2 (succeeds)
+        source = ListSource([{"value": 1}, {"value": 2}])
+        transform = SelectiveFailTransform()
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[transform],
+            sinks={"default": sink},
+        )
+
+        # Create settings with retry enabled (max 3 attempts, fast delays)
+        # ElspethSettings requires datasource, sinks, output_sink but
+        # those are not used when orchestrator.run() already has PipelineConfig
+        settings = ElspethSettings(
+            datasource={"plugin": "memory"},
+            sinks={"default": {"plugin": "memory"}},
+            output_sink="default",
+            retry={
+                "max_attempts": 3,
+                "initial_delay_seconds": 0.001,
+                "max_delay_seconds": 0.01,
+            },
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(
+            config, graph=_build_test_graph(config), settings=settings
+        )
+
+        # Run completes (partial success)
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 2
+
+        # Row with value=1 failed after max retries (3 attempts)
+        # Row with value=2 succeeded
+        assert (
+            result.rows_failed == 1
+        ), f"Expected 1 failed row, got {result.rows_failed}"
+        assert (
+            result.rows_succeeded == 1
+        ), f"Expected 1 succeeded row, got {result.rows_succeeded}"
+
+        # Verify attempt counts
+        assert (
+            attempt_counts[1] == 3
+        ), f"value=1 should have 3 attempts, got {attempt_counts[1]}"
+        assert (
+            attempt_counts[2] == 1
+        ), f"value=2 should have 1 attempt, got {attempt_counts[2]}"
+
+        # Sink only received the successful row
+        assert len(sink.results) == 1
+        assert sink.results[0]["value"] == 2
+        assert sink.results[0]["processed"] is True
+
+        # Verify audit trail for failed row shows all attempts
+        recorder = LandscapeRecorder(db)
+        nodes = recorder.get_nodes(result.run_id)
+        transform_node = next(n for n in nodes if n.plugin_name == "selective_fail")
+
+        with db.engine.connect() as conn:
+            stmt = (
+                select(node_states_table)
+                .where(node_states_table.c.node_id == transform_node.node_id)
+                .order_by(node_states_table.c.token_id, node_states_table.c.attempt)
+            )
+            states = list(conn.execute(stmt))
+
+        # Should have: 3 failed attempts for value=1 + 1 success for value=2 = 4
+        assert len(states) == 4, f"Expected 4 node_states, got {len(states)}"
+
+        # Verify statuses: 3 failed + 1 completed
+        statuses = [s.status for s in states]
+        assert statuses.count("failed") == 3, f"Expected 3 failed, got {statuses}"
+        assert statuses.count("completed") == 1, f"Expected 1 completed, got {statuses}"
+
+        # Verify all failed attempts have error_json populated
+        failed_states = [s for s in states if s.status == "failed"]
+        for failed in failed_states:
+            assert failed.error_json is not None, "Failed states must have error_json"

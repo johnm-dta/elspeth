@@ -1360,6 +1360,178 @@ class TestEndToEndPipeline:
         assert "config_gate:audit_test_gate" in node_names
         assert "gate" in node_types
 
+    def test_gate_audit_trail_includes_evaluation_metadata(self) -> None:
+        """WP-14b: Verify gate audit trail includes condition, result, and route.
+
+        ELSPETH is built for high-stakes accountability. Every gate decision
+        must be auditable - traceable to what condition was evaluated and
+        what route was taken.
+
+        This test verifies that for gate evaluations:
+        1. The node_states table records the gate evaluation
+        2. The routing_events table (for routed tokens) includes metadata
+        3. The metadata contains: condition evaluated, evaluation result, route taken
+        """
+        import json
+
+        from sqlalchemy import text
+
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        class InputSchema(PluginSchema):
+            priority: int
+
+        class ListSource(_TestSourceBase):
+            name = "list_source"
+            output_schema = InputSchema
+
+            def __init__(self, data: list[dict[str, Any]]) -> None:
+                self._data = data
+
+            def load(self, ctx: Any) -> Any:
+                yield from self._data
+
+            def close(self) -> None:
+                pass
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+            config: ClassVar[dict[str, Any]] = {}
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Two rows: one high priority (routes to "urgent"), one low (continues to default)
+        source = ListSource([{"priority": 10}, {"priority": 2}])
+        default_sink = CollectSink()
+        urgent_sink = CollectSink()
+
+        gate = GateSettings(
+            name="priority_gate",
+            condition="row['priority'] > 5",
+            routes={"true": "urgent", "false": "continue"},
+        )
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[],
+            sinks={"default": default_sink, "urgent": urgent_sink},
+            gates=[gate],
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(
+            config, graph=_build_test_graph_with_config_gates(config)
+        )
+
+        assert result.status == "completed"
+        assert result.rows_processed == 2
+
+        # Verify sink routing
+        assert len(urgent_sink.results) == 1, "High priority should route to urgent"
+        assert len(default_sink.results) == 1, "Low priority should continue to default"
+        assert urgent_sink.results[0]["priority"] == 10
+        assert default_sink.results[0]["priority"] == 2
+
+        # Query the database to verify audit trail completeness
+        with db._engine.connect() as conn:
+            # 1. Find the gate node
+            gate_node = conn.execute(
+                text("""
+                    SELECT node_id, config_json
+                    FROM nodes
+                    WHERE run_id = :run_id
+                    AND node_type = 'gate'
+                """),
+                {"run_id": result.run_id},
+            ).fetchone()
+
+            assert gate_node is not None, "Gate node should be registered"
+            gate_node_id = gate_node[0]
+
+            # Verify gate config is recorded (includes condition)
+            gate_config = json.loads(gate_node[1])
+            assert gate_config["condition"] == "row['priority'] > 5"
+            assert "routes" in gate_config
+            assert gate_config["routes"]["true"] == "urgent"
+            assert gate_config["routes"]["false"] == "continue"
+
+            # 2. Find node_states for the gate (one per token processed)
+            gate_states = conn.execute(
+                text("""
+                    SELECT state_id, token_id, status, input_hash, output_hash
+                    FROM node_states
+                    WHERE node_id = :node_id
+                    ORDER BY started_at
+                """),
+                {"node_id": gate_node_id},
+            ).fetchall()
+
+            assert len(gate_states) == 2, "Should have 2 node_states (one per row)"
+
+            # All gate states should be "completed" (terminal state is derived)
+            for state in gate_states:
+                assert state[2] == "completed", "Gate state should be 'completed'"
+                assert state[3] is not None, "input_hash must be recorded"
+                assert state[4] is not None, "output_hash must be recorded"
+
+            # 3. Find routing events for the gate evaluations
+            # Only routed tokens (not "continue") generate routing events
+            routing_events = conn.execute(
+                text("""
+                    SELECT re.event_id, re.state_id, re.edge_id, re.reason_hash,
+                           e.label, e.to_node_id
+                    FROM routing_events re
+                    JOIN node_states ns ON re.state_id = ns.state_id
+                    JOIN edges e ON re.edge_id = e.edge_id
+                    WHERE ns.node_id = :node_id
+                """),
+                {"node_id": gate_node_id},
+            ).fetchall()
+
+            # We expect 1 routing event for the "true" -> "urgent" route
+            # The "false" -> "continue" route doesn't generate a routing event
+            # because it just continues to next node
+            assert (
+                len(routing_events) == 1
+            ), f"Expected 1 routing event for routed token, got {len(routing_events)}"
+
+            routing_event = routing_events[0]
+            edge_label = routing_event[4]
+            assert (
+                edge_label == "true"
+            ), f"Edge label should be 'true', got {edge_label}"
+
+            # The routing event should have a reason_hash (metadata was recorded)
+            reason_hash = routing_event[3]
+            assert (
+                reason_hash is not None
+            ), "Routing event should have reason_hash for audit trail"
+
+            # 4. Verify the edge points to the urgent sink
+            to_node_id = routing_event[5]
+            sink_node = conn.execute(
+                text("""
+                    SELECT plugin_name FROM nodes WHERE node_id = :node_id
+                """),
+                {"node_id": to_node_id},
+            ).fetchone()
+            assert sink_node is not None
+            # The sink plugin name should indicate it's the urgent sink
+
 
 # ============================================================================
 # Error Handling Tests

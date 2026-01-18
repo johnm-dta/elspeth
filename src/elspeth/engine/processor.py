@@ -11,9 +11,12 @@ Coordinates:
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts import RowOutcome, RowResult, TokenInfo, TransformResult
+
+if TYPE_CHECKING:
+    from elspeth.engine.coalesce_executor import CoalesceExecutor
 from elspeth.contracts.enums import RoutingKind
 from elspeth.contracts.results import FailureInfo
 from elspeth.core.config import AggregationSettings, GateSettings
@@ -84,6 +87,7 @@ class RowProcessor:
         config_gate_id_map: dict[str, str] | None = None,
         aggregation_settings: dict[str, AggregationSettings] | None = None,
         retry_manager: RetryManager | None = None,
+        coalesce_executor: "CoalesceExecutor | None" = None,
     ) -> None:
         """Initialize processor.
 
@@ -98,6 +102,7 @@ class RowProcessor:
             config_gate_id_map: Map of gate name -> node_id for config gates
             aggregation_settings: Map of node_id -> AggregationSettings for trigger evaluation
             retry_manager: Optional retry manager for transform execution
+            coalesce_executor: Optional coalesce executor for fork/join operations
         """
         self._recorder = recorder
         self._spans = span_factory
@@ -106,6 +111,7 @@ class RowProcessor:
         self._config_gates = config_gates or []
         self._config_gate_id_map = config_gate_id_map or {}
         self._retry_manager = retry_manager
+        self._coalesce_executor = coalesce_executor
 
         self._token_manager = TokenManager(recorder)
         self._transform_executor = TransformExecutor(recorder, span_factory)

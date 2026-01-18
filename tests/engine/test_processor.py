@@ -1750,6 +1750,49 @@ class TestProcessorAggregationTriggers:
         assert flushed_values[0] == [{"value": 1}, {"value": 2}, {"value": 3}]
 
 
+class TestRowProcessorCoalesce:
+    """Test RowProcessor integration with CoalesceExecutor."""
+
+    def test_processor_accepts_coalesce_executor(self) -> None:
+        """RowProcessor should accept coalesce_executor parameter."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        token_manager = TokenManager(recorder)
+
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        coalesce_executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+
+        # Should not raise
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            coalesce_executor=coalesce_executor,
+        )
+        assert processor._coalesce_executor is coalesce_executor
+
+
 class TestRowProcessorRetry:
     """Tests for retry integration in RowProcessor."""
 

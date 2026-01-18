@@ -700,6 +700,213 @@ class TestForkCreatesChildTokens:
         assert node_info.config["fork_to"] == ["analysis_a", "analysis_b"]
         assert node_info.config["routes"]["all"] == "fork"
 
+    def test_fork_children_route_to_branch_named_sinks(self) -> None:
+        """Fork children with branch_name route to matching sinks.
+
+        This is the core fork use case:
+        - Gate forks to ["path_a", "path_b"]
+        - Child with branch_name="path_a" goes to sink named "path_a"
+        - Child with branch_name="path_b" goes to sink named "path_b"
+        """
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+        from elspeth.core.config import (
+            GateSettings as GateSettingsConfig,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        class ListSource(_TestSourceBase):
+            name = "list_source"
+            output_schema = RowSchema
+
+            def __init__(self, data: list[dict[str, Any]]) -> None:
+                self._data = data
+
+            def load(self, ctx: Any) -> Any:
+                yield from self._data
+
+            def close(self) -> None:
+                pass
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+            config: ClassVar[dict[str, Any]] = {}
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
+
+            def close(self) -> None:
+                pass
+
+        source = ListSource([{"value": 42}])
+        path_a_sink = CollectSink()
+        path_b_sink = CollectSink()
+
+        # Config with fork gate and branch-named sinks
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="list_source"),
+            sinks={
+                "path_a": SinkSettings(plugin="collect"),
+                "path_b": SinkSettings(plugin="collect"),
+            },
+            gates=[
+                GateSettingsConfig(
+                    name="forking_gate",
+                    condition="True",
+                    routes={"true": "fork"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            output_sink="path_a",  # Default, but fork should override for path_b
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[],
+            sinks={"path_a": path_a_sink, "path_b": path_b_sink},
+            gates=settings.gates,
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(config, graph=graph)
+
+        assert result.status == "completed"
+
+        # CRITICAL: Each sink gets exactly one row (the fork child for that branch)
+        assert (
+            len(path_a_sink.results) == 1
+        ), f"path_a should get 1 row, got {len(path_a_sink.results)}"
+        assert (
+            len(path_b_sink.results) == 1
+        ), f"path_b should get 1 row, got {len(path_b_sink.results)}"
+
+        # Both should have the same value (forked from same parent)
+        assert path_a_sink.results[0]["value"] == 42
+        assert path_b_sink.results[0]["value"] == 42
+
+    def test_fork_unmatched_branch_falls_back_to_output_sink(self) -> None:
+        """Fork child with branch_name not matching any sink goes to output_sink.
+
+        Edge case: fork_to=["stats", "alerts"] but only "alerts" is a sink.
+        Child with branch_name="stats" should fall back to output_sink.
+        """
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+        from elspeth.core.config import (
+            GateSettings as GateSettingsConfig,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        class ListSource(_TestSourceBase):
+            name = "list_source"
+            output_schema = RowSchema
+
+            def __init__(self, data: list[dict[str, Any]]) -> None:
+                self._data = data
+
+            def load(self, ctx: Any) -> Any:
+                yield from self._data
+
+            def close(self) -> None:
+                pass
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+            config: ClassVar[dict[str, Any]] = {}
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
+
+            def close(self) -> None:
+                pass
+
+        source = ListSource([{"value": 99}])
+        default_sink = CollectSink()  # output_sink
+        alerts_sink = CollectSink()  # only one fork branch has matching sink
+
+        # fork_to has "stats" and "alerts", but only "alerts" is a sink
+        # "stats" child should fall back to default output_sink
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="list_source"),
+            sinks={
+                "default": SinkSettings(plugin="collect"),
+                "alerts": SinkSettings(plugin="collect"),
+            },
+            gates=[
+                GateSettingsConfig(
+                    name="forking_gate",
+                    condition="True",
+                    routes={"true": "fork"},
+                    fork_to=["stats", "alerts"],  # "stats" is NOT a sink
+                ),
+            ],
+            output_sink="default",
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[],
+            sinks={"default": default_sink, "alerts": alerts_sink},
+            gates=settings.gates,
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(config, graph=graph)
+
+        assert result.status == "completed"
+
+        # "alerts" child -> alerts_sink (branch matches sink)
+        assert (
+            len(alerts_sink.results) == 1
+        ), f"alerts sink should get 1 row, got {len(alerts_sink.results)}"
+
+        # "stats" child -> default_sink (no matching sink, falls back)
+        assert (
+            len(default_sink.results) == 1
+        ), f"default sink should get 1 row (stats fallback), got {len(default_sink.results)}"
+
+        # Both should have the same value (forked from same parent)
+        assert alerts_sink.results[0]["value"] == 99
+        assert default_sink.results[0]["value"] == 99
+
 
 # ============================================================================
 # WP-09 Verification: Security Rejection at Config Time

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts import NodeType, RowOutcome, RunStatus
-from elspeth.core.config import GateSettings
+from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 from elspeth.engine.processor import RowProcessor
@@ -49,6 +49,7 @@ class PipelineConfig:
         sinks: Dict of sink_name -> sink plugin instance
         config: Additional run configuration
         gates: Config-driven gates (processed AFTER transforms, BEFORE sinks)
+        aggregation_settings: Dict of node_id -> AggregationSettings
     """
 
     source: SourceProtocol
@@ -56,6 +57,7 @@ class PipelineConfig:
     sinks: dict[str, SinkProtocol]  # Sinks implement batch write directly
     config: dict[str, Any] = field(default_factory=dict)
     gates: list[GateSettings] = field(default_factory=list)
+    aggregation_settings: dict[str, AggregationSettings] = field(default_factory=dict)
 
 
 @dataclass
@@ -548,6 +550,7 @@ class Orchestrator:
             route_resolution_map=route_resolution_map,
             config_gates=config.gates,
             config_gate_id_map=config_gate_id_map,
+            aggregation_settings=config.aggregation_settings,
             retry_manager=retry_manager,
         )
 

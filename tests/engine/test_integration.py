@@ -4265,3 +4265,679 @@ class TestComplexDAGIntegration:
             "output_sink",
         }
         assert expected_nodes <= node_ids, f"Missing nodes: {expected_nodes - node_ids}"
+
+    def test_full_feature_pipeline(self) -> None:
+        """Pipeline using ALL features: gate routing + fork + coalesce + aggregation.
+
+        Pipeline structure:
+        source (10 rows, values 0-9)
+        -> threshold_gate (routes high/low based on value >= 5)
+            -> high path (values 5-9):
+                -> fork_gate (splits to path_a and path_b)
+                    -> transform_A (adds field_a)
+                    -> transform_B (adds field_b)
+                -> coalesce (merges A+B)
+                -> aggregation (batches by 2, output_mode=single)
+                -> high_sink
+            -> low path (values 0-4):
+                -> transform_C (adds field_c)
+                -> low_sink
+
+        This exercises:
+        - Config gate routing (threshold)
+        - Fork execution
+        - Coalesce merge
+        - Aggregation triggers
+
+        Expected results:
+        - Low path: 5 rows (0-4) -> low_sink receives 5 rows
+        - High path: 5 rows (5-9) -> forked -> coalesced -> aggregated by 2
+          -> high_sink receives 3 outputs (2 batches of 2 + 1 end_of_source flush)
+        """
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.config import (
+            AggregationSettings,
+            CoalesceSettings,
+            TriggerConfig,
+        )
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.executors import (
+            AggregationExecutor,
+            GateExecutor,
+            SinkExecutor,
+            TransformExecutor,
+        )
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+        from elspeth.plugins.base import BaseAggregation
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import AcceptResult, TransformResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Start a run
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        # ====================================================================
+        # Register all nodes for the complex DAG
+        # ====================================================================
+        source_node = recorder.register_node(
+            run_id=run_id,
+            node_id="source",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        threshold_gate_node = recorder.register_node(
+            run_id=run_id,
+            node_id="threshold_gate",
+            plugin_name="config_gate:threshold_gate",
+            node_type=NodeType.GATE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Low path nodes
+        transform_c_node = recorder.register_node(
+            run_id=run_id,
+            node_id="transform_c",
+            plugin_name="transform_c",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        low_sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="low_sink",
+            plugin_name="low_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # High path nodes
+        fork_gate_node = recorder.register_node(
+            run_id=run_id,
+            node_id="fork_gate",
+            plugin_name="config_gate:fork_gate",
+            node_type=NodeType.GATE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        transform_a_node = recorder.register_node(
+            run_id=run_id,
+            node_id="transform_a",
+            plugin_name="transform_a",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        transform_b_node = recorder.register_node(
+            run_id=run_id,
+            node_id="transform_b",
+            plugin_name="transform_b",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        coalesce_node = recorder.register_node(
+            run_id=run_id,
+            node_id="high_coalesce",
+            plugin_name="coalesce:high_coalesce",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        aggregation_node = recorder.register_node(
+            run_id=run_id,
+            node_id="high_agg",
+            plugin_name="batch_aggregator",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        high_sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="high_sink",
+            plugin_name="high_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # ====================================================================
+        # Register edges
+        # ====================================================================
+        # Threshold gate -> low path (edge label matches route result "false")
+        edge_to_low = recorder.register_edge(
+            run_id=run_id,
+            from_node_id=threshold_gate_node.node_id,
+            to_node_id=transform_c_node.node_id,
+            label="false",  # Route result when value < 5
+            mode=RoutingMode.MOVE,
+        )
+
+        # Threshold gate -> high path (edge label matches route result "true")
+        edge_to_high = recorder.register_edge(
+            run_id=run_id,
+            from_node_id=threshold_gate_node.node_id,
+            to_node_id=fork_gate_node.node_id,
+            label="true",  # Route result when value >= 5
+            mode=RoutingMode.MOVE,
+        )
+
+        # Fork gate -> path_a (transform_a)
+        edge_to_a = recorder.register_edge(
+            run_id=run_id,
+            from_node_id=fork_gate_node.node_id,
+            to_node_id=transform_a_node.node_id,
+            label="path_a",
+            mode=RoutingMode.COPY,
+        )
+
+        # Fork gate -> path_b (transform_b)
+        edge_to_b = recorder.register_edge(
+            run_id=run_id,
+            from_node_id=fork_gate_node.node_id,
+            to_node_id=transform_b_node.node_id,
+            label="path_b",
+            mode=RoutingMode.COPY,
+        )
+
+        # Edge maps for gate executor - use route_label (true/false) as keys
+        threshold_edge_map = {
+            (threshold_gate_node.node_id, "false"): edge_to_low.edge_id,
+            (threshold_gate_node.node_id, "true"): edge_to_high.edge_id,
+        }
+
+        fork_edge_map = {
+            (fork_gate_node.node_id, "path_a"): edge_to_a.edge_id,
+            (fork_gate_node.node_id, "path_b"): edge_to_b.edge_id,
+        }
+
+        combined_edge_map = {**threshold_edge_map, **fork_edge_map}
+
+        # Route resolution maps - for non-fork routing, destination is the sink
+        # but in this test, we manually handle routing to transforms
+        threshold_route_resolution = {
+            (threshold_gate_node.node_id, "false"): "low_path",  # Routes to transform_c
+            (threshold_gate_node.node_id, "true"): "high_path",  # Routes to fork_gate
+        }
+
+        fork_route_resolution = {
+            (fork_gate_node.node_id, "path_a"): "fork",
+            (fork_gate_node.node_id, "path_b"): "fork",
+        }
+
+        combined_route_resolution = {
+            **threshold_route_resolution,
+            **fork_route_resolution,
+        }
+
+        # ====================================================================
+        # Config-driven gates
+        # ====================================================================
+        # Threshold gate: routes based on value >= 5
+        # NOTE: The route values "high_path"/"low_path" are used as sink names
+        # by the executor, but we manually handle the routing in the test
+        threshold_gate = GateSettings(
+            name="threshold_gate",
+            condition="row['value'] >= 5",
+            routes={"true": "high_path", "false": "low_path"},
+        )
+
+        fork_gate = GateSettings(
+            name="fork_gate",
+            condition="True",  # Always fork
+            routes={"true": "fork"},
+            fork_to=["path_a", "path_b"],
+        )
+
+        # Coalesce settings
+        coalesce_settings = CoalesceSettings(
+            name="high_coalesce",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+        )
+
+        # Aggregation settings (batch by 2)
+        agg_settings = AggregationSettings(
+            name="high_agg",
+            plugin="batch_aggregator",
+            trigger=TriggerConfig(count=2),
+            output_mode="single",
+        )
+
+        # ====================================================================
+        # Test transforms and aggregation
+        # ====================================================================
+        class TransformA(BaseTransform):
+            """Adds field_a."""
+
+            name = "transform_a"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(self, row: Any, ctx: Any) -> TransformResult:
+                return TransformResult.success({**row, "field_a": f"a_{row['value']}"})
+
+        class TransformB(BaseTransform):
+            """Adds field_b."""
+
+            name = "transform_b"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(self, row: Any, ctx: Any) -> TransformResult:
+                return TransformResult.success({**row, "field_b": f"b_{row['value']}"})
+
+        class TransformC(BaseTransform):
+            """Adds field_c for low path."""
+
+            name = "transform_c"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(self, row: Any, ctx: Any) -> TransformResult:
+                return TransformResult.success({**row, "field_c": f"c_{row['value']}"})
+
+        class BatchAggregation(BaseAggregation):
+            """Batches rows, returns batch summary on flush."""
+
+            name = "batch_aggregator"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+                self._batch: list[dict[str, Any]] = []
+
+            def accept(self, row: dict[str, Any], ctx: Any) -> AcceptResult:
+                self._batch.append(row)
+                return AcceptResult(accepted=True)
+
+            def flush(self, ctx: Any) -> list[dict[str, Any]]:
+                values = [r["value"] for r in self._batch]
+                result = [{"batch_values": values, "batch_size": len(self._batch)}]
+                self._batch = []
+                return result
+
+        class CollectSink(_TestSinkBase):
+            """Collects written rows."""
+
+            name = "collect_sink"
+
+            def __init__(self, node_id: str, sink_name: str) -> None:
+                self.node_id = node_id
+                self._sink_name = sink_name
+                self.rows_written: list[dict[str, Any]] = []
+                self._artifact_counter = 0
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.rows_written.extend(rows)
+                self._artifact_counter += 1
+                return ArtifactDescriptor.for_file(
+                    path=f"memory://{self._sink_name}_{self._artifact_counter}",
+                    size_bytes=len(str(rows)),
+                    content_hash=f"{self._sink_name}_hash_{self._artifact_counter}",
+                )
+
+            def close(self) -> None:
+                pass
+
+        # ====================================================================
+        # Create components
+        # ====================================================================
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        transform_a = TransformA(transform_a_node.node_id)
+        transform_b = TransformB(transform_b_node.node_id)
+        transform_c = TransformC(transform_c_node.node_id)
+        aggregation = BatchAggregation(aggregation_node.node_id)
+        low_sink = CollectSink(low_sink_node.node_id, "low")
+        high_sink = CollectSink(high_sink_node.node_id, "high")
+
+        gate_executor = GateExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            edge_map=combined_edge_map,
+            route_resolution_map=combined_route_resolution,
+        )
+
+        transform_executor = TransformExecutor(recorder, span_factory)
+
+        coalesce_executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run_id,
+        )
+        coalesce_executor.register_coalesce(coalesce_settings, coalesce_node.node_id)
+
+        agg_executor = AggregationExecutor(
+            recorder,
+            span_factory,
+            run_id,
+            aggregation_settings={aggregation_node.node_id: agg_settings},
+        )
+
+        sink_executor = SinkExecutor(recorder, span_factory, run_id)
+
+        ctx = PluginContext(run_id=run_id, config={})
+
+        # ====================================================================
+        # Process 10 rows (values 0-9)
+        # ====================================================================
+        low_path_tokens: list[TokenInfo] = []
+        high_path_coalesced: list[TokenInfo] = []
+
+        for i in range(10):
+            source_row = {"value": i}
+
+            # Create initial token from source
+            initial_token = token_manager.create_initial_token(
+                run_id=run_id,
+                source_node_id=source_node.node_id,
+                row_index=i,
+                row_data=source_row,
+            )
+
+            # Execute threshold gate
+            gate_outcome = gate_executor.execute_config_gate(
+                gate_config=threshold_gate,
+                node_id=threshold_gate_node.node_id,
+                token=initial_token,
+                ctx=ctx,
+                step_in_pipeline=1,
+                token_manager=token_manager,
+            )
+
+            if i < 5:
+                # Low path: value 0-4
+                # Route token through transform_c to low_sink
+                result_c, token_c, _ = transform_executor.execute_transform(
+                    transform=transform_c,
+                    token=gate_outcome.updated_token,
+                    ctx=ctx,
+                    step_in_pipeline=2,
+                )
+                assert result_c.status == "success"
+                low_path_tokens.append(
+                    TokenInfo(
+                        row_id=token_c.row_id,
+                        token_id=token_c.token_id,
+                        row_data=result_c.row,
+                    )
+                )
+            else:
+                # High path: value 5-9
+                # Execute fork gate
+                fork_outcome = gate_executor.execute_config_gate(
+                    gate_config=fork_gate,
+                    node_id=fork_gate_node.node_id,
+                    token=gate_outcome.updated_token,
+                    ctx=ctx,
+                    step_in_pipeline=2,
+                    token_manager=token_manager,
+                )
+
+                assert (
+                    len(fork_outcome.child_tokens) == 2
+                ), f"Fork should create 2 children, got {len(fork_outcome.child_tokens)}"
+
+                # Get tokens for each path
+                token_path_a = next(
+                    t for t in fork_outcome.child_tokens if t.branch_name == "path_a"
+                )
+                token_path_b = next(
+                    t for t in fork_outcome.child_tokens if t.branch_name == "path_b"
+                )
+
+                # Transform A
+                result_a, token_a_updated, _ = transform_executor.execute_transform(
+                    transform=transform_a,
+                    token=token_path_a,
+                    ctx=ctx,
+                    step_in_pipeline=3,
+                )
+                assert result_a.status == "success"
+
+                # Transform B
+                result_b, token_b_updated, _ = transform_executor.execute_transform(
+                    transform=transform_b,
+                    token=token_path_b,
+                    ctx=ctx,
+                    step_in_pipeline=3,
+                )
+                assert result_b.status == "success"
+
+                # Coalesce the branches
+                processed_a = TokenInfo(
+                    row_id=token_a_updated.row_id,
+                    token_id=token_a_updated.token_id,
+                    row_data=result_a.row,
+                    branch_name="path_a",
+                )
+                processed_b = TokenInfo(
+                    row_id=token_b_updated.row_id,
+                    token_id=token_b_updated.token_id,
+                    row_data=result_b.row,
+                    branch_name="path_b",
+                )
+
+                outcome_a = coalesce_executor.accept(
+                    token=processed_a,
+                    coalesce_name="high_coalesce",
+                    step_in_pipeline=4,
+                )
+                assert outcome_a.held is True, "First branch should be held"
+
+                outcome_b = coalesce_executor.accept(
+                    token=processed_b,
+                    coalesce_name="high_coalesce",
+                    step_in_pipeline=4,
+                )
+                assert outcome_b.held is False, "Second branch should trigger merge"
+                assert outcome_b.merged_token is not None
+
+                # Verify merged data has fields from both branches
+                merged_data = outcome_b.merged_token.row_data
+                assert (
+                    "field_a" in merged_data
+                ), f"Missing field_a in merged data: {merged_data}"
+                assert (
+                    "field_b" in merged_data
+                ), f"Missing field_b in merged data: {merged_data}"
+
+                high_path_coalesced.append(outcome_b.merged_token)
+
+        # ====================================================================
+        # Write low path rows to low_sink
+        # ====================================================================
+        assert (
+            len(low_path_tokens) == 5
+        ), f"Expected 5 low path tokens, got {len(low_path_tokens)}"
+        sink_executor.write(
+            sink=low_sink,
+            tokens=low_path_tokens,
+            ctx=ctx,
+            step_in_pipeline=3,
+        )
+
+        # ====================================================================
+        # Process aggregation and write to high_sink
+        # ====================================================================
+        assert (
+            len(high_path_coalesced) == 5
+        ), f"Expected 5 coalesced tokens, got {len(high_path_coalesced)}"
+
+        high_sink_outputs: list[dict[str, Any]] = []
+
+        for token in high_path_coalesced:
+            # Accept into aggregation
+            agg_executor.accept(
+                aggregation=aggregation,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=5,
+            )
+
+            # Check if should flush (count trigger)
+            if agg_executor.should_flush(aggregation_node.node_id):
+                outputs = agg_executor.flush(
+                    aggregation=aggregation,
+                    ctx=ctx,
+                    trigger_reason="count_reached",
+                    step_in_pipeline=5,
+                )
+                high_sink_outputs.extend(outputs)
+
+        # Flush remaining rows at end of source
+        if agg_executor.get_batch_id(aggregation_node.node_id) is not None:
+            outputs = agg_executor.flush(
+                aggregation=aggregation,
+                ctx=ctx,
+                trigger_reason="end_of_source",
+                step_in_pipeline=5,
+            )
+            high_sink_outputs.extend(outputs)
+
+        # Write aggregated outputs to high_sink
+        # Create tokens for the aggregated outputs
+        # Use row indices starting after the source rows (10+)
+        agg_output_tokens = []
+        for idx, output in enumerate(high_sink_outputs):
+            agg_row_index = (
+                10 + idx
+            )  # Offset to avoid collision with source row indices
+            agg_token = TokenInfo(
+                row_id=f"agg_output_{idx}",
+                token_id=f"agg_token_{idx}",
+                row_data=output,
+            )
+            # Register row and token for audit
+            row = recorder.create_row(
+                run_id=run_id,
+                source_node_id=aggregation_node.node_id,
+                row_index=agg_row_index,
+                data=output,
+                row_id=agg_token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=agg_token.token_id)
+            agg_output_tokens.append(agg_token)
+
+        if agg_output_tokens:
+            sink_executor.write(
+                sink=high_sink,
+                tokens=agg_output_tokens,
+                ctx=ctx,
+                step_in_pipeline=6,
+            )
+
+        # ====================================================================
+        # Verify results
+        # ====================================================================
+        # Complete the run
+        recorder.complete_run(run_id, status="completed")
+
+        # Low sink: 5 rows with field_c
+        assert (
+            len(low_sink.rows_written) == 5
+        ), f"Low sink should have 5 rows, got {len(low_sink.rows_written)}"
+        for row in low_sink.rows_written:
+            assert "field_c" in row, f"Low path row missing field_c: {row}"
+            assert row["value"] < 5, f"Low path got high value: {row['value']}"
+
+        # High sink: 3 aggregated outputs (2 batches of 2 + 1 end_of_source)
+        # 5 high rows -> batched by 2 -> 2 full batches + 1 partial (1 row)
+        assert (
+            len(high_sink.rows_written) == 3
+        ), f"High sink should have 3 aggregated outputs, got {len(high_sink.rows_written)}"
+
+        # Verify aggregation batching
+        batch_sizes = [row["batch_size"] for row in high_sink.rows_written]
+        assert batch_sizes == [
+            2,
+            2,
+            1,
+        ], f"Expected batch sizes [2, 2, 1], got {batch_sizes}"
+
+        # Verify all high values were processed
+        all_values = []
+        for row in high_sink.rows_written:
+            all_values.extend(row["batch_values"])
+        assert sorted(all_values) == [
+            5,
+            6,
+            7,
+            8,
+            9,
+        ], f"Expected values [5,6,7,8,9], got {sorted(all_values)}"
+
+        # Verify audit trail
+        rows = recorder.get_rows(run_id)
+        # 10 source rows + 3 aggregation output rows = 13
+        assert len(rows) >= 10, f"Expected at least 10 rows, got {len(rows)}"
+
+        # Verify nodes were registered
+        nodes = recorder.get_nodes(run_id)
+        node_ids = {n.node_id for n in nodes}
+        expected_nodes = {
+            "source",
+            "threshold_gate",
+            "transform_c",
+            "low_sink",
+            "fork_gate",
+            "transform_a",
+            "transform_b",
+            "high_coalesce",
+            "high_agg",
+            "high_sink",
+        }
+        assert expected_nodes <= node_ids, f"Missing nodes: {expected_nodes - node_ids}"

@@ -504,6 +504,73 @@ class TestTransformExecutor:
         assert result.status == "success"
         assert error_sink is None
 
+    def test_execute_transform_records_attempt_number(self) -> None:
+        """Attempt number is passed to begin_node_state."""
+        from unittest.mock import patch
+
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import TransformExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="attempt_test",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        class SimpleTransform:
+            name = "attempt_test"
+            node_id = node.node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success(row)
+
+        transform = SimpleTransform()
+        ctx = PluginContext(run_id=run.run_id, config={})
+        executor = TransformExecutor(recorder, SpanFactory())
+
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="token-1",
+            row_data={"value": 42},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+
+        # Patch begin_node_state to capture attempt
+        with patch.object(
+            recorder, "begin_node_state", wraps=recorder.begin_node_state
+        ) as mock:
+            executor.execute_transform(
+                transform=transform,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=0,
+                attempt=2,  # Non-default attempt
+            )
+
+        # Verify attempt was passed
+        mock.assert_called_once()
+        call_kwargs = mock.call_args.kwargs
+        assert call_kwargs.get("attempt") == 2
+
 
 class TestGateExecutor:
     """Gate execution with audit and routing."""

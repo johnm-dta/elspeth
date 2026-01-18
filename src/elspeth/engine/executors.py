@@ -120,6 +120,7 @@ class TransformExecutor:
         token: TokenInfo,
         ctx: PluginContext,
         step_in_pipeline: int,
+        attempt: int = 0,
     ) -> tuple[TransformResult, TokenInfo, str | None]:
         """Execute a transform with full audit recording and error routing.
 
@@ -139,6 +140,7 @@ class TransformExecutor:
             token: Current token with row data
             ctx: Plugin context
             step_in_pipeline: Current position in DAG (Orchestrator is authority)
+            attempt: Attempt number for retry tracking (0-indexed, default 0)
 
         Returns:
             Tuple of (TransformResult with audit fields, updated TokenInfo, error_sink)
@@ -160,6 +162,7 @@ class TransformExecutor:
             node_id=transform.node_id,
             step_index=step_in_pipeline,
             input_data=token.row_data,
+            attempt=attempt,
         )
 
         # Execute with timing and span

@@ -13,7 +13,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-from elspeth.contracts import RowOutcome, RowResult, TokenInfo
+from elspeth.contracts import RowOutcome, RowResult, TokenInfo, TransformResult
 from elspeth.contracts.enums import RoutingKind
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape import LandscapeRecorder
@@ -113,6 +113,67 @@ class RowProcessor:
         )
         self._aggregation_executor = AggregationExecutor(
             recorder, span_factory, run_id, aggregation_settings=aggregation_settings
+        )
+
+    def _execute_transform_with_retry(
+        self,
+        transform: Any,
+        token: TokenInfo,
+        ctx: PluginContext,
+        step: int,
+    ) -> tuple[TransformResult, TokenInfo, str | None]:
+        """Execute transform with optional retry for transient failures.
+
+        Retry behavior:
+        - If retry_manager is None: single attempt, no retry
+        - If retry_manager is set: retry on transient exceptions
+
+        Each attempt is recorded separately in the audit trail with attempt number.
+
+        Note: TransformResult.error() is NOT retried - that's a processing error,
+        not a transient failure. Only exceptions trigger retry.
+
+        Args:
+            transform: Transform to execute
+            token: Current token
+            ctx: Plugin context
+            step: Pipeline step index
+
+        Returns:
+            Tuple of (TransformResult, updated TokenInfo, error_sink)
+        """
+        if self._retry_manager is None:
+            # No retry configured - single attempt
+            return self._transform_executor.execute_transform(
+                transform=transform,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=step,
+                attempt=0,
+            )
+
+        # Track attempt number for audit
+        attempt_tracker = {"current": 0}
+
+        def execute_attempt() -> tuple[TransformResult, TokenInfo, str | None]:
+            attempt = attempt_tracker["current"]
+            attempt_tracker["current"] += 1
+            return self._transform_executor.execute_transform(
+                transform=transform,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=step,
+                attempt=attempt,
+            )
+
+        def is_retryable(e: BaseException) -> bool:
+            # Retry transient errors (network, timeout, rate limit)
+            # Don't retry programming errors (AttributeError, TypeError, etc.)
+            return isinstance(e, ConnectionError | TimeoutError | OSError)
+
+        return self._retry_manager.execute_with_retry(
+            operation=execute_attempt,
+            is_retryable=is_retryable,
         )
 
     def process_row(
@@ -270,14 +331,12 @@ class RowProcessor:
                 )
 
             elif isinstance(transform, BaseTransform):
-                # Regular transform
-                result, current_token, error_sink = (
-                    self._transform_executor.execute_transform(
-                        transform=transform,
-                        token=current_token,
-                        ctx=ctx,
-                        step_in_pipeline=step,
-                    )
+                # Regular transform (with optional retry)
+                result, current_token, error_sink = self._execute_transform_with_retry(
+                    transform=transform,
+                    token=current_token,
+                    ctx=ctx,
+                    step=step,
                 )
 
                 if result.status == "error":

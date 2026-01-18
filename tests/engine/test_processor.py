@@ -1772,3 +1772,102 @@ class TestRowProcessorRetry:
         )
 
         assert processor._retry_manager is retry_manager
+
+    def test_retries_transient_transform_exception(self) -> None:
+        """Transform exceptions are retried up to max_attempts."""
+        from unittest.mock import Mock
+
+        from elspeth.contracts import TransformResult
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.retry import RetryConfig, RetryManager
+
+        # Track call count
+        call_count = 0
+
+        def flaky_execute(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ConnectionError("Transient network error")
+            # Return success on 3rd attempt
+            return (
+                TransformResult.success({"result": "ok"}),
+                Mock(
+                    token_id="t1",
+                    row_id="r1",
+                    row_data={"result": "ok"},
+                    branch_name=None,
+                ),
+                None,  # error_sink
+            )
+
+        # Create processor with mocked internals
+        processor = RowProcessor(
+            recorder=Mock(),
+            span_factory=Mock(),
+            run_id="test-run",
+            source_node_id="source",
+            retry_manager=RetryManager(RetryConfig(max_attempts=3, base_delay=0.01)),
+        )
+
+        # Mock the transform executor
+        processor._transform_executor = Mock()
+        processor._transform_executor.execute_transform.side_effect = flaky_execute
+
+        # Create test transform
+        transform = Mock()
+        transform.node_id = "transform-1"
+
+        # Create test token
+        token = Mock()
+        token.token_id = "t1"
+        token.row_id = "r1"
+        token.row_data = {"input": 1}
+        token.branch_name = None
+
+        ctx = Mock()
+        ctx.run_id = "test-run"
+
+        # Call the retry wrapper directly
+        result, _out_token, _error_sink = processor._execute_transform_with_retry(
+            transform=transform,
+            token=token,
+            ctx=ctx,
+            step=0,
+        )
+
+        # Should have retried and succeeded
+        assert call_count == 3
+        assert result.status == "success"
+
+    def test_no_retry_when_retry_manager_is_none(self) -> None:
+        """Without retry_manager, exceptions propagate immediately."""
+        from unittest.mock import Mock
+
+        import pytest
+
+        from elspeth.engine.processor import RowProcessor
+
+        processor = RowProcessor(
+            recorder=Mock(),
+            span_factory=Mock(),
+            run_id="test-run",
+            source_node_id="source",
+            retry_manager=None,  # No retry
+        )
+
+        processor._transform_executor = Mock()
+        processor._transform_executor.execute_transform.side_effect = ConnectionError(
+            "fail"
+        )
+
+        transform = Mock()
+        transform.node_id = "t1"
+        token = Mock(token_id="t1", row_id="r1", row_data={}, branch_name=None)
+        ctx = Mock(run_id="test-run")
+
+        with pytest.raises(ConnectionError):
+            processor._execute_transform_with_retry(transform, token, ctx, step=0)
+
+        # Should only be called once (no retry)
+        assert processor._transform_executor.execute_transform.call_count == 1

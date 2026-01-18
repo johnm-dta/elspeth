@@ -2362,6 +2362,156 @@ class TestRowProcessorCoalesce:
         }
         assert "summary" not in outcome.coalesce_metadata["branches_arrived"]
 
+    def test_coalesce_quorum_merges_at_threshold(self) -> None:
+        """Quorum policy should merge when quorum_count branches arrive.
+
+        Setup: Fork to 3 paths (fast, medium, slow), quorum=2
+        - When 2 of 3 arrive, merge immediately
+        - 3rd branch result is discarded (arrives after merge)
+
+        This test uses CoalesceExecutor directly to verify:
+        1. First branch (fast) is held
+        2. Second branch (medium) triggers merge at quorum=2
+        3. Merged data contains only fast and medium
+        4. Late arrival (slow) starts a new pending entry (doesn't crash)
+        """
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.core.config import CoalesceSettings
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        token_manager = TokenManager(recorder)
+
+        # Register minimal nodes needed for coalesce testing
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="merger",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Setup coalesce with quorum policy (2 of 3)
+        coalesce_settings = CoalesceSettings(
+            name="merger",
+            branches=["fast", "medium", "slow"],
+            policy="quorum",
+            quorum_count=2,
+            merge="nested",  # Use nested to see which branches contributed
+        )
+        coalesce_executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        coalesce_executor.register_coalesce(coalesce_settings, coalesce_node.node_id)
+
+        # Create tokens to simulate fork scenario
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            row_data={"text": "test input"},
+        )
+        children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["fast", "medium", "slow"],
+            step_in_pipeline=1,
+        )
+
+        # Simulate: fast arrives first with enriched data
+        fast_token = TokenInfo(
+            row_id=children[0].row_id,
+            token_id=children[0].token_id,
+            row_data={"text": "test input", "fast_result": "fast done"},
+            branch_name="fast",
+        )
+        outcome1 = coalesce_executor.accept(fast_token, "merger", step_in_pipeline=3)
+
+        # First arrival: should be held (quorum not met yet)
+        assert outcome1.held is True
+        assert outcome1.merged_token is None
+
+        # Simulate: medium arrives second with enriched data
+        medium_token = TokenInfo(
+            row_id=children[1].row_id,
+            token_id=children[1].token_id,
+            row_data={"text": "test input", "medium_result": "medium done"},
+            branch_name="medium",
+        )
+        outcome2 = coalesce_executor.accept(medium_token, "merger", step_in_pipeline=3)
+
+        # Second arrival: quorum met (2 of 3), merge triggers immediately
+        assert outcome2.held is False
+        assert outcome2.merged_token is not None
+        assert outcome2.failure_reason is None  # Not a failure
+
+        # Verify merged data using nested strategy
+        merged_data = outcome2.merged_token.row_data
+        assert "fast" in merged_data, "Merged data should have 'fast' branch"
+        assert "medium" in merged_data, "Merged data should have 'medium' branch"
+        assert "slow" not in merged_data, "Merged data should NOT have 'slow' branch"
+
+        # Check nested structure contains expected data
+        assert merged_data["fast"]["fast_result"] == "fast done"
+        assert merged_data["medium"]["medium_result"] == "medium done"
+
+        # Verify coalesce metadata shows quorum merge
+        assert outcome2.coalesce_metadata is not None
+        assert outcome2.coalesce_metadata["policy"] == "quorum"
+        assert set(outcome2.coalesce_metadata["branches_arrived"]) == {"fast", "medium"}
+        assert outcome2.coalesce_metadata["expected_branches"] == [
+            "fast",
+            "medium",
+            "slow",
+        ]
+
+        # Verify consumed tokens
+        assert len(outcome2.consumed_tokens) == 2
+        consumed_ids = {t.token_id for t in outcome2.consumed_tokens}
+        assert fast_token.token_id in consumed_ids
+        assert medium_token.token_id in consumed_ids
+
+        # Verify arrival order is recorded (fast came before medium)
+        arrival_order = outcome2.coalesce_metadata["arrival_order"]
+        assert len(arrival_order) == 2
+        assert arrival_order[0]["branch"] == "fast"  # First arrival
+        assert arrival_order[1]["branch"] == "medium"  # Second arrival
+
+        # === Late arrival behavior ===
+        # The slow branch arrives after merge is complete.
+        # Since pending state was deleted, this creates a NEW pending entry.
+        # This is by design - the row processing would have already continued
+        # with the merged token, so this late arrival is effectively orphaned.
+        slow_token = TokenInfo(
+            row_id=children[2].row_id,
+            token_id=children[2].token_id,
+            row_data={"text": "test input", "slow_result": "slow done"},
+            branch_name="slow",
+        )
+        outcome3 = coalesce_executor.accept(slow_token, "merger", step_in_pipeline=3)
+
+        # Late arrival creates new pending state (waiting for more branches)
+        # This is the expected behavior - in real pipelines, the orchestrator
+        # would track that this row already coalesced and not submit the late token.
+        assert outcome3.held is True
+        assert outcome3.merged_token is None
+
 
 class TestRowProcessorRetry:
     """Tests for retry integration in RowProcessor."""

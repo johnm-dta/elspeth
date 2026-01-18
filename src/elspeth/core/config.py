@@ -16,6 +16,95 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 _IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
+class TriggerConfig(BaseModel):
+    """Trigger configuration for aggregation batches.
+
+    Per plugin-protocol.md: Multiple triggers can be combined (first one to fire wins).
+    The engine evaluates all configured triggers after each accept and fires when
+    ANY condition is met.
+
+    Trigger types:
+    - count: Fire after N rows accumulated
+    - timeout: Fire after N seconds since first accept
+    - condition: Fire when expression evaluates to true
+
+    Note: end_of_source is IMPLICIT - always checked at source exhaustion.
+    It is not configured here because it always applies.
+
+    Example YAML (combined triggers):
+        trigger:
+          count: 1000           # Fire after 1000 rows
+          timeout: 3600         # Or after 1 hour
+          condition: "row['type'] == 'flush_signal'"  # Or on special row
+    """
+
+    model_config = {"frozen": True}
+
+    count: int | None = Field(
+        default=None,
+        gt=0,
+        description="Fire after N rows accumulated",
+    )
+    timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description="Fire after N seconds since first accept",
+    )
+    condition: str | None = Field(
+        default=None,
+        description="Fire when expression evaluates to true",
+    )
+
+    @field_validator("condition")
+    @classmethod
+    def validate_condition_expression(cls, v: str | None) -> str | None:
+        """Validate condition is a valid expression at config time."""
+        if v is None:
+            return v
+
+        from elspeth.engine.expression_parser import (
+            ExpressionParser,
+            ExpressionSecurityError,
+            ExpressionSyntaxError,
+        )
+
+        try:
+            ExpressionParser(v)
+        except ExpressionSyntaxError as e:
+            raise ValueError(f"Invalid condition syntax: {e}") from e
+        except ExpressionSecurityError as e:
+            raise ValueError(f"Forbidden construct in condition: {e}") from e
+        return v
+
+    @model_validator(mode="after")
+    def validate_at_least_one_trigger(self) -> "TriggerConfig":
+        """At least one trigger must be configured."""
+        if (
+            self.count is None
+            and self.timeout_seconds is None
+            and self.condition is None
+        ):
+            raise ValueError(
+                "at least one trigger must be configured (count, timeout_seconds, or condition)"
+            )
+        return self
+
+    @property
+    def has_count(self) -> bool:
+        """Whether count trigger is configured."""
+        return self.count is not None
+
+    @property
+    def has_timeout(self) -> bool:
+        """Whether timeout trigger is configured."""
+        return self.timeout_seconds is not None
+
+    @property
+    def has_condition(self) -> bool:
+        """Whether condition trigger is configured."""
+        return self.condition is not None
+
+
 class GateSettings(BaseModel):
     """Engine-level gate configuration for config-driven routing.
 

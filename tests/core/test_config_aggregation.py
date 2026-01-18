@@ -1,0 +1,125 @@
+"""Tests for AggregationSettings configuration."""
+
+import pytest
+from pydantic import ValidationError
+
+
+class TestTriggerConfig:
+    """Tests for TriggerConfig model.
+
+    Per plugin-protocol.md: Multiple triggers can be combined (first one to fire wins).
+    """
+
+    def test_count_trigger_only(self) -> None:
+        """Count-only trigger configuration."""
+        from elspeth.core.config import TriggerConfig
+
+        trigger = TriggerConfig(count=100)
+        assert trigger.count == 100
+        assert trigger.timeout_seconds is None
+        assert trigger.condition is None
+
+    def test_timeout_trigger_only(self) -> None:
+        """Timeout-only trigger configuration."""
+        from elspeth.core.config import TriggerConfig
+
+        trigger = TriggerConfig(timeout_seconds=30.0)
+        assert trigger.timeout_seconds == 30.0
+        assert trigger.count is None
+        assert trigger.condition is None
+
+    def test_condition_trigger_only(self) -> None:
+        """Condition-only trigger configuration."""
+        from elspeth.core.config import TriggerConfig
+
+        trigger = TriggerConfig(condition="row['batch_count'] >= 50")
+        assert trigger.condition == "row['batch_count'] >= 50"
+        assert trigger.count is None
+        assert trigger.timeout_seconds is None
+
+    def test_combined_count_and_timeout(self) -> None:
+        """Combined count + timeout triggers (first to fire wins)."""
+        from elspeth.core.config import TriggerConfig
+
+        trigger = TriggerConfig(count=100, timeout_seconds=60.0)
+        assert trigger.count == 100
+        assert trigger.timeout_seconds == 60.0
+        assert trigger.condition is None
+
+    def test_combined_all_triggers(self) -> None:
+        """All three trigger types combined."""
+        from elspeth.core.config import TriggerConfig
+
+        trigger = TriggerConfig(
+            count=1000,
+            timeout_seconds=3600.0,  # 1 hour
+            condition="row['type'] == 'flush_signal'",
+        )
+        assert trigger.count == 1000
+        assert trigger.timeout_seconds == 3600.0
+        assert trigger.condition == "row['type'] == 'flush_signal'"
+
+    def test_at_least_one_trigger_required(self) -> None:
+        """At least one trigger must be specified."""
+        from elspeth.core.config import TriggerConfig
+
+        with pytest.raises(ValidationError, match="at least one trigger"):
+            TriggerConfig()
+
+    def test_condition_validates_expression(self) -> None:
+        """Condition trigger validates expression syntax."""
+        from elspeth.core.config import TriggerConfig
+
+        # Invalid Python syntax
+        with pytest.raises(ValidationError, match="Invalid.*syntax"):
+            TriggerConfig(condition="batch_count >=")
+
+    def test_count_must_be_positive(self) -> None:
+        """Count threshold must be positive."""
+        from elspeth.core.config import TriggerConfig
+
+        with pytest.raises(ValidationError):
+            TriggerConfig(count=0)
+
+        with pytest.raises(ValidationError):
+            TriggerConfig(count=-1)
+
+    def test_timeout_must_be_positive(self) -> None:
+        """Timeout must be positive."""
+        from elspeth.core.config import TriggerConfig
+
+        with pytest.raises(ValidationError):
+            TriggerConfig(timeout_seconds=0)
+
+        with pytest.raises(ValidationError):
+            TriggerConfig(timeout_seconds=-1.0)
+
+    def test_has_count_property(self) -> None:
+        """has_count property indicates count trigger configured."""
+        from elspeth.core.config import TriggerConfig
+
+        with_count = TriggerConfig(count=100)
+        without_count = TriggerConfig(timeout_seconds=30.0)
+
+        assert with_count.has_count is True
+        assert without_count.has_count is False
+
+    def test_has_timeout_property(self) -> None:
+        """has_timeout property indicates timeout trigger configured."""
+        from elspeth.core.config import TriggerConfig
+
+        with_timeout = TriggerConfig(timeout_seconds=30.0)
+        without_timeout = TriggerConfig(count=100)
+
+        assert with_timeout.has_timeout is True
+        assert without_timeout.has_timeout is False
+
+    def test_has_condition_property(self) -> None:
+        """has_condition property indicates condition trigger configured."""
+        from elspeth.core.config import TriggerConfig
+
+        with_condition = TriggerConfig(condition="row['batch_count'] > 0")
+        without_condition = TriggerConfig(count=100)
+
+        assert with_condition.has_condition is True
+        assert without_condition.has_condition is False

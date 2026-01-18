@@ -131,3 +131,115 @@ class TestTriggerConfig:
         # Forbidden function call
         with pytest.raises(ValidationError, match="Forbidden"):
             TriggerConfig(condition="__import__('os')")
+
+
+class TestAggregationSettings:
+    """Tests for AggregationSettings model."""
+
+    def test_aggregation_settings_valid(self) -> None:
+        """Valid aggregation settings with all fields."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+
+        settings = AggregationSettings(
+            name="batch_stats",
+            plugin="stats_aggregation",
+            trigger=TriggerConfig(count=100),
+            output_mode="single",
+        )
+        assert settings.name == "batch_stats"
+        assert settings.plugin == "stats_aggregation"
+        assert settings.trigger.count == 100
+        assert settings.output_mode == "single"
+
+    def test_aggregation_settings_combined_triggers(self) -> None:
+        """Aggregation with combined triggers (per plugin-protocol.md)."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+
+        settings = AggregationSettings(
+            name="batch_stats",
+            plugin="stats_aggregation",
+            trigger=TriggerConfig(count=1000, timeout_seconds=3600.0),
+            output_mode="single",
+        )
+        assert settings.trigger.count == 1000
+        assert settings.trigger.timeout_seconds == 3600.0
+
+    def test_aggregation_settings_default_output_mode(self) -> None:
+        """Output mode defaults to 'single'."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+
+        settings = AggregationSettings(
+            name="batch_stats",
+            plugin="stats_aggregation",
+            trigger=TriggerConfig(count=100),
+        )
+        assert settings.output_mode == "single"
+
+    def test_aggregation_settings_passthrough_mode(self) -> None:
+        """Passthrough output mode is valid."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+
+        settings = AggregationSettings(
+            name="batch_stats",
+            plugin="stats_aggregation",
+            trigger=TriggerConfig(timeout_seconds=60.0),
+            output_mode="passthrough",
+        )
+        assert settings.output_mode == "passthrough"
+
+    def test_aggregation_settings_transform_mode(self) -> None:
+        """Transform output mode is valid."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+
+        settings = AggregationSettings(
+            name="batch_stats",
+            plugin="stats_aggregation",
+            trigger=TriggerConfig(count=50),
+            output_mode="transform",
+        )
+        assert settings.output_mode == "transform"
+
+    def test_aggregation_settings_invalid_output_mode(self) -> None:
+        """Invalid output mode is rejected."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+
+        with pytest.raises(ValidationError, match="output_mode"):
+            AggregationSettings(
+                name="batch_stats",
+                plugin="stats_aggregation",
+                trigger=TriggerConfig(count=100),
+                output_mode="invalid",  # type: ignore[arg-type]
+            )
+
+    def test_aggregation_settings_requires_name(self) -> None:
+        """Name is required."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+
+        with pytest.raises(ValidationError, match="name"):
+            AggregationSettings(
+                plugin="stats_aggregation",
+                trigger=TriggerConfig(count=100),
+            )
+
+    def test_aggregation_settings_options_default_empty(self) -> None:
+        """Options defaults to empty dict."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+
+        settings = AggregationSettings(
+            name="batch_stats",
+            plugin="stats_aggregation",
+            trigger=TriggerConfig(count=100),
+        )
+        assert settings.options == {}
+
+    def test_aggregation_settings_with_options(self) -> None:
+        """Options can be provided."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+
+        settings = AggregationSettings(
+            name="batch_stats",
+            plugin="stats_aggregation",
+            trigger=TriggerConfig(count=100),
+            options={"fields": ["value"], "compute_mean": True},
+        )
+        assert settings.options == {"fields": ["value"], "compute_mean": True}

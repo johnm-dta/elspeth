@@ -105,6 +105,44 @@ class TriggerConfig(BaseModel):
         return self.condition is not None
 
 
+class AggregationSettings(BaseModel):
+    """Aggregation configuration for batching rows.
+
+    Aggregations collect rows until a trigger fires, then process the batch.
+    The engine evaluates trigger conditions - plugins only accept/reject rows.
+
+    Output modes:
+    - single: Batch produces one aggregated result row
+    - passthrough: Batch releases all accepted rows unchanged
+    - transform: Batch applies a transform function to produce results
+
+    Example YAML:
+        aggregations:
+          - name: batch_stats
+            plugin: stats_aggregation
+            trigger:
+              count: 100
+            output_mode: single
+            options:
+              fields: ["value"]
+              compute_mean: true
+    """
+
+    model_config = {"frozen": True}
+
+    name: str = Field(description="Aggregation identifier (unique within pipeline)")
+    plugin: str = Field(description="Plugin name to instantiate")
+    trigger: TriggerConfig = Field(description="When to flush the batch")
+    output_mode: Literal["single", "passthrough", "transform"] = Field(
+        default="single",
+        description="How batch produces output rows",
+    )
+    options: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Plugin-specific configuration options",
+    )
+
+
 class GateSettings(BaseModel):
     """Engine-level gate configuration for config-driven routing.
 

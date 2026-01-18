@@ -2976,6 +2976,302 @@ class TestAggregationIntegration:
         artifacts = recorder.get_artifacts(run_id)
         assert len(artifacts) == 2, f"Expected 2 artifacts, got {len(artifacts)}"
 
+    def test_aggregation_condition_trigger(self) -> None:
+        """Condition trigger fires when both batch_count and batch_age_seconds conditions are met.
+
+        Pipeline: source (10 rows) -> delay_transform (5ms delay) -> aggregation -> sink
+        - condition: row['batch_count'] >= 3 and row['batch_age_seconds'] > 0.01
+
+        The condition requires BOTH:
+        - At least 3 rows in the batch
+        - At least 10ms elapsed since batch start
+
+        With 5ms delay per row, after 3 rows we have:
+        - batch_count = 3 (meets >= 3)
+        - batch_age_seconds >= 15ms (meets > 10ms)
+
+        Verifies that condition trigger fires when both conditions are satisfied.
+        """
+        import time
+
+        from elspeth.contracts import NodeType, PluginSchema, TokenInfo
+        from elspeth.contracts.enums import TriggerType
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.executors import AggregationExecutor, SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+        from elspeth.plugins.base import BaseAggregation, BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import AcceptResult, TransformResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Start a run
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        # Register nodes
+        source_node = recorder.register_node(
+            run_id=run_id,
+            node_id="source",
+            plugin_name="list_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        transform_node = recorder.register_node(
+            run_id=run_id,
+            node_id="delay_transform",
+            plugin_name="delay_transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        agg_node = recorder.register_node(
+            run_id=run_id,
+            node_id="buffer_agg",
+            plugin_name="buffer_agg",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="output_sink",
+            plugin_name="collect_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        class DelayTransform(BaseTransform):
+            """Transform that adds 5ms delay per row."""
+
+            name = "delay_transform"
+            input_schema = RowSchema
+            output_schema = RowSchema
+            plugin_version = "1.0.0"
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                time.sleep(0.005)  # 5ms delay
+                return TransformResult.success(row)
+
+        class BufferAggregation(BaseAggregation):
+            """Aggregation that buffers and releases rows unchanged."""
+
+            name = "buffer_agg"
+            input_schema = RowSchema
+            output_schema = RowSchema
+            plugin_version = "1.0.0"
+
+            def __init__(self) -> None:
+                super().__init__({})
+                self._buffer: list[dict[str, Any]] = []
+
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
+                self._buffer.append(row)
+                return AcceptResult(accepted=True)
+
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+                result = list(self._buffer)
+                self._buffer = []
+                return result
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://output", size_bytes=0, content_hash="test_hash"
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Configure aggregation: condition trigger only (no count/timeout)
+        # Requires BOTH: batch_count >= 3 AND batch_age_seconds > 0.01 (10ms)
+        agg_settings = AggregationSettings(
+            name="buffer_agg",
+            plugin="buffer_agg",
+            trigger=TriggerConfig(
+                condition="row['batch_count'] >= 3 and row['batch_age_seconds'] > 0.01"
+            ),
+            output_mode="passthrough",
+        )
+
+        # Create instances and assign node_ids
+        transform = DelayTransform()
+        transform.node_id = transform_node.node_id
+
+        aggregation = BufferAggregation()
+        aggregation.node_id = agg_node.node_id
+
+        sink = CollectSink()
+        sink.node_id = sink_node.node_id
+
+        # Create executors
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        agg_executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            run_id=run_id,
+            aggregation_settings={agg_node.node_id: agg_settings},
+        )
+
+        sink_executor = SinkExecutor(recorder, span_factory, run_id)
+
+        ctx = PluginContext(run_id=run_id, config={})
+
+        # Source with 10 rows
+        source_rows = [{"value": i} for i in range(1, 11)]
+
+        # Track when condition triggers
+        condition_triggered = False
+        rows_processed_before_condition = 0
+
+        for row_index, row_data in enumerate(source_rows):
+            # Create token for each source row
+            token = token_manager.create_initial_token(
+                run_id=run_id,
+                source_node_id=source_node.node_id,
+                row_index=row_index,
+                row_data=row_data,
+            )
+
+            # Process through delay transform (adds 5ms delay)
+            transform_result = transform.process(row_data, ctx)
+            transformed_data = transform_result.row
+
+            # Update token with transformed data
+            token = TokenInfo(
+                row_id=token.row_id,
+                token_id=token.token_id,
+                row_data=transformed_data,
+            )
+
+            # Accept into aggregation
+            result = agg_executor.accept(
+                aggregation=aggregation,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=2,
+            )
+            assert result.accepted is True
+
+            # Check if condition trigger fired
+            if agg_executor.should_flush(agg_node.node_id):
+                trigger_type = agg_executor.get_trigger_type(agg_node.node_id)
+
+                # CRITICAL VERIFICATION: Condition triggered
+                assert trigger_type == TriggerType.CONDITION, (
+                    f"Expected TriggerType.CONDITION, got {trigger_type}. "
+                    f"Condition should fire after {row_index + 1} rows."
+                )
+
+                condition_triggered = True
+                rows_processed_before_condition = row_index + 1
+                break
+
+        # CRITICAL: Condition MUST have triggered
+        assert condition_triggered, (
+            "Condition trigger should have fired. "
+            f"Processed {len(source_rows)} rows with 5ms delay each, "
+            "but condition (batch_count >= 3 and batch_age_seconds > 0.01) never triggered."
+        )
+
+        # Condition requires batch_count >= 3, so it must fire on row 3 or later
+        # With 5ms per row, by row 3 we have ~15ms elapsed (> 10ms requirement)
+        assert rows_processed_before_condition >= 3, (
+            f"Condition should fire after at least 3 rows, but fired after {rows_processed_before_condition}. "
+            "batch_count >= 3 requires at least 3 rows."
+        )
+
+        # Should fire relatively soon after 3 rows (once time condition is also met)
+        assert rows_processed_before_condition <= 5, (
+            f"Condition should fire around row 3-4, but fired after {rows_processed_before_condition}. "
+            "With 5ms delay per row, time condition (> 10ms) should be met by row 3."
+        )
+
+        # Flush the batch
+        output_rows = agg_executor.flush(
+            aggregation=aggregation,
+            ctx=ctx,
+            trigger_reason="condition",
+            step_in_pipeline=3,
+        )
+
+        # Verify flushed rows match processed rows
+        assert len(output_rows) == rows_processed_before_condition, (
+            f"Expected {rows_processed_before_condition} rows from flush, "
+            f"got {len(output_rows)}."
+        )
+
+        # Write to sink
+        for idx, output_row in enumerate(output_rows):
+            output_token = TokenInfo(
+                row_id=f"condition_output_{idx}",
+                token_id=f"condition_token_{idx}",
+                row_data=output_row,
+            )
+            sink_executor.write(
+                sink=sink,
+                tokens=[output_token],
+                ctx=ctx,
+                step_in_pipeline=4,
+            )
+
+        # Verify sink received the rows
+        assert len(sink.results) == rows_processed_before_condition
+
+        # Complete the run
+        recorder.complete_run(run_id, status="completed")
+
+        # Verify batch was created and triggered by condition
+        batches = recorder.get_batches(run_id)
+        assert len(batches) == 1
+        assert (
+            batches[0].trigger_reason == "condition"
+        ), f"Expected trigger_reason='condition', got '{batches[0].trigger_reason}'"
+
+        # Verify batch has correct member count
+        members = recorder.get_batch_members(batches[0].batch_id)
+        assert (
+            len(members) == rows_processed_before_condition
+        ), f"Expected {rows_processed_before_condition} batch members, got {len(members)}"
+
 
 class TestForkCoalescePipelineIntegration:
     """End-to-end fork -> coalesce -> sink tests.

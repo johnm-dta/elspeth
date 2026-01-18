@@ -225,7 +225,7 @@ class TestRetryAuditTrail:
             return isinstance(e, ConnectionError | TimeoutError | OSError)
 
         # Execute with retry
-        result, out_token, error_sink = retry_manager.execute_with_retry(
+        result, _out_token, _error_sink = retry_manager.execute_with_retry(
             operation=execute_attempt,
             is_retryable=is_retryable,
         )
@@ -417,7 +417,7 @@ class TestRetryAuditTrail:
         ctx = PluginContext(run_id=run_id, config={})
 
         # Execute without retry manager (single attempt)
-        result, out_token, error_sink = transform_executor.execute_transform(
+        result, _out_token, _error_sink = transform_executor.execute_transform(
             transform=transform,
             token=token,
             ctx=ctx,

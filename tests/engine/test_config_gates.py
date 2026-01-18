@@ -384,6 +384,114 @@ class TestConfigGateIntegration:
         assert len(a_sink.results) == 2
         assert len(b_sink.results) == 1
 
+    def test_config_gate_integer_route_label(self) -> None:
+        """Config gate condition can return an integer that maps to route labels.
+
+        When an expression returns an integer (e.g., row['priority'] returns 1, 2, 3),
+        the executor converts it to a string for route lookup. So routes must use
+        string keys like {"1": "priority_1", "2": "priority_2"}.
+
+        This test uses ExecutionGraph.from_config() for proper edge building.
+        """
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+        from elspeth.core.config import (
+            GateSettings as GateSettingsConfig,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        class RowSchema(PluginSchema):
+            priority: int
+
+        class ListSource(_TestSourceBase):
+            name = "list_source"
+            output_schema = RowSchema
+
+            def __init__(self, data: list[dict[str, Any]]) -> None:
+                self._data = data
+
+            def load(self, ctx: Any) -> Any:
+                yield from self._data
+
+            def close(self) -> None:
+                pass
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+            config: ClassVar[dict[str, Any]] = {}
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
+
+            def close(self) -> None:
+                pass
+
+        # 3 rows with priorities 1, 2, 1 -> expect 2 go to priority_1, 1 goes to priority_2
+        source = ListSource([{"priority": 1}, {"priority": 2}, {"priority": 1}])
+        priority_1_sink = CollectSink()
+        priority_2_sink = CollectSink()
+
+        # Build settings to use ExecutionGraph.from_config()
+        # NOTE: Route keys must be strings because the executor converts
+        # non-bool/non-string results to strings via str()
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "priority_1": SinkSettings(plugin="csv"),
+                "priority_2": SinkSettings(plugin="csv"),
+            },
+            output_sink="priority_1",
+            gates=[
+                GateSettingsConfig(
+                    name="priority_router",
+                    condition="row['priority']",  # Returns 1 or 2 (integer)
+                    routes={
+                        "1": "priority_1",  # String key for integer result
+                        "2": "priority_2",  # String key for integer result
+                    },
+                ),
+            ],
+        )
+
+        # Build graph from settings (proper edge construction)
+        graph = ExecutionGraph.from_config(settings)
+
+        # Build PipelineConfig with actual plugin instances
+        config = PipelineConfig(
+            source=source,
+            transforms=[],
+            sinks={"priority_1": priority_1_sink, "priority_2": priority_2_sink},
+            gates=settings.gates,
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(config, graph=graph)
+
+        assert result.status == "completed"
+        assert result.rows_processed == 3
+        # All rows are routed (none use "continue")
+        assert result.rows_routed == 3
+        # 2 rows with priority 1, 1 row with priority 2
+        assert len(priority_1_sink.results) == 2
+        assert len(priority_2_sink.results) == 1
+        # Verify the right rows went to the right sinks
+        assert all(row["priority"] == 1 for row in priority_1_sink.results)
+        assert all(row["priority"] == 2 for row in priority_2_sink.results)
+
     def test_config_gate_node_registered_in_landscape(self) -> None:
         """Config gates are registered as nodes in Landscape."""
         from elspeth.core.landscape import LandscapeDB

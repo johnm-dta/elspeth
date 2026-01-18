@@ -93,3 +93,34 @@ class TestEnumCoercion:
 
         with pytest.raises(ValueError):
             RunStatus("invalid")
+
+
+class TestTriggerType:
+    """Tests for TriggerType enum."""
+
+    def test_trigger_type_exists(self) -> None:
+        """TriggerType can be imported."""
+        from elspeth.contracts.enums import TriggerType
+
+        assert TriggerType is not None
+
+    def test_trigger_type_values(self) -> None:
+        """TriggerType has all required values."""
+        from elspeth.contracts.enums import TriggerType
+
+        assert TriggerType.COUNT.value == "count"
+        assert TriggerType.TIMEOUT.value == "timeout"
+        assert TriggerType.CONDITION.value == "condition"
+        assert TriggerType.END_OF_SOURCE.value == "end_of_source"
+        assert TriggerType.MANUAL.value == "manual"
+
+    def test_trigger_type_is_str_enum(self) -> None:
+        """TriggerType can be used as string (for database serialization)."""
+        from elspeth.contracts.enums import TriggerType
+
+        # (str, Enum) allows direct string comparison for database serialization
+        assert TriggerType.COUNT == "count"
+        assert TriggerType.TIMEOUT == "timeout"
+        # Can be created from string values (for DB reads)
+        assert TriggerType("count") == TriggerType.COUNT
+        assert TriggerType("end_of_source") == TriggerType.END_OF_SOURCE

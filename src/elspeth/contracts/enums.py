@@ -53,6 +53,26 @@ class BatchStatus(str, Enum):
     FAILED = "failed"
 
 
+class TriggerType(str, Enum):
+    """Type of trigger that caused an aggregation batch to execute.
+
+    Uses (str, Enum) for database serialization to batches.trigger_type.
+
+    Values:
+        COUNT: Batch reached configured row count threshold
+        TIMEOUT: Batch reached configured time limit
+        CONDITION: Custom condition expression evaluated to true
+        END_OF_SOURCE: Source exhausted, flush remaining rows
+        MANUAL: Explicitly triggered via API/CLI
+    """
+
+    COUNT = "count"
+    TIMEOUT = "timeout"
+    CONDITION = "condition"
+    END_OF_SOURCE = "end_of_source"
+    MANUAL = "manual"
+
+
 class NodeType(str, Enum):
     """Type of node in the execution graph.
 

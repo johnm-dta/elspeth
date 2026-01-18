@@ -24,6 +24,7 @@ from elspeth.contracts.enums import (
     RoutingMode,
     RowOutcome,
     RunStatus,
+    TriggerType,
 )
 from elspeth.contracts.errors import (
     ExecutionError,
@@ -136,6 +137,7 @@ __all__ = [
     "RoutingMode",
     "RowOutcome",
     "RunStatus",
+    "TriggerType",
     # identity
     "TokenInfo",
     # results

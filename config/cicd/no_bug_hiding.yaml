@@ -385,42 +385,13 @@ allow_hits:
     safety: "Legitimate Optional return - None means 'accepts any schema'"
     expires: null  # Permanent - intentional design
 
-  # PluginManager._refresh_caches - uses getattr for name fallback to __name__
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=196"
-    owner: "architecture"
-    reason: "Trust boundary: plugins may not define name attribute"
-    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=206"
-    owner: "architecture"
-    reason: "Trust boundary: plugins may not define name attribute"
-    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=216"
-    owner: "architecture"
-    reason: "Trust boundary: plugins may not define name attribute"
-    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=226"
-    owner: "architecture"
-    reason: "Trust boundary: plugins may not define name attribute"
-    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=236"
-    owner: "architecture"
-    reason: "Trust boundary: plugins may not define name attribute"
-    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/manager.py:R2:PluginManager:_refresh_caches:line=246"
-    owner: "architecture"
-    reason: "Trust boundary: plugins may not define name attribute"
-    safety: "Duck-typing at plugin boundary - fallback to __name__ is documented"
-    expires: null  # Permanent - intentional design
+  # PluginManager._refresh_caches
+  # NOTE: Previously had allowlist entries for getattr(cls, 'name', cls.__name__)
+  # fallbacks at lines 196, 206, 216, 226, 236, 246. These were REMOVED because:
+  # - All 6 protocols require 'name: str' as a mandatory attribute
+  # - The fallback hid protocol violations instead of failing fast
+  # - Now uses direct cls.name access; missing name crashes immediately
+  # Removed in WP-11 Task 4 (2026-01-18).
 
   # ============================================================
   # SCHEMA VALIDATION TRUST BOUNDARY (Permanent)

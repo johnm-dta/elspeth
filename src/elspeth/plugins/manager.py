@@ -193,7 +193,7 @@ class PluginManager:
         # Collect from all registered plugins with duplicate detection
         for sources in self._pm.hook.elspeth_get_source():
             for cls in sources:
-                name = getattr(cls, "name", cls.__name__)
+                name = cls.name
                 if name in new_sources:
                     raise ValueError(
                         f"Duplicate source plugin name: '{name}'. "
@@ -203,7 +203,7 @@ class PluginManager:
 
         for transforms in self._pm.hook.elspeth_get_transforms():
             for cls in transforms:
-                name = getattr(cls, "name", cls.__name__)
+                name = cls.name
                 if name in new_transforms:
                     raise ValueError(
                         f"Duplicate transform plugin name: '{name}'. "
@@ -213,7 +213,7 @@ class PluginManager:
 
         for gates in self._pm.hook.elspeth_get_gates():
             for cls in gates:
-                name = getattr(cls, "name", cls.__name__)
+                name = cls.name
                 if name in new_gates:
                     raise ValueError(
                         f"Duplicate gate plugin name: '{name}'. "
@@ -223,7 +223,7 @@ class PluginManager:
 
         for aggs in self._pm.hook.elspeth_get_aggregations():
             for cls in aggs:
-                name = getattr(cls, "name", cls.__name__)
+                name = cls.name
                 if name in new_aggregations:
                     raise ValueError(
                         f"Duplicate aggregation plugin name: '{name}'. "
@@ -233,7 +233,7 @@ class PluginManager:
 
         for coalesces in self._pm.hook.elspeth_get_coalesces():
             for cls in coalesces:
-                name = getattr(cls, "name", cls.__name__)
+                name = cls.name
                 if name in new_coalesces:
                     raise ValueError(
                         f"Duplicate coalesce plugin name: '{name}'. "
@@ -243,7 +243,7 @@ class PluginManager:
 
         for sinks in self._pm.hook.elspeth_get_sinks():
             for cls in sinks:
-                name = getattr(cls, "name", cls.__name__)
+                name = cls.name
                 if name in new_sinks:
                     raise ValueError(
                         f"Duplicate sink plugin name: '{name}'. "

@@ -2,6 +2,8 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+> **Updated 2026-01-19:** Migrated from `BaseGate` plugin classes to config-driven `GateSettings` for consistency with WP-02 (plugin gate removal) and WP-16 (test cleanup).
+
 **Goal:** Complete test coverage for fork work queue (WP-07) and coalesce executor (WP-08) integration with RowProcessor and Orchestrator.
 
 **Architecture:** Tests will verify the complete token lifecycle through fork → parallel processing → coalesce, ensuring audit trail integrity and correct terminal state propagation. The existing `CoalesceExecutor` unit tests validate executor behavior in isolation; this plan adds integration tests showing how `RowProcessor` orchestrates fork/coalesce operations.
@@ -240,21 +242,13 @@ def test_fork_then_coalesce_require_all(self) -> None:
     )
     coalesce_executor.register_coalesce(coalesce_settings, coalesce_node.node_id)
 
-    # Create gate and transforms
-    class ForkGate(BaseGate):
-        name = "splitter"
-        input_schema = _TestSchema
-        output_schema = _TestSchema
-
-        def __init__(self, node_id: str) -> None:
-            super().__init__({})
-            self.node_id = node_id
-
-        def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
-            return GateResult(
-                row=row,
-                action=RoutingAction.fork_to_paths(["path_a", "path_b"]),
-            )
+    # Create config-driven fork gate (not a plugin class)
+    fork_gate_settings = GateSettings(
+        name="splitter",
+        condition="True",  # Always fork
+        routes={"true": "fork"},
+        fork_to=["path_a", "path_b"],
+    )
 
     class EnrichA(BaseTransform):
         name = "enrich_a"
@@ -289,6 +283,12 @@ def test_fork_then_coalesce_require_all(self) -> None:
             (fork_gate.node_id, "path_a"): edge_a.edge_id,
             (fork_gate.node_id, "path_b"): edge_b.edge_id,
         },
+        config_gates=[fork_gate_settings],  # Config-driven gate
+        config_gate_id_map={"splitter": fork_gate.node_id},
+        route_resolution_map={
+            (fork_gate.node_id, "path_a"): "fork",
+            (fork_gate.node_id, "path_b"): "fork",
+        },
         coalesce_executor=coalesce_executor,
         coalesce_node_ids={"merger": coalesce_node.node_id},
     )
@@ -296,7 +296,7 @@ def test_fork_then_coalesce_require_all(self) -> None:
     ctx = PluginContext(run_id=run.run_id, config={})
 
     # Process should:
-    # 1. Fork at gate (parent FORKED)
+    # 1. Fork at config gate (parent FORKED)
     # 2. Process path_a (add sentiment)
     # 3. Process path_b (add entities)
     # 4. Coalesce both paths (merged token COALESCED)
@@ -304,12 +304,11 @@ def test_fork_then_coalesce_require_all(self) -> None:
         row_index=0,
         row_data={"text": "ACME earnings"},
         transforms=[
-            ForkGate(fork_gate.node_id),
             EnrichA(transform_a.node_id),
             EnrichB(transform_b.node_id),
         ],
         ctx=ctx,
-        coalesce_at_step=3,  # After both transforms
+        coalesce_at_step=2,  # After both transforms (gate runs before transforms)
         coalesce_name="merger",
     )
 

@@ -2,6 +2,8 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+> **Updated 2026-01-19:** Migrated from `BaseGate` plugin classes to config-driven `GateSettings` for consistency with WP-02 (plugin gate removal) and WP-16 (test cleanup).
+
 **Goal:** Complete end-to-end integration tests that exercise ALL engine features together: fork, coalesce, gates, aggregation, retry, and audit trail verification.
 
 **Architecture:** WP-14a/b/c test individual subsystems in isolation. WP-14d verifies these subsystems work correctly when combined in realistic pipelines. Tests focus on the "audit spine" guarantee: every row reaches a terminal state with complete lineage.
@@ -65,20 +67,16 @@ class TestComplexDAGIntegration:
         - 1 COALESCED (merged token reaches sink)
         """
         from elspeth.contracts import PluginSchema, RowOutcome, RoutingMode
-        from elspeth.core.config import CoalesceSettings
+        from elspeth.core.config import CoalesceSettings, GateSettings
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.coalesce_executor import CoalesceExecutor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
         from elspeth.engine.spans import SpanFactory
         from elspeth.engine.tokens import TokenManager
-        from elspeth.plugins.base import BaseGate, BaseTransform
+        from elspeth.plugins.base import BaseTransform
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import (
-            GateResult,
-            RoutingAction,
-            TransformResult,
-        )
+        from elspeth.plugins.results import TransformResult
 
         db = LandscapeDB.in_memory()
 
@@ -106,20 +104,13 @@ class TestComplexDAGIntegration:
             def close(self) -> None:
                 pass
 
-        class ForkGate(BaseGate):
-            """Gate that forks to sentiment and entity paths."""
-            name = "fork_gate"
-            input_schema = TextSchema
-            output_schema = TextSchema
-
-            def __init__(self) -> None:
-                super().__init__({})
-
-            def evaluate(self, row: dict[str, Any], ctx: Any) -> GateResult:
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.fork_to_paths(["sentiment_path", "entity_path"]),
-                )
+        # Config-driven fork gate (not a plugin class)
+        fork_gate = GateSettings(
+            name="fork_gate",
+            condition="True",  # Always fork
+            routes={"true": "fork"},
+            fork_to=["sentiment_path", "entity_path"],
+        )
 
         class SentimentTransform(BaseTransform):
             """Adds sentiment analysis."""
@@ -180,7 +171,7 @@ class TestComplexDAGIntegration:
 
         # Create pipeline components
         source = ListSource([{"text": "ACME reported good earnings"}])
-        fork_gate = ForkGate()
+        # fork_gate already defined above as GateSettings
         sentiment_transform = SentimentTransform()
         entity_transform = EntityTransform()
         sink = CollectSink()
@@ -199,8 +190,9 @@ class TestComplexDAGIntegration:
 
         config = PipelineConfig(
             source=source,
-            transforms=[fork_gate, sentiment_transform, entity_transform],
+            transforms=[sentiment_transform, entity_transform],
             sinks={"default": sink},
+            gates=[fork_gate],  # Config-driven gate
             coalesce_settings={"merger": coalesce_settings},
         )
 
@@ -234,7 +226,7 @@ Expected: FAIL - Need to implement `_build_diamond_graph` and wire coalesce thro
 ```python
 def _build_diamond_graph(
     config: PipelineConfig,
-    fork_gate: BaseGate,
+    fork_gate: GateSettings,  # Config-driven gate, not BaseGate
     coalesce_settings: CoalesceSettings,
 ) -> ExecutionGraph:
     """Build diamond DAG: source → fork → [A, B] → coalesce → sink."""
@@ -245,17 +237,18 @@ def _build_diamond_graph(
     # Source
     graph.add_node("source", node_type="source", plugin_name=config.source.name)
 
-    # Fork gate
-    graph.add_node("fork_gate", node_type="gate", plugin_name=fork_gate.name)
-    graph.add_edge("source", "fork_gate", label="continue", mode=RoutingMode.MOVE)
+    # Config-driven fork gate (uses GateSettings.name)
+    gate_node_id = f"config_gate_{fork_gate.name}"
+    graph.add_node(gate_node_id, node_type="config_gate", plugin_name=fork_gate.name)
+    graph.add_edge("source", gate_node_id, label="continue", mode=RoutingMode.MOVE)
 
     # Parallel transforms
     graph.add_node("sentiment_transform", node_type="transform", plugin_name="sentiment_transform")
     graph.add_node("entity_transform", node_type="transform", plugin_name="entity_transform")
 
     # Fork edges (COPY mode for parallel execution)
-    graph.add_edge("fork_gate", "sentiment_transform", label="sentiment_path", mode=RoutingMode.COPY)
-    graph.add_edge("fork_gate", "entity_transform", label="entity_path", mode=RoutingMode.COPY)
+    graph.add_edge(gate_node_id, "sentiment_transform", label="sentiment_path", mode=RoutingMode.COPY)
+    graph.add_edge(gate_node_id, "entity_transform", label="entity_path", mode=RoutingMode.COPY)
 
     # Coalesce node
     graph.add_node("coalesce", node_type="coalesce", plugin_name="merger")
@@ -269,11 +262,12 @@ def _build_diamond_graph(
 
     # Populate maps
     graph._sink_id_map = {sink_name: f"sink_{sink_name}"}
-    graph._transform_id_map = {0: "fork_gate", 1: "sentiment_transform", 2: "entity_transform"}
+    graph._transform_id_map = {0: "sentiment_transform", 1: "entity_transform"}
+    graph._config_gate_id_map = {fork_gate.name: gate_node_id}
     graph._coalesce_id_map = {"merger": "coalesce"}
     graph._route_resolution_map = {
-        ("fork_gate", "sentiment_path"): "fork",
-        ("fork_gate", "entity_path"): "fork",
+        (gate_node_id, "sentiment_path"): "fork",
+        (gate_node_id, "entity_path"): "fork",
     }
     graph._output_sink = sink_name
 
@@ -354,8 +348,13 @@ def test_full_feature_pipeline(self) -> None:
         routes={"true": "high_path", "false": "low_path"},
     )
 
-    # Fork in high path
-    fork_gate = ForkGate()
+    # Fork in high path (config-driven)
+    fork_gate = GateSettings(
+        name="high_fork",
+        condition="True",
+        routes={"true": "fork"},
+        fork_to=["path_a", "path_b"],
+    )
 
     # Aggregation in high path
     agg_settings = AggregationSettings(

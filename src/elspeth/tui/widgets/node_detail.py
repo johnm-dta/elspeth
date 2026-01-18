@@ -88,7 +88,7 @@ class NodeDetailPanel:
             lines.append("Error:")
             try:
                 # Runtime check: Landscape DB may contain corrupted/malformed data
-                if not isinstance(error_json, str):  # type: ignore[unreachable]
+                if not isinstance(error_json, str):
                     # Non-string error_json - display as-is
                     lines.append(f"  {error_json}")  # type: ignore[unreachable]
                 else:
@@ -133,7 +133,7 @@ class NodeDetailPanel:
                 size_bytes = artifact.get("size_bytes")
                 if size_bytes is not None and isinstance(size_bytes, int | float):
                     lines.append(f"  Size:    {self._format_size(int(size_bytes))}")
-            else:  # type: ignore[unreachable]
+            else:
                 # Non-dict artifact - display as-is
                 lines.append(f"  {artifact}")  # type: ignore[unreachable]
             lines.append("")

@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Literal
 
 from elspeth.contracts import (
+    BatchStatus,
     Determinism,
     ExportStatus,
     NodeStateStatus,
@@ -266,7 +267,7 @@ class Batch:
     run_id: str
     aggregation_node_id: str
     attempt: int
-    status: str  # draft, executing, completed, failed
+    status: BatchStatus
     created_at: datetime
     aggregation_state_id: str | None = None
     trigger_reason: str | None = None

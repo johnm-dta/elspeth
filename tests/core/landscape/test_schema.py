@@ -1,6 +1,7 @@
 # tests/core/landscape/test_schema.py
 """Tests for Landscape SQLAlchemy schema."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import inspect
@@ -134,6 +135,7 @@ class TestPhase3AModels:
         assert event.event_id == "evt1"
 
     def test_batch_model(self) -> None:
+        from elspeth.contracts.enums import BatchStatus
         from elspeth.core.landscape.models import Batch
 
         batch = Batch(
@@ -141,10 +143,10 @@ class TestPhase3AModels:
             run_id="run1",
             aggregation_node_id="node1",
             attempt=0,
-            status="draft",
+            status=BatchStatus.DRAFT,
             created_at=None,  # type: ignore[arg-type]
         )
-        assert batch.status == "draft"
+        assert batch.status == BatchStatus.DRAFT
 
 
 class TestNodesDeterminismColumn:
@@ -280,6 +282,27 @@ class TestArtifactsIdempotencyKey:
 
         field_names = [f.name for f in fields(Artifact)]
         assert "idempotency_key" in field_names
+
+
+class TestBatchStatusType:
+    """Tests for Batch.status type being BatchStatus enum (WP-05 Task 4)."""
+
+    def test_batch_status_is_typed(self) -> None:
+        """Batch.status should accept BatchStatus enum."""
+
+        from elspeth.contracts.enums import BatchStatus
+        from elspeth.core.landscape.models import Batch
+
+        batch = Batch(
+            batch_id="b1",
+            run_id="r1",
+            aggregation_node_id="agg1",
+            attempt=1,
+            status=BatchStatus.DRAFT,  # Should work without type error
+            created_at=datetime.now(UTC),
+        )
+
+        assert batch.status == BatchStatus.DRAFT
 
 
 class TestBatchesTriggerType:

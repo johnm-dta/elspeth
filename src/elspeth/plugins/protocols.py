@@ -276,6 +276,7 @@ class AggregationProtocol(Protocol):
     - Engine creates Landscape batch on first accept()
     - Engine persists batch membership on every accept()
     - Engine transitions batch status on flush()
+    - Engine evaluates trigger conditions via TriggerEvaluator (WP-06)
 
     Example:
         class StatsAggregation:
@@ -286,9 +287,6 @@ class AggregationProtocol(Protocol):
             def accept(self, row, ctx) -> AcceptResult:
                 self._values.append(row["value"])
                 return AcceptResult(accepted=True)
-
-            def should_trigger(self) -> bool:
-                return len(self._values) >= self.batch_size
 
             def flush(self, ctx) -> list[dict]:
                 result = {"mean": statistics.mean(self._values)}
@@ -316,11 +314,10 @@ class AggregationProtocol(Protocol):
     ) -> "AcceptResult":
         """Accept a row into the batch.
 
-        Called for each row. Implementation should:
-        1. Store the row in internal buffer
-        2. Implement should_trigger() for flush condition (WP-06)
+        Called for each row. Implementation should store the row in internal buffer.
 
         Note: In Phase 3, the engine wraps this to manage Landscape batches.
+        Trigger evaluation is handled by the engine via TriggerEvaluator (WP-06).
 
         Args:
             row: Input row
@@ -328,13 +325,6 @@ class AggregationProtocol(Protocol):
 
         Returns:
             AcceptResult indicating acceptance
-        """
-        ...
-
-    def should_trigger(self) -> bool:
-        """Check if batch should flush now.
-
-        Called by engine to check trigger condition outside of accept().
         """
         ...
 
@@ -354,13 +344,6 @@ class AggregationProtocol(Protocol):
 
         Returns:
             List of output rows (usually one aggregate result)
-        """
-        ...
-
-    def reset(self) -> None:
-        """Reset internal state.
-
-        Called by engine on error recovery.
         """
         ...
 

@@ -1709,9 +1709,6 @@ class TestAggregationExecutor:
                 self._values.append(row["value"])
                 return AcceptResult(accepted=True)
 
-            def should_trigger(self) -> bool:
-                return len(self._values) >= 2
-
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 total = sum(self._values)
                 self._values = []
@@ -1797,9 +1794,6 @@ class TestAggregationExecutor:
                 self._count += 1
                 return AcceptResult(accepted=True)
 
-            def should_trigger(self) -> bool:
-                return self._count >= 3
-
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 result = [{"count": self._count}]
                 self._count = 0
@@ -1850,9 +1844,11 @@ class TestAggregationExecutor:
     def test_flush_with_audit(self) -> None:
         """Flush transitions batch and returns outputs."""
         from elspeth.contracts import TokenInfo
+        from elspeth.core.config import TriggerConfig
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import AggregationExecutor
         from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.triggers import TriggerEvaluator
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import AcceptResult
 
@@ -1881,9 +1877,6 @@ class TestAggregationExecutor:
                 self._values.append(row["value"])
                 return AcceptResult(accepted=True)
 
-            def should_trigger(self) -> bool:
-                return len(self._values) >= 2
-
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 avg = sum(self._values) / len(self._values) if self._values else 0
                 self._values = []
@@ -1892,6 +1885,8 @@ class TestAggregationExecutor:
         aggregation = AvgAggregation()
         ctx = PluginContext(run_id=run.run_id, config={})
         executor = AggregationExecutor(recorder, SpanFactory(), run.run_id)
+        # Engine uses TriggerEvaluator to manage trigger conditions (WP-06)
+        trigger_evaluator = TriggerEvaluator(TriggerConfig(count=2))
 
         # Accept two rows
         batch_id: str | None = None
@@ -1912,7 +1907,8 @@ class TestAggregationExecutor:
 
             result = executor.accept(aggregation, token, ctx, step_in_pipeline=1)
             batch_id = result.batch_id
-            if aggregation.should_trigger():
+            trigger_evaluator.record_accept()
+            if trigger_evaluator.should_trigger():
                 break
 
         assert batch_id is not None  # Trigger condition reached after 2 rows
@@ -1964,9 +1960,6 @@ class TestAggregationExecutor:
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 return AcceptResult(accepted=True)
-
-            def should_trigger(self) -> bool:
-                return False
 
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 return []
@@ -2072,9 +2065,6 @@ class TestAggregationExecutor:
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 return AcceptResult(accepted=True)
 
-            def should_trigger(self) -> bool:
-                return True
-
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 raise RuntimeError("flush failed!")
 
@@ -2118,9 +2108,11 @@ class TestAggregationExecutor:
     def test_multiple_batches_sequential(self) -> None:
         """After flush, new batch is created for subsequent accepts."""
         from elspeth.contracts import TokenInfo
+        from elspeth.core.config import TriggerConfig
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import AggregationExecutor
         from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.triggers import TriggerEvaluator
         from elspeth.plugins.context import PluginContext
         from elspeth.plugins.results import AcceptResult
 
@@ -2146,9 +2138,6 @@ class TestAggregationExecutor:
                 self._count += 1
                 return AcceptResult(accepted=True)
 
-            def should_trigger(self) -> bool:
-                return self._count >= 2
-
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 self._batch_num += 1
                 result = [{"batch": self._batch_num, "count": self._count}]
@@ -2158,6 +2147,8 @@ class TestAggregationExecutor:
         aggregation = BatchCounterAggregation()
         ctx = PluginContext(run_id=run.run_id, config={})
         executor = AggregationExecutor(recorder, SpanFactory(), run.run_id)
+        # Engine uses TriggerEvaluator to manage trigger conditions (WP-06)
+        trigger_evaluator = TriggerEvaluator(TriggerConfig(count=2))
 
         batch_ids: list[str] = []
 
@@ -2178,7 +2169,8 @@ class TestAggregationExecutor:
             recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
             result = executor.accept(aggregation, token, ctx, step_in_pipeline=1)
-            if aggregation.should_trigger():
+            trigger_evaluator.record_accept()
+            if trigger_evaluator.should_trigger():
                 assert result.batch_id is not None  # Batch exists when trigger fires
                 batch_ids.append(result.batch_id)
                 _outputs = executor.flush(
@@ -2187,6 +2179,7 @@ class TestAggregationExecutor:
                     trigger_reason="count_reached",
                     step_in_pipeline=1,
                 )
+                trigger_evaluator.reset()
 
         # Should have 2 completed batches with different IDs
         assert len(batch_ids) == 2

@@ -150,19 +150,12 @@ class _TestAggregation(BaseAggregation):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self._batch: list[dict[str, Any]] = []
-        self._batch_size: int = config.get("batch_size", 10)
 
     def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
         self._batch.append(row)
         return AcceptResult(accepted=True)
 
-    def should_trigger(self) -> bool:
-        return len(self._batch) >= self._batch_size
-
     def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
         result = self._batch.copy()
         self._batch = []
         return result
-
-    def reset(self) -> None:
-        self._batch = []

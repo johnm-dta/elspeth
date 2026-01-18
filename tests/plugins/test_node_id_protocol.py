@@ -149,9 +149,6 @@ class TestNodeIdProtocol:
                 self._buffer.append(row)
                 return AcceptResult(accepted=True)
 
-            def should_trigger(self) -> bool:
-                return len(self._buffer) >= 10
-
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 result = list(self._buffer)
                 self._buffer = []

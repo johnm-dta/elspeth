@@ -62,6 +62,22 @@ class TestBaseTransform:
 class TestBaseAggregation:
     """Base class for aggregations."""
 
+    def test_base_aggregation_no_should_trigger(self) -> None:
+        """BaseAggregation should NOT have should_trigger() (moved to engine)."""
+        from elspeth.plugins.base import BaseAggregation
+
+        assert not hasattr(
+            BaseAggregation, "should_trigger"
+        ), "should_trigger() should be removed (WP-06)"
+
+    def test_base_aggregation_no_reset(self) -> None:
+        """BaseAggregation should NOT have reset() (engine manages batch lifecycle)."""
+        from elspeth.plugins.base import BaseAggregation
+
+        assert not hasattr(
+            BaseAggregation, "reset"
+        ), "reset() should be removed (WP-06)"
+
     def test_base_aggregation_implementation(self) -> None:
         from elspeth.contracts import PluginSchema
         from elspeth.plugins.base import BaseAggregation
@@ -88,9 +104,6 @@ class TestBaseAggregation:
                 self._values.append(row["value"])
                 return AcceptResult(accepted=True)
 
-            def should_trigger(self) -> bool:
-                return len(self._values) >= self._batch_size
-
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 result = {"total": sum(self._values)}
                 self._values = []
@@ -101,7 +114,7 @@ class TestBaseAggregation:
 
         agg.accept({"value": 10}, ctx)
         agg.accept({"value": 20}, ctx)
-        assert agg.should_trigger() is True
+        # Engine now handles trigger evaluation via TriggerEvaluator (WP-06)
 
         outputs = agg.flush(ctx)
         assert outputs == [{"total": 30}]

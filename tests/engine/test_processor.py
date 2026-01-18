@@ -775,9 +775,6 @@ class TestRowProcessorAggregation:
                 self._count += 1
                 return AcceptResult(accepted=True)
 
-            def should_trigger(self) -> bool:
-                return False
-
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 result = [{"count": self._count}]
                 self._count = 0
@@ -845,9 +842,6 @@ class TestRowProcessorAggregation:
                 self._values.append(row["value"])
                 return AcceptResult(accepted=True)
 
-            def should_trigger(self) -> bool:
-                return len(self._values) >= 2
-
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 result = [{"sum": sum(self._values)}]
                 self._values = []
@@ -884,8 +878,8 @@ class TestRowProcessorAggregation:
         assert results2[0].outcome == RowOutcome.CONSUMED_IN_BATCH
 
         # Verify aggregation buffered both values (flush not automatically called)
+        # Engine now handles trigger evaluation via TriggerEvaluator (WP-06)
         assert len(aggregation._values) == 2
-        assert aggregation.should_trigger() is True
 
 
 class TestRowProcessorTokenIdentity:

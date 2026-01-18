@@ -213,9 +213,6 @@ class TestAggregationProtocol:
                 self._values.append(row["value"])
                 return AcceptResult(accepted=True)
 
-            def should_trigger(self) -> bool:
-                return len(self._values) >= self.batch_size
-
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 result = {
                     "total": sum(self._values),
@@ -223,9 +220,6 @@ class TestAggregationProtocol:
                 }
                 self._values = []
                 return [result]
-
-            def reset(self) -> None:
-                self._values = []
 
             def on_register(self, ctx: PluginContext) -> None:
                 pass
@@ -245,14 +239,14 @@ class TestAggregationProtocol:
 
         ctx = PluginContext(run_id="test", config={})
 
-        # First row - no trigger yet
+        # First row - accepted into batch
         result = agg.accept({"value": 10}, ctx)
         assert result.accepted is True
-        assert agg.should_trigger() is False
 
-        # Second row - should trigger
+        # Second row - also accepted
         result = agg.accept({"value": 20}, ctx)
-        assert agg.should_trigger() is True
+        assert result.accepted is True
+        # Engine now handles trigger evaluation via TriggerEvaluator (WP-06)
 
         # Flush
         outputs = agg.flush(ctx)

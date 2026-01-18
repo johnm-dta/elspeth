@@ -173,12 +173,13 @@ class BaseGate(ABC):
 class BaseAggregation(ABC):
     """Base class for aggregation transforms (stateful batching).
 
-    Subclass and implement accept(), should_trigger(), flush().
+    Subclass and implement accept() and flush().
 
     Phase 3 Integration:
     - Engine creates Landscape batch on first accept()
     - Engine persists batch membership on every accept()
     - Engine manages batch state transitions
+    - Engine evaluates trigger conditions via TriggerEvaluator (WP-06)
 
     Example:
         class StatsAggregation(BaseAggregation):
@@ -193,9 +194,6 @@ class BaseAggregation(ABC):
             def accept(self, row, ctx) -> AcceptResult:
                 self._values.append(row["value"])
                 return AcceptResult(accepted=True)
-
-            def should_trigger(self) -> bool:
-                return len(self._values) >= 100
 
             def flush(self, ctx) -> list[dict]:
                 result = {"mean": statistics.mean(self._values)}
@@ -226,20 +224,9 @@ class BaseAggregation(ABC):
         ...
 
     @abstractmethod
-    def should_trigger(self) -> bool:
-        """Check if batch should flush."""
-        ...
-
-    @abstractmethod
     def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
         """Process batch and return results."""
         ...
-
-    def reset(self) -> None:  # noqa: B027
-        """Reset internal state.
-
-        Override if you have state beyond what __init__ sets up.
-        """
 
     def close(self) -> None:  # noqa: B027
         """Clean up resources after pipeline completion."""

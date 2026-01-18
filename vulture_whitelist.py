@@ -105,8 +105,7 @@ output_schema_hash  # type: ignore
 
 # Protocol lifecycle methods (may be overridden by implementations)
 on_register  # type: ignore
-should_trigger  # type: ignore
-reset  # type: ignore
+# NOTE: should_trigger and reset removed from BaseAggregation (WP-06)
 
 # ast.NodeVisitor methods (called dynamically by .visit())
 visit_NamedExpr  # type: ignore

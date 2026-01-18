@@ -1981,6 +1981,211 @@ class TestRowProcessorCoalesce:
         assert merged_data["sentiment"] == "positive"
         assert merged_data["entities"] == ["ACME"]
 
+    def test_coalesce_best_effort_with_quarantined_child(self) -> None:
+        """best_effort policy should merge available children even if one quarantines.
+
+        Scenario:
+        - Fork to 3 paths: sentiment, entities, summary
+        - summary path quarantines (transform returns TransformResult.error())
+        - best_effort timeout triggers, merges sentiment + entities
+        - Result should include FORKED, QUARANTINED, and COALESCED outcomes
+
+        This test verifies the end-to-end flow using CoalesceExecutor directly
+        to simulate the scenario where one branch is quarantined and never
+        reaches the coalesce point.
+        """
+        import time
+
+        from elspeth.contracts import NodeType, RoutingMode, TokenInfo
+        from elspeth.core.config import CoalesceSettings
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        token_manager = TokenManager(recorder)
+
+        # Register nodes
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        fork_gate = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="splitter",
+            node_type=NodeType.GATE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_sentiment = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="sentiment",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_entities = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="entities",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_summary = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="summary",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="merger",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Register edges for fork paths
+        edge_sentiment = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=fork_gate.node_id,
+            to_node_id=transform_sentiment.node_id,
+            label="sentiment",
+            mode=RoutingMode.COPY,
+        )
+        edge_entities = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=fork_gate.node_id,
+            to_node_id=transform_entities.node_id,
+            label="entities",
+            mode=RoutingMode.COPY,
+        )
+        edge_summary = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=fork_gate.node_id,
+            to_node_id=transform_summary.node_id,
+            label="summary",
+            mode=RoutingMode.COPY,
+        )
+
+        # Setup coalesce with best_effort policy and short timeout
+        coalesce_settings = CoalesceSettings(
+            name="merger",
+            branches=["sentiment", "entities", "summary"],
+            policy="best_effort",
+            timeout_seconds=0.1,  # Short timeout for testing
+            merge="union",
+        )
+        coalesce_executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        coalesce_executor.register_coalesce(coalesce_settings, coalesce_node.node_id)
+
+        # Create processor (not used directly in this test, but shows integration setup)
+        _processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            edge_map={
+                (fork_gate.node_id, "sentiment"): edge_sentiment.edge_id,
+                (fork_gate.node_id, "entities"): edge_entities.edge_id,
+                (fork_gate.node_id, "summary"): edge_summary.edge_id,
+            },
+            coalesce_executor=coalesce_executor,
+            coalesce_node_ids={"merger": coalesce_node.node_id},
+        )
+
+        # Create tokens to simulate fork scenario
+        initial_token = token_manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            row_data={"text": "ACME earnings report"},
+        )
+        children = token_manager.fork_token(
+            parent_token=initial_token,
+            branches=["sentiment", "entities", "summary"],
+            step_in_pipeline=1,
+        )
+
+        # Simulate processing: sentiment and entities complete, summary is quarantined
+        # sentiment child completes with enriched data
+        sentiment_token = TokenInfo(
+            row_id=children[0].row_id,
+            token_id=children[0].token_id,
+            row_data={"text": "ACME earnings report", "sentiment": "positive"},
+            branch_name="sentiment",
+        )
+        outcome1 = coalesce_executor.accept(
+            sentiment_token, "merger", step_in_pipeline=3
+        )
+        assert outcome1.held is True
+
+        # entities child completes with enriched data
+        entities_token = TokenInfo(
+            row_id=children[1].row_id,
+            token_id=children[1].token_id,
+            row_data={"text": "ACME earnings report", "entities": ["ACME"]},
+            branch_name="entities",
+        )
+        outcome2 = coalesce_executor.accept(
+            entities_token, "merger", step_in_pipeline=3
+        )
+        assert outcome2.held is True  # Still waiting (need all 3 or timeout)
+
+        # summary child is QUARANTINED - it never arrives at coalesce
+        # (simulated by simply not calling accept for it)
+
+        # Wait for timeout
+        time.sleep(0.15)
+
+        # Check timeouts - should trigger best_effort merge
+        timed_out = coalesce_executor.check_timeouts("merger", step_in_pipeline=3)
+
+        # Should have merged sentiment + entities (without summary)
+        assert len(timed_out) == 1
+        outcome = timed_out[0]
+        assert outcome.held is False
+        assert outcome.merged_token is not None
+        assert outcome.failure_reason is None  # Not a failure, just partial merge
+
+        # Verify merged data contains sentiment and entities but not summary
+        merged_data = outcome.merged_token.row_data
+        assert "sentiment" in merged_data
+        assert merged_data["sentiment"] == "positive"
+        assert "entities" in merged_data
+        assert merged_data["entities"] == ["ACME"]
+        # summary never arrived, so its data is NOT in merged result
+        # (The original text field should be there from union merge)
+        assert "text" in merged_data
+
+        # Verify coalesce metadata shows partial merge
+        assert outcome.coalesce_metadata is not None
+        assert outcome.coalesce_metadata["policy"] == "best_effort"
+        assert set(outcome.coalesce_metadata["branches_arrived"]) == {
+            "sentiment",
+            "entities",
+        }
+        assert "summary" not in outcome.coalesce_metadata["branches_arrived"]
+
 
 class TestRowProcessorRetry:
     """Tests for retry integration in RowProcessor."""

@@ -43,6 +43,8 @@ class _WorkItem:
 
     token: TokenInfo
     start_step: int  # Which step in transforms to start from (0-indexed)
+    coalesce_at_step: int | None = None  # Step at which to coalesce (if any)
+    coalesce_name: str | None = None  # Name of the coalesce point (if any)
 
 
 class RowProcessor:
@@ -89,6 +91,7 @@ class RowProcessor:
         aggregation_settings: dict[str, AggregationSettings] | None = None,
         retry_manager: RetryManager | None = None,
         coalesce_executor: "CoalesceExecutor | None" = None,
+        coalesce_node_ids: dict[str, str] | None = None,
     ) -> None:
         """Initialize processor.
 
@@ -104,6 +107,7 @@ class RowProcessor:
             aggregation_settings: Map of node_id -> AggregationSettings for trigger evaluation
             retry_manager: Optional retry manager for transform execution
             coalesce_executor: Optional coalesce executor for fork/join operations
+            coalesce_node_ids: Map of coalesce_name -> node_id for coalesce points
         """
         self._recorder = recorder
         self._spans = span_factory
@@ -113,6 +117,7 @@ class RowProcessor:
         self._config_gate_id_map = config_gate_id_map or {}
         self._retry_manager = retry_manager
         self._coalesce_executor = coalesce_executor
+        self._coalesce_node_ids = coalesce_node_ids or {}
 
         self._token_manager = TokenManager(recorder)
         self._transform_executor = TransformExecutor(recorder, span_factory)
@@ -190,6 +195,9 @@ class RowProcessor:
         row_data: dict[str, Any],
         transforms: list[Any],
         ctx: PluginContext,
+        *,
+        coalesce_at_step: int | None = None,
+        coalesce_name: str | None = None,
     ) -> list[RowResult]:
         """Process a row through all transforms.
 
@@ -202,6 +210,8 @@ class RowProcessor:
             row_data: Initial row data
             transforms: List of transform plugins
             ctx: Plugin context
+            coalesce_at_step: Step index at which fork children should coalesce
+            coalesce_name: Name of the coalesce point for merging
 
         Returns:
             List of RowResults, one per terminal token (parent + children)
@@ -215,7 +225,16 @@ class RowProcessor:
         )
 
         # Initialize work queue with initial token starting at step 0
-        work_queue: deque[_WorkItem] = deque([_WorkItem(token=token, start_step=0)])
+        work_queue: deque[_WorkItem] = deque(
+            [
+                _WorkItem(
+                    token=token,
+                    start_step=0,
+                    coalesce_at_step=coalesce_at_step,
+                    coalesce_name=coalesce_name,
+                )
+            ]
+        )
         results: list[RowResult] = []
         iterations = 0
 
@@ -234,8 +253,12 @@ class RowProcessor:
                     transforms=transforms,
                     ctx=ctx,
                     start_step=item.start_step,
+                    coalesce_at_step=item.coalesce_at_step,
+                    coalesce_name=item.coalesce_name,
                 )
-                results.append(result)
+                # Result can be None for held coalesce tokens
+                if result is not None:
+                    results.append(result)
 
                 # Add any child tokens to the queue
                 work_queue.extend(child_items)
@@ -248,7 +271,9 @@ class RowProcessor:
         transforms: list[Any],
         ctx: PluginContext,
         start_step: int,
-    ) -> tuple[RowResult, list[_WorkItem]]:
+        coalesce_at_step: int | None = None,
+        coalesce_name: str | None = None,
+    ) -> tuple[RowResult | None, list[_WorkItem]]:
         """Process a single token through transforms starting at given step.
 
         Args:
@@ -256,9 +281,12 @@ class RowProcessor:
             transforms: List of transform plugins
             ctx: Plugin context
             start_step: Index in transforms to start from (0-indexed)
+            coalesce_at_step: Step index at which fork children should coalesce
+            coalesce_name: Name of the coalesce point for merging
 
         Returns:
-            Tuple of (RowResult for this token, list of child WorkItems to queue)
+            Tuple of (RowResult for this token or None if held for coalesce,
+                      list of child WorkItems to queue)
         """
         current_token = token
         child_items: list[_WorkItem] = []
@@ -295,7 +323,12 @@ class RowProcessor:
                     next_step = start_step + step_offset + 1
                     for child_token in outcome.child_tokens:
                         child_items.append(
-                            _WorkItem(token=child_token, start_step=next_step)
+                            _WorkItem(
+                                token=child_token,
+                                start_step=next_step,
+                                coalesce_at_step=coalesce_at_step,
+                                coalesce_name=coalesce_name,
+                            )
                         )
 
                     return (
@@ -430,6 +463,8 @@ class RowProcessor:
                         _WorkItem(
                             token=child_token,
                             start_step=len(transforms) + next_config_step,
+                            coalesce_at_step=coalesce_at_step,
+                            coalesce_name=coalesce_name,
                         )
                     )
 
@@ -441,6 +476,41 @@ class RowProcessor:
                     ),
                     child_items,
                 )
+
+        # Check if this is a fork child that should be coalesced
+        if (
+            self._coalesce_executor is not None
+            and current_token.branch_name is not None  # Is a fork child
+            and coalesce_name is not None
+            and coalesce_at_step is not None
+        ):
+            # Get the step we just completed
+            completed_step = len(transforms) + len(self._config_gates)
+            if completed_step >= coalesce_at_step:
+                # Coalesce operation is at the next step after the last transform
+                coalesce_step = completed_step + 1
+                # Submit to coalesce executor
+                coalesce_outcome = self._coalesce_executor.accept(
+                    token=current_token,
+                    coalesce_name=coalesce_name,
+                    step_in_pipeline=coalesce_step,
+                )
+
+                if coalesce_outcome.held:
+                    # Token is waiting for siblings - it's consumed by coalesce
+                    # Return None - held tokens don't produce results until merged
+                    return (None, child_items)
+
+                if coalesce_outcome.merged_token is not None:
+                    # All siblings arrived - return COALESCED with merged data
+                    return (
+                        RowResult(
+                            token=coalesce_outcome.merged_token,
+                            final_data=coalesce_outcome.merged_token.row_data,
+                            outcome=RowOutcome.COALESCED,
+                        ),
+                        child_items,
+                    )
 
         return (
             RowResult(

@@ -225,6 +225,7 @@ batches_table = Table(
     ),
     Column("aggregation_state_id", String(64), ForeignKey("node_states.state_id")),
     Column("trigger_reason", String(128)),
+    Column("trigger_type", String(32)),  # TriggerType enum value
     Column("attempt", Integer, nullable=False, default=0),
     Column("status", String(32), nullable=False),  # draft, executing, completed, failed
     Column("created_at", DateTime(timezone=True), nullable=False),

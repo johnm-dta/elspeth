@@ -280,3 +280,23 @@ class TestArtifactsIdempotencyKey:
 
         field_names = [f.name for f in fields(Artifact)]
         assert "idempotency_key" in field_names
+
+
+class TestBatchesTriggerType:
+    """Tests for trigger_type column in batches table (WP-05 Task 3)."""
+
+    def test_batches_table_has_trigger_type(self) -> None:
+        """batches table should have trigger_type column."""
+        from elspeth.core.landscape.schema import batches_table
+
+        column_names = [c.name for c in batches_table.columns]
+        assert "trigger_type" in column_names
+
+    def test_batch_model_has_trigger_type(self) -> None:
+        """Batch model should have trigger_type field."""
+        from dataclasses import fields
+
+        from elspeth.core.landscape.models import Batch
+
+        field_names = [f.name for f in fields(Batch)]
+        assert "trigger_type" in field_names

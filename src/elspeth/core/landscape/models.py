@@ -270,6 +270,7 @@ class Batch:
     created_at: datetime
     aggregation_state_id: str | None = None
     trigger_reason: str | None = None
+    trigger_type: str | None = None  # TriggerType enum value
     completed_at: datetime | None = None
 
 

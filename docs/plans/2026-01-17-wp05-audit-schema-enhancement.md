@@ -15,6 +15,102 @@
 
 ---
 
+## Pre-Flight Checks
+
+Before starting implementation, verify the following prerequisites are in place.
+
+### Check 1: Alembic Configuration
+
+Verify Alembic is properly configured for migration generation:
+
+```bash
+# Check alembic.ini exists and has correct database URL
+ls -la alembic.ini
+
+# Check env.py imports our metadata
+head -50 alembic/env.py | grep -E "(import|metadata)"
+
+# Verify current migration state
+alembic current
+```
+
+**Expected:**
+- `alembic.ini` exists with valid `sqlalchemy.url`
+- `alembic/env.py` imports `metadata` from `elspeth.core.landscape.schema`
+- `alembic current` shows current revision (or empty for new DB)
+
+**If Alembic is not configured:**
+```bash
+# Initialize Alembic (only if not already done)
+alembic init alembic
+
+# Then edit alembic/env.py to import our metadata:
+# from elspeth.core.landscape.schema import metadata
+# target_metadata = metadata
+```
+
+### Check 2: Test Files Exist
+
+Verify test files exist, create if missing:
+
+```bash
+# Check for test_enums.py
+ls tests/contracts/test_enums.py 2>/dev/null || echo "MISSING: tests/contracts/test_enums.py"
+
+# Check for test_schema.py
+ls tests/core/landscape/test_schema.py 2>/dev/null || echo "MISSING: tests/core/landscape/test_schema.py"
+
+# Ensure directories exist
+mkdir -p tests/contracts tests/core/landscape
+```
+
+**If test files are missing, create them:**
+
+`tests/contracts/test_enums.py` (if missing):
+```python
+"""Tests for contract enums."""
+
+from dataclasses import fields
+
+
+# Existing enum tests go here, WP-05 tests added below
+```
+
+`tests/core/landscape/test_schema.py` (if missing):
+```python
+"""Tests for Landscape schema definitions."""
+
+from dataclasses import fields
+
+
+# WP-05 schema tests added below
+```
+
+### Check 3: Verify Pre-requisite Enums Exist
+
+```bash
+# BatchStatus enum must exist (used in Task 4)
+python -c "from elspeth.contracts.enums import BatchStatus; print([s.value for s in BatchStatus])"
+```
+
+**Expected output:** `['draft', 'executing', 'completed', 'failed']`
+
+---
+
+## Architecture Note: Why models.py, Not audit.py
+
+The Landscape audit models live in two locations:
+
+| File | Purpose |
+|------|---------|
+| `src/elspeth/contracts/audit.py` | **Read-only query results** - dataclasses returned by explain() queries |
+| `src/elspeth/core/landscape/models.py` | **Database models** - dataclasses for CRUD operations |
+
+WP-05 modifies **models.py** because we're changing what gets stored in the database.
+The `Artifact` and `Batch` models in models.py are the authoritative definitions.
+
+---
+
 ## Task 1: Add TriggerType enum
 
 **Files:**
@@ -405,14 +501,50 @@ The migration should include:
 - `op.add_column('artifacts', sa.Column('idempotency_key', sa.String(256), nullable=True))`
 - `op.add_column('batches', sa.Column('trigger_type', sa.String(32), nullable=True))`
 
+**Troubleshooting: If autogenerate produces empty migration**
+
+If the migration `upgrade()` function is empty, Alembic isn't detecting changes. Common causes:
+
+1. **Metadata not imported:** Check `alembic/env.py` has:
+   ```python
+   from elspeth.core.landscape.schema import metadata
+   target_metadata = metadata
+   ```
+
+2. **Table already exists with columns:** If running against existing DB, columns may already exist.
+   Check with: `alembic upgrade head --sql` to see what SQL would run.
+
+3. **Wrong database URL:** Check `alembic.ini` points to correct dev database.
+
+**If autogenerate fails, create manual migration:**
+```bash
+alembic revision -m "WP-05: Add idempotency_key to artifacts, trigger_type to batches"
+```
+
+Then edit the generated file:
+```python
+def upgrade() -> None:
+    op.add_column('artifacts', sa.Column('idempotency_key', sa.String(256), nullable=True))
+    op.add_column('batches', sa.Column('trigger_type', sa.String(32), nullable=True))
+
+def downgrade() -> None:
+    op.drop_column('batches', 'trigger_type')
+    op.drop_column('artifacts', 'idempotency_key')
+```
+
 **Step 3: Test migration**
 
 ```bash
 # Apply migration
 alembic upgrade head
 
-# Verify columns exist
-# (use sqlite3 or psql depending on your dev database)
+# Verify columns exist (SQLite example)
+sqlite3 landscape.db ".schema artifacts" | grep idempotency_key
+sqlite3 landscape.db ".schema batches" | grep trigger_type
+
+# Or for PostgreSQL:
+# psql -d elspeth -c "\d artifacts" | grep idempotency_key
+# psql -d elspeth -c "\d batches" | grep trigger_type
 ```
 
 **Step 4: Commit**
@@ -473,6 +605,14 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ---
 
 ## Verification Checklist
+
+### Pre-Flight (before starting)
+
+- [ ] Alembic configured (`alembic.ini` exists, `env.py` imports metadata)
+- [ ] Test directories exist (`tests/contracts/`, `tests/core/landscape/`)
+- [ ] `BatchStatus` enum importable from `elspeth.contracts.enums`
+
+### Implementation (after each task)
 
 - [ ] `TriggerType` enum exists with 5 values (COUNT, TIMEOUT, CONDITION, END_OF_SOURCE, MANUAL)
 - [ ] `TriggerType` exported from `elspeth.contracts`

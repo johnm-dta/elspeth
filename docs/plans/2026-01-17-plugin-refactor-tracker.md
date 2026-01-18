@@ -16,7 +16,7 @@
 | WP-03 | Sink Implementation Rewrite | 🟢 Complete | 4h | WP-01 | WP-04, WP-13 |
 | WP-04 | Delete SinkAdapter & SinkLike | 🟢 Complete | 2h | WP-03 | WP-04a, WP-13 |
 | WP-04a | Delete *Like Protocol Duplications | 🟢 Complete | 1.5h | WP-04 | — |
-| WP-05 | Audit Schema Enhancement | 🔴 Not Started | 2h | None | WP-06 |
+| WP-05 | Audit Schema Enhancement | 🟢 Complete | 2h | None | WP-06 |
 | WP-06 | Aggregation Triggers | 🔴 Not Started | 6h | WP-05 | WP-14 |
 | WP-07 | Fork Work Queue | 🟢 Complete | 8h | None | WP-08, WP-10 |
 | WP-08 | Coalesce Executor | 🟢 Complete | 8h | WP-07 | WP-14 |
@@ -58,7 +58,7 @@ WP-11.99 ──► WP-12  (config-driven schemas unlock simplified utility conso
 
 ### Sprint 1: Foundation
 - [x] WP-01: Protocol & Base Class Alignment
-- [ ] WP-05: Audit Schema Enhancement
+- [x] WP-05: Audit Schema Enhancement ✅ Complete (2026-01-18)
 - [ ] WP-11: Orphaned Code Cleanup (split into sub-tasks)
 
 ### Sprint 2: Sink Contract & Interface Cleanup
@@ -338,26 +338,45 @@ c231f41 test(integration): update gate assertion for WP-02 (Task 10)
 
 ### WP-05: Audit Schema Enhancement
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete (2026-01-18)
 **Plan:** [2026-01-17-wp05-audit-schema-enhancement.md](./2026-01-17-wp05-audit-schema-enhancement.md)
 **Goal:** Add missing columns and fix types for audit completeness
 **Unlocks:** WP-06
 
-#### Tasks
-- [ ] Task 1: Add TriggerType enum
-- [ ] Task 2: Add idempotency_key to artifacts table
-- [ ] Task 3: Add trigger_type to batches table
-- [ ] Task 4: Fix Batch.status type from str to BatchStatus
-- [ ] Task 5: Generate Alembic migration
-- [ ] Task 6: Run full verification
+#### Files Modified
+- `src/elspeth/contracts/enums.py` - Added TriggerType enum
+- `src/elspeth/contracts/__init__.py` - Export TriggerType
+- `src/elspeth/core/landscape/schema.py` - Added idempotency_key, trigger_type columns
+- `src/elspeth/core/landscape/models.py` - Added fields, fixed Batch.status type
+- `tests/contracts/test_enums.py` - Added TriggerType tests
+- `tests/core/landscape/test_schema.py` - Added schema/model tests
 
-#### Verification
-- [ ] `TriggerType` enum exists with 5 values
-- [ ] `artifacts_table` has `idempotency_key` column
-- [ ] `batches_table` has `trigger_type` column
-- [ ] `Batch.status` type is `BatchStatus`
-- [ ] Alembic migration generated
-- [ ] All tests pass
+#### Tasks
+- [x] Task 1: Add TriggerType enum (5 values: COUNT, TIMEOUT, CONDITION, END_OF_SOURCE, MANUAL)
+- [x] Task 2: Add idempotency_key to artifacts table (String(256))
+- [x] Task 3: Add trigger_type to batches table (String(32))
+- [x] Task 4: Fix Batch.status type from str to BatchStatus
+- [x] Task 5: Generate Alembic migration (SKIPPED - pre-release, no DB to migrate)
+- [x] Task 6: Run full verification
+
+#### Commits
+```
+e4f0a9c feat(contracts): add TriggerType enum for aggregation triggers
+2af8349 feat(landscape): add idempotency_key to artifacts table
+df2fa70 feat(landscape): add trigger_type to batches table
+7d8df17 fix(models): change Batch.status from str to BatchStatus
+```
+
+#### Verification ✅
+- [x] `TriggerType` enum exists with 5 values (COUNT, TIMEOUT, CONDITION, END_OF_SOURCE, MANUAL)
+- [x] `TriggerType` exported from `elspeth.contracts`
+- [x] `artifacts_table` has `idempotency_key` column (String(256))
+- [x] `Artifact` model has `idempotency_key` field
+- [x] `batches_table` has `trigger_type` column (String(32))
+- [x] `Batch` model has `trigger_type` field
+- [x] `Batch.status` type is `BatchStatus` (not `str`)
+- [x] `mypy --strict` passes on contracts and landscape modules
+- [x] All 8 WP-05 tests pass (3 enum + 2 artifacts + 2 batches + 1 status type)
 
 ---
 
@@ -779,4 +798,5 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 | 2026-01-18 | WP-07 | ✅ **COMPLETE** - Work queue using `collections.deque` for BFS token processing, `_WorkItem` dataclass, `process_row()` returns `list[RowResult]`, MAX_WORK_QUEUE_ITERATIONS=10,000 safety guard, nested fork support. Unlocks WP-08 and WP-10. | Claude |
 | 2026-01-18 | WP-08 | ✅ **COMPLETE** - 13 commits, 10 tasks. CoalesceExecutor (350 lines), CoalesceSettings config, all 4 policies (require_all, quorum, best_effort, first), all 3 merge strategies (union, nested, select), flush_pending(), audit metadata recording. Unlocks WP-14. | Claude |
 | 2026-01-18 | WP-10 | ✅ **COMPLETE** - 4 commits, 6 tasks. `execute_transform()` returns 3-tuple with `error_sink`, processor returns QUARANTINED/ROUTED based on error routing, `rows_quarantined` metric added to RunResult, integration tests for full quarantine flow. Unlocks WP-14. | Claude |
+| 2026-01-18 | WP-05 | ✅ **COMPLETE** - 4 commits, 6 tasks. TriggerType enum (5 values), idempotency_key column (String(256)), trigger_type column (String(32)), Batch.status typed as BatchStatus. Alembic migration skipped (pre-release). Unlocks WP-06. | Claude |
 | | | | |

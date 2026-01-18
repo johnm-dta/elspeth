@@ -17,7 +17,10 @@ Integration Point (Phase 5):
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
+
+if TYPE_CHECKING:
+    from elspeth.core.config import RetrySettings
 
 from tenacity import (
     RetryError,
@@ -78,6 +81,23 @@ class RetryConfig:
             base_delay=max(0.01, policy.get("base_delay", 1.0)),
             max_delay=max(0.1, policy.get("max_delay", 60.0)),
             jitter=max(0.0, policy.get("jitter", 1.0)),
+        )
+
+    @classmethod
+    def from_settings(cls, settings: "RetrySettings") -> "RetryConfig":
+        """Factory from RetrySettings config model.
+
+        Args:
+            settings: Validated Pydantic settings model
+
+        Returns:
+            RetryConfig with mapped values
+        """
+        return cls(
+            max_attempts=settings.max_attempts,
+            base_delay=settings.initial_delay_seconds,
+            max_delay=settings.max_delay_seconds,
+            jitter=1.0,  # Fixed jitter, not exposed in settings
         )
 
 

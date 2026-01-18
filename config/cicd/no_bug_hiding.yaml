@@ -405,25 +405,25 @@ allow_hits:
   # invalid or missing values.
   # ============================================================
 
-  - key: "engine/retry.py:R1:RetryConfig:from_policy:line=77"
-    owner: "architecture"
-    reason: "Trust boundary: external policy dict may have invalid/missing values"
-    safety: "max() ensures minimum valid value, docstring documents this behavior"
-    expires: null  # Permanent - intentional design
-
-  - key: "engine/retry.py:R1:RetryConfig:from_policy:line=78"
-    owner: "architecture"
-    reason: "Trust boundary: external policy dict may have invalid/missing values"
-    safety: "max() ensures minimum valid value, docstring documents this behavior"
-    expires: null  # Permanent - intentional design
-
-  - key: "engine/retry.py:R1:RetryConfig:from_policy:line=79"
-    owner: "architecture"
-    reason: "Trust boundary: external policy dict may have invalid/missing values"
-    safety: "max() ensures minimum valid value, docstring documents this behavior"
-    expires: null  # Permanent - intentional design
-
   - key: "engine/retry.py:R1:RetryConfig:from_policy:line=80"
+    owner: "architecture"
+    reason: "Trust boundary: external policy dict may have invalid/missing values"
+    safety: "max() ensures minimum valid value, docstring documents this behavior"
+    expires: null  # Permanent - intentional design
+
+  - key: "engine/retry.py:R1:RetryConfig:from_policy:line=81"
+    owner: "architecture"
+    reason: "Trust boundary: external policy dict may have invalid/missing values"
+    safety: "max() ensures minimum valid value, docstring documents this behavior"
+    expires: null  # Permanent - intentional design
+
+  - key: "engine/retry.py:R1:RetryConfig:from_policy:line=82"
+    owner: "architecture"
+    reason: "Trust boundary: external policy dict may have invalid/missing values"
+    safety: "max() ensures minimum valid value, docstring documents this behavior"
+    expires: null  # Permanent - intentional design
+
+  - key: "engine/retry.py:R1:RetryConfig:from_policy:line=83"
     owner: "architecture"
     reason: "Trust boundary: external policy dict may have invalid/missing values"
     safety: "max() ensures minimum valid value, docstring documents this behavior"

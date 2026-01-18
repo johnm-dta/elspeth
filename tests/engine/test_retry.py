@@ -110,6 +110,26 @@ class TestRetryManager:
 class TestRetryConfig:
     """RetryConfig validation and factories."""
 
+    def test_from_settings_creates_config(self) -> None:
+        """RetrySettings maps to RetryConfig."""
+        from elspeth.core.config import RetrySettings
+        from elspeth.engine.retry import RetryConfig
+
+        settings = RetrySettings(
+            max_attempts=5,
+            initial_delay_seconds=2.0,
+            max_delay_seconds=120.0,
+            exponential_base=3.0,
+        )
+
+        config = RetryConfig.from_settings(settings)
+
+        assert config.max_attempts == 5
+        assert config.base_delay == 2.0
+        assert config.max_delay == 120.0
+        # jitter defaults to 1.0 when not specified in settings
+        assert config.jitter == 1.0
+
     def test_default_values(self) -> None:
         from elspeth.engine.retry import RetryConfig
 

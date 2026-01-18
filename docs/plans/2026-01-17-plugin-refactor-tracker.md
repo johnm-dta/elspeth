@@ -22,11 +22,12 @@
 | WP-08 | Coalesce Executor | 🟢 Complete | 8h | WP-07 | WP-14 |
 | WP-09 | Engine-Level Gates | 🟢 Complete | 10h | (after WP-02) | WP-14 |
 | WP-10 | Quarantine Implementation | 🟢 Complete | 4h | WP-07 | WP-14 |
-| WP-11 | Orphaned Code Cleanup | 🔴 Not Started | 2h | None | — |
+| WP-11 | Orphaned Code Cleanup | 🟢 Complete | 2h | None | — |
 | WP-11.99 | Config-Driven Plugin Schemas | 🟢 Complete | 4-6h | None | WP-12 |
-| WP-12 | Utility Consolidation | 🔴 Not Started | 0.5h | WP-11.99 | — |
+| WP-12 | Utility Consolidation | 🟢 Complete | 0.5h | WP-11.99 | — |
 | WP-13 | Sink Test Rewrites | 🔴 Not Started | 4h | WP-03, WP-04 | — |
 | WP-14 | Engine Test Rewrites | 🔴 Not Started | 16h | WP-06,07,08,09,10 | — |
+| WP-15 | RetryManager Integration | 🔴 Not Started | 4h | None | — |
 
 **Legend:** 🔴 Not Started | 🟡 In Progress | 🟢 Complete | ⏸️ Blocked
 
@@ -59,13 +60,13 @@ WP-11.99 ──► WP-12  (config-driven schemas unlock simplified utility conso
 ### Sprint 1: Foundation
 - [x] WP-01: Protocol & Base Class Alignment
 - [x] WP-05: Audit Schema Enhancement ✅ Complete (2026-01-18)
-- [ ] WP-11: Orphaned Code Cleanup (split into sub-tasks)
+- [x] WP-11: Orphaned Code Cleanup ✅ Complete (2026-01-18)
 
 ### Sprint 2: Sink Contract & Interface Cleanup
 - [x] WP-03: Sink Implementation Rewrite
 - [ ] WP-04: Delete SinkAdapter & SinkLike
 - [ ] WP-04a: Delete *Like Protocol Duplications (TransformLike, GateLike, AggregationLike)
-- [ ] WP-12: Utility Consolidation
+- [x] WP-12: Utility Consolidation ✅ Complete (2026-01-18)
 - [ ] WP-13: Sink Test Rewrites
 
 ### Sprint 3: DAG & Aggregation
@@ -638,7 +639,7 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 
 ### WP-11: Orphaned Code Cleanup
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete (2026-01-18)
 **Plan:** [2026-01-17-wp11-orphaned-code-cleanup.md](./2026-01-17-wp11-orphaned-code-cleanup.md)
 **Goal:** Remove dead code and defensive programming patterns, KEEP audit-critical infrastructure
 
@@ -652,24 +653,24 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 - **TUI silent exceptions:** LOG before returning failed states - added 2026-01-18
 
 #### Tasks
-- [ ] Task 1: Remove on_register() from 4 base classes
-- [ ] Task 2: Verify RetryManager is ready for integration
-- [ ] Task 3: Verify Call infrastructure is intact
-- [ ] Task 4: Remove defensive `getattr(cls, "name", cls.__name__)` from manager.py (6 occurrences)
-- [ ] Task 5: Fix `_schema_hash()` to crash on non-Pydantic schemas
-- [ ] Task 6: Fix TUI node_detail.py to not use .get() defaults
-- [ ] Task 7: Fix TUI exception handlers to log instead of silently swallow
-- [ ] Task 8: Run full verification
+- [x] Task 1: Remove on_register() from 4 base classes
+- [x] Task 2: Verify RetryManager is ready for integration
+- [x] Task 3: Verify Call infrastructure is intact
+- [x] Task 4: Remove defensive `getattr(cls, "name", cls.__name__)` from manager.py (6 occurrences)
+- [x] Task 5: Fix `_schema_hash()` to crash on non-Pydantic schemas
+- [x] Task 6: Fix TUI node_detail.py to not use .get() defaults
+- [x] Task 7: Fix TUI exception handlers to log instead of silently swallow
+- [x] Task 8: Run full verification
 
 #### Verification
-- [ ] `on_register()` removed from 4 base classes
-- [ ] Defensive getattr for plugin names removed (6 occurrences)
-- [ ] `_schema_hash()` crashes on non-Pydantic schemas
-- [ ] TUI uses direct field access (not .get() defaults)
-- [ ] TUI logs exceptions before returning failed states
-- [ ] RetryManager tests pass
-- [ ] Call infrastructure intact
-- [ ] All tests pass (plugins, engine, TUI)
+- [x] `on_register()` removed from 4 base classes
+- [x] Defensive getattr for plugin names removed (6 occurrences)
+- [x] `_schema_hash()` crashes on non-Pydantic schemas
+- [x] TUI uses direct field access (not .get() defaults)
+- [x] TUI logs exceptions before returning failed states
+- [x] RetryManager tests pass
+- [x] Call infrastructure intact
+- [x] All tests pass (plugins, engine, TUI)
 
 ---
 
@@ -715,22 +716,22 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 
 ### WP-12: Utility Consolidation
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete (2026-01-18)
 **Plan:** [2026-01-17-wp12-utility-consolidation.md](./2026-01-17-wp12-utility-consolidation.md)
 **Goal:** Extract `get_nested_field()` utility to shared module
-**Blocked by:** WP-11.99
+**Blocked by:** WP-11.99 ✅
 
 > **Note:** Schema consolidation is handled by WP-11.99. This WP only extracts the `_get_nested()` utility.
 
 #### Tasks
-- [ ] Task 1: Create utils.py with get_nested_field()
-- [ ] Task 2: Update field_mapper.py to use shared utility
-- [ ] Task 3: Run verification
+- [x] Task 1: Create utils.py with get_nested_field()
+- [x] Task 2: Update field_mapper.py to use shared utility
+- [x] Task 3: Run verification
 
 #### Verification
-- [ ] `get_nested_field()` has tests
-- [ ] `field_mapper.py` imports from utils, no local `_get_nested`
-- [ ] field_mapper tests pass
+- [x] `get_nested_field()` has tests (9 tests pass)
+- [x] `field_mapper.py` imports from utils, no local `_get_nested`
+- [x] field_mapper tests pass (14 tests pass)
 
 ---
 
@@ -822,4 +823,5 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 | 2026-01-18 | WP-05 | ✅ **COMPLETE** - 4 commits, 6 tasks. TriggerType enum (5 values), idempotency_key column (String(256)), trigger_type column (String(32)), Batch.status typed as BatchStatus. Alembic migration skipped (pre-release). Unlocks WP-06. | Claude |
 | 2026-01-18 | WP-11 | Added Task 4: Remove defensive `getattr(cls, "name", cls.__name__)` from manager.py (6 occurrences). Found during defensive programming audit - all protocols require `name: str`, fallback hides violations. | Claude |
 | 2026-01-18 | WP-11 | Added Tasks 5-7: (5) Crash on non-Pydantic schemas in `_schema_hash()`, (6) Remove TUI `.get()` defaults that mask incomplete data, (7) Log TUI exceptions instead of silently swallowing. All found during defensive programming deep-dive. | Claude |
+| 2026-01-18 | WP-11 | ✅ **COMPLETE** - 7 commits, 8 tasks. Removed `on_register()` from 4 base classes, removed defensive getattr (6 occurrences), fixed `_schema_hash()` to crash on non-Pydantic, fixed TUI `.get()` patterns, added exception logging. Updated PHASE3_INTEGRATION.md. 297 plugin tests, 348 engine tests, 43 TUI tests all pass. | Claude |
 | | | | |

@@ -282,18 +282,18 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 ## Verification Checklist
 
-- [ ] `on_register()` removed from `BaseSource`
-- [ ] `on_register()` removed from `BaseTransform`
-- [ ] `on_register()` removed from `BaseGate`
-- [ ] `on_register()` removed from `BaseAggregation`
-- [ ] No code calls `on_register()` anywhere
-- [ ] `RetryManager` tests pass (kept for Phase 5)
-- [ ] `CallType`, `CallStatus` enums exist (kept for Phase 6)
-- [ ] `Call` dataclass exists (kept for Phase 6)
-- [ ] `get_calls()` method exists (kept for Phase 6)
-- [ ] `mypy --strict` passes on base.py
-- [ ] All plugin tests pass
-- [ ] All engine tests pass
+- [x] `on_register()` removed from `BaseSource`
+- [x] `on_register()` removed from `BaseTransform`
+- [x] `on_register()` removed from `BaseGate`
+- [x] `on_register()` removed from `BaseAggregation`
+- [x] No code calls `on_register()` anywhere
+- [x] `RetryManager` tests pass (kept for Phase 5)
+- [x] `CallType`, `CallStatus` enums exist (kept for Phase 6)
+- [x] `Call` dataclass exists (kept for Phase 6)
+- [x] `get_calls()` method exists (kept for Phase 6)
+- [x] `mypy --strict` passes on base.py
+- [x] All plugin tests pass
+- [x] All engine tests pass
 
 ---
 

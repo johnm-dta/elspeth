@@ -173,10 +173,6 @@ Phase 3 engine calls lifecycle hooks:
 ```python
 # Phase 3: Engine calls hooks at appropriate times
 
-# During plugin registration
-for plugin in all_plugins:
-    plugin.on_register(ctx)
-
 # At run start
 for plugin in all_plugins:
     plugin.on_start(ctx)

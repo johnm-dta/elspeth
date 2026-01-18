@@ -1996,11 +1996,10 @@ class TestRowProcessorCoalesce:
         """
         import time
 
-        from elspeth.contracts import NodeType, RoutingMode, TokenInfo
+        from elspeth.contracts import NodeType, TokenInfo
         from elspeth.core.config import CoalesceSettings
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.coalesce_executor import CoalesceExecutor
-        from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
         from elspeth.engine.tokens import TokenManager
 
@@ -2009,43 +2008,11 @@ class TestRowProcessorCoalesce:
         run = recorder.begin_run(config={}, canonical_version="v1")
         token_manager = TokenManager(recorder)
 
-        # Register nodes
+        # Register minimal nodes needed for coalesce testing
         source = recorder.register_node(
             run_id=run.run_id,
             plugin_name="source",
             node_type=NodeType.SOURCE,
-            plugin_version="1.0",
-            config={},
-            schema_config=DYNAMIC_SCHEMA,
-        )
-        fork_gate = recorder.register_node(
-            run_id=run.run_id,
-            plugin_name="splitter",
-            node_type=NodeType.GATE,
-            plugin_version="1.0",
-            config={},
-            schema_config=DYNAMIC_SCHEMA,
-        )
-        transform_sentiment = recorder.register_node(
-            run_id=run.run_id,
-            plugin_name="sentiment",
-            node_type=NodeType.TRANSFORM,
-            plugin_version="1.0",
-            config={},
-            schema_config=DYNAMIC_SCHEMA,
-        )
-        transform_entities = recorder.register_node(
-            run_id=run.run_id,
-            plugin_name="entities",
-            node_type=NodeType.TRANSFORM,
-            plugin_version="1.0",
-            config={},
-            schema_config=DYNAMIC_SCHEMA,
-        )
-        transform_summary = recorder.register_node(
-            run_id=run.run_id,
-            plugin_name="summary",
-            node_type=NodeType.TRANSFORM,
             plugin_version="1.0",
             config={},
             schema_config=DYNAMIC_SCHEMA,
@@ -2057,29 +2024,6 @@ class TestRowProcessorCoalesce:
             plugin_version="1.0",
             config={},
             schema_config=DYNAMIC_SCHEMA,
-        )
-
-        # Register edges for fork paths
-        edge_sentiment = recorder.register_edge(
-            run_id=run.run_id,
-            from_node_id=fork_gate.node_id,
-            to_node_id=transform_sentiment.node_id,
-            label="sentiment",
-            mode=RoutingMode.COPY,
-        )
-        edge_entities = recorder.register_edge(
-            run_id=run.run_id,
-            from_node_id=fork_gate.node_id,
-            to_node_id=transform_entities.node_id,
-            label="entities",
-            mode=RoutingMode.COPY,
-        )
-        edge_summary = recorder.register_edge(
-            run_id=run.run_id,
-            from_node_id=fork_gate.node_id,
-            to_node_id=transform_summary.node_id,
-            label="summary",
-            mode=RoutingMode.COPY,
         )
 
         # Setup coalesce with best_effort policy and short timeout
@@ -2097,21 +2041,6 @@ class TestRowProcessorCoalesce:
             run_id=run.run_id,
         )
         coalesce_executor.register_coalesce(coalesce_settings, coalesce_node.node_id)
-
-        # Create processor (not used directly in this test, but shows integration setup)
-        _processor = RowProcessor(
-            recorder=recorder,
-            span_factory=SpanFactory(),
-            run_id=run.run_id,
-            source_node_id=source.node_id,
-            edge_map={
-                (fork_gate.node_id, "sentiment"): edge_sentiment.edge_id,
-                (fork_gate.node_id, "entities"): edge_entities.edge_id,
-                (fork_gate.node_id, "summary"): edge_summary.edge_id,
-            },
-            coalesce_executor=coalesce_executor,
-            coalesce_node_ids={"merger": coalesce_node.node_id},
-        )
 
         # Create tokens to simulate fork scenario
         initial_token = token_manager.create_initial_token(

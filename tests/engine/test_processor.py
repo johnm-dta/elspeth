@@ -1792,6 +1792,195 @@ class TestRowProcessorCoalesce:
         )
         assert processor._coalesce_executor is coalesce_executor
 
+    def test_fork_then_coalesce_require_all(self) -> None:
+        """Fork children should coalesce when all branches arrive.
+
+        Pipeline: source -> fork_gate -> (path_a, path_b) -> coalesce -> completed
+
+        This test verifies the full fork→coalesce flow:
+        1. Gate forks to two paths (path_a, path_b)
+        2. Each path enriches data differently (sentiment vs entities)
+        3. Coalesce merges both paths with require_all policy
+        4. Parent token becomes FORKED, children become COALESCED
+        5. Merged token has fields from both paths
+        """
+        from elspeth.contracts import NodeType, RoutingMode
+        from elspeth.core.config import CoalesceSettings
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        token_manager = TokenManager(recorder)
+
+        # Register nodes
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        fork_gate = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="splitter",
+            node_type=NodeType.GATE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_a = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="enrich_a",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_b = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="enrich_b",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="merger",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Register edges for fork paths
+        edge_a = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=fork_gate.node_id,
+            to_node_id=transform_a.node_id,
+            label="path_a",
+            mode=RoutingMode.COPY,
+        )
+        edge_b = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=fork_gate.node_id,
+            to_node_id=transform_b.node_id,
+            label="path_b",
+            mode=RoutingMode.COPY,
+        )
+
+        # Setup coalesce executor
+        coalesce_settings = CoalesceSettings(
+            name="merger",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+        )
+        coalesce_executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        coalesce_executor.register_coalesce(coalesce_settings, coalesce_node.node_id)
+
+        # Create gate and transforms (inline test classes)
+        class ForkGate(BaseGate):
+            name = "splitter"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
+                return GateResult(
+                    row=row,
+                    action=RoutingAction.fork_to_paths(["path_a", "path_b"]),
+                )
+
+        class EnrichA(BaseTransform):
+            name = "enrich_a"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success({**row, "sentiment": "positive"})
+
+        class EnrichB(BaseTransform):
+            name = "enrich_b"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success({**row, "entities": ["ACME"]})
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            edge_map={
+                (fork_gate.node_id, "path_a"): edge_a.edge_id,
+                (fork_gate.node_id, "path_b"): edge_b.edge_id,
+            },
+            coalesce_executor=coalesce_executor,
+            coalesce_node_ids={"merger": coalesce_node.node_id},
+        )
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process should:
+        # 1. Fork at gate (parent FORKED)
+        # 2. Process path_a (add sentiment)
+        # 3. Process path_b (add entities)
+        # 4. Coalesce both paths (merged token COALESCED)
+        results = processor.process_row(
+            row_index=0,
+            row_data={"text": "ACME earnings"},
+            transforms=[
+                ForkGate(fork_gate.node_id),
+                EnrichA(transform_a.node_id),
+                EnrichB(transform_b.node_id),
+            ],
+            ctx=ctx,
+            coalesce_at_step=3,  # After both transforms
+            coalesce_name="merger",
+        )
+
+        # Verify outcomes
+        outcomes = {r.outcome for r in results}
+        assert RowOutcome.FORKED in outcomes
+        assert RowOutcome.COALESCED in outcomes
+
+        # Find the coalesced result
+        coalesced = [r for r in results if r.outcome == RowOutcome.COALESCED]
+        assert len(coalesced) == 1
+
+        # Verify merged data
+        merged_data = coalesced[0].final_data
+        assert merged_data["sentiment"] == "positive"
+        assert merged_data["entities"] == ["ACME"]
+
 
 class TestRowProcessorRetry:
     """Tests for retry integration in RowProcessor."""

@@ -158,9 +158,6 @@ class TestTransformProtocol:
             def close(self) -> None:
                 pass
 
-            def on_register(self, ctx: PluginContext) -> None:
-                pass
-
             def on_start(self, ctx: PluginContext) -> None:
                 pass
 
@@ -220,9 +217,6 @@ class TestAggregationProtocol:
                 }
                 self._values = []
                 return [result]
-
-            def on_register(self, ctx: PluginContext) -> None:
-                pass
 
             def on_start(self, ctx: PluginContext) -> None:
                 pass
@@ -297,9 +291,6 @@ class TestCoalesceProtocol:
             ) -> dict[str, Any]:
                 return {"combined": "+".join(branch_outputs.keys())}
 
-            def on_register(self, ctx: PluginContext) -> None:
-                pass
-
             def on_start(self, ctx: PluginContext) -> None:
                 pass
 
@@ -345,9 +336,6 @@ class TestCoalesceProtocol:
             ) -> dict[str, Any]:
                 total = sum(out["value"] for out in branch_outputs.values())
                 return {"total": total}
-
-            def on_register(self, ctx: PluginContext) -> None:
-                pass
 
             def on_start(self, ctx: PluginContext) -> None:
                 pass
@@ -433,9 +421,6 @@ class TestSinkProtocol:
             def close(self) -> None:
                 pass
 
-            def on_register(self, ctx: PluginContext) -> None:
-                pass
-
             def on_start(self, ctx: PluginContext) -> None:
                 pass
 
@@ -492,9 +477,6 @@ class TestSinkProtocol:
                 pass
 
             def close(self) -> None:
-                pass
-
-            def on_register(self, ctx: PluginContext) -> None:
                 pass
 
             def on_start(self, ctx: PluginContext) -> None:

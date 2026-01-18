@@ -40,9 +40,6 @@ class TestPluginManager:
             ) -> TransformResult:
                 return TransformResult.success({**row, "y": row["x"] * 2})
 
-            def on_register(self, ctx: PluginContext) -> None:
-                pass
-
             def on_start(self, ctx: PluginContext) -> None:
                 pass
 
@@ -84,9 +81,6 @@ class TestPluginManager:
             ) -> TransformResult:
                 return TransformResult.success(row)
 
-            def on_register(self, ctx: PluginContext) -> None:
-                pass
-
             def on_start(self, ctx: PluginContext) -> None:
                 pass
 
@@ -105,9 +99,6 @@ class TestPluginManager:
                 self, row: dict[str, Any], ctx: PluginContext
             ) -> TransformResult:
                 return TransformResult.success(row)
-
-            def on_register(self, ctx: PluginContext) -> None:
-                pass
 
             def on_start(self, ctx: PluginContext) -> None:
                 pass

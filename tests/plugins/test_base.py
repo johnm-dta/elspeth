@@ -54,7 +54,6 @@ class TestBaseTransform:
         from elspeth.plugins.base import BaseTransform
 
         # These should exist as no-op methods
-        assert hasattr(BaseTransform, "on_register")
         assert hasattr(BaseTransform, "on_start")
         assert hasattr(BaseTransform, "on_complete")
 

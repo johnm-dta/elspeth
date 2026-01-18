@@ -162,10 +162,6 @@ class TransformProtocol(Protocol):
 
     # === Optional Lifecycle Hooks ===
 
-    def on_register(self, ctx: "PluginContext") -> None:
-        """Called when plugin is registered."""
-        ...
-
     def on_start(self, ctx: "PluginContext") -> None:
         """Called at start of run."""
         ...
@@ -243,10 +239,6 @@ class GateProtocol(Protocol):
         ...
 
     # === Optional Lifecycle Hooks ===
-
-    def on_register(self, ctx: "PluginContext") -> None:
-        """Called when plugin is registered."""
-        ...
 
     def on_start(self, ctx: "PluginContext") -> None:
         """Called at start of run."""
@@ -349,10 +341,6 @@ class AggregationProtocol(Protocol):
 
     # === Optional Lifecycle Hooks ===
 
-    def on_register(self, ctx: "PluginContext") -> None:
-        """Called when plugin is registered."""
-        ...
-
     def on_start(self, ctx: "PluginContext") -> None:
         """Called at start of run."""
         ...
@@ -424,10 +412,6 @@ class CoalesceProtocol(Protocol):
         ...
 
     # === Optional Lifecycle Hooks ===
-
-    def on_register(self, ctx: "PluginContext") -> None:
-        """Called when plugin is registered."""
-        ...
 
     def on_start(self, ctx: "PluginContext") -> None:
         """Called at start of run."""
@@ -512,10 +496,6 @@ class SinkProtocol(Protocol):
         ...
 
     # === Optional Lifecycle Hooks ===
-
-    def on_register(self, ctx: "PluginContext") -> None:
-        """Called when plugin is registered."""
-        ...
 
     def on_start(self, ctx: "PluginContext") -> None:
         """Called at start of run."""

@@ -45,9 +45,6 @@ class TestTransformProtocolLifecycle:
             def close(self) -> None:
                 self.closed = True
 
-            def on_register(self, ctx: PluginContext) -> None:
-                pass
-
             def on_start(self, ctx: PluginContext) -> None:
                 pass
 
@@ -95,9 +92,6 @@ class TestGateProtocolLifecycle:
 
             def close(self) -> None:
                 self.closed = True
-
-            def on_register(self, ctx: PluginContext) -> None:
-                pass
 
             def on_start(self, ctx: PluginContext) -> None:
                 pass

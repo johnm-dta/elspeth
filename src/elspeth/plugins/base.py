@@ -5,7 +5,7 @@ These provide common functionality and ensure proper interface compliance.
 Plugins can subclass these for convenience, or implement protocols directly.
 
 Phase 3 Integration:
-- Lifecycle hooks (on_register, on_start, on_complete) are called by engine
+- Lifecycle hooks (on_start, on_complete) are called by engine
 - PluginContext is provided by engine with landscape/tracer/payload_store
 """
 
@@ -82,12 +82,6 @@ class BaseTransform(ABC):
     # === Lifecycle Hooks (Phase 3) ===
     # These are intentionally empty - optional hooks for subclasses to override
 
-    def on_register(self, ctx: PluginContext) -> None:  # noqa: B027
-        """Called when plugin is registered with the engine.
-
-        Override for one-time setup.
-        """
-
     def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called at the start of each run.
 
@@ -160,9 +154,6 @@ class BaseGate(ABC):
 
     # === Lifecycle Hooks (Phase 3) ===
 
-    def on_register(self, ctx: PluginContext) -> None:  # noqa: B027
-        """Called when plugin is registered."""
-
     def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called at start of run."""
 
@@ -232,9 +223,6 @@ class BaseAggregation(ABC):
         """Clean up resources after pipeline completion."""
 
     # === Lifecycle Hooks (Phase 3) ===
-
-    def on_register(self, ctx: PluginContext) -> None:  # noqa: B027
-        """Called when plugin is registered."""
 
     def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called at start of run."""
@@ -311,9 +299,6 @@ class BaseSink(ABC):
         ...
 
     # === Lifecycle Hooks (Phase 3) ===
-
-    def on_register(self, ctx: PluginContext) -> None:  # noqa: B027
-        """Called when plugin is registered."""
 
     def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
         """Called at start of run."""

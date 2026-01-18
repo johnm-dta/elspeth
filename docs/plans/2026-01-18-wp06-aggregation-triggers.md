@@ -26,6 +26,62 @@ If this fails, WP-05 must be completed first.
 
 ---
 
+## Breaking Change Impact Assessment
+
+**This WP makes breaking API changes.** The following test files contain code that will break and must be updated in Tasks 5-6:
+
+| Test File | `AcceptResult.trigger` refs | `should_trigger()` impls |
+|-----------|----------------------------|--------------------------|
+| `tests/engine/test_executors.py` | 8 | 4 |
+| `tests/engine/test_processor.py` | 2 | 2 |
+| `tests/engine/test_plugin_detection.py` | 2 | 1 |
+| `tests/plugins/test_integration.py` | 2 | 1 |
+| `tests/plugins/test_results.py` | 5 | 0 |
+| `tests/plugins/test_base.py` | 1 | 1 |
+| `tests/plugins/test_node_id_protocol.py` | 1 | 1 |
+| `tests/plugins/test_protocols.py` | 3 | 1 |
+| `tests/contracts/test_results.py` | 5 | 0 |
+| `tests/contracts/test_audit.py` | 1 | 0 |
+
+**Total:** ~30 `trigger` references, 11 mock `should_trigger()` implementations.
+
+Tasks 5 and 6 include grep commands to find all these. Update them ALL - do not leave broken tests.
+
+---
+
+## ExpressionParser Interface Note
+
+The existing `ExpressionParser.evaluate(row)` accepts any dict, not just row data. For trigger conditions, pass a context dict:
+
+```python
+context = {"batch_count": 50, "batch_age_seconds": 30.5}
+result = parser.evaluate(context)  # Works - parameter name is just "row"
+```
+
+Condition expressions use these variables: `batch_count`, `batch_age_seconds`.
+
+---
+
+## Scope Discipline
+
+**DO NOT:**
+- Add features not in this plan
+- "Improve" existing code while you're in there
+- Refactor unrelated code
+- Add extra tests beyond what's specified
+- Add logging, metrics, or observability not mentioned
+- Create abstractions "for future use"
+
+**DO:**
+- Follow TDD exactly as written
+- Run only the commands specified
+- Commit only what's specified
+- Move to the next task when done
+
+If you see something that "should" be fixed but isn't in the plan, **note it and move on**. Do not fix it.
+
+---
+
 ## Task 1: Add TriggerConfig model to config.py
 
 **Files:**
@@ -496,6 +552,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ---
 
 ## Task 3: Add aggregations field to ElspethSettings
+
+> **SCOPE CHECK:** Add ONE field and ONE validator. Do not reorganize ElspethSettings, do not add other fields, do not "clean up" the class while you're there.
 
 **Files:**
 - Modify: `src/elspeth/core/config.py`
@@ -1083,6 +1141,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 ## Task 5: Delete AcceptResult.trigger field
 
+> **SCOPE CHECK:** Delete the `trigger` field and fix ALL references. Do NOT refactor AcceptResult, do NOT add new fields, do NOT "improve" tests while fixing them - just remove the trigger argument/assertion.
+
 **Files:**
 - Modify: `src/elspeth/contracts/results.py`
 - Modify: Tests that reference `AcceptResult.trigger`
@@ -1196,6 +1256,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ---
 
 ## Task 6: Delete BaseAggregation.should_trigger() and reset()
+
+> **SCOPE CHECK:** Delete TWO methods and fix ALL test mocks. Do NOT refactor BaseAggregation, do NOT change accept() or flush() signatures, do NOT "clean up" the class. Mock aggregations in tests: just delete their should_trigger() method.
 
 **Files:**
 - Modify: `src/elspeth/plugins/base.py`
@@ -1321,6 +1383,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ---
 
 ## Task 7: Integrate TriggerEvaluator into AggregationExecutor
+
+> **SCOPE CHECK:** Add `aggregation_settings` parameter, create evaluators, add `should_flush()` method, update `accept()` and `flush()`. Do NOT refactor existing executor code, do NOT add new methods beyond what's specified, do NOT "improve" the batch lifecycle.
 
 **Files:**
 - Modify: `src/elspeth/engine/executors.py`
@@ -1583,6 +1647,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ---
 
 ## Task 8: Update RowProcessor to use engine-controlled triggers
+
+> **SCOPE CHECK:** Add `aggregation_settings` parameter, pass to executor, call `should_flush()` after accept, call `flush()` when triggered. Do NOT refactor RowProcessor, do NOT change non-aggregation code paths, do NOT add new abstractions.
 
 **Files:**
 - Modify: `src/elspeth/engine/processor.py`

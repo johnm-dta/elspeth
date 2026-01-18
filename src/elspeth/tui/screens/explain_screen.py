@@ -4,8 +4,10 @@ Uses discriminated union pattern to represent screen states.
 Invalid state combinations are prevented at the type level.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
+
+import structlog
 
 from elspeth.contracts import NodeType
 from elspeth.core.landscape import LandscapeDB
@@ -13,6 +15,8 @@ from elspeth.core.landscape.recorder import LandscapeRecorder
 from elspeth.tui.types import LineageData, NodeStateInfo
 from elspeth.tui.widgets.lineage_tree import LineageTree
 from elspeth.tui.widgets.node_detail import NodeDetailPanel
+
+logger = structlog.get_logger(__name__)
 
 
 class ScreenStateType(Enum):
@@ -38,11 +42,13 @@ class LoadingFailedState:
     """Data source configured but loading failed.
 
     Preserves db and run_id so retry is possible.
+    Error message included for user visibility.
     """
 
     db: LandscapeDB
     run_id: str
-    state_type: ScreenStateType = ScreenStateType.LOADING_FAILED
+    error: str | None = field(default=None)
+    state_type: ScreenStateType = field(default=ScreenStateType.LOADING_FAILED)
 
 
 @dataclass(frozen=True)
@@ -163,9 +169,15 @@ class ExplainScreen:
                 lineage_data=lineage_data,
                 tree=tree,
             )
-        except Exception:
-            # Handle missing run or other errors gracefully
-            return LoadingFailedState(db=db, run_id=run_id)
+        except Exception as e:
+            # Log the actual error - silent failures hide bugs
+            logger.error(
+                "Failed to load lineage data",
+                run_id=run_id,
+                error=str(e),
+                exc_info=True,
+            )
+            return LoadingFailedState(db=db, run_id=run_id, error=str(e))
 
     def get_widget_types(self) -> list[str]:
         """Get list of widget types in this screen.
@@ -259,7 +271,14 @@ class ExplainScreen:
             # the user selects a specific token-node combination.
 
             return result
-        except Exception:
+        except Exception as e:
+            logger.error(
+                "Failed to load node state",
+                run_id=run_id,
+                node_id=node_id,
+                error=str(e),
+                exc_info=True,
+            )
             return None
 
     def get_detail_panel_state(self) -> NodeStateInfo | None:

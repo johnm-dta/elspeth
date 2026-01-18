@@ -17,6 +17,7 @@ from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import TransformResult
 from elspeth.plugins.schema_factory import create_schema_from_config
 from elspeth.plugins.sentinels import MISSING
+from elspeth.plugins.utils import get_nested_field
 
 
 class FieldMapperConfig(TransformDataConfig):
@@ -96,7 +97,7 @@ class FieldMapper(BaseTransform):
 
         # Apply mappings
         for source, target in self._mapping.items():
-            value = self._get_nested(row, source)
+            value = get_nested_field(row, source)
 
             if value is MISSING:
                 if self._strict:
@@ -112,26 +113,6 @@ class FieldMapper(BaseTransform):
             output[target] = value
 
         return TransformResult.success(output)
-
-    def _get_nested(self, data: dict[str, Any], path: str) -> Any:
-        """Get value from nested dict using dot notation.
-
-        Args:
-            data: Source dictionary
-            path: Dot-separated path (e.g., "meta.source")
-
-        Returns:
-            Value at path or MISSING sentinel
-        """
-        parts = path.split(".")
-        current: Any = data
-
-        for part in parts:
-            if not isinstance(current, dict) or part not in current:
-                return MISSING
-            current = current[part]
-
-        return current
 
     def close(self) -> None:
         """No resources to release."""

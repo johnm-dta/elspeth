@@ -790,6 +790,7 @@ class TestForkCreatesChildTokens:
         result = orchestrator.run(config, graph=graph)
 
         assert result.status == "completed"
+        assert result.rows_forked == 1
 
         # CRITICAL: Each sink gets exactly one row (the fork child for that branch)
         assert (
@@ -892,6 +893,7 @@ class TestForkCreatesChildTokens:
         result = orchestrator.run(config, graph=graph)
 
         assert result.status == "completed"
+        assert result.rows_forked == 1
 
         # "alerts" child -> alerts_sink (branch matches sink)
         assert (

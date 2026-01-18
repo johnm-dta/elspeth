@@ -354,9 +354,29 @@ class ExecutionGraph:
                 if target == "continue":
                     continue  # Not a sink route - no edge to create
                 if target == "fork":
-                    # Fork routes don't create edges to sinks - they create child tokens
-                    # The fork_to paths are handled by the executor
-                    # No edges to create for fork destinations
+                    # Fork creates edges to each fork_to destination
+                    # - If branch matches a sink name, edge goes to that sink
+                    # - If branch doesn't match a sink, edge goes to output_sink (fallback)
+                    if gate_config.fork_to:
+                        output_sink_node = sink_ids[config.output_sink]
+                        for branch in gate_config.fork_to:
+                            if branch in sink_ids:
+                                # Edge with COPY mode to matching sink
+                                graph.add_edge(
+                                    gid,
+                                    sink_ids[branch],
+                                    label=branch,
+                                    mode=RoutingMode.COPY,
+                                )
+                            else:
+                                # Fallback: edge to output_sink with branch label
+                                graph.add_edge(
+                                    gid,
+                                    output_sink_node,
+                                    label=branch,
+                                    mode=RoutingMode.COPY,
+                                )
+                    # Do NOT modify _route_resolution_map - keep existing "fork" value
                     continue
                 if target not in sink_ids:
                     raise GraphValidationError(

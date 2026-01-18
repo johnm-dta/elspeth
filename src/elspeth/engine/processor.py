@@ -427,7 +427,14 @@ class RowProcessor:
         # Process config-driven gates (after all plugin transforms)
         # Step continues from where transforms left off
         config_gate_start_step = len(transforms) + 1
-        for gate_idx, gate_config in enumerate(self._config_gates):
+
+        # Calculate which config gate to start from based on start_step
+        # If start_step > len(transforms), we skip some config gates
+        # (e.g., fork children that already passed through earlier gates)
+        config_gate_start_idx = max(0, start_step - len(transforms))
+        for gate_idx, gate_config in enumerate(
+            self._config_gates[config_gate_start_idx:], start=config_gate_start_idx
+        ):
             step = config_gate_start_step + gate_idx
 
             # Get the node_id for this config gate

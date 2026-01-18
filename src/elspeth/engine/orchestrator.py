@@ -594,7 +594,14 @@ class Orchestrator:
 
                         if result.outcome == RowOutcome.COMPLETED:
                             rows_succeeded += 1
-                            pending_tokens[output_sink_name].append(result.token)
+                            # Fork children route to branch-named sink if it exists
+                            sink_name = output_sink_name
+                            if (
+                                result.token.branch_name is not None
+                                and result.token.branch_name in config.sinks
+                            ):
+                                sink_name = result.token.branch_name
+                            pending_tokens[sink_name].append(result.token)
                             # Checkpoint after successful row processing
                             self._maybe_checkpoint(
                                 run_id=run_id,

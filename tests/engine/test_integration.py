@@ -5299,3 +5299,478 @@ class TestRetryIntegration:
         failed_states = [s for s in states if s.status == "failed"]
         for failed in failed_states:
             assert failed.error_json is not None, "Failed states must have error_json"
+
+
+class TestExplainQuery:
+    """Tests verifying explain() query functionality for audit trail traceability.
+
+    The explain() function is the primary query interface for answering
+    "what happened to this row?" - critical for audit and debugging.
+    """
+
+    def test_explain_traces_output_to_source(self) -> None:
+        """Explain traces any output back to its source.
+
+        For any token that reached a sink, explain() should provide:
+        - Which source row it came from
+        - Every transform it passed through (via node_states)
+        - The final sink that received it
+
+        This is THE fundamental audit query.
+        """
+        from elspeth.contracts import NodeType
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.core.landscape.lineage import explain
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        # Start a run
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        # Register nodes for a 3-step pipeline: source -> transform -> sink
+        source_node = recorder.register_node(
+            run_id=run_id,
+            node_id="source",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_node = recorder.register_node(
+            run_id=run_id,
+            node_id="transform",
+            plugin_name="test_transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            sequence=1,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="sink",
+            plugin_name="test_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            sequence=2,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Register edges
+        recorder.register_edge(
+            run_id=run_id,
+            from_node_id=source_node.node_id,
+            to_node_id=transform_node.node_id,
+            label="continue",
+            mode="move",
+        )
+        recorder.register_edge(
+            run_id=run_id,
+            from_node_id=transform_node.node_id,
+            to_node_id=sink_node.node_id,
+            label="continue",
+            mode="move",
+        )
+
+        # Create a row and token
+        token_manager = TokenManager(recorder)
+
+        source_data = {"value": 42, "name": "test_row"}
+        token = token_manager.create_initial_token(
+            run_id=run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data=source_data,
+        )
+
+        # Record transform processing
+        state1 = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=transform_node.node_id,
+            step_index=0,
+            input_data=source_data,
+        )
+        transformed_data = {"value": 84, "name": "test_row", "doubled": True}
+        recorder.complete_node_state(
+            state_id=state1.state_id,
+            status="completed",
+            output_data=transformed_data,
+            duration_ms=10.0,
+        )
+
+        # Record sink processing
+        state2 = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=sink_node.node_id,
+            step_index=1,
+            input_data=transformed_data,
+        )
+        recorder.complete_node_state(
+            state_id=state2.state_id,
+            status="completed",
+            output_data=transformed_data,
+            duration_ms=5.0,
+        )
+
+        recorder.complete_run(run_id, status="completed")
+
+        # Now test explain()
+        lineage = explain(recorder, run_id, token_id=token.token_id)
+
+        # Lineage must exist
+        assert lineage is not None, "explain() returned None for valid token"
+
+        # Must link back to source row
+        assert lineage.source_row is not None, "source_row must be present"
+        assert (
+            lineage.source_row.row_id == token.row_id
+        ), "source_row.row_id must match token's row_id"
+        assert (
+            lineage.source_row.source_node_id == source_node.node_id
+        ), "source_row must track source node"
+        assert (
+            lineage.source_row.row_index == 0
+        ), "source_row.row_index must match original"
+
+        # Must have node_states covering transform AND sink
+        assert (
+            len(lineage.node_states) == 2
+        ), f"Expected 2 node_states (transform + sink), got {len(lineage.node_states)}"
+
+        node_ids_in_states = {s.node_id for s in lineage.node_states}
+        assert (
+            transform_node.node_id in node_ids_in_states
+        ), "node_states must include transform"
+        assert sink_node.node_id in node_ids_in_states, "node_states must include sink"
+
+        # All states must be completed
+        for state in lineage.node_states:
+            assert (
+                state.status == "completed"
+            ), f"All states should be completed, got {state.status}"
+
+        # Verify states are in step_index order
+        step_indices = [s.step_index for s in lineage.node_states]
+        assert step_indices == sorted(
+            step_indices
+        ), "node_states should be ordered by step_index"
+
+    def test_explain_for_aggregated_row(self) -> None:
+        """Explain traces aggregated output back to all input rows.
+
+        When aggregation produces one output from N inputs:
+        - explain() should trace back to all N source rows via batch_members table
+        - The batch_members link the aggregation output to all contributing tokens
+        """
+        from elspeth.contracts import NodeType
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        # Start a run
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        # Register nodes: source -> aggregation -> sink
+        source_node = recorder.register_node(
+            run_id=run_id,
+            node_id="source",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        agg_node = recorder.register_node(
+            run_id=run_id,
+            node_id="aggregation",
+            plugin_name="sum_aggregation",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0.0",
+            config={},
+            sequence=1,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        # Note: sink node not needed for this test - we're testing batch_members traceability
+
+        # Create 3 input tokens (simulating 3 source rows being aggregated)
+        token_manager = TokenManager(recorder)
+        input_tokens = []
+        for i in range(3):
+            token = token_manager.create_initial_token(
+                run_id=run_id,
+                source_node_id=source_node.node_id,
+                row_index=i,
+                row_data={"value": (i + 1) * 10},  # 10, 20, 30
+            )
+            input_tokens.append(token)
+
+            # Record aggregation acceptance (CONSUMED_IN_BATCH state)
+            state = recorder.begin_node_state(
+                token_id=token.token_id,
+                node_id=agg_node.node_id,
+                step_index=0,
+                input_data={"value": (i + 1) * 10},
+            )
+            recorder.complete_node_state(
+                state_id=state.state_id,
+                status="completed",
+                output_data={"accepted": True},
+                duration_ms=1.0,
+            )
+
+        # Create a batch linking all 3 tokens
+        batch = recorder.create_batch(
+            run_id=run_id,
+            aggregation_node_id=agg_node.node_id,
+        )
+
+        # Add all tokens as batch members
+        for ordinal, token in enumerate(input_tokens):
+            recorder.add_batch_member(
+                batch_id=batch.batch_id,
+                token_id=token.token_id,
+                ordinal=ordinal,
+            )
+
+        # Complete the batch
+        recorder.complete_batch(
+            batch_id=batch.batch_id,
+            status="completed",
+            trigger_reason="count_reached",
+        )
+
+        recorder.complete_run(run_id, status="completed")
+
+        # Verify batch_members links aggregation to all input tokens
+        batch_members = recorder.get_batch_members(batch.batch_id)
+        assert (
+            len(batch_members) == 3
+        ), f"Expected 3 batch members, got {len(batch_members)}"
+
+        # Verify each batch member maps to a distinct token
+        member_token_ids = {m.token_id for m in batch_members}
+        input_token_ids = {t.token_id for t in input_tokens}
+        assert member_token_ids == input_token_ids, (
+            "batch_members should link to all input tokens. "
+            f"Expected {input_token_ids}, got {member_token_ids}"
+        )
+
+        # Verify we can trace from each batch member back to its source row
+        for member in batch_members:
+            token = recorder.get_token(member.token_id)
+            assert token is not None, f"Token {member.token_id} should exist"
+
+            row = recorder.get_row(token.row_id)
+            assert row is not None, f"Row {token.row_id} should exist"
+            assert (
+                row.source_node_id == source_node.node_id
+            ), "Row should trace to source node"
+
+    def test_explain_for_coalesced_row(self) -> None:
+        """Explain traces coalesced output back through branches to fork point.
+
+        When coalesce merges N branch outputs:
+        - explain() should trace through all branches back to fork point
+        - Should show parent token that forked
+        - Uses parent_token_id to trace lineage
+        """
+        from elspeth.contracts import NodeType
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.core.landscape.lineage import explain
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        # Start a run
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        # Register nodes: source -> fork gate -> [path_a, path_b] -> coalesce -> sink
+        source_node = recorder.register_node(
+            run_id=run_id,
+            node_id="source",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        gate_node = recorder.register_node(
+            run_id=run_id,
+            node_id="fork_gate",
+            plugin_name="fork_gate",
+            node_type=NodeType.GATE,
+            plugin_version="1.0.0",
+            config={},
+            sequence=1,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run_id,
+            node_id="coalesce",
+            plugin_name="merge_coalesce",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            sequence=2,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="sink",
+            plugin_name="test_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            sequence=3,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Create initial token (before fork)
+        token_manager = TokenManager(recorder)
+        source_data = {"value": 100, "name": "original"}
+        parent_token = token_manager.create_initial_token(
+            run_id=run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data=source_data,
+        )
+
+        # Record parent token processing at gate (fork point)
+        gate_state = recorder.begin_node_state(
+            token_id=parent_token.token_id,
+            node_id=gate_node.node_id,
+            step_index=0,
+            input_data=source_data,
+        )
+        recorder.complete_node_state(
+            state_id=gate_state.state_id,
+            status="completed",
+            output_data={"forked_to": ["path_a", "path_b"]},
+            duration_ms=1.0,
+        )
+
+        # Fork into two children using token_manager (records parent relationships)
+        child_tokens = token_manager.fork_token(
+            parent_token=parent_token,
+            branches=["path_a", "path_b"],
+            step_in_pipeline=1,
+        )
+        token_a = child_tokens[0]
+        token_b = child_tokens[1]
+
+        # Record child token processing (each branch does different work)
+        for child in child_tokens:
+            branch_state = recorder.begin_node_state(
+                token_id=child.token_id,
+                node_id=f"transform_{child.branch_name}",  # Pseudo-node
+                step_index=1,
+                input_data=source_data,
+            )
+            recorder.complete_node_state(
+                state_id=branch_state.state_id,
+                status="completed",
+                output_data={f"{child.branch_name}_result": True},
+                duration_ms=5.0,
+            )
+
+        # Coalesce: merge the two child tokens into one
+        # Use recorder's coalesce_tokens to properly record parent relationships
+        merged_token = recorder.coalesce_tokens(
+            parent_token_ids=[token_a.token_id, token_b.token_id],
+            row_id=parent_token.row_id,  # Same source row
+            step_in_pipeline=2,
+        )
+
+        # Record coalesce processing
+        coalesce_state = recorder.begin_node_state(
+            token_id=merged_token.token_id,
+            node_id=coalesce_node.node_id,
+            step_index=2,
+            input_data={"path_a_result": True, "path_b_result": True},
+        )
+        recorder.complete_node_state(
+            state_id=coalesce_state.state_id,
+            status="completed",
+            output_data={"merged": True, "path_a_result": True, "path_b_result": True},
+            duration_ms=2.0,
+        )
+
+        # Record sink processing
+        sink_state = recorder.begin_node_state(
+            token_id=merged_token.token_id,
+            node_id=sink_node.node_id,
+            step_index=3,
+            input_data={"merged": True},
+        )
+        recorder.complete_node_state(
+            state_id=sink_state.state_id,
+            status="completed",
+            output_data={"written": True},
+            duration_ms=1.0,
+        )
+
+        recorder.complete_run(run_id, status="completed")
+
+        # Test explain() on the coalesced token
+        lineage = explain(recorder, run_id, token_id=merged_token.token_id)
+
+        # Lineage must exist
+        assert lineage is not None, "explain() returned None for coalesced token"
+
+        # Must trace to original source row
+        assert lineage.source_row is not None, "source_row must be present"
+        assert (
+            lineage.source_row.row_id == parent_token.row_id
+        ), "source_row should trace to original row before fork"
+        assert (
+            lineage.source_row.source_node_id == source_node.node_id
+        ), "source_row should trace to source node"
+
+        # Must have parent tokens (the forked children that were merged)
+        assert (
+            len(lineage.parent_tokens) == 2
+        ), f"Coalesced token should have 2 parent tokens, got {len(lineage.parent_tokens)}"
+
+        parent_token_ids = {p.token_id for p in lineage.parent_tokens}
+        expected_parent_ids = {token_a.token_id, token_b.token_id}
+        assert parent_token_ids == expected_parent_ids, (
+            f"parent_tokens should be the forked children. "
+            f"Expected {expected_parent_ids}, got {parent_token_ids}"
+        )
+
+        # Verify we can trace further back from parent tokens to the original fork
+        for parent in lineage.parent_tokens:
+            # Get the parent's parent (should be the original pre-fork token)
+            grandparents = recorder.get_token_parents(parent.token_id)
+            assert (
+                len(grandparents) == 1
+            ), f"Forked child should have exactly 1 parent, got {len(grandparents)}"
+            assert (
+                grandparents[0].parent_token_id == parent_token.token_id
+            ), "Forked child's parent should be the original token"
+
+        # Verify node_states show the path through coalesce and sink
+        state_node_ids = {s.node_id for s in lineage.node_states}
+        assert (
+            coalesce_node.node_id in state_node_ids
+        ), "node_states should include coalesce"
+        assert sink_node.node_id in state_node_ids, "node_states should include sink"

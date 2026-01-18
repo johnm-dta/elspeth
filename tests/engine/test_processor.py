@@ -1657,3 +1657,94 @@ class TestProcessorAggregationTriggers:
             aggregation_settings=aggregation_settings,
         )
         assert processor is not None
+
+    def test_processor_flushes_on_count_trigger(self) -> None:
+        """Processor flushes aggregation when count trigger reached."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="counting_agg",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Track how many times flush was called
+        flush_call_count = 0
+        flushed_values: list[list[dict[str, Any]]] = []
+
+        class CountingAggregation(BaseAggregation):
+            """Aggregation that tracks flush calls."""
+
+            name = "counting_agg"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+                self._values: list[dict[str, Any]] = []
+
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
+                self._values.append(row)
+                return AcceptResult(accepted=True)
+
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+                nonlocal flush_call_count, flushed_values
+                flush_call_count += 1
+                result = [{"sum": sum(r["value"] for r in self._values)}]
+                flushed_values.append(list(self._values))
+                self._values = []
+                return result
+
+        # Configure trigger: flush after 3 rows
+        aggregation_settings = {
+            agg_node.node_id: AggregationSettings(
+                name="counting_agg",
+                plugin="counting_agg",
+                trigger=TriggerConfig(count=3),
+            ),
+        }
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+        aggregation = CountingAggregation(agg_node.node_id)
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            aggregation_settings=aggregation_settings,
+        )
+
+        # Process 3 rows - should trigger flush after 3rd
+        for i in range(3):
+            processor.process_row(
+                row_index=i,
+                row_data={"value": i + 1},
+                transforms=[aggregation],
+                ctx=ctx,
+            )
+
+        # Verify flush was called once (after 3rd accept triggered count=3)
+        assert flush_call_count == 1
+        # Verify all 3 rows were in the flushed batch
+        assert len(flushed_values) == 1
+        assert len(flushed_values[0]) == 3
+        assert flushed_values[0] == [{"value": 1}, {"value": 2}, {"value": 3}]

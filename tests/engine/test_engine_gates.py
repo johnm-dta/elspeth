@@ -1538,6 +1538,280 @@ class TestEndToEndPipeline:
 # ============================================================================
 
 
+# ============================================================================
+# WP-14b: Gate Runtime Error Handling
+# ============================================================================
+
+
+class TestGateRuntimeErrors:
+    """WP-14b: Verify runtime condition errors follow Three-Tier Trust Model.
+
+    Per ELSPETH's data manifesto:
+    - Row data is Tier 2 (elevated trust) - types are trustworthy but operations can fail
+    - Missing fields or type errors during gate evaluation should fail clearly
+    - row.get() is the correct pattern for optional fields
+
+    These tests verify that gate conditions fail predictably when row data
+    doesn't meet expectations, and that optional field patterns work correctly.
+    """
+
+    def test_missing_field_raises_key_error(self) -> None:
+        """Gate condition referencing missing field should fail clearly.
+
+        Per ELSPETH's design: operations on row values can fail, and when they
+        do, the failure should be clear and auditable. A gate condition that
+        references row['missing_field'] should raise KeyError when the field
+        doesn't exist, and this should be recorded as a failed node state.
+        """
+        from elspeth.contracts import TokenInfo
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import GateExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.context import PluginContext
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register a fake gate node for audit trail
+        schema_config = SchemaConfig.from_dict({"fields": "dynamic"})
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="config_gate:missing_test",
+            node_type="gate",
+            plugin_version="1.0.0",
+            config={"condition": "row['nonexistent'] > 0"},
+            schema_config=schema_config,
+        )
+
+        span_factory = SpanFactory()  # No tracer = no-op spans
+        executor = GateExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            edge_map={},
+            route_resolution_map={},
+        )
+
+        gate_config = GateSettings(
+            name="missing_test",
+            condition="row['nonexistent'] > 0",
+            routes={"true": "continue", "false": "continue"},
+        )
+
+        token = TokenInfo(
+            row_id="row_1",
+            token_id="token_1",
+            row_data={"existing_field": 42},  # Missing 'nonexistent' field
+        )
+
+        # Create row and token in landscape for audit trail
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # The expression parser evaluates row['nonexistent'], which raises KeyError
+        # The executor should catch this and re-raise after recording failure
+        with pytest.raises(KeyError) as exc_info:
+            executor.execute_config_gate(
+                gate_config=gate_config,
+                node_id=node.node_id,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=0,
+            )
+
+        # Verify the error message indicates the missing field
+        assert "nonexistent" in str(exc_info.value)
+
+        # Verify the failure was recorded in the audit trail
+        with db._engine.connect() as conn:
+            from sqlalchemy import text
+
+            states = conn.execute(
+                text("""
+                    SELECT status, error_json
+                    FROM node_states
+                    WHERE node_id = :node_id
+                """),
+                {"node_id": node.node_id},
+            ).fetchall()
+
+            assert len(states) == 1, "Should have exactly one node state"
+            status, error_json = states[0]
+            assert status == "failed", "Node state should be failed"
+            assert error_json is not None, "Error should be recorded"
+
+            import json
+
+            error = json.loads(error_json)
+            assert (
+                error["type"] == "KeyError"
+            ), f"Expected KeyError, got {error['type']}"
+
+    def test_optional_field_with_get_succeeds(self) -> None:
+        """Gate using row.get() for optional field should succeed safely.
+
+        The row.get() pattern is the correct way to handle optional fields
+        in gate conditions. This test verifies that:
+        1. row.get('field') returns None for missing fields (no exception)
+        2. row.get('field', default) returns the default for missing fields
+        3. The gate evaluates correctly and routes based on the result
+        """
+        from elspeth.contracts import TokenInfo
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import GateExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.context import PluginContext
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register a fake gate node for audit trail
+        schema_config = SchemaConfig.from_dict({"fields": "dynamic"})
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="config_gate:optional_test",
+            node_type="gate",
+            plugin_version="1.0.0",
+            config={"condition": "row.get('optional', 0) > 5"},
+            schema_config=schema_config,
+        )
+
+        span_factory = SpanFactory()  # No tracer = no-op spans
+        executor = GateExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            edge_map={},
+            route_resolution_map={
+                (node.node_id, "true"): "continue",
+                (node.node_id, "false"): "continue",
+            },
+        )
+
+        gate_config = GateSettings(
+            name="optional_test",
+            condition="row.get('optional', 0) > 5",
+            routes={"true": "continue", "false": "continue"},
+        )
+
+        # Test 1: Missing optional field - should use default (0) and evaluate to false
+        token_missing = TokenInfo(
+            row_id="row_1",
+            token_id="token_1",
+            row_data={"required": "value"},  # Missing 'optional' field
+        )
+
+        # Create row and token in landscape for audit trail
+        row1 = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data=token_missing.row_data,
+            row_id=token_missing.row_id,
+        )
+        recorder.create_token(row_id=row1.row_id, token_id=token_missing.token_id)
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Should NOT raise - row.get() handles missing fields safely
+        outcome_missing = executor.execute_config_gate(
+            gate_config=gate_config,
+            node_id=node.node_id,
+            token=token_missing,
+            ctx=ctx,
+            step_in_pipeline=0,
+        )
+
+        # With default 0, condition "0 > 5" is false
+        assert outcome_missing.result.action.kind.value == "continue"
+        # Check that the raw evaluation result (captured in reason) shows "false"
+        assert outcome_missing.result.action.reason["result"] == "false"
+
+        # Test 2: Present optional field with value > 5 - should evaluate to true
+        token_present = TokenInfo(
+            row_id="row_2",
+            token_id="token_2",
+            row_data={"required": "value", "optional": 10},
+        )
+
+        row2 = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=1,
+            data=token_present.row_data,
+            row_id=token_present.row_id,
+        )
+        recorder.create_token(row_id=row2.row_id, token_id=token_present.token_id)
+
+        outcome_present = executor.execute_config_gate(
+            gate_config=gate_config,
+            node_id=node.node_id,
+            token=token_present,
+            ctx=ctx,
+            step_in_pipeline=1,
+        )
+
+        # With value 10, condition "10 > 5" is true
+        assert outcome_present.result.action.kind.value == "continue"
+        assert outcome_present.result.action.reason["result"] == "true"
+
+        # Test 3: Present optional field with value <= 5 - should evaluate to false
+        token_low = TokenInfo(
+            row_id="row_3",
+            token_id="token_3",
+            row_data={"required": "value", "optional": 3},
+        )
+
+        row3 = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=2,
+            data=token_low.row_data,
+            row_id=token_low.row_id,
+        )
+        recorder.create_token(row_id=row3.row_id, token_id=token_low.token_id)
+
+        outcome_low = executor.execute_config_gate(
+            gate_config=gate_config,
+            node_id=node.node_id,
+            token=token_low,
+            ctx=ctx,
+            step_in_pipeline=2,
+        )
+
+        # With value 3, condition "3 > 5" is false
+        assert outcome_low.result.action.kind.value == "continue"
+        assert outcome_low.result.action.reason["result"] == "false"
+
+        # Verify all node states are completed (not failed)
+        with db._engine.connect() as conn:
+            from sqlalchemy import text
+
+            states = conn.execute(
+                text("""
+                    SELECT status
+                    FROM node_states
+                    WHERE node_id = :node_id
+                    ORDER BY step_index
+                """),
+                {"node_id": node.node_id},
+            ).fetchall()
+
+            assert len(states) == 3, "Should have three node states"
+            for state in states:
+                assert state[0] == "completed", "All states should be completed"
+
+
 class TestErrorHandling:
     """Error handling scenarios for gates."""
 

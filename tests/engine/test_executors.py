@@ -2379,6 +2379,15 @@ class TestAggregationExecutorTriggers:
         # After flush, trigger should be reset
         assert executor.should_flush(agg_node.node_id) is False
 
+    def test_accept_does_not_return_trigger(self) -> None:
+        """accept() returns AcceptResult without trigger field."""
+        from dataclasses import fields
+
+        from elspeth.contracts.results import AcceptResult
+
+        field_names = [f.name for f in fields(AcceptResult)]
+        assert "trigger" not in field_names
+
 
 class TestSinkExecutor:
     """Sink execution with artifact recording."""

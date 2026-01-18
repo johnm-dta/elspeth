@@ -4942,6 +4942,255 @@ class TestComplexDAGIntegration:
         }
         assert expected_nodes <= node_ids, f"Missing nodes: {expected_nodes - node_ids}"
 
+    def test_run_result_captures_all_metrics(self) -> None:
+        """RunResult captures metrics for all pipeline operations.
+
+        This test verifies that RunResult includes all expected metrics
+        and that they are consistent with what actually happened in the pipeline.
+
+        Verifies:
+        - rows_processed: Total rows from source
+        - rows_succeeded: Rows that completed successfully
+        - rows_failed: Rows that failed processing
+        - rows_quarantined: Rows quarantined due to errors
+        - rows_routed: Rows routed to named sinks by gates
+        - rows_forked: Rows that were forked to multiple paths
+
+        Consistency checks:
+        - All metrics >= 0
+        - rows_succeeded + rows_quarantined <= rows_processed
+        """
+        from elspeth.contracts import PluginSchema, RunStatus
+        from elspeth.core.config import GateSettings
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine import Orchestrator, PipelineConfig
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource(_TestSourceBase):
+            """Source emitting test data."""
+
+            name = "test_source"
+            output_schema = ValueSchema
+
+            def __init__(self, data: list[dict[str, Any]]) -> None:
+                self._data = data
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def load(self, ctx: Any) -> Any:
+                yield from self._data
+
+            def close(self) -> None:
+                pass
+
+        class SelectiveTransform(BaseTransform):
+            """Transform that fails on specific values.
+
+            - Values divisible by 3 fail (will be quarantined)
+            - Other values succeed
+
+            Has _on_error="discard" so errors become QUARANTINED.
+            """
+
+            name = "selective_transform"
+            input_schema = ValueSchema
+            output_schema = ValueSchema
+            _on_error = "discard"  # Required for TransformResult.error() to work
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def process(self, row: dict[str, Any], ctx: Any) -> TransformResult:
+                if row["value"] % 3 == 0:
+                    return TransformResult.error(
+                        {"reason": "divisible_by_3", "value": row["value"]}
+                    )
+                return TransformResult.success(
+                    {"value": row["value"], "processed": True}
+                )
+
+        class CollectSink(_TestSinkBase):
+            """Sink that collects written rows."""
+
+            name = "output_sink"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://output",
+                    size_bytes=len(str(rows)),
+                    content_hash="metrics_test",
+                )
+
+            def close(self) -> None:
+                pass
+
+        class RoutedSink(_TestSinkBase):
+            """Sink for routed rows."""
+
+            name = "routed_sink"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://routed",
+                    size_bytes=len(str(rows)),
+                    content_hash="routed_metrics",
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Create pipeline with:
+        # - 10 rows (values 1-10)
+        # - Gate routes values >= 8 to "routed" sink
+        # - Transform fails on divisible by 3 (3, 6, 9)
+        # - Remaining go to default sink
+        source = ListSource([{"value": i} for i in range(1, 11)])  # 1-10
+        transform = SelectiveTransform()
+        default_sink = CollectSink()
+        routed_sink = RoutedSink()
+
+        # Gate: route values >= 8 to routed sink
+        routing_gate = GateSettings(
+            name="routing_gate",
+            condition="row['value'] >= 8",
+            routes={"true": "routed", "false": "continue"},
+        )
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[transform],
+            sinks={"default": default_sink, "routed": routed_sink},
+            gates=[routing_gate],
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(config, graph=_build_test_graph(config))
+
+        # ================================================================
+        # Verify all metrics are non-negative
+        # ================================================================
+        assert result.rows_processed >= 0, "rows_processed must be >= 0"
+        assert result.rows_succeeded >= 0, "rows_succeeded must be >= 0"
+        assert result.rows_failed >= 0, "rows_failed must be >= 0"
+        assert result.rows_quarantined >= 0, "rows_quarantined must be >= 0"
+        assert result.rows_routed >= 0, "rows_routed must be >= 0"
+        assert result.rows_forked >= 0, "rows_forked must be >= 0"
+
+        # ================================================================
+        # Verify run completed
+        # ================================================================
+        assert result.status == RunStatus.COMPLETED
+
+        # ================================================================
+        # Verify expected metric values
+        # ================================================================
+        # 10 rows processed (values 1-10)
+        assert (
+            result.rows_processed == 10
+        ), f"Expected 10 rows_processed, got {result.rows_processed}"
+
+        # Pipeline flow:
+        # 1. Transform processes all 10 rows FIRST
+        #    - Values 3, 6, 9 fail (divisible by 3) -> QUARANTINED
+        #    - Values 1, 2, 4, 5, 7, 8, 10 succeed (7 rows continue)
+        # 2. Gate routes the 7 surviving rows:
+        #    - Values >= 8: 8, 10 -> ROUTED to "routed" sink
+        #    - Values < 8: 1, 2, 4, 5, 7 -> SUCCEEDED to "default" sink
+
+        # Quarantined: 3, 6, 9 (3 rows failed at transform)
+        assert (
+            result.rows_quarantined == 3
+        ), f"Expected 3 rows_quarantined (3, 6, 9), got {result.rows_quarantined}"
+
+        # Routed: 8, 10 (2 rows that passed transform and got routed by gate)
+        assert (
+            result.rows_routed == 2
+        ), f"Expected 2 rows_routed (8, 10), got {result.rows_routed}"
+
+        # Succeeded: 1, 2, 4, 5, 7 (5 rows that reached default sink)
+        assert (
+            result.rows_succeeded == 5
+        ), f"Expected 5 rows_succeeded (1, 2, 4, 5, 7), got {result.rows_succeeded}"
+
+        # Failed: 0 (no exceptions, only TransformResult.error with discard)
+        assert (
+            result.rows_failed == 0
+        ), f"Expected 0 rows_failed (errors become quarantined), got {result.rows_failed}"
+
+        # ================================================================
+        # Verify consistency: succeeded + quarantined <= processed
+        # ================================================================
+        total_terminal = result.rows_succeeded + result.rows_quarantined
+        assert total_terminal <= result.rows_processed, (
+            f"Consistency check failed: "
+            f"rows_succeeded ({result.rows_succeeded}) + "
+            f"rows_quarantined ({result.rows_quarantined}) = {total_terminal} "
+            f"should be <= rows_processed ({result.rows_processed})"
+        )
+
+        # ================================================================
+        # Verify sink outputs match metrics
+        # ================================================================
+        # Default sink receives rows that:
+        # 1. Pass the transform (not divisible by 3)
+        # 2. Are not routed by gate (value < 8)
+        # Expected: 1, 2, 4, 5, 7 (5 rows)
+        default_values = [r["value"] for r in default_sink.results]
+        assert sorted(default_values) == [
+            1,
+            2,
+            4,
+            5,
+            7,
+        ], f"Default sink expected [1, 2, 4, 5, 7], got {sorted(default_values)}"
+
+        # Routed sink receives rows that:
+        # 1. Pass the transform (not divisible by 3)
+        # 2. Are routed by gate (value >= 8)
+        # Expected: 8, 10 (2 rows - 9 failed at transform before reaching gate)
+        routed_values = [r["value"] for r in routed_sink.results]
+        assert sorted(routed_values) == [
+            8,
+            10,
+        ], f"Routed sink expected [8, 10], got {sorted(routed_values)}"
+
+        # ================================================================
+        # Verify no forking in this pipeline (rows_forked should be 0)
+        # ================================================================
+        assert (
+            result.rows_forked == 0
+        ), f"Expected 0 rows_forked (no fork gates), got {result.rows_forked}"
+
 
 class TestRetryIntegration:
     """End-to-end retry behavior tests.

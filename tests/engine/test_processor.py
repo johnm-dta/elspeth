@@ -1748,3 +1748,27 @@ class TestProcessorAggregationTriggers:
         assert len(flushed_values) == 1
         assert len(flushed_values[0]) == 3
         assert flushed_values[0] == [{"value": 1}, {"value": 2}, {"value": 3}]
+
+
+class TestRowProcessorRetry:
+    """Tests for retry integration in RowProcessor."""
+
+    def test_processor_accepts_retry_manager(self) -> None:
+        """RowProcessor can be constructed with RetryManager."""
+        from unittest.mock import Mock
+
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.retry import RetryConfig, RetryManager
+
+        retry_manager = RetryManager(RetryConfig(max_attempts=3))
+
+        # Should not raise
+        processor = RowProcessor(
+            recorder=Mock(),
+            span_factory=Mock(),
+            run_id="test-run",
+            source_node_id="source-node",
+            retry_manager=retry_manager,
+        )
+
+        assert processor._retry_manager is retry_manager

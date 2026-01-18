@@ -22,6 +22,7 @@ from elspeth.engine.executors import (
     GateExecutor,
     TransformExecutor,
 )
+from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenManager
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
@@ -81,6 +82,7 @@ class RowProcessor:
         config_gates: list[GateSettings] | None = None,
         config_gate_id_map: dict[str, str] | None = None,
         aggregation_settings: dict[str, AggregationSettings] | None = None,
+        retry_manager: RetryManager | None = None,
     ) -> None:
         """Initialize processor.
 
@@ -94,6 +96,7 @@ class RowProcessor:
             config_gates: List of config-driven gate settings
             config_gate_id_map: Map of gate name -> node_id for config gates
             aggregation_settings: Map of node_id -> AggregationSettings for trigger evaluation
+            retry_manager: Optional retry manager for transform execution
         """
         self._recorder = recorder
         self._spans = span_factory
@@ -101,6 +104,7 @@ class RowProcessor:
         self._source_node_id = source_node_id
         self._config_gates = config_gates or []
         self._config_gate_id_map = config_gate_id_map or {}
+        self._retry_manager = retry_manager
 
         self._token_manager = TokenManager(recorder)
         self._transform_executor = TransformExecutor(recorder, span_factory)

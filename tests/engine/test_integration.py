@@ -2556,6 +2556,426 @@ class TestAggregationIntegration:
         assert len(artifacts) == 1
         assert artifacts[0].content_hash == "test_hash"
 
+    def test_aggregation_after_gate_routing(self) -> None:
+        """Rows routed by gate aggregate correctly in separate paths.
+
+        Pipeline: source -> gate -> aggregation(s) -> sink(s)
+
+        Rows are routed by value:
+        - High-value rows (>50) go to high_agg -> high_sink
+        - Low-value rows (<=50) go to low_agg -> low_sink
+
+        Source data:
+        - [10, 20, 60, 70]
+
+        Expected results:
+        - High path: 60 + 70 = 130 -> high_sink
+        - Low path: 10 + 20 = 30 -> low_sink
+        """
+        from elspeth.contracts import NodeType, PluginSchema, TokenInfo
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.config import AggregationSettings, GateSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.executors import (
+            AggregationExecutor,
+            GateExecutor,
+            SinkExecutor,
+        )
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+        from elspeth.plugins.base import BaseAggregation
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import AcceptResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Start a run
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        # Register nodes: source, gate, high_agg, low_agg, high_sink, low_sink
+        source_node = recorder.register_node(
+            run_id=run_id,
+            node_id="source",
+            plugin_name="list_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        gate_node = recorder.register_node(
+            run_id=run_id,
+            node_id="value_router",
+            plugin_name="config_gate:value_router",
+            node_type=NodeType.GATE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        high_agg_node = recorder.register_node(
+            run_id=run_id,
+            node_id="high_agg",
+            plugin_name="sum_agg",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        low_agg_node = recorder.register_node(
+            run_id=run_id,
+            node_id="low_agg",
+            plugin_name="sum_agg",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        high_sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="high_sink",
+            plugin_name="collect_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        low_sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="low_sink",
+            plugin_name="collect_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Register edges for gate routing
+        edge_high = recorder.register_edge(
+            run_id=run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=high_agg_node.node_id,
+            label="true",
+            mode=RoutingMode.MOVE,
+        )
+        edge_low = recorder.register_edge(
+            run_id=run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=low_agg_node.node_id,
+            label="false",
+            mode=RoutingMode.MOVE,
+        )
+
+        # Build edge_map for GateExecutor
+        edge_map = {
+            (gate_node.node_id, "true"): edge_high.edge_id,
+            (gate_node.node_id, "false"): edge_low.edge_id,
+        }
+
+        # Route resolution map for config gate: true -> high_path, false -> low_path
+        # Note: For this test we're just using route labels directly, not routing to sinks
+        route_resolution_map: dict[tuple[str, str], str] = {
+            (gate_node.node_id, "true"): "high_path",
+            (gate_node.node_id, "false"): "low_path",
+        }
+
+        class SumAggregation(BaseAggregation):
+            """Aggregation that sums values."""
+
+            name = "sum_agg"
+            input_schema = RowSchema
+            output_schema = RowSchema
+            plugin_version = "1.0.0"
+
+            def __init__(self) -> None:
+                super().__init__({})
+                self._values: list[int] = []
+
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
+                self._values.append(row["value"])
+                return AcceptResult(accepted=True)
+
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+                total = sum(self._values)
+                self._values = []
+                return [{"value": total}]
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://output", size_bytes=0, content_hash="test_hash"
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Configure gate: routes high values (>50) vs low values (<=50)
+        gate_settings = GateSettings(
+            name="value_router",
+            condition="row['value'] > 50",
+            routes={"true": "high_path", "false": "low_path"},
+        )
+
+        # Configure aggregations: flush when source exhausts (use high count trigger)
+        high_agg_settings = AggregationSettings(
+            name="high_agg",
+            plugin="sum_agg",
+            trigger=TriggerConfig(count=1000),  # Won't fire - rely on end_of_source
+            output_mode="single",
+        )
+
+        low_agg_settings = AggregationSettings(
+            name="low_agg",
+            plugin="sum_agg",
+            trigger=TriggerConfig(count=1000),  # Won't fire - rely on end_of_source
+            output_mode="single",
+        )
+
+        # Create plugin instances and assign node_ids
+        high_agg = SumAggregation()
+        high_agg.node_id = high_agg_node.node_id
+
+        low_agg = SumAggregation()
+        low_agg.node_id = low_agg_node.node_id
+
+        high_sink = CollectSink()
+        high_sink.node_id = high_sink_node.node_id
+
+        low_sink = CollectSink()
+        low_sink.node_id = low_sink_node.node_id
+
+        # Create executors
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        gate_executor = GateExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            edge_map=edge_map,
+            route_resolution_map=route_resolution_map,
+        )
+
+        high_agg_executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            run_id=run_id,
+            aggregation_settings={high_agg_node.node_id: high_agg_settings},
+        )
+
+        low_agg_executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            run_id=run_id,
+            aggregation_settings={low_agg_node.node_id: low_agg_settings},
+        )
+
+        high_sink_executor = SinkExecutor(recorder, span_factory, run_id)
+        low_sink_executor = SinkExecutor(recorder, span_factory, run_id)
+
+        ctx = PluginContext(run_id=run_id, config={})
+
+        # Source data: mix of high and low values
+        source_rows = [
+            {"value": 10},  # low
+            {"value": 20},  # low
+            {"value": 60},  # high
+            {"value": 70},  # high
+        ]
+
+        # Track tokens routed to each path
+        high_tokens: list[TokenInfo] = []
+        low_tokens: list[TokenInfo] = []
+
+        # Process each source row through the gate
+        for row_index, row_data in enumerate(source_rows):
+            # Create token for each source row
+            token = token_manager.create_initial_token(
+                run_id=run_id,
+                source_node_id=source_node.node_id,
+                row_index=row_index,
+                row_data=row_data,
+            )
+
+            # Evaluate gate to determine routing
+            outcome = gate_executor.execute_config_gate(
+                gate_config=gate_settings,
+                node_id=gate_node.node_id,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=1,
+            )
+
+            # Route token based on gate result
+            # GateResult action contains routing info
+            action = outcome.result.action
+            route_label = action.destinations[0] if action.destinations else None
+
+            if route_label == "true":
+                # High value path
+                high_tokens.append(outcome.updated_token)
+            else:
+                # Low value path
+                low_tokens.append(outcome.updated_token)
+
+        # Verify routing: 2 high (60, 70), 2 low (10, 20)
+        assert len(high_tokens) == 2, f"Expected 2 high tokens, got {len(high_tokens)}"
+        assert len(low_tokens) == 2, f"Expected 2 low tokens, got {len(low_tokens)}"
+
+        high_values = [t.row_data["value"] for t in high_tokens]
+        low_values = [t.row_data["value"] for t in low_tokens]
+        assert set(high_values) == {
+            60,
+            70,
+        }, f"Expected high values {{60, 70}}, got {set(high_values)}"
+        assert set(low_values) == {
+            10,
+            20,
+        }, f"Expected low values {{10, 20}}, got {set(low_values)}"
+
+        # Process high tokens through high aggregation
+        for token in high_tokens:
+            result = high_agg_executor.accept(
+                aggregation=high_agg,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=2,
+            )
+            assert result.accepted is True
+
+        # Process low tokens through low aggregation
+        for token in low_tokens:
+            result = low_agg_executor.accept(
+                aggregation=low_agg,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=2,
+            )
+            assert result.accepted is True
+
+        # Flush high aggregation (end_of_source)
+        high_output = high_agg_executor.flush(
+            aggregation=high_agg,
+            ctx=ctx,
+            trigger_reason="end_of_source",
+            step_in_pipeline=3,
+        )
+
+        # Flush low aggregation (end_of_source)
+        low_output = low_agg_executor.flush(
+            aggregation=low_agg,
+            ctx=ctx,
+            trigger_reason="end_of_source",
+            step_in_pipeline=3,
+        )
+
+        # CRITICAL VERIFICATION: Aggregation results are correct
+        assert (
+            len(high_output) == 1
+        ), f"Expected 1 high aggregation result, got {len(high_output)}"
+        assert (
+            high_output[0]["value"] == 130
+        ), f"Expected high sum 130 (60+70), got {high_output[0]['value']}"
+
+        assert (
+            len(low_output) == 1
+        ), f"Expected 1 low aggregation result, got {len(low_output)}"
+        assert (
+            low_output[0]["value"] == 30
+        ), f"Expected low sum 30 (10+20), got {low_output[0]['value']}"
+
+        # Write aggregation outputs to respective sinks
+        high_output_token = TokenInfo(
+            row_id="high_agg_output_0",
+            token_id="high_agg_token_0",
+            row_data=high_output[0],
+        )
+        high_sink_executor.write(
+            sink=high_sink,
+            tokens=[high_output_token],
+            ctx=ctx,
+            step_in_pipeline=4,
+        )
+
+        low_output_token = TokenInfo(
+            row_id="low_agg_output_0",
+            token_id="low_agg_token_0",
+            row_data=low_output[0],
+        )
+        low_sink_executor.write(
+            sink=low_sink,
+            tokens=[low_output_token],
+            ctx=ctx,
+            step_in_pipeline=4,
+        )
+
+        # CRITICAL VERIFICATION: Sinks received correct aggregated values
+        assert (
+            len(high_sink.results) == 1
+        ), f"Expected 1 row in high_sink, got {len(high_sink.results)}"
+        assert (
+            high_sink.results[0]["value"] == 130
+        ), f"Expected high_sink value 130, got {high_sink.results[0]['value']}"
+
+        assert (
+            len(low_sink.results) == 1
+        ), f"Expected 1 row in low_sink, got {len(low_sink.results)}"
+        assert (
+            low_sink.results[0]["value"] == 30
+        ), f"Expected low_sink value 30, got {low_sink.results[0]['value']}"
+
+        # Complete the run
+        recorder.complete_run(run_id, status="completed")
+
+        # Verify audit trail completeness
+        rows = recorder.get_rows(run_id)
+        assert len(rows) == 4, f"Expected 4 source rows, got {len(rows)}"
+
+        # Verify batches were created (2 batches: high_agg, low_agg)
+        batches = recorder.get_batches(run_id)
+        assert (
+            len(batches) == 2
+        ), f"Expected 2 batches (high and low), got {len(batches)}"
+
+        # Verify each batch has correct member count
+        batch_member_counts = {}
+        for batch in batches:
+            members = recorder.get_batch_members(batch.batch_id)
+            batch_member_counts[batch.aggregation_node_id] = len(members)
+
+        assert (
+            batch_member_counts.get(high_agg_node.node_id) == 2
+        ), f"Expected 2 members in high_agg batch, got {batch_member_counts.get(high_agg_node.node_id)}"
+        assert (
+            batch_member_counts.get(low_agg_node.node_id) == 2
+        ), f"Expected 2 members in low_agg batch, got {batch_member_counts.get(low_agg_node.node_id)}"
+
+        # Verify artifacts were recorded (2 artifacts: one for each sink)
+        artifacts = recorder.get_artifacts(run_id)
+        assert len(artifacts) == 2, f"Expected 2 artifacts, got {len(artifacts)}"
+
 
 class TestForkCoalescePipelineIntegration:
     """End-to-end fork -> coalesce -> sink tests.

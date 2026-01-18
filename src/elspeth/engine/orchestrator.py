@@ -20,6 +20,7 @@ from elspeth.core.config import GateSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 from elspeth.engine.processor import RowProcessor
+from elspeth.engine.retry import RetryConfig, RetryManager
 from elspeth.engine.schema_validator import validate_pipeline_schemas
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
@@ -337,7 +338,9 @@ class Orchestrator:
         run_completed = False
         try:
             with self._span_factory.run_span(run.run_id):
-                result = self._execute_run(recorder, run.run_id, config, graph)
+                result = self._execute_run(
+                    recorder, run.run_id, config, graph, settings
+                )
 
             # Complete run
             recorder.complete_run(run.run_id, status="completed")
@@ -393,6 +396,7 @@ class Orchestrator:
         run_id: str,
         config: PipelineConfig,
         graph: ExecutionGraph,
+        settings: "ElspethSettings | None" = None,
     ) -> RunResult:
         """Execute the run using the execution graph.
 
@@ -528,6 +532,11 @@ class Orchestrator:
         for sink in config.sinks.values():
             sink.on_start(ctx)
 
+        # Create retry manager from settings if available
+        retry_manager: RetryManager | None = None
+        if settings is not None:
+            retry_manager = RetryManager(RetryConfig.from_settings(settings.retry))
+
         # Create processor with config gates info
         processor = RowProcessor(
             recorder=recorder,
@@ -538,6 +547,7 @@ class Orchestrator:
             route_resolution_map=route_resolution_map,
             config_gates=config.gates,
             config_gate_id_map=config_gate_id_map,
+            retry_manager=retry_manager,
         )
 
         # Process rows - Buffer TOKENS, not dicts, to preserve identity

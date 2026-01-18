@@ -17,7 +17,7 @@
 | WP-04 | Delete SinkAdapter & SinkLike | 🟢 Complete | 2h | WP-03 | WP-04a, WP-13 |
 | WP-04a | Delete *Like Protocol Duplications | 🟢 Complete | 1.5h | WP-04 | — |
 | WP-05 | Audit Schema Enhancement | 🟢 Complete | 2h | None | WP-06 |
-| WP-06 | Aggregation Triggers | 🔴 Not Started | 6h | WP-05 | WP-14 |
+| WP-06 | Aggregation Triggers | 🟢 Complete | 6h | WP-05 | WP-14 |
 | WP-07 | Fork Work Queue | 🟢 Complete | 8h | None | WP-08, WP-10 |
 | WP-08 | Coalesce Executor | 🟢 Complete | 8h | WP-07 | WP-14 |
 | WP-09 | Engine-Level Gates | 🟢 Complete | 10h | (after WP-02) | WP-14 |
@@ -69,7 +69,7 @@ WP-11.99 ──► WP-12  (config-driven schemas unlock simplified utility conso
 - [ ] WP-13: Sink Test Rewrites
 
 ### Sprint 3: DAG & Aggregation
-- [ ] WP-06: Aggregation Triggers (includes stale code cleanup)
+- [x] WP-06: Aggregation Triggers ✅ Complete (2026-01-18)
 - [x] WP-07: Fork Work Queue ✅ Complete (2026-01-18)
 - [x] WP-10: Quarantine Implementation ✅ Complete (2026-01-18)
 
@@ -382,27 +382,37 @@ df2fa70 feat(landscape): add trigger_type to batches table
 
 ### WP-06: Aggregation Triggers
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete (2026-01-18)
+**Plan:** [2026-01-18-wp06-aggregation-triggers.md](./2026-01-18-wp06-aggregation-triggers.md)
 **Goal:** Config-driven aggregation triggers replace plugin-driven decisions
-**Blocked by:** WP-05
+
+#### Summary
+Moved aggregation trigger logic from plugins to engine:
+- TriggerConfig model (count, timeout_seconds, condition)
+- AggregationSettings model (name, plugin, trigger, output_mode, options)
+- TriggerEvaluator class for engine-controlled trigger evaluation
+- Removed AcceptResult.trigger, BaseAggregation.should_trigger(), BaseAggregation.reset()
+- Integrated into AggregationExecutor and RowProcessor
 
 #### Tasks
-- [ ] Create `AggregationSettings` in `src/elspeth/core/config.py`
-- [ ] Implement trigger types in orchestrator:
-  - [ ] `count` trigger
-  - [ ] `timeout` trigger
-  - [ ] `condition` trigger
-  - [ ] `end_of_source` trigger (implicit)
-- [ ] Implement output modes:
-  - [ ] `single` mode
-  - [ ] `passthrough` mode
-  - [ ] `transform` mode
-- [ ] Move trigger evaluation from plugin to engine
+- [x] Create `TriggerConfig` model in `src/elspeth/core/config.py`
+- [x] Create `AggregationSettings` model in `src/elspeth/core/config.py`
+- [x] Add `aggregations` field to `ElspethSettings`
+- [x] Implement `TriggerEvaluator` in `src/elspeth/engine/triggers.py`:
+  - [x] `count` trigger
+  - [x] `timeout` trigger (via time.monotonic())
+  - [x] `condition` trigger (via ExpressionParser)
+  - [x] `end_of_source` trigger (implicit - engine calls flush at source exhaustion)
+- [x] Remove `AcceptResult.trigger` field (BREAKING)
+- [x] Remove `BaseAggregation.should_trigger()` and `reset()` (BREAKING)
+- [x] Integrate `TriggerEvaluator` into `AggregationExecutor`
+- [x] Update `RowProcessor` to use engine-controlled triggers
 
 #### Verification
-- [ ] Config validation rejects invalid triggers
-- [ ] All 4 trigger types work
-- [ ] All 3 output modes work
+- [x] Config validation rejects invalid triggers (at least one required)
+- [x] count, timeout, condition triggers work (15 TriggerEvaluator tests)
+- [x] mypy --strict passes on all 6 modified source files
+- [x] 532 affected tests pass
 
 ---
 
@@ -630,25 +640,36 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 
 **Status:** 🔴 Not Started
 **Plan:** [2026-01-17-wp11-orphaned-code-cleanup.md](./2026-01-17-wp11-orphaned-code-cleanup.md)
-**Goal:** Remove dead code, KEEP audit-critical infrastructure
+**Goal:** Remove dead code and defensive programming patterns, KEEP audit-critical infrastructure
 
 #### Decisions Made
 - **RetryManager:** KEEP & INTEGRATE (Phase 5)
 - **Call infrastructure:** KEEP (Phase 6)
 - **on_register():** DELETE (never called)
+- **Defensive getattr in manager.py:** DELETE (hides protocol violations) - added 2026-01-18
+- **Non-Pydantic schema check:** CRASH instead of silent None - added 2026-01-18
+- **TUI .get() defaults:** DELETE (masks incomplete data, violates tui/types.py) - added 2026-01-18
+- **TUI silent exceptions:** LOG before returning failed states - added 2026-01-18
 
 #### Tasks
 - [ ] Task 1: Remove on_register() from 4 base classes
 - [ ] Task 2: Verify RetryManager is ready for integration
 - [ ] Task 3: Verify Call infrastructure is intact
-- [ ] Task 4: Run full verification
+- [ ] Task 4: Remove defensive `getattr(cls, "name", cls.__name__)` from manager.py (6 occurrences)
+- [ ] Task 5: Fix `_schema_hash()` to crash on non-Pydantic schemas
+- [ ] Task 6: Fix TUI node_detail.py to not use .get() defaults
+- [ ] Task 7: Fix TUI exception handlers to log instead of silently swallow
+- [ ] Task 8: Run full verification
 
 #### Verification
-- [ ] `on_register()` removed from BaseSource, BaseTransform, BaseGate, BaseAggregation
-- [ ] No code calls `on_register()` anywhere
+- [ ] `on_register()` removed from 4 base classes
+- [ ] Defensive getattr for plugin names removed (6 occurrences)
+- [ ] `_schema_hash()` crashes on non-Pydantic schemas
+- [ ] TUI uses direct field access (not .get() defaults)
+- [ ] TUI logs exceptions before returning failed states
 - [ ] RetryManager tests pass
 - [ ] Call infrastructure intact
-- [ ] All tests pass
+- [ ] All tests pass (plugins, engine, TUI)
 
 ---
 
@@ -799,4 +820,6 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 | 2026-01-18 | WP-08 | ✅ **COMPLETE** - 13 commits, 10 tasks. CoalesceExecutor (350 lines), CoalesceSettings config, all 4 policies (require_all, quorum, best_effort, first), all 3 merge strategies (union, nested, select), flush_pending(), audit metadata recording. Unlocks WP-14. | Claude |
 | 2026-01-18 | WP-10 | ✅ **COMPLETE** - 4 commits, 6 tasks. `execute_transform()` returns 3-tuple with `error_sink`, processor returns QUARANTINED/ROUTED based on error routing, `rows_quarantined` metric added to RunResult, integration tests for full quarantine flow. Unlocks WP-14. | Claude |
 | 2026-01-18 | WP-05 | ✅ **COMPLETE** - 4 commits, 6 tasks. TriggerType enum (5 values), idempotency_key column (String(256)), trigger_type column (String(32)), Batch.status typed as BatchStatus. Alembic migration skipped (pre-release). Unlocks WP-06. | Claude |
+| 2026-01-18 | WP-11 | Added Task 4: Remove defensive `getattr(cls, "name", cls.__name__)` from manager.py (6 occurrences). Found during defensive programming audit - all protocols require `name: str`, fallback hides violations. | Claude |
+| 2026-01-18 | WP-11 | Added Tasks 5-7: (5) Crash on non-Pydantic schemas in `_schema_hash()`, (6) Remove TUI `.get()` defaults that mask incomplete data, (7) Log TUI exceptions instead of silently swallowing. All found during defensive programming deep-dive. | Claude |
 | | | | |

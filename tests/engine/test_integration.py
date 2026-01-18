@@ -1247,6 +1247,235 @@ class TestForkIntegration:
         recorder.complete_run(run_id, status="completed")
 
 
+class TestAggregationIntegration:
+    """Integration tests for aggregation through full pipeline."""
+
+    def test_aggregation_output_mode_single(self) -> None:
+        """output_mode=single: batch produces one aggregated result.
+
+        Pipeline: source (3 rows) -> aggregation (count=3) -> sink
+        Result: sink receives 1 row with aggregated data
+
+        This test uses lower-level components (AggregationExecutor, SinkExecutor)
+        to verify output_mode=single behavior. PipelineConfig aggregation support
+        is WIP - this test validates the underlying engine behavior.
+        """
+        from elspeth.contracts import NodeType, PluginSchema, TokenInfo
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.executors import AggregationExecutor, SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+        from elspeth.plugins.base import BaseAggregation
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import AcceptResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Start a run
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        # Register nodes
+        source_node = recorder.register_node(
+            run_id=run_id,
+            node_id="source",
+            plugin_name="list_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        agg_node = recorder.register_node(
+            run_id=run_id,
+            node_id="sum_agg",
+            plugin_name="sum_agg",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="output_sink",
+            plugin_name="collect_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        class SumAggregation(BaseAggregation):
+            """Aggregation that sums values."""
+
+            name = "sum_agg"
+            input_schema = RowSchema
+            output_schema = RowSchema
+            plugin_version = "1.0.0"
+
+            def __init__(self) -> None:
+                super().__init__({})
+                self._values: list[int] = []
+
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
+                self._values.append(row["value"])
+                return AcceptResult(accepted=True)
+
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+                total = sum(self._values)
+                count = len(self._values)
+                self._values = []
+                # output_mode=single means we return exactly ONE aggregated result
+                return [{"value": total, "count": count}]
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://output", size_bytes=0, content_hash="test_hash"
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Configure aggregation: flush after 3 rows, output_mode=single
+        agg_settings = AggregationSettings(
+            name="sum_agg",
+            plugin="sum_agg",
+            trigger=TriggerConfig(count=3),
+            output_mode="single",
+        )
+
+        # Create aggregation instance and assign node_id
+        aggregation = SumAggregation()
+        aggregation.node_id = agg_node.node_id
+
+        # Create sink instance and assign node_id
+        sink = CollectSink()
+        sink.node_id = sink_node.node_id
+
+        # Create executors
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        agg_executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            run_id=run_id,
+            aggregation_settings={agg_node.node_id: agg_settings},
+        )
+
+        sink_executor = SinkExecutor(recorder, span_factory, run_id)
+
+        ctx = PluginContext(run_id=run_id, config={})
+
+        # Process 3 source rows through aggregation
+        source_rows = [{"value": 10}, {"value": 20}, {"value": 30}]
+
+        for row_index, row_data in enumerate(source_rows):
+            # Create token for each source row
+            token = token_manager.create_initial_token(
+                run_id=run_id,
+                source_node_id=source_node.node_id,
+                row_index=row_index,
+                row_data=row_data,
+            )
+
+            # Accept row into aggregation
+            result = agg_executor.accept(
+                aggregation=aggregation,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=1,
+            )
+            assert result.accepted is True
+
+        # Verify trigger condition is met after 3 rows
+        assert agg_executor.should_flush(agg_node.node_id) is True
+
+        # Flush the batch
+        output_rows = agg_executor.flush(
+            aggregation=aggregation,
+            ctx=ctx,
+            trigger_reason="count_reached",
+            step_in_pipeline=2,
+        )
+
+        # output_mode=single: batch produces ONE aggregated result
+        assert len(output_rows) == 1
+        assert output_rows[0]["value"] == 60  # 10 + 20 + 30
+        assert output_rows[0]["count"] == 3
+
+        # Create token for aggregation output and write to sink
+        # For aggregation outputs, we create a synthetic token
+        agg_output_token = TokenInfo(
+            row_id="agg_output_0",
+            token_id="agg_token_0",
+            row_data=output_rows[0],
+        )
+
+        # Write aggregated result to sink
+        sink_executor.write(
+            sink=sink,
+            tokens=[agg_output_token],
+            ctx=ctx,
+            step_in_pipeline=3,
+        )
+
+        # CRITICAL VERIFICATION: Sink received 1 row (aggregated), not 3 (source rows)
+        assert len(sink.results) == 1, (
+            f"Expected 1 aggregated row, got {len(sink.results)}. "
+            "output_mode=single should produce exactly one result."
+        )
+        assert sink.results[0]["value"] == 60
+        assert sink.results[0]["count"] == 3
+
+        # Complete the run
+        recorder.complete_run(run_id, status="completed")
+
+        # Verify audit trail completeness
+        # - 3 source rows recorded
+        # - Each row has token with node_state at aggregation
+        # - Aggregation batch exists with 3 members
+        rows = recorder.get_rows(run_id)
+        assert len(rows) == 3, f"Expected 3 source rows, got {len(rows)}"
+
+        # Verify batch was created and completed
+        batches = recorder.get_batches(run_id)
+        assert len(batches) == 1
+        assert batches[0].status == "completed"
+
+        # Verify batch has 3 members
+        members = recorder.get_batch_members(batches[0].batch_id)
+        assert len(members) == 3
+
+        # Verify artifact was recorded
+        artifacts = recorder.get_artifacts(run_id)
+        assert len(artifacts) == 1
+        assert artifacts[0].content_hash == "test_hash"
+
+
 class TestForkCoalescePipelineIntegration:
     """End-to-end fork -> coalesce -> sink tests.
 

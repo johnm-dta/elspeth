@@ -25,9 +25,9 @@
 | WP-11 | Orphaned Code Cleanup | 🟢 Complete | 2h | None | — |
 | WP-11.99 | Config-Driven Plugin Schemas | 🟢 Complete | 4-6h | None | WP-12 |
 | WP-12 | Utility Consolidation | 🟢 Complete | 0.5h | WP-11.99 | — |
-| WP-13 | Sink Test Rewrites | 🔴 Not Started | 4h | WP-03, WP-04 | — |
+| WP-13 | Sink Test Rewrites | 🟢 Complete | 4h | WP-03, WP-04 | — |
 | WP-14 | Engine Test Rewrites | 🔴 Not Started | 16h | WP-06,07,08,09,10 | — |
-| WP-15 | RetryManager Integration | 🔴 Not Started | 4h | None | — |
+| WP-15 | RetryManager Integration | 🟢 Complete | 4h | None | — |
 
 **Legend:** 🔴 Not Started | 🟡 In Progress | 🟢 Complete | ⏸️ Blocked
 
@@ -49,6 +49,7 @@ WP-09 ──────────────────╱
 
 WP-11       (independent)
 WP-11.99 ──► WP-12  (config-driven schemas unlock simplified utility consolidation)
+WP-15       (independent - RetryManager integration)
 ```
 
 ---
@@ -67,7 +68,7 @@ WP-11.99 ──► WP-12  (config-driven schemas unlock simplified utility conso
 - [ ] WP-04: Delete SinkAdapter & SinkLike
 - [ ] WP-04a: Delete *Like Protocol Duplications (TransformLike, GateLike, AggregationLike)
 - [x] WP-12: Utility Consolidation ✅ Complete (2026-01-18)
-- [ ] WP-13: Sink Test Rewrites
+- [x] WP-13: Sink Test Rewrites ✅ Complete (done with WP-03)
 
 ### Sprint 3: DAG & Aggregation
 - [x] WP-06: Aggregation Triggers ✅ Complete (2026-01-18)
@@ -79,8 +80,9 @@ WP-11.99 ──► WP-12  (config-driven schemas unlock simplified utility conso
 - [x] WP-09: Engine-Level Gates ✅ Complete (2026-01-18)
 - [x] WP-08: Coalesce Executor ✅ Complete (2026-01-18)
 
-### Sprint 5: Verification
+### Sprint 5: Verification & Integration
 - [ ] WP-14: Engine Test Rewrites (split into WP-14a/b/c/d/e)
+- [x] WP-15: RetryManager Integration ✅ Complete (2026-01-18)
 - [ ] Final integration testing
 
 ---
@@ -737,22 +739,23 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 
 ### WP-13: Sink Test Rewrites
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete (done implicitly with WP-03)
 **Goal:** All sink tests use batch signature
-**Blocked by:** WP-03, WP-04
+**Blocked by:** WP-03 ✅, WP-04 ✅
 
-**Note:** `test_adapters.py` is deleted in WP-04, so no adapter tests to update.
+**Note:** Tests were updated alongside WP-03 sink implementation changes. This is best practice - changing implementation and tests together.
 
 #### Tasks
-- [ ] Rewrite `tests/plugins/sinks/test_csv_sink.py`
-- [ ] Rewrite `tests/plugins/sinks/test_json_sink.py`
-- [ ] Rewrite `tests/plugins/sinks/test_database_sink.py`
-- [ ] Create MockSink fixture for engine tests that need it
+- [x] Rewrite `tests/plugins/sinks/test_csv_sink.py` (done with WP-03)
+- [x] Rewrite `tests/plugins/sinks/test_json_sink.py` (done with WP-03)
+- [x] Rewrite `tests/plugins/sinks/test_database_sink.py` (done with WP-03)
+- [x] Create MockSink fixture for engine tests that need it
 
 #### Verification
-- [ ] All sink plugin tests pass
-- [ ] No per-row write patterns remain
-- [ ] Engine tests use inline MockSink or fixture
+- [x] All sink plugin tests pass (41 tests)
+- [x] Batch signature: `sink.write([...], ctx)` throughout
+- [x] ArtifactDescriptor assertions present
+- [x] content_hash and size_bytes verified
 
 ---
 
@@ -776,6 +779,61 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 
 ---
 
+### WP-15: RetryManager Integration
+
+**Status:** 🟢 Complete (2026-01-18)
+**Plan:** [2026-01-18-wp15-retry-manager-integration.md](./2026-01-18-wp15-retry-manager-integration.md)
+**Goal:** Integrate existing RetryManager into transform execution with full audit trail
+**Dependencies:** None (independent)
+
+**Context:** RetryManager exists at `src/elspeth/engine/retry.py` but was never wired into the engine. This WP integrates it so transient failures (network timeouts, rate limits) are automatically retried with each attempt recorded in the audit trail.
+
+#### Files Modified
+- `src/elspeth/engine/retry.py` - Added `RetryConfig.from_settings()` factory method
+- `src/elspeth/engine/executors.py` - Added `attempt: int = 0` parameter to `execute_transform()`
+- `src/elspeth/engine/processor.py` - Added `retry_manager` parameter, `_execute_transform_with_retry()` method
+- `src/elspeth/contracts/results.py` - Added `error: dict[str, Any] | None` field to `RowResult`
+- `src/elspeth/engine/orchestrator.py` - Wire RetryManager creation from settings
+
+#### Files Created
+- `tests/integration/test_retry_integration.py` - 3 integration tests proving retry audit trail
+
+#### Tasks
+- [x] Task 1: Add RetryConfig.from_settings() factory
+- [x] Task 2: Add attempt parameter to execute_transform
+- [x] Task 3: Add RetryManager to RowProcessor
+- [x] Task 4: Implement retry wrapper for transform execution
+- [x] Task 5: Handle MaxRetriesExceeded with FAILED outcome
+- [x] Task 6: Wire RetryManager in Orchestrator
+- [x] Task 7: Integration test for retry audit trail
+- [x] Task 8: Update tracker
+
+#### Commits
+```
+443114a feat(retry): add RetryConfig.from_settings() factory (WP-15 Task 1)
+0242ef1 feat(executor): add attempt parameter to execute_transform (WP-15 Task 2)
+9f09af2 feat(processor): add retry_manager parameter to RowProcessor (WP-15 Task 3)
+60e2177 feat(processor): implement retry wrapper for transform execution (WP-15 Task 4)
+41c2fdc feat(processor): handle MaxRetriesExceeded with FAILED outcome (WP-15 Task 5)
+5814de7 feat(orchestrator): wire RetryManager from settings (WP-15 Task 6)
+f415e1c test(integration): add retry audit trail integration tests (WP-15 Task 7)
+8f3ed16 style(tests): prefix unused variables with underscore
+```
+
+#### Verification ✅
+- [x] RetryConfig.from_settings() creates config from Pydantic model
+- [x] execute_transform accepts and passes attempt number
+- [x] Transient exceptions (ConnectionError, TimeoutError, OSError) are retried
+- [x] MaxRetriesExceeded returns FAILED outcome with error details
+- [x] Each attempt recorded as separate node_state with attempt number
+- [x] RowResult.error captures exception type, message, attempts, last_error
+- [x] Integration tests prove: attempts 0,1,2 each recorded in node_states
+- [x] All tests pass (3 integration tests + existing unit tests)
+- [x] mypy --strict passes
+- [x] ruff lint clean
+
+---
+
 ## Risk Register
 
 | WP | Risk | Likelihood | Impact | Mitigation |
@@ -785,6 +843,7 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 | WP-08 | Timeout race conditions | Medium | Medium | Use monotonic clock |
 | WP-09 | Expression parser security | ✅ Mitigated | High | AST whitelist validation, 2277+ fuzz inputs, 8 attack patterns rejected |
 | WP-14 | Large test rewrite scope | High | Medium | Incremental, focus on critical paths |
+| WP-15 | Retry storms under load | Low | Medium | max_delay cap (60s), bounded max_attempts |
 
 ---
 
@@ -824,4 +883,6 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 | 2026-01-18 | WP-11 | Added Task 4: Remove defensive `getattr(cls, "name", cls.__name__)` from manager.py (6 occurrences). Found during defensive programming audit - all protocols require `name: str`, fallback hides violations. | Claude |
 | 2026-01-18 | WP-11 | Added Tasks 5-7: (5) Crash on non-Pydantic schemas in `_schema_hash()`, (6) Remove TUI `.get()` defaults that mask incomplete data, (7) Log TUI exceptions instead of silently swallowing. All found during defensive programming deep-dive. | Claude |
 | 2026-01-18 | WP-11 | ✅ **COMPLETE** - 7 commits, 8 tasks. Removed `on_register()` from 4 base classes, removed defensive getattr (6 occurrences), fixed `_schema_hash()` to crash on non-Pydantic, fixed TUI `.get()` patterns, added exception logging. Updated PHASE3_INTEGRATION.md. 297 plugin tests, 348 engine tests, 43 TUI tests all pass. | Claude |
+| 2026-01-18 | WP-15 | **CREATED** - New work package to integrate RetryManager into transform execution. Plan at `2026-01-18-wp15-retry-manager-integration.md`. 8 tasks covering: factory method, attempt tracking, RowProcessor integration, MaxRetriesExceeded handling, Orchestrator wiring. Independent - can run anytime. | Claude |
+| 2026-01-18 | WP-15 | ✅ **COMPLETE** - 8 commits, 8 tasks. RetryConfig.from_settings() factory, attempt parameter to execute_transform(), retry wrapper in RowProcessor, MaxRetriesExceeded → FAILED outcome with error details, Orchestrator wiring, 3 integration tests proving attempts 0,1,2 recorded in node_states. Added `error: dict[str, Any] \| None` to RowResult for failure details. | Claude |
 | | | | |

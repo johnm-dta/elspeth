@@ -63,7 +63,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
     """Build a simple graph for testing (temporary until from_config is wired).
 
     Creates a linear graph matching the PipelineConfig structure:
-    source -> transforms... -> sinks
+    source -> transforms... -> config gates... -> sinks
 
     For gates, creates additional edges to all sinks (gates can route anywhere).
     Route labels use sink names for simplicity in tests.
@@ -90,42 +90,88 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
         graph.add_edge(prev, node_id, label="continue", mode=RoutingMode.MOVE)
         prev = node_id
 
-    # Add sinks and populate sink_id_map
+    # Add sinks first (need sink_ids for gate routing)
     sink_ids: dict[str, str] = {}
     for sink_name, sink in config.sinks.items():
         node_id = f"sink_{sink_name}"
         sink_ids[sink_name] = node_id
         graph.add_node(node_id, node_type="sink", plugin_name=sink.name)
-        graph.add_edge(prev, node_id, label=sink_name, mode=RoutingMode.MOVE)
-
-        # Gates can route to any sink, so add edges from all gates
-        for i, t in enumerate(config.transforms):
-            if isinstance(t, BaseGate):
-                gate_id = f"transform_{i}"
-                if gate_id != prev:  # Don't duplicate edge
-                    graph.add_edge(
-                        gate_id, node_id, label=sink_name, mode=RoutingMode.MOVE
-                    )
-
-    # Populate internal ID maps so get_sink_id_map() and get_transform_id_map() work
-    graph._sink_id_map = sink_ids
-    graph._transform_id_map = transform_ids
 
     # Populate route resolution map: (gate_id, label) -> sink_name
-    # In test graphs, route labels = sink names for simplicity
     route_resolution_map: dict[tuple[str, str], str] = {}
+
+    # Handle plugin-based gates in transforms
     for i, t in enumerate(config.transforms):
         if isinstance(t, BaseGate):  # It's a gate
             gate_id = f"transform_{i}"
             for sink_name in sink_ids:
                 route_resolution_map[(gate_id, sink_name)] = sink_name
-    graph._route_resolution_map = route_resolution_map
 
-    # Set output_sink - use "default" if present, otherwise first sink
+    # Add config-driven gates (from config.gates)
+    config_gate_ids: dict[str, str] = {}
+    for gate_config in config.gates:
+        gate_id = f"config_gate_{gate_config.name}"
+        config_gate_ids[gate_config.name] = gate_id
+
+        # Store condition in node config for audit trail
+        gate_node_config = {
+            "condition": gate_config.condition,
+            "routes": dict(gate_config.routes),
+        }
+        if gate_config.fork_to:
+            gate_node_config["fork_to"] = list(gate_config.fork_to)
+
+        graph.add_node(
+            gate_id,
+            node_type="gate",
+            plugin_name=f"config_gate:{gate_config.name}",
+            config=gate_node_config,
+        )
+
+        # Edge from previous node
+        graph.add_edge(prev, gate_id, label="continue", mode=RoutingMode.MOVE)
+
+        # Config gate routes to sinks
+        for route_label, target in gate_config.routes.items():
+            route_resolution_map[(gate_id, route_label)] = target
+
+            if target == "continue":
+                continue  # Not a sink route - no edge to create
+            if target in sink_ids:
+                graph.add_edge(
+                    gate_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE
+                )
+
+        prev = gate_id
+
+    # Add edges from transforms to sinks (for plugin-based gates and linear flow)
+    for sink_name in sink_ids:
+        node_id = sink_ids[sink_name]
+        # Gates can route to any sink
+        for i, t in enumerate(config.transforms):
+            if isinstance(t, BaseGate):
+                gate_id = f"transform_{i}"
+                graph.add_edge(gate_id, node_id, label=sink_name, mode=RoutingMode.MOVE)
+
+    # Edge from last node to output sink
     if "default" in sink_ids:
-        graph._output_sink = "default"
+        output_sink = "default"
     elif sink_ids:
-        graph._output_sink = next(iter(sink_ids))
+        output_sink = next(iter(sink_ids))
+    else:
+        output_sink = ""
+
+    if output_sink:
+        graph.add_edge(
+            prev, sink_ids[output_sink], label="continue", mode=RoutingMode.MOVE
+        )
+
+    # Populate internal ID maps
+    graph._sink_id_map = sink_ids
+    graph._transform_id_map = transform_ids
+    graph._config_gate_id_map = config_gate_ids
+    graph._route_resolution_map = route_resolution_map
+    graph._output_sink = output_sink
 
     return graph
 
@@ -294,10 +340,10 @@ class TestOrchestrator:
 
     def test_run_with_gate_routing(self) -> None:
         from elspeth.contracts import PluginSchema
+        from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-        from elspeth.plugins.results import GateResult, RoutingAction
 
         db = LandscapeDB.in_memory()
 
@@ -320,24 +366,6 @@ class TestOrchestrator:
             def close(self) -> None:
                 pass
 
-        class ThresholdGate(BaseGate):
-            name = "threshold"
-            input_schema = RowSchema
-            output_schema = RowSchema
-
-            def __init__(self) -> None:
-                super().__init__({})
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                if row["value"] > 50:
-                    return GateResult(
-                        row=row,
-                        action=RoutingAction.route(
-                            "high"
-                        ),  # Route label (same as sink name in test)
-                    )
-                return GateResult(row=row, action=RoutingAction.continue_())
-
         class CollectSink(_TestSinkBase):
             name = "collect"
 
@@ -359,15 +387,22 @@ class TestOrchestrator:
             def close(self) -> None:
                 pass
 
+        # Config-driven gate: routes values > 50 to "high" sink, else continues
+        threshold_gate = GateSettings(
+            name="threshold",
+            condition="row['value'] > 50",
+            routes={"true": "high", "false": "continue"},
+        )
+
         source = ListSource([{"value": 10}, {"value": 100}, {"value": 30}])
-        gate = ThresholdGate()
         default_sink = CollectSink()
         high_sink = CollectSink()
 
         config = PipelineConfig(
             source=source,
-            transforms=[gate],
+            transforms=[],
             sinks={"default": default_sink, "high": high_sink},
+            gates=[threshold_gate],
         )
 
         orchestrator = Orchestrator(db)

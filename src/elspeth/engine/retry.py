@@ -6,6 +6,13 @@ Provides configurable retry behavior for transform execution:
 - Configurable max attempts
 - Retryable error filtering
 - Attempt tracking for Landscape
+
+Integration Point (Phase 5):
+    The RowProcessor should use RetryManager.execute_with_retry() around
+    transform execution. Each retry attempt must be auditable with the key
+    (run_id, row_id, transform_seq, attempt). The on_retry callback should
+    call recorder.record_retry_attempt() to audit each attempt, ensuring
+    complete traceability of transient failures and recovery.
 """
 
 from collections.abc import Callable

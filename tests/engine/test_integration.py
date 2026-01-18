@@ -7,8 +7,8 @@ These tests verify:
 3. "Audit spine" tests proving every token reaches terminal state
 4. "No silent audit loss" tests proving errors raise, not skip
 
-All test plugins inherit from base classes (BaseTransform, BaseGate)
-because the processor uses isinstance() for type-safe plugin detection.
+Transform plugins inherit from BaseTransform. Gates use config-driven
+GateSettings which are processed by the engine's ExpressionParser.
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from elspeth.contracts import Determinism, PluginSchema, RoutingMode
-from elspeth.plugins.base import BaseGate, BaseTransform
+from elspeth.core.config import GateSettings
+from elspeth.plugins.base import BaseTransform
 
 if TYPE_CHECKING:
     from elspeth.contracts.results import ArtifactDescriptor, TransformResult
@@ -69,9 +70,9 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
     """Build a simple graph for testing (temporary until from_config is wired).
 
     Creates a linear graph matching the PipelineConfig structure:
-    source -> transforms... -> sinks
+    source -> transforms... -> config_gates... -> sinks
 
-    For gates, creates additional edges to all sinks (gates can route anywhere).
+    Config-driven gates (GateSettings in config.gates) can route to sinks.
     Route labels use sink names for simplicity in tests.
     """
     from elspeth.core.dag import ExecutionGraph
@@ -87,51 +88,66 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
     for i, t in enumerate(config.transforms):
         node_id = f"transform_{i}"
         transform_ids[i] = node_id
-        is_gate = isinstance(t, BaseGate)
         graph.add_node(
             node_id,
-            node_type="gate" if is_gate else "transform",
+            node_type="transform",
             plugin_name=t.name,
         )
         graph.add_edge(prev, node_id, label="continue", mode=RoutingMode.MOVE)
         prev = node_id
 
-    # Add sinks and populate sink_id_map
+    # Add sinks first (needed for config gate edges)
     sink_ids: dict[str, str] = {}
     for sink_name, sink in config.sinks.items():
         node_id = f"sink_{sink_name}"
         sink_ids[sink_name] = node_id
         graph.add_node(node_id, node_type="sink", plugin_name=sink.name)
-        graph.add_edge(prev, node_id, label=sink_name, mode=RoutingMode.MOVE)
 
-        # Gates can route to any sink, so add edges from all gates
-        for i, t in enumerate(config.transforms):
-            if isinstance(t, BaseGate):
-                gate_id = f"transform_{i}"
-                if gate_id != prev:  # Don't duplicate edge
-                    graph.add_edge(
-                        gate_id, node_id, label=sink_name, mode=RoutingMode.MOVE
-                    )
+    # Add config gates
+    config_gate_ids: dict[str, str] = {}
+    route_resolution_map: dict[tuple[str, str], str] = {}
 
-    # Populate internal ID maps so get_sink_id_map() and get_transform_id_map() work
+    for gate_config in config.gates:
+        node_id = f"config_gate_{gate_config.name}"
+        config_gate_ids[gate_config.name] = node_id
+        graph.add_node(
+            node_id,
+            node_type="gate",
+            plugin_name=f"config_gate:{gate_config.name}",
+            config={
+                "condition": gate_config.condition,
+                "routes": dict(gate_config.routes),
+            },
+        )
+        graph.add_edge(prev, node_id, label="continue", mode=RoutingMode.MOVE)
+
+        # Add route edges and resolution map
+        for route_label, target in gate_config.routes.items():
+            route_resolution_map[(node_id, route_label)] = target
+            if target not in ("continue", "fork") and target in sink_ids:
+                graph.add_edge(
+                    node_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE
+                )
+
+        # Handle fork paths
+        if gate_config.fork_to:
+            for path in gate_config.fork_to:
+                route_resolution_map[(node_id, path)] = "fork"
+                # Fork paths need edges to next step (or sink if no next step)
+                # For fork tests, we add edges to a pseudo-node or reuse sink
+
+        prev = node_id
+
+    # Edge from last node to output sink
+    output_sink = "default" if "default" in sink_ids else next(iter(sink_ids))
+    graph.add_edge(prev, sink_ids[output_sink], label="continue", mode=RoutingMode.MOVE)
+
+    # Populate internal ID maps
     graph._sink_id_map = sink_ids
     graph._transform_id_map = transform_ids
-
-    # Populate route resolution map: (gate_id, label) -> sink_name
-    # In test graphs, route labels = sink names for simplicity
-    route_resolution_map: dict[tuple[str, str], str] = {}
-    for i, t in enumerate(config.transforms):
-        if isinstance(t, BaseGate):  # It's a gate
-            gate_id = f"transform_{i}"
-            for sink_name in sink_ids:
-                route_resolution_map[(gate_id, sink_name)] = sink_name
+    graph._config_gate_id_map = config_gate_ids
     graph._route_resolution_map = route_resolution_map
-
-    # Set output_sink - use "default" if present, otherwise first sink
-    if "default" in sink_ids:
-        graph._output_sink = "default"
-    elif sink_ids:
-        graph._output_sink = next(iter(sink_ids))
+    graph._output_sink = output_sink
 
     return graph
 
@@ -456,7 +472,6 @@ class TestEngineIntegration:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
         from elspeth.engine.artifacts import ArtifactDescriptor
-        from elspeth.plugins.results import GateResult, RoutingAction
 
         db = LandscapeDB.in_memory()
 
@@ -478,24 +493,6 @@ class TestEngineIntegration:
 
             def close(self) -> None:
                 pass
-
-        class EvenOddGate(BaseGate):
-            name = "even_odd_gate"
-            input_schema = NumberSchema
-            output_schema = NumberSchema
-
-            def __init__(self) -> None:
-                super().__init__({})
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                if row["value"] % 2 == 0:
-                    return GateResult(
-                        row=row,
-                        action=RoutingAction.route(
-                            "even"
-                        ),  # Route label (same as sink name in test)
-                    )
-                return GateResult(row=row, action=RoutingAction.continue_())
 
         class CollectSink(_TestSinkBase):
             name: str
@@ -521,16 +518,23 @@ class TestEngineIntegration:
             def close(self) -> None:
                 pass
 
+        # Config-driven gate: routes even numbers to "even" sink, odd continue
+        even_odd_gate = GateSettings(
+            name="even_odd_gate",
+            condition="row['value'] % 2 == 0",
+            routes={"true": "even", "false": "continue"},
+        )
+
         # Pipeline with routing gate
         source = ListSource([{"value": 1}, {"value": 2}, {"value": 3}, {"value": 4}])
-        gate = EvenOddGate()
         default_sink = CollectSink("default_sink")
         even_sink = CollectSink("even_sink")
 
         config = PipelineConfig(
             source=source,
-            transforms=[gate],
+            transforms=[],
             sinks={"default": default_sink, "even": even_sink},
+            gates=[even_odd_gate],
         )
 
         orchestrator = Orchestrator(db)
@@ -591,17 +595,21 @@ class TestNoSilentAuditLoss:
     """Tests that ensure audit errors raise, never skip silently."""
 
     def test_missing_edge_raises_not_skips(self) -> None:
-        """Critical: MissingEdgeError must raise, not silently count.
+        """Critical: RouteValidationError must raise, not silently count.
 
-        This test ensures that when a gate routes to a sink that doesn't
-        have a registered edge, the error is raised immediately rather
-        than being silently counted as a failure.
+        This test ensures that when a config-driven gate routes to a sink that
+        doesn't exist, the error is raised immediately at pipeline initialization
+        (fail-fast) rather than being silently counted as a failure.
+
+        Note: Config-driven gates are validated at startup via RouteValidationError,
+        which is better than MissingEdgeError at runtime because it catches config
+        errors before any rows are processed.
         """
         from elspeth.contracts import PluginSchema
         from elspeth.core.landscape import LandscapeDB
-        from elspeth.engine import MissingEdgeError, Orchestrator, PipelineConfig
+        from elspeth.engine import Orchestrator, PipelineConfig
         from elspeth.engine.artifacts import ArtifactDescriptor
-        from elspeth.plugins.results import GateResult, RoutingAction
+        from elspeth.engine.orchestrator import RouteValidationError
 
         db = LandscapeDB.in_memory()
 
@@ -624,21 +632,6 @@ class TestNoSilentAuditLoss:
             def close(self) -> None:
                 pass
 
-        class MisroutingGate(BaseGate):
-            name = "misrouting_gate"
-            input_schema = RowSchema
-            output_schema = RowSchema
-
-            def __init__(self) -> None:
-                super().__init__({})
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                # Route to "phantom" which is not in route_resolution_map
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.route("phantom"),
-                )
-
         class CollectSink(_TestSinkBase):
             name = "default_sink"
 
@@ -660,23 +653,30 @@ class TestNoSilentAuditLoss:
             def close(self) -> None:
                 pass
 
+        # Config-driven gate that always routes to "phantom" (nonexistent sink)
+        misrouting_gate = GateSettings(
+            name="misrouting_gate",
+            condition="True",  # Always routes
+            routes={"true": "phantom"},  # Route to nonexistent sink
+        )
+
         source = ListSource([{"value": 42}])
-        gate = MisroutingGate()
         sink = CollectSink()
 
         config = PipelineConfig(
             source=source,
-            transforms=[gate],
+            transforms=[],
             sinks={"default": sink},  # Note: "phantom" is NOT configured
+            gates=[misrouting_gate],
         )
 
         orchestrator = Orchestrator(db)
 
-        # This MUST raise MissingEdgeError, not silently fail
-        with pytest.raises(MissingEdgeError) as exc_info:
+        # This MUST raise RouteValidationError at startup, not silently fail
+        with pytest.raises(RouteValidationError) as exc_info:
             orchestrator.run(config, graph=_build_test_graph(config))
 
-        # Verify error message includes the missing edge label
+        # Verify error message includes the missing sink name
         assert "phantom" in str(exc_info.value)
 
     def test_missing_edge_error_is_not_catchable_silently(self) -> None:
@@ -957,7 +957,6 @@ class TestAuditTrailCompleteness:
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine import Orchestrator, PipelineConfig
         from elspeth.engine.artifacts import ArtifactDescriptor
-        from elspeth.plugins.results import GateResult, RoutingAction
 
         db = LandscapeDB.in_memory()
 
@@ -979,21 +978,6 @@ class TestAuditTrailCompleteness:
 
             def close(self) -> None:
                 pass
-
-        class SplitGate(BaseGate):
-            name = "split_gate"
-            input_schema = ValueSchema
-            output_schema = ValueSchema
-
-            def __init__(self) -> None:
-                super().__init__({})
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                if row["value"] > 50:
-                    return GateResult(
-                        row=row, action=RoutingAction.route("high")
-                    )  # Route label
-                return GateResult(row=row, action=RoutingAction.continue_())
 
         class CollectSink(_TestSinkBase):
             def __init__(self, sink_name: str):
@@ -1017,17 +1001,24 @@ class TestAuditTrailCompleteness:
             def close(self) -> None:
                 pass
 
+        # Config-driven gate: routes values > 50 to "high" sink, otherwise continue
+        split_gate = GateSettings(
+            name="split_gate",
+            condition="row['value'] > 50",
+            routes={"true": "high", "false": "continue"},
+        )
+
         source = ListSource(
             [{"value": 10}, {"value": 60}, {"value": 30}, {"value": 90}]
         )
-        gate = SplitGate()
         default_sink = CollectSink("default_output")
         high_sink = CollectSink("high_output")
 
         config = PipelineConfig(
             source=source,
-            transforms=[gate],
+            transforms=[],
             sinks={"default": default_sink, "high": high_sink},
+            gates=[split_gate],
         )
 
         orchestrator = Orchestrator(db)
@@ -1063,7 +1054,7 @@ class TestForkIntegration:
 
         This test verifies end-to-end fork behavior:
         - 2 rows from source
-        - Each row forks into 2 children via ForkGate
+        - Each row forks into 2 children via config-driven ForkGate
         - All 4 children (2 rows x 2 forks) continue processing and reach sink
 
         Fork behavior: Fork creates child tokens that continue processing through
@@ -1073,13 +1064,12 @@ class TestForkIntegration:
         Implementation note: Uses RowProcessor directly with manually registered
         edges to work around DiGraph's single-edge limitation between node pairs.
         """
-        from elspeth.contracts import PluginSchema, RowOutcome
+        from elspeth.contracts import RowOutcome
         from elspeth.contracts.schema import SchemaConfig
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import GateResult, RoutingAction
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -1087,9 +1077,6 @@ class TestForkIntegration:
         # Start a run
         run = recorder.begin_run(config={}, canonical_version="v1")
         run_id = run.run_id
-
-        class ValueSchema(PluginSchema):
-            value: int
 
         # Register nodes
         source_node = recorder.register_node(
@@ -1103,7 +1090,7 @@ class TestForkIntegration:
 
         gate_node = recorder.register_node(
             run_id=run_id,
-            plugin_name="fork_gate",
+            plugin_name="config_gate:fork_gate",
             node_type="gate",
             plugin_version="1.0",
             config={},
@@ -1166,27 +1153,15 @@ class TestForkIntegration:
             (gate_node.node_id, "path_b"): "fork",
         }
 
-        class ForkGate(BaseGate):
-            """Gate that forks every row into two parallel paths."""
+        # Config-driven fork gate: forks every row into two parallel paths
+        fork_gate = GateSettings(
+            name="fork_gate",
+            condition="True",  # Always fork
+            routes={"true": "fork"},
+            fork_to=["path_a", "path_b"],
+        )
 
-            name = "fork_gate"
-            input_schema = ValueSchema
-            output_schema = ValueSchema
-
-            def __init__(self, node_id: str) -> None:
-                super().__init__({})
-                self.node_id = node_id
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.fork_to_paths(
-                        ["path_a", "path_b"],
-                        reason={"fork_reason": "parallel processing"},
-                    ),
-                )
-
-        # Create processor
+        # Create processor with config gate
         processor = RowProcessor(
             recorder=recorder,
             span_factory=SpanFactory(),
@@ -1194,10 +1169,9 @@ class TestForkIntegration:
             source_node_id=source_node.node_id,
             edge_map=edge_map,
             route_resolution_map=route_resolution_map,
+            config_gates=[fork_gate],
+            config_gate_id_map={"fork_gate": gate_node.node_id},
         )
-
-        # Create gate with node_id set
-        gate = ForkGate(gate_node.node_id)
 
         # Create context
         ctx = PluginContext(run_id=run_id, config={})
@@ -1209,7 +1183,7 @@ class TestForkIntegration:
             results = processor.process_row(
                 row_index=row_index,
                 row_data=row_data,
-                transforms=[gate],
+                transforms=[],  # No plugin transforms, only config gate
                 ctx=ctx,
             )
             all_results.extend(results)
@@ -1303,7 +1277,7 @@ class TestForkCoalescePipelineIntegration:
         from elspeth.engine.spans import SpanFactory
         from elspeth.engine.tokens import TokenManager
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import GateResult, RoutingAction, TransformResult
+        from elspeth.plugins.results import TransformResult
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -1328,7 +1302,7 @@ class TestForkCoalescePipelineIntegration:
         gate_node = recorder.register_node(
             run_id=run_id,
             node_id="fork_gate",
-            plugin_name="fork_gate",
+            plugin_name="config_gate:fork_gate",
             node_type=NodeType.GATE,
             plugin_version="1.0.0",
             config={},
@@ -1404,26 +1378,13 @@ class TestForkCoalescePipelineIntegration:
             (gate_node.node_id, "entities"): "fork",
         }
 
-        # Create test plugins
-        class ForkGate(BaseGate):
-            """Gate that forks every row into sentiment and entity branches."""
-
-            name = "fork_gate"
-            input_schema = _TestSchema
-            output_schema = _TestSchema
-
-            def __init__(self, node_id: str) -> None:
-                super().__init__({})
-                self.node_id = node_id
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.fork_to_paths(
-                        ["sentiment", "entities"],
-                        reason={"fork_reason": "parallel analysis"},
-                    ),
-                )
+        # Config-driven fork gate: forks every row into sentiment and entity branches
+        fork_gate_config = GateSettings(
+            name="fork_gate",
+            condition="True",  # Always fork
+            routes={"true": "fork"},
+            fork_to=["sentiment", "entities"],
+        )
 
         class SentimentTransform(BaseTransform):
             """Simulates sentiment analysis."""
@@ -1503,7 +1464,6 @@ class TestForkCoalescePipelineIntegration:
         coalesce_executor.register_coalesce(coalesce_settings, coalesce_node.node_id)
 
         # Create plugins
-        gate = ForkGate(gate_node.node_id)
         sentiment = SentimentTransform(sentiment_node.node_id)
         entity = EntityTransform(entity_node.node_id)
         sink = CollectSink(sink_node.node_id)
@@ -1522,7 +1482,7 @@ class TestForkCoalescePipelineIntegration:
             row_data=source_row,
         )
 
-        # Execute the fork gate
+        # Execute the config-driven fork gate
         from elspeth.engine.executors import GateExecutor
 
         gate_executor = GateExecutor(
@@ -1531,8 +1491,9 @@ class TestForkCoalescePipelineIntegration:
             edge_map=edge_map,
             route_resolution_map=route_resolution_map,
         )
-        gate_outcome = gate_executor.execute_gate(
-            gate=gate,
+        gate_outcome = gate_executor.execute_config_gate(
+            gate_config=fork_gate_config,
+            node_id=gate_node.node_id,
             token=initial_token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -1676,7 +1637,6 @@ class TestForkCoalescePipelineIntegration:
         from elspeth.engine.spans import SpanFactory
         from elspeth.engine.tokens import TokenManager
         from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import GateResult, RoutingAction
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)
@@ -1699,7 +1659,7 @@ class TestForkCoalescePipelineIntegration:
         gate_node = recorder.register_node(
             run_id=run_id,
             node_id="gate",
-            plugin_name="fork_gate",
+            plugin_name="config_gate:fork_gate",
             node_type=NodeType.GATE,
             plugin_version="1.0.0",
             config={},
@@ -1749,21 +1709,13 @@ class TestForkCoalescePipelineIntegration:
             (gate_node.node_id, "path_b"): "fork",
         }
 
-        # Create plugins
-        class ForkGate(BaseGate):
-            name = "fork_gate"
-            input_schema = _TestSchema
-            output_schema = _TestSchema
-
-            def __init__(self, node_id: str) -> None:
-                super().__init__({})
-                self.node_id = node_id
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.fork_to_paths(["path_a", "path_b"]),
-                )
+        # Config-driven fork gate: forks every row into path_a and path_b
+        fork_gate_config = GateSettings(
+            name="fork_gate",
+            condition="True",  # Always fork
+            routes={"true": "fork"},
+            fork_to=["path_a", "path_b"],
+        )
 
         class CollectSink(_TestSinkBase):
             name = "test_sink"
@@ -1815,7 +1767,6 @@ class TestForkCoalescePipelineIntegration:
             route_resolution_map=route_resolution_map,
         )
 
-        gate = ForkGate(gate_node.node_id)
         sink = CollectSink(sink_node.node_id)
         ctx = PluginContext(run_id=run_id, config={})
 
@@ -1832,9 +1783,10 @@ class TestForkCoalescePipelineIntegration:
                 row_data=source_row,
             )
 
-            # Fork
-            gate_outcome = gate_executor.execute_gate(
-                gate=gate,
+            # Fork using config-driven gate
+            gate_outcome = gate_executor.execute_config_gate(
+                gate_config=fork_gate_config,
+                node_id=gate_node.node_id,
                 token=initial_token,
                 ctx=ctx,
                 step_in_pipeline=1,

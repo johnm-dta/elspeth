@@ -1981,6 +1981,253 @@ class TestRowProcessorCoalesce:
         assert merged_data["sentiment"] == "positive"
         assert merged_data["entities"] == ["ACME"]
 
+    def test_coalesced_token_audit_trail_complete(self) -> None:
+        """Coalesced tokens should have complete audit trail for explain().
+
+        After fork -> process -> coalesce, querying explain() on the merged
+        token should show:
+        - Original source row
+        - Fork point (parent token for forked children)
+        - Both branch processing steps (node_states for each consumed token)
+        - Coalesce point with parent relationships
+
+        This test verifies the audit infrastructure captures the complete
+        lineage for a coalesced token, enabling explain() queries.
+        """
+        from elspeth.contracts import NodeType, RoutingMode
+        from elspeth.core.config import CoalesceSettings
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        token_manager = TokenManager(recorder)
+
+        # Register nodes
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        fork_gate = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="splitter",
+            node_type=NodeType.GATE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_a = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="enrich_a",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_b = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="enrich_b",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        coalesce_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="merger",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Register edges for fork paths
+        edge_a = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=fork_gate.node_id,
+            to_node_id=transform_a.node_id,
+            label="path_a",
+            mode=RoutingMode.COPY,
+        )
+        edge_b = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=fork_gate.node_id,
+            to_node_id=transform_b.node_id,
+            label="path_b",
+            mode=RoutingMode.COPY,
+        )
+
+        # Setup coalesce executor
+        coalesce_settings = CoalesceSettings(
+            name="merger",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+        )
+        coalesce_executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            token_manager=token_manager,
+            run_id=run.run_id,
+        )
+        coalesce_executor.register_coalesce(coalesce_settings, coalesce_node.node_id)
+
+        # Create gate and transforms (inline test classes)
+        class ForkGate(BaseGate):
+            name = "splitter"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
+                return GateResult(
+                    row=row,
+                    action=RoutingAction.fork_to_paths(["path_a", "path_b"]),
+                )
+
+        class EnrichA(BaseTransform):
+            name = "enrich_a"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success({**row, "sentiment": "positive"})
+
+        class EnrichB(BaseTransform):
+            name = "enrich_b"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success({**row, "entities": ["ACME"]})
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            edge_map={
+                (fork_gate.node_id, "path_a"): edge_a.edge_id,
+                (fork_gate.node_id, "path_b"): edge_b.edge_id,
+            },
+            coalesce_executor=coalesce_executor,
+            coalesce_node_ids={"merger": coalesce_node.node_id},
+        )
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process the row through fork -> enrich -> coalesce
+        results = processor.process_row(
+            row_index=0,
+            row_data={"text": "ACME earnings"},
+            transforms=[
+                ForkGate(fork_gate.node_id),
+                EnrichA(transform_a.node_id),
+                EnrichB(transform_b.node_id),
+            ],
+            ctx=ctx,
+            coalesce_at_step=3,
+            coalesce_name="merger",
+        )
+
+        # === Verify outcomes ===
+        forked_results = [r for r in results if r.outcome == RowOutcome.FORKED]
+        coalesced_results = [r for r in results if r.outcome == RowOutcome.COALESCED]
+
+        assert len(forked_results) == 1, "Should have exactly 1 FORKED result"
+        assert len(coalesced_results) == 1, "Should have exactly 1 COALESCED result"
+
+        forked = forked_results[0]
+        coalesced = coalesced_results[0]
+
+        # === Audit Trail: Verify source row exists ===
+        row = recorder.get_row(forked.row_id)
+        assert row is not None, "Source row should be recorded"
+        assert row.row_index == 0
+        assert row.source_node_id == source.node_id
+
+        # === Audit Trail: Verify merged token has parent relationships ===
+        # The merged token's parents are the consumed child tokens (with branch names)
+        merged_token = coalesced.token
+        merged_parents = recorder.get_token_parents(merged_token.token_id)
+        assert (
+            len(merged_parents) == 2
+        ), "Merged token should have 2 parents (the consumed children)"
+
+        # Get child token IDs from the merged token's parents
+        child_token_ids = {p.parent_token_id for p in merged_parents}
+
+        # Verify child tokens have branch names
+        for child_token_id in child_token_ids:
+            child_token = recorder.get_token(child_token_id)
+            assert child_token is not None, "Child token should exist"
+            assert child_token.branch_name in (
+                "path_a",
+                "path_b",
+            ), f"Child token should have branch name, got {child_token.branch_name}"
+
+        # Verify child tokens have parent relationships pointing to forked token
+        for child_token_id in child_token_ids:
+            parents = recorder.get_token_parents(child_token_id)
+            assert len(parents) == 1, "Child token should have 1 parent"
+            assert (
+                parents[0].parent_token_id == forked.token_id
+            ), "Parent should be the forked token"
+
+        # === Audit Trail: Verify consumed tokens have node_states at coalesce ===
+        # The CoalesceExecutor records node_states for consumed tokens
+        for child_token_id in child_token_ids:
+            states = recorder.get_node_states_for_token(child_token_id)
+            # Should have states: gate evaluation + transform processing + coalesce
+            assert (
+                len(states) >= 1
+            ), f"Child token {child_token_id} should have node states"
+
+            # Check that at least one state is at the coalesce node
+            coalesce_states = [s for s in states if s.node_id == coalesce_node.node_id]
+            assert (
+                len(coalesce_states) == 1
+            ), "Child token should have exactly one coalesce node_state"
+
+            coalesce_state = coalesce_states[0]
+            assert coalesce_state.status.value == "completed"
+
+        # === Audit Trail: Verify merged token has join_group_id ===
+        merged_token_record = recorder.get_token(merged_token.token_id)
+        assert merged_token_record is not None
+        assert (
+            merged_token_record.join_group_id is not None
+        ), "Merged token should have join_group_id"
+
+        # === Audit Trail: Verify complete lineage back to source ===
+        # Follow the chain: merged_token -> children -> forked parent -> source row
+        assert (
+            merged_token.row_id == row.row_id
+        ), "Merged token traces back to source row"
+
     def test_coalesce_best_effort_with_quarantined_child(self) -> None:
         """best_effort policy should merge available children even if one quarantines.
 

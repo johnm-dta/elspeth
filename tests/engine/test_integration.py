@@ -1271,3 +1271,620 @@ class TestForkIntegration:
 
         # Complete the run
         recorder.complete_run(run_id, status="completed")
+
+
+class TestForkCoalescePipelineIntegration:
+    """End-to-end fork -> coalesce -> sink tests.
+
+    Verifies the complete pipeline flow:
+    - Source emits rows
+    - Fork gate splits rows to parallel branches
+    - Each branch processes independently
+    - Coalesce merges results
+    - Sink receives merged data (not fork children separately)
+    - Artifacts recorded with content hashes
+    """
+
+    def test_fork_coalesce_writes_merged_to_sink(self) -> None:
+        """Complete pipeline: source -> fork -> process -> coalesce -> sink.
+
+        Verifies:
+        - Sink receives merged data (not 2 fork children separately)
+        - Only 1 row written to sink per source row
+        - Sink artifact has correct content hash
+        """
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.config import CoalesceSettings
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.executors import SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import GateResult, RoutingAction, TransformResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Start a run
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        # Register nodes
+        source_node = recorder.register_node(
+            run_id=run_id,
+            node_id="source_1",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        gate_node = recorder.register_node(
+            run_id=run_id,
+            node_id="fork_gate",
+            plugin_name="fork_gate",
+            node_type=NodeType.GATE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Register branch transform nodes (simulate processing on each branch)
+        sentiment_node = recorder.register_node(
+            run_id=run_id,
+            node_id="sentiment_transform",
+            plugin_name="sentiment_analyzer",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        entity_node = recorder.register_node(
+            run_id=run_id,
+            node_id="entity_transform",
+            plugin_name="entity_extractor",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        coalesce_node = recorder.register_node(
+            run_id=run_id,
+            node_id="merge_coalesce",
+            plugin_name="merge_results",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="output_sink",
+            plugin_name="test_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Register edges for fork paths
+        edge_sentiment = recorder.register_edge(
+            run_id=run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=sentiment_node.node_id,
+            label="sentiment",
+            mode=RoutingMode.COPY,
+        )
+        edge_entity = recorder.register_edge(
+            run_id=run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=entity_node.node_id,
+            label="entities",
+            mode=RoutingMode.COPY,
+        )
+
+        # Build edge_map for GateExecutor
+        edge_map = {
+            (gate_node.node_id, "sentiment"): edge_sentiment.edge_id,
+            (gate_node.node_id, "entities"): edge_entity.edge_id,
+        }
+
+        # Route resolution map: fork paths resolve to "fork"
+        route_resolution_map: dict[tuple[str, str], str] = {
+            (gate_node.node_id, "sentiment"): "fork",
+            (gate_node.node_id, "entities"): "fork",
+        }
+
+        # Create test plugins
+        class ForkGate(BaseGate):
+            """Gate that forks every row into sentiment and entity branches."""
+
+            name = "fork_gate"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
+                return GateResult(
+                    row=row,
+                    action=RoutingAction.fork_to_paths(
+                        ["sentiment", "entities"],
+                        reason={"fork_reason": "parallel analysis"},
+                    ),
+                )
+
+        class SentimentTransform(BaseTransform):
+            """Simulates sentiment analysis."""
+
+            name = "sentiment_analyzer"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(self, row: Any, ctx: Any) -> TransformResult:
+                return TransformResult.success({"sentiment": "positive"})
+
+        class EntityTransform(BaseTransform):
+            """Simulates entity extraction."""
+
+            name = "entity_extractor"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(self, row: Any, ctx: Any) -> TransformResult:
+                return TransformResult.success({"entities": ["ACME"]})
+
+        class CollectSink(_TestSinkBase):
+            """Test sink that collects written rows."""
+
+            name = "test_sink"
+
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.rows_written: list[dict[str, Any]] = []
+                self._artifact_counter = 0
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.rows_written.extend(rows)
+                self._artifact_counter += 1
+                content_hash = f"hash_{self._artifact_counter}"
+                return ArtifactDescriptor.for_file(
+                    path=f"memory://output_{self._artifact_counter}",
+                    size_bytes=len(str(rows)),
+                    content_hash=content_hash,
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Create components
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        # Configure coalesce
+        coalesce_settings = CoalesceSettings(
+            name="merge_results",
+            branches=["sentiment", "entities"],
+            policy="require_all",
+            merge="union",
+        )
+
+        coalesce_executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run_id,
+        )
+        coalesce_executor.register_coalesce(coalesce_settings, coalesce_node.node_id)
+
+        # Create plugins
+        gate = ForkGate(gate_node.node_id)
+        sentiment = SentimentTransform(sentiment_node.node_id)
+        entity = EntityTransform(entity_node.node_id)
+        sink = CollectSink(sink_node.node_id)
+
+        ctx = PluginContext(run_id=run_id, config={})
+
+        # Process a single source row through the pipeline
+        # The flow: source -> fork gate -> [sentiment branch, entity branch] -> coalesce
+        source_row = {"text": "ACME reported great earnings"}
+
+        # Step 1: Process through gate (fork)
+        initial_token = token_manager.create_initial_token(
+            run_id=run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            row_data=source_row,
+        )
+
+        # Execute the fork gate
+        from elspeth.engine.executors import GateExecutor
+
+        gate_executor = GateExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            edge_map=edge_map,
+            route_resolution_map=route_resolution_map,
+        )
+        gate_outcome = gate_executor.execute_gate(
+            gate=gate,
+            token=initial_token,
+            ctx=ctx,
+            step_in_pipeline=1,
+            token_manager=token_manager,
+        )
+
+        # Verify fork created 2 children
+        assert len(gate_outcome.child_tokens) == 2
+        sentiment_token = next(
+            t for t in gate_outcome.child_tokens if t.branch_name == "sentiment"
+        )
+        entity_token = next(
+            t for t in gate_outcome.child_tokens if t.branch_name == "entities"
+        )
+
+        # Step 2: Process each branch through its transform
+        from elspeth.engine.executors import TransformExecutor
+
+        transform_executor = TransformExecutor(recorder, span_factory)
+
+        # Process sentiment branch
+        sentiment_result, sentiment_token_updated, _ = (
+            transform_executor.execute_transform(
+                transform=sentiment,
+                token=sentiment_token,
+                ctx=ctx,
+                step_in_pipeline=2,
+            )
+        )
+        assert sentiment_result.status == "success"
+        # Update token with transformed data while preserving branch_name
+        sentiment_token_processed = TokenInfo(
+            row_id=sentiment_token_updated.row_id,
+            token_id=sentiment_token_updated.token_id,
+            row_data=sentiment_result.row,
+            branch_name="sentiment",
+        )
+
+        # Process entity branch
+        entity_result, entity_token_updated, _ = transform_executor.execute_transform(
+            transform=entity,
+            token=entity_token,
+            ctx=ctx,
+            step_in_pipeline=2,
+        )
+        assert entity_result.status == "success"
+        # Update token with transformed data while preserving branch_name
+        entity_token_processed = TokenInfo(
+            row_id=entity_token_updated.row_id,
+            token_id=entity_token_updated.token_id,
+            row_data=entity_result.row,
+            branch_name="entities",
+        )
+
+        # Step 3: Coalesce the branches
+        outcome1 = coalesce_executor.accept(
+            token=sentiment_token_processed,
+            coalesce_name="merge_results",
+            step_in_pipeline=3,
+        )
+        assert outcome1.held is True  # Waiting for other branch
+
+        outcome2 = coalesce_executor.accept(
+            token=entity_token_processed,
+            coalesce_name="merge_results",
+            step_in_pipeline=3,
+        )
+        assert outcome2.held is False  # All arrived, merged
+        assert outcome2.merged_token is not None
+
+        # Verify merged data contains both sentiment and entities
+        merged_data = outcome2.merged_token.row_data
+        assert "sentiment" in merged_data
+        assert "entities" in merged_data
+        assert merged_data["sentiment"] == "positive"
+        assert merged_data["entities"] == ["ACME"]
+
+        # Step 4: Write merged token to sink
+        sink_executor = SinkExecutor(recorder, span_factory, run_id)
+        artifact = sink_executor.write(
+            sink=sink,
+            tokens=[outcome2.merged_token],
+            ctx=ctx,
+            step_in_pipeline=4,
+        )
+
+        # CRITICAL VERIFICATION: Sink received 1 merged row, not 2 fork children
+        assert len(sink.rows_written) == 1, (
+            f"Expected 1 merged row, got {len(sink.rows_written)}. "
+            "Fork children should be coalesced before sink."
+        )
+
+        # Verify the single row contains merged data
+        written_row = sink.rows_written[0]
+        assert written_row["sentiment"] == "positive"
+        assert written_row["entities"] == ["ACME"]
+
+        # Verify artifact recorded with content hash
+        assert artifact is not None
+        assert artifact.content_hash is not None
+        assert artifact.content_hash.startswith("hash_")
+
+        # Verify artifact in landscape
+        artifacts = recorder.get_artifacts(run_id)
+        assert len(artifacts) == 1
+        assert artifacts[0].content_hash == artifact.content_hash
+
+        # Complete the run
+        recorder.complete_run(run_id, status="completed")
+
+        # Verify audit trail completeness
+        # We should have:
+        # - 1 source row
+        # - 3 tokens: 1 parent (forked) + 2 children (coalesced) -> 1 merged
+        # Actually: 1 parent + 2 children + 1 merged = 4 tokens total
+        rows = recorder.get_rows(run_id)
+        assert len(rows) == 1
+
+        all_tokens = recorder.get_tokens(rows[0].row_id)
+        # Parent token, 2 fork children, 1 merged token = 4 total
+        assert len(all_tokens) == 4, f"Expected 4 tokens, got {len(all_tokens)}"
+
+    def test_multiple_rows_coalesce_correctly(self) -> None:
+        """Multiple source rows each fork and coalesce independently.
+
+        Verifies:
+        - Each source row's fork children merge with correct siblings
+        - No cross-contamination between rows
+        - Sink receives correct number of merged rows
+        """
+        from elspeth.contracts import NodeType, TokenInfo
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.config import CoalesceSettings
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.executors import (
+            GateExecutor,
+            SinkExecutor,
+        )
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import GateResult, RoutingAction
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        # Register nodes
+        source_node = recorder.register_node(
+            run_id=run_id,
+            node_id="source",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        gate_node = recorder.register_node(
+            run_id=run_id,
+            node_id="gate",
+            plugin_name="fork_gate",
+            node_type=NodeType.GATE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        recorder.register_node(
+            run_id=run_id,
+            node_id="coalesce",
+            plugin_name="merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="sink",
+            plugin_name="test_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Register edges
+        edge_a = recorder.register_edge(
+            run_id=run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id="coalesce",
+            label="path_a",
+            mode=RoutingMode.COPY,
+        )
+        edge_b = recorder.register_edge(
+            run_id=run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id="coalesce",
+            label="path_b",
+            mode=RoutingMode.COPY,
+        )
+
+        edge_map = {
+            (gate_node.node_id, "path_a"): edge_a.edge_id,
+            (gate_node.node_id, "path_b"): edge_b.edge_id,
+        }
+        route_resolution_map = {
+            (gate_node.node_id, "path_a"): "fork",
+            (gate_node.node_id, "path_b"): "fork",
+        }
+
+        # Create plugins
+        class ForkGate(BaseGate):
+            name = "fork_gate"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def evaluate(self, row: Any, ctx: Any) -> GateResult:
+                return GateResult(
+                    row=row,
+                    action=RoutingAction.fork_to_paths(["path_a", "path_b"]),
+                )
+
+        class CollectSink(_TestSinkBase):
+            name = "test_sink"
+
+            def __init__(self, node_id: str) -> None:
+                self.node_id = node_id
+                self.rows_written: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.rows_written.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://output",
+                    size_bytes=100,
+                    content_hash="test_hash",
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Setup executors
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        coalesce_settings = CoalesceSettings(
+            name="merge",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+        )
+
+        coalesce_executor = CoalesceExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            token_manager=token_manager,
+            run_id=run_id,
+        )
+        coalesce_executor.register_coalesce(coalesce_settings, "coalesce")
+
+        gate_executor = GateExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            edge_map=edge_map,
+            route_resolution_map=route_resolution_map,
+        )
+
+        gate = ForkGate(gate_node.node_id)
+        sink = CollectSink(sink_node.node_id)
+        ctx = PluginContext(run_id=run_id, config={})
+
+        # Process 3 source rows
+        source_rows = [{"id": 1}, {"id": 2}, {"id": 3}]
+        merged_tokens: list[TokenInfo] = []
+
+        for idx, source_row in enumerate(source_rows):
+            # Create initial token
+            initial_token = token_manager.create_initial_token(
+                run_id=run_id,
+                source_node_id=source_node.node_id,
+                row_index=idx,
+                row_data=source_row,
+            )
+
+            # Fork
+            gate_outcome = gate_executor.execute_gate(
+                gate=gate,
+                token=initial_token,
+                ctx=ctx,
+                step_in_pipeline=1,
+                token_manager=token_manager,
+            )
+
+            # Simulate branch processing - each branch adds its identifier
+            for child in gate_outcome.child_tokens:
+                processed_data = child.row_data.copy()
+                processed_data[f"from_{child.branch_name}"] = True
+
+                processed_token = TokenInfo(
+                    row_id=child.row_id,
+                    token_id=child.token_id,
+                    row_data=processed_data,
+                    branch_name=child.branch_name,
+                )
+
+                # Submit to coalesce
+                outcome = coalesce_executor.accept(
+                    token=processed_token,
+                    coalesce_name="merge",
+                    step_in_pipeline=2,
+                )
+
+                if not outcome.held and outcome.merged_token is not None:
+                    merged_tokens.append(outcome.merged_token)
+
+        # All 3 rows should have merged
+        assert (
+            len(merged_tokens) == 3
+        ), f"Expected 3 merged tokens, got {len(merged_tokens)}"
+
+        # Write to sink
+        sink_executor = SinkExecutor(recorder, span_factory, run_id)
+        sink_executor.write(
+            sink=sink,
+            tokens=merged_tokens,
+            ctx=ctx,
+            step_in_pipeline=3,
+        )
+
+        # Verify sink received exactly 3 merged rows
+        assert len(sink.rows_written) == 3
+
+        # Verify each row has data from both branches and correct ID
+        for idx, row in enumerate(sink.rows_written):
+            expected_id = idx + 1
+            assert row["id"] == expected_id, f"Wrong ID in row {idx}"
+            assert row["from_path_a"] is True, f"Missing path_a data in row {idx}"
+            assert row["from_path_b"] is True, f"Missing path_b data in row {idx}"
+
+        recorder.complete_run(run_id, status="completed")

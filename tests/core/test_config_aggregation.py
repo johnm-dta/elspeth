@@ -243,3 +243,76 @@ class TestAggregationSettings:
             options={"fields": ["value"], "compute_mean": True},
         )
         assert settings.options == {"fields": ["value"], "compute_mean": True}
+
+
+class TestElspethSettingsAggregations:
+    """Tests for aggregations in ElspethSettings."""
+
+    def test_elspeth_settings_aggregations_default_empty(self) -> None:
+        """Aggregations defaults to empty list."""
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={"output": SinkSettings(plugin="csv")},
+            output_sink="output",
+        )
+        assert settings.aggregations == []
+
+    def test_elspeth_settings_with_aggregations(self) -> None:
+        """Aggregations can be configured."""
+        from elspeth.core.config import (
+            AggregationSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+            TriggerConfig,
+        )
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={"output": SinkSettings(plugin="csv")},
+            output_sink="output",
+            aggregations=[
+                AggregationSettings(
+                    name="batch_stats",
+                    plugin="stats",
+                    trigger=TriggerConfig(count=100),
+                ),
+            ],
+        )
+        assert len(settings.aggregations) == 1
+        assert settings.aggregations[0].name == "batch_stats"
+
+    def test_elspeth_settings_rejects_duplicate_aggregation_names(self) -> None:
+        """Aggregation names must be unique."""
+        from elspeth.core.config import (
+            AggregationSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+            TriggerConfig,
+        )
+
+        with pytest.raises(ValidationError, match=r"(?i)duplicate.*name"):
+            ElspethSettings(
+                datasource=DatasourceSettings(plugin="csv"),
+                sinks={"output": SinkSettings(plugin="csv")},
+                output_sink="output",
+                aggregations=[
+                    AggregationSettings(
+                        name="batch_stats",
+                        plugin="stats",
+                        trigger=TriggerConfig(count=100),
+                    ),
+                    AggregationSettings(
+                        name="batch_stats",  # Duplicate!
+                        plugin="other_stats",
+                        trigger=TriggerConfig(timeout_seconds=30),
+                    ),
+                ],
+            )

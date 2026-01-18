@@ -584,6 +584,12 @@ class ElspethSettings(BaseModel):
         description="Coalesce configurations for merging forked paths",
     )
 
+    # Optional - aggregations (config-driven batching)
+    aggregations: list[AggregationSettings] = Field(
+        default_factory=list,
+        description="Aggregation configurations for batching rows",
+    )
+
     # Optional - subsystem configuration with defaults
     landscape: LandscapeSettings = Field(
         default_factory=LandscapeSettings,
@@ -633,6 +639,15 @@ class ElspethSettings(BaseModel):
                     f"landscape.export.sink '{self.landscape.export.sink}' not found in sinks. "
                     f"Available sinks: {list(self.sinks.keys())}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_unique_aggregation_names(self) -> "ElspethSettings":
+        """Ensure aggregation names are unique."""
+        names = [agg.name for agg in self.aggregations]
+        duplicates = [name for name in names if names.count(name) > 1]
+        if duplicates:
+            raise ValueError(f"Duplicate aggregation name(s): {set(duplicates)}")
         return self
 
     @field_validator("sinks")

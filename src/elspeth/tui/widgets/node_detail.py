@@ -1,9 +1,10 @@
 """Node detail panel widget for displaying node state information."""
 
 import json
-from typing import Any
 
 import structlog
+
+from elspeth.tui.types import NodeStateInfo
 
 logger = structlog.get_logger(__name__)
 
@@ -12,18 +13,24 @@ class NodeDetailPanel:
     """Panel displaying detailed information about a selected node.
 
     Shows:
-    - Node identity (plugin name, type, IDs)
-    - Status and timing
-    - Input/output hashes
-    - Errors (if failed)
-    - Artifacts (if sink)
+    - Node identity (plugin name, type, IDs) - REQUIRED fields
+    - Status and timing - optional, depends on execution state
+    - Input/output hashes - optional
+    - Errors (if failed) - optional
+    - Artifacts (if sink) - optional
+
+    Field access follows the three-tier trust model:
+    - Required fields (node_id, plugin_name, node_type): Direct access.
+      Missing = bug in _load_node_state, should crash.
+    - Optional fields: Use .get() without default, then explicit fallback
+      for display (e.g., `value or 'N/A'`).
     """
 
-    def __init__(self, node_state: dict[str, Any] | None) -> None:
+    def __init__(self, node_state: NodeStateInfo | None) -> None:
         """Initialize with node state data.
 
         Args:
-            node_state: Dict containing node state fields, or None if nothing selected
+            node_state: NodeStateInfo with required fields, or None if nothing selected
         """
         self._state = node_state
 
@@ -38,31 +45,35 @@ class NodeDetailPanel:
 
         lines: list[str] = []
 
-        # Header
-        plugin_name = self._state.get("plugin_name", "unknown")
-        node_type = self._state.get("node_type", "unknown")
+        # Header - REQUIRED fields, direct access (crash if missing = bug)
+        plugin_name = self._state["plugin_name"]
+        node_type = self._state["node_type"]
         lines.append(f"=== {plugin_name} ({node_type}) ===")
         lines.append("")
 
-        # Identity
+        # Identity - node_id is required, others are optional
         lines.append("Identity:")
-        lines.append(f"  State ID:  {self._state.get('state_id', 'N/A')}")
-        lines.append(f"  Node ID:   {self._state.get('node_id', 'N/A')}")
-        lines.append(f"  Token ID:  {self._state.get('token_id', 'N/A')}")
+        state_id = self._state.get("state_id")
+        lines.append(f"  State ID:  {state_id or 'N/A'}")
+        lines.append(f"  Node ID:   {self._state['node_id']}")  # Required
+        token_id = self._state.get("token_id")
+        lines.append(f"  Token ID:  {token_id or 'N/A'}")
         lines.append("")
 
-        # Status
-        status = self._state.get("status", "unknown")
+        # Status - all optional (may not have execution state yet)
+        status = self._state.get("status")
         lines.append("Status:")
-        lines.append(f"  Status:     {status}")
-        lines.append(f"  Started:    {self._state.get('started_at', 'N/A')}")
-        lines.append(f"  Completed:  {self._state.get('completed_at', 'N/A')}")
+        lines.append(f"  Status:     {status or 'N/A'}")
+        started_at = self._state.get("started_at")
+        lines.append(f"  Started:    {started_at or 'N/A'}")
+        completed_at = self._state.get("completed_at")
+        lines.append(f"  Completed:  {completed_at or 'N/A'}")
         duration = self._state.get("duration_ms")
         if duration is not None:
             lines.append(f"  Duration:   {duration} ms")
         lines.append("")
 
-        # Hashes
+        # Hashes - optional
         lines.append("Data Hashes:")
         input_hash = self._state.get("input_hash")
         output_hash = self._state.get("output_hash")
@@ -70,20 +81,24 @@ class NodeDetailPanel:
         lines.append(f"  Output:  {output_hash or '(none)'}")
         lines.append("")
 
-        # Error (if present)
+        # Error (if present) - optional field
         # Trust boundary: error_json may be malformed or wrong type from Landscape
         error_json = self._state.get("error_json")
         if error_json:
             lines.append("Error:")
             try:
-                if not isinstance(error_json, str):
+                # Runtime check: Landscape DB may contain corrupted/malformed data
+                if not isinstance(error_json, str):  # type: ignore[unreachable]
                     # Non-string error_json - display as-is
-                    lines.append(f"  {error_json}")
+                    lines.append(f"  {error_json}")  # type: ignore[unreachable]
                 else:
                     error = json.loads(error_json)
                     if isinstance(error, dict):
-                        lines.append(f"  Type:    {error.get('type', 'unknown')}")
-                        lines.append(f"  Message: {error.get('message', 'unknown')}")
+                        # Error dict fields are external data - use .get() + fallback
+                        error_type = error.get("type")
+                        error_message = error.get("message")
+                        lines.append(f"  Type:    {error_type or 'unknown'}")
+                        lines.append(f"  Message: {error_message or 'unknown'}")
                     else:
                         # Parsed but not a dict (e.g., JSON string/number)
                         lines.append(f"  {error}")
@@ -101,21 +116,26 @@ class NodeDetailPanel:
                 lines.append(f"  {error_json}")
             lines.append("")
 
-        # Artifact (if sink)
+        # Artifact (if sink) - optional field
         # Trust boundary: artifact may be malformed or wrong type from Landscape
         artifact = self._state.get("artifact")
         if artifact:
             lines.append("Artifact:")
+            # Runtime check: Landscape DB may contain corrupted/malformed data
             if isinstance(artifact, dict):
-                lines.append(f"  ID:      {artifact.get('artifact_id', 'N/A')}")
-                lines.append(f"  Path:    {artifact.get('path_or_uri', 'N/A')}")
-                lines.append(f"  Hash:    {artifact.get('content_hash', 'N/A')}")
+                # Artifact dict fields are external data - use .get() + fallback
+                artifact_id = artifact.get("artifact_id")
+                path_or_uri = artifact.get("path_or_uri")
+                content_hash = artifact.get("content_hash")
+                lines.append(f"  ID:      {artifact_id or 'N/A'}")
+                lines.append(f"  Path:    {path_or_uri or 'N/A'}")
+                lines.append(f"  Hash:    {content_hash or 'N/A'}")
                 size_bytes = artifact.get("size_bytes")
                 if size_bytes is not None and isinstance(size_bytes, int | float):
                     lines.append(f"  Size:    {self._format_size(int(size_bytes))}")
-            else:
+            else:  # type: ignore[unreachable]
                 # Non-dict artifact - display as-is
-                lines.append(f"  {artifact}")
+                lines.append(f"  {artifact}")  # type: ignore[unreachable]
             lines.append("")
 
         return "\n".join(lines)
@@ -138,7 +158,7 @@ class NodeDetailPanel:
         else:
             return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
 
-    def update_state(self, node_state: dict[str, Any] | None) -> None:
+    def update_state(self, node_state: NodeStateInfo | None) -> None:
         """Update the displayed node state.
 
         Args:

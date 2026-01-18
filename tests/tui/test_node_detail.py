@@ -138,6 +138,7 @@ class TestNodeDetailPanel:
 
         panel.update_state(
             {
+                "node_id": "node-001",  # Required field
                 "state_id": "state-001",
                 "plugin_name": "filter",
                 "node_type": "transform",
@@ -153,6 +154,7 @@ class TestNodeDetailPanel:
 
         panel = NodeDetailPanel(
             {
+                "node_id": "sink-001",  # Required field
                 "state_id": "state-001",
                 "plugin_name": "sink",
                 "node_type": "sink",

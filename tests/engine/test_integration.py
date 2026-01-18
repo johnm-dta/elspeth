@@ -2966,11 +2966,11 @@ class TestAggregationIntegration:
             batch_member_counts[batch.aggregation_node_id] = len(members)
 
         assert (
-            batch_member_counts.get(high_agg_node.node_id) == 2
-        ), f"Expected 2 members in high_agg batch, got {batch_member_counts.get(high_agg_node.node_id)}"
+            batch_member_counts[high_agg_node.node_id] == 2
+        ), f"Expected 2 members in high_agg batch, got {batch_member_counts[high_agg_node.node_id]}"
         assert (
-            batch_member_counts.get(low_agg_node.node_id) == 2
-        ), f"Expected 2 members in low_agg batch, got {batch_member_counts.get(low_agg_node.node_id)}"
+            batch_member_counts[low_agg_node.node_id] == 2
+        ), f"Expected 2 members in low_agg batch, got {batch_member_counts[low_agg_node.node_id]}"
 
         # Verify artifacts were recorded (2 artifacts: one for each sink)
         artifacts = recorder.get_artifacts(run_id)

@@ -624,8 +624,8 @@ class TestRouteLabelResolution:
 class TestForkCreatesChildTokens:
     """WP-09 Verification: fork_to creates child tokens.
 
-    Note: Fork execution is deferred to WP-07 (Fork Work Queue).
-    These tests verify the configuration and graph construction only.
+    Fork execution was implemented in WP-07 (Fork Work Queue).
+    Tests verify configuration, graph construction, and execution.
     """
 
     def test_fork_config_accepted(self) -> None:
@@ -908,6 +908,118 @@ class TestForkCreatesChildTokens:
         # Both should have the same value (forked from same parent)
         assert alerts_sink.results[0]["value"] == 99
         assert default_sink.results[0]["value"] == 99
+
+    def test_fork_multiple_source_rows_counts_correctly(self) -> None:
+        """Multiple source rows fork correctly with proper counting.
+
+        When processing multiple source rows through a fork gate:
+        - rows_forked should count the NUMBER OF PARENT ROWS that forked
+        - Each sink should receive one child per source row
+        """
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            SinkSettings,
+        )
+        from elspeth.core.config import (
+            GateSettings as GateSettingsConfig,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        class ListSource(_TestSourceBase):
+            name = "list_source"
+            output_schema = RowSchema
+
+            def __init__(self, data: list[dict[str, Any]]) -> None:
+                self._data = data
+
+            def load(self, ctx: Any) -> Any:
+                yield from self._data
+
+            def close(self) -> None:
+                pass
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+            config: ClassVar[dict[str, Any]] = {}
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory", size_bytes=0, content_hash=""
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Three source rows - all will fork
+        source = ListSource([{"value": 10}, {"value": 20}, {"value": 30}])
+        analysis_sink = CollectSink()
+        archive_sink = CollectSink()
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="list_source"),
+            sinks={
+                "analysis": SinkSettings(plugin="collect"),
+                "archive": SinkSettings(plugin="collect"),
+            },
+            gates=[
+                GateSettingsConfig(
+                    name="parallel_fork",
+                    condition="True",
+                    routes={"true": "fork"},
+                    fork_to=["analysis", "archive"],
+                ),
+            ],
+            output_sink="analysis",
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[],
+            sinks={"analysis": analysis_sink, "archive": archive_sink},
+            gates=settings.gates,
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(config, graph=graph)
+
+        assert result.status == "completed"
+        assert result.rows_processed == 3
+
+        # CRITICAL: rows_forked counts parent rows that forked
+        assert (
+            result.rows_forked == 3
+        ), f"Expected 3 forked rows, got {result.rows_forked}"
+
+        # Each sink should receive 3 rows (one child per source row)
+        assert (
+            len(analysis_sink.results) == 3
+        ), f"analysis should get 3 rows, got {len(analysis_sink.results)}"
+        assert (
+            len(archive_sink.results) == 3
+        ), f"archive should get 3 rows, got {len(archive_sink.results)}"
+
+        # Verify all values are preserved
+        analysis_values = {r["value"] for r in analysis_sink.results}
+        archive_values = {r["value"] for r in archive_sink.results}
+        expected_values = {10, 20, 30}
+
+        assert analysis_values == expected_values
+        assert archive_values == expected_values
 
 
 # ============================================================================

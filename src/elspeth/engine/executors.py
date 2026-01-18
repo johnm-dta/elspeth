@@ -20,7 +20,7 @@ from elspeth.contracts import (
     RoutingSpec,
     TokenInfo,
 )
-from elspeth.contracts.enums import RoutingKind, RoutingMode
+from elspeth.contracts.enums import RoutingKind, RoutingMode, TriggerType
 from elspeth.core.canonical import stable_hash
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape import LandscapeRecorder
@@ -736,6 +736,20 @@ class AggregationExecutor:
         if evaluator is None:
             return False
         return evaluator.should_trigger()
+
+    def get_trigger_type(self, node_id: str) -> "TriggerType | None":
+        """Get the TriggerType for the trigger that fired.
+
+        Args:
+            node_id: Aggregation node ID
+
+        Returns:
+            TriggerType enum if a trigger fired, None otherwise
+        """
+        evaluator = self._trigger_evaluators.get(node_id)
+        if evaluator is None:
+            return None
+        return evaluator.get_trigger_type()
 
     def accept(
         self,

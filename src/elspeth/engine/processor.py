@@ -15,7 +15,7 @@ from typing import Any
 
 from elspeth.contracts import RowOutcome, RowResult, TokenInfo
 from elspeth.contracts.enums import RoutingKind
-from elspeth.core.config import GateSettings
+from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape import LandscapeRecorder
 from elspeth.engine.executors import (
     AggregationExecutor,
@@ -80,6 +80,7 @@ class RowProcessor:
         route_resolution_map: dict[tuple[str, str], str] | None = None,
         config_gates: list[GateSettings] | None = None,
         config_gate_id_map: dict[str, str] | None = None,
+        aggregation_settings: dict[str, AggregationSettings] | None = None,
     ) -> None:
         """Initialize processor.
 
@@ -92,6 +93,7 @@ class RowProcessor:
             route_resolution_map: Map of (node_id, label) -> "continue" | sink_name
             config_gates: List of config-driven gate settings
             config_gate_id_map: Map of gate name -> node_id for config gates
+            aggregation_settings: Map of node_id -> AggregationSettings for trigger evaluation
         """
         self._recorder = recorder
         self._spans = span_factory
@@ -105,7 +107,9 @@ class RowProcessor:
         self._gate_executor = GateExecutor(
             recorder, span_factory, edge_map, route_resolution_map
         )
-        self._aggregation_executor = AggregationExecutor(recorder, span_factory, run_id)
+        self._aggregation_executor = AggregationExecutor(
+            recorder, span_factory, run_id, aggregation_settings=aggregation_settings
+        )
 
     def process_row(
         self,
@@ -232,13 +236,25 @@ class RowProcessor:
 
             elif isinstance(transform, BaseAggregation):
                 # Aggregation transform
-                # NOTE: accept() just accepts rows, flush logic moved to engine (WP-06 Tasks 7-8)
                 self._aggregation_executor.accept(
                     aggregation=transform,
                     token=current_token,
                     ctx=ctx,
                     step_in_pipeline=step,
                 )
+
+                # Check if engine-controlled trigger condition is met (WP-06)
+                node_id = transform.node_id
+                assert node_id is not None, "node_id must be set by orchestrator"
+                if self._aggregation_executor.should_flush(node_id):
+                    trigger_type = self._aggregation_executor.get_trigger_type(node_id)
+                    trigger_reason = trigger_type.value if trigger_type else "manual"
+                    self._aggregation_executor.flush(
+                        aggregation=transform,
+                        ctx=ctx,
+                        trigger_reason=trigger_reason,
+                        step_in_pipeline=step,
+                    )
 
                 return (
                     RowResult(

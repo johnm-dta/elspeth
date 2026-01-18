@@ -1615,3 +1615,45 @@ class TestQuarantineIntegration:
 
         error_data = json.loads(state.error_json)
         assert error_data["message"] == "missing required_field"
+
+
+class TestProcessorAggregationTriggers:
+    """Tests for config-driven aggregation triggers in RowProcessor."""
+
+    def test_processor_accepts_aggregation_settings(self) -> None:
+        """RowProcessor accepts aggregation_settings parameter."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        aggregation_settings = {
+            "agg-1": AggregationSettings(
+                name="test_agg",
+                plugin="test",
+                trigger=TriggerConfig(count=3),
+            ),
+        }
+
+        # Should not raise
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            aggregation_settings=aggregation_settings,
+        )
+        assert processor is not None

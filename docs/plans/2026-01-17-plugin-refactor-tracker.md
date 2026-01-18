@@ -791,12 +791,14 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 #### Files Modified
 - `src/elspeth/engine/retry.py` - Added `RetryConfig.from_settings()` factory method
 - `src/elspeth/engine/executors.py` - Added `attempt: int = 0` parameter to `execute_transform()`
-- `src/elspeth/engine/processor.py` - Added `retry_manager` parameter, `_execute_transform_with_retry()` method
-- `src/elspeth/contracts/results.py` - Added `error: dict[str, Any] | None` field to `RowResult`
+- `src/elspeth/engine/processor.py` - Added `retry_manager` parameter, `_execute_transform_with_retry()` method, uses `FailureInfo`
+- `src/elspeth/contracts/results.py` - Added `FailureInfo` dataclass, `RowResult.error` typed as `FailureInfo | None`
+- `src/elspeth/contracts/__init__.py` - Export `FailureInfo`
 - `src/elspeth/engine/orchestrator.py` - Wire RetryManager creation from settings
 
 #### Files Created
 - `tests/integration/test_retry_integration.py` - 3 integration tests proving retry audit trail
+- `tests/contracts/test_results.py` - Added 6 tests for FailureInfo (TestFailureInfo, TestRowResultWithFailureInfo)
 
 #### Tasks
 - [x] Task 1: Add RetryConfig.from_settings() factory
@@ -807,6 +809,7 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 - [x] Task 6: Wire RetryManager in Orchestrator
 - [x] Task 7: Integration test for retry audit trail
 - [x] Task 8: Update tracker
+- [x] Task 9: Type-safe FailureInfo for RowResult.error (user-requested enhancement)
 
 #### Commits
 ```
@@ -818,6 +821,8 @@ e9a6029 test(processor): add quarantine integration tests (WP-10 Task 5)
 5814de7 feat(orchestrator): wire RetryManager from settings (WP-15 Task 6)
 f415e1c test(integration): add retry audit trail integration tests (WP-15 Task 7)
 8f3ed16 style(tests): prefix unused variables with underscore
+a708bb8 docs(tracker): mark WP-15 RetryManager Integration complete (WP-15 Task 8)
+2b37e0d feat(contracts): add type-safe FailureInfo for RowResult errors (WP-15 Task 9)
 ```
 
 #### Verification ✅
@@ -826,9 +831,10 @@ f415e1c test(integration): add retry audit trail integration tests (WP-15 Task 7
 - [x] Transient exceptions (ConnectionError, TimeoutError, OSError) are retried
 - [x] MaxRetriesExceeded returns FAILED outcome with error details
 - [x] Each attempt recorded as separate node_state with attempt number
-- [x] RowResult.error captures exception type, message, attempts, last_error
+- [x] RowResult.error uses type-safe FailureInfo dataclass (not dict[str, Any])
+- [x] FailureInfo has factory method from_max_retries_exceeded()
 - [x] Integration tests prove: attempts 0,1,2 each recorded in node_states
-- [x] All tests pass (3 integration tests + existing unit tests)
+- [x] All tests pass (1481 passed, 2 pre-existing unrelated failures)
 - [x] mypy --strict passes
 - [x] ruff lint clean
 
@@ -884,5 +890,5 @@ f415e1c test(integration): add retry audit trail integration tests (WP-15 Task 7
 | 2026-01-18 | WP-11 | Added Tasks 5-7: (5) Crash on non-Pydantic schemas in `_schema_hash()`, (6) Remove TUI `.get()` defaults that mask incomplete data, (7) Log TUI exceptions instead of silently swallowing. All found during defensive programming deep-dive. | Claude |
 | 2026-01-18 | WP-11 | ✅ **COMPLETE** - 7 commits, 8 tasks. Removed `on_register()` from 4 base classes, removed defensive getattr (6 occurrences), fixed `_schema_hash()` to crash on non-Pydantic, fixed TUI `.get()` patterns, added exception logging. Updated PHASE3_INTEGRATION.md. 297 plugin tests, 348 engine tests, 43 TUI tests all pass. | Claude |
 | 2026-01-18 | WP-15 | **CREATED** - New work package to integrate RetryManager into transform execution. Plan at `2026-01-18-wp15-retry-manager-integration.md`. 8 tasks covering: factory method, attempt tracking, RowProcessor integration, MaxRetriesExceeded handling, Orchestrator wiring. Independent - can run anytime. | Claude |
-| 2026-01-18 | WP-15 | ✅ **COMPLETE** - 8 commits, 8 tasks. RetryConfig.from_settings() factory, attempt parameter to execute_transform(), retry wrapper in RowProcessor, MaxRetriesExceeded → FAILED outcome with error details, Orchestrator wiring, 3 integration tests proving attempts 0,1,2 recorded in node_states. Added `error: dict[str, Any] \| None` to RowResult for failure details. | Claude |
+| 2026-01-18 | WP-15 | ✅ **COMPLETE** - 10 commits, 9 tasks. RetryConfig.from_settings() factory, attempt parameter to execute_transform(), retry wrapper in RowProcessor, MaxRetriesExceeded → FAILED outcome, Orchestrator wiring, 3 integration tests proving attempts 0,1,2 recorded in node_states. Task 9 added type-safe `FailureInfo` dataclass replacing `dict[str, Any]` for audit-safe error capture. | Claude |
 | | | | |

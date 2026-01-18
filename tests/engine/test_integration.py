@@ -5774,3 +5774,331 @@ class TestExplainQuery:
             coalesce_node.node_id in state_node_ids
         ), "node_states should include coalesce"
         assert sink_node.node_id in state_node_ids, "node_states should include sink"
+
+
+class TestErrorRecovery:
+    """Tests for error handling and recovery scenarios.
+
+    These tests verify that:
+    1. Pipelines can complete with partial success (some rows fail, others succeed)
+    2. Failed/quarantined rows have complete audit trails
+    3. The orchestrator correctly tracks failed vs quarantined counts
+
+    Key distinction:
+    - FAILED: Transform raised exception, retries exhausted -> rows_failed
+    - QUARANTINED: Transform returned TransformResult.error() with _on_error="discard"
+      -> rows_quarantined
+
+    For transforms that return TransformResult.error(), they MUST have _on_error
+    configured (otherwise RuntimeError is raised). Setting _on_error="discard"
+    causes the row to be quarantined.
+    """
+
+    def test_partial_success_continues_processing(self) -> None:
+        """Some rows fail via TransformResult.error(), others succeed.
+
+        Pipeline should:
+        - Process all rows
+        - Quarantine failures (via _on_error="discard")
+        - Complete successfully with partial results
+        - Sink only receives successful rows
+        """
+
+        from elspeth.contracts import PluginSchema, RunStatus
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource(_TestSourceBase):
+            """Source that yields rows with integer values."""
+
+            name = "list_source"
+            output_schema = ValueSchema
+
+            def __init__(self, data: list[dict[str, Any]]) -> None:
+                self._data = data
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def load(self, ctx: Any) -> Any:
+                yield from self._data
+
+            def close(self) -> None:
+                pass
+
+        class SelectiveFailTransform(BaseTransform):
+            """Fails on even values via TransformResult.error(), succeeds on odd.
+
+            Has _on_error="discard" so errors become QUARANTINED.
+            """
+
+            name = "selective_fail"
+            input_schema = ValueSchema
+            output_schema = ValueSchema
+            _on_error = "discard"  # Required for TransformResult.error() to work
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def process(self, row: dict[str, Any], ctx: Any) -> TransformResult:
+                if row["value"] % 2 == 0:
+                    return TransformResult.error(
+                        {"message": "Even values fail", "value": row["value"]}
+                    )
+                return TransformResult.success(row)
+
+        class CollectSink(_TestSinkBase):
+            """Sink that collects rows in memory."""
+
+            name = "output_sink"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://output",
+                    size_bytes=100,
+                    content_hash="partial_success_test",
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Create 10 rows: values 0-9
+        # Even values (0, 2, 4, 6, 8) will fail -> 5 quarantined
+        # Odd values (1, 3, 5, 7, 9) will succeed -> 5 succeeded
+        source = ListSource([{"value": i} for i in range(10)])
+        transform = SelectiveFailTransform()
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[transform],
+            sinks={"default": sink},
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(config, graph=_build_test_graph(config))
+
+        # Pipeline completes despite failures
+        assert (
+            result.status == RunStatus.COMPLETED
+        ), f"Expected COMPLETED, got {result.status}"
+        assert (
+            result.rows_processed == 10
+        ), f"Expected 10 rows processed, got {result.rows_processed}"
+        assert (
+            result.rows_succeeded == 5
+        ), f"Expected 5 succeeded (odd values), got {result.rows_succeeded}"
+        assert (
+            result.rows_quarantined == 5
+        ), f"Expected 5 quarantined (even values), got {result.rows_quarantined}"
+        assert (
+            result.rows_failed == 0
+        ), f"Expected 0 failed (errors are quarantined), got {result.rows_failed}"
+
+        # Sink received only successful rows (odd values)
+        assert (
+            len(sink.results) == 5
+        ), f"Expected 5 results in sink, got {len(sink.results)}"
+        result_values = {r["value"] for r in sink.results}
+        expected_values = {1, 3, 5, 7, 9}
+        assert (
+            result_values == expected_values
+        ), f"Expected odd values {expected_values}, got {result_values}"
+
+    def test_quarantined_rows_have_audit_trail(self) -> None:
+        """Quarantined rows must have complete audit trail.
+
+        Even failed rows must be traceable - we need to know:
+        - What source row failed (row_id linkage)
+        - At which transform (node_id in node_state)
+        - What the error was (error_json in node_state)
+        """
+        import json
+
+        from sqlalchemy import select
+
+        from elspeth.contracts import PluginSchema, RunStatus
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.core.landscape.schema import node_states_table
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class ListSource(_TestSourceBase):
+            """Source that yields rows with integer values."""
+
+            name = "list_source"
+            output_schema = ValueSchema
+
+            def __init__(self, data: list[dict[str, Any]]) -> None:
+                self._data = data
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def load(self, ctx: Any) -> Any:
+                yield from self._data
+
+            def close(self) -> None:
+                pass
+
+        class SelectiveFailTransform(BaseTransform):
+            """Fails on even values via TransformResult.error(), succeeds on odd.
+
+            Has _on_error="discard" so errors become QUARANTINED.
+            """
+
+            name = "selective_fail"
+            input_schema = ValueSchema
+            output_schema = ValueSchema
+            _on_error = "discard"
+
+            def __init__(self) -> None:
+                super().__init__({})
+
+            def process(self, row: dict[str, Any], ctx: Any) -> TransformResult:
+                if row["value"] % 2 == 0:
+                    return TransformResult.error(
+                        {"message": "Even values fail", "value": row["value"]}
+                    )
+                return TransformResult.success(row)
+
+        class CollectSink(_TestSinkBase):
+            """Sink that collects rows in memory."""
+
+            name = "output_sink"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://output",
+                    size_bytes=100,
+                    content_hash="audit_trail_test",
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Create 4 rows: values 0-3
+        # Even values (0, 2) will fail -> 2 quarantined with audit trail
+        # Odd values (1, 3) will succeed -> 2 succeeded
+        source = ListSource([{"value": i} for i in range(4)])
+        transform = SelectiveFailTransform()
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=source,
+            transforms=[transform],
+            sinks={"default": sink},
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(config, graph=_build_test_graph(config))
+
+        # Basic verification
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_quarantined == 2
+
+        # Now verify audit trail for quarantined rows
+        recorder = LandscapeRecorder(db)
+        nodes = recorder.get_nodes(result.run_id)
+        transform_node = next(n for n in nodes if n.plugin_name == "selective_fail")
+
+        # Query node_states for the transform
+        with db.engine.connect() as conn:
+            stmt = (
+                select(node_states_table)
+                .where(node_states_table.c.node_id == transform_node.node_id)
+                .order_by(node_states_table.c.started_at)
+            )
+            states = list(conn.execute(stmt))
+
+        # Should have 4 node_states: 2 failed (quarantined) + 2 completed (succeeded)
+        assert len(states) == 4, f"Expected 4 node_states, got {len(states)}"
+
+        # Count by status
+        failed_states = [s for s in states if s.status == "failed"]
+        completed_states = [s for s in states if s.status == "completed"]
+
+        assert (
+            len(failed_states) == 2
+        ), f"Expected 2 failed states (quarantined rows), got {len(failed_states)}"
+        assert (
+            len(completed_states) == 2
+        ), f"Expected 2 completed states (succeeded rows), got {len(completed_states)}"
+
+        # Verify each failed state has complete audit trail
+        for failed_state in failed_states:
+            # Must have error_json populated
+            assert (
+                failed_state.error_json is not None
+            ), f"Failed state for token {failed_state.token_id} missing error_json"
+
+            # error_json should be valid JSON with the error details we provided
+            error_data = json.loads(failed_state.error_json)
+            assert (
+                "message" in error_data
+            ), f"error_json missing 'message' field: {error_data}"
+            assert (
+                error_data["message"] == "Even values fail"
+            ), f"Unexpected error message: {error_data['message']}"
+            assert (
+                "value" in error_data
+            ), f"error_json missing 'value' field: {error_data}"
+            # The value should be even (0 or 2)
+            assert (
+                error_data["value"] % 2 == 0
+            ), f"Expected even value in error, got {error_data['value']}"
+
+            # Must identify which node (transform) failed
+            assert failed_state.node_id == transform_node.node_id, (
+                f"Failed state node_id mismatch: {failed_state.node_id} != "
+                f"{transform_node.node_id}"
+            )
+
+            # Must have token_id linking back to the row
+            assert failed_state.token_id is not None, "Failed state missing token_id"
+
+            # Must have duration_ms (processing was attempted)
+            assert (
+                failed_state.duration_ms is not None
+            ), "Failed state missing duration_ms"

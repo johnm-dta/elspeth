@@ -1871,3 +1871,83 @@ class TestRowProcessorRetry:
 
         # Should only be called once (no retry)
         assert processor._transform_executor.execute_transform.call_count == 1
+
+    def test_max_retries_exceeded_returns_failed_outcome(self) -> None:
+        """When all retries exhausted, process_row returns FAILED outcome."""
+
+        from elspeth.contracts import RowOutcome
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.retry import RetryConfig, RetryManager
+        from elspeth.engine.spans import SpanFactory
+
+        # Set up real Landscape
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=SchemaConfig.from_dict({"fields": "dynamic"}),
+        )
+        transform_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="always_fails",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=SchemaConfig.from_dict({"fields": "dynamic"}),
+        )
+
+        class AlwaysFailsTransform(BaseTransform):
+            """Transform that always raises transient error."""
+
+            name = "always_fails"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                raise ConnectionError("Network always down")
+
+        # Create processor with retry (max 2 attempts, fast delays for test)
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            retry_manager=RetryManager(RetryConfig(max_attempts=2, base_delay=0.01)),
+        )
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process should return FAILED, not raise MaxRetriesExceeded
+        results = processor.process_row(
+            row_index=0,
+            row_data={"x": 1},
+            transforms=[AlwaysFailsTransform(transform_node.node_id)],
+            ctx=ctx,
+        )
+
+        # Should get a result, not an exception
+        assert len(results) == 1
+        result = results[0]
+
+        # Outcome should be FAILED
+        assert result.outcome == RowOutcome.FAILED
+
+        # Error info should be captured
+        assert result.error is not None
+        assert "MaxRetriesExceeded" in str(result.error) or "attempts" in str(
+            result.error
+        )

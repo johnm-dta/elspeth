@@ -22,7 +22,7 @@ from elspeth.engine.executors import (
     GateExecutor,
     TransformExecutor,
 )
-from elspeth.engine.retry import RetryManager
+from elspeth.engine.retry import MaxRetriesExceeded, RetryManager
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenManager
 from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
@@ -332,12 +332,31 @@ class RowProcessor:
 
             elif isinstance(transform, BaseTransform):
                 # Regular transform (with optional retry)
-                result, current_token, error_sink = self._execute_transform_with_retry(
-                    transform=transform,
-                    token=current_token,
-                    ctx=ctx,
-                    step=step,
-                )
+                try:
+                    result, current_token, error_sink = (
+                        self._execute_transform_with_retry(
+                            transform=transform,
+                            token=current_token,
+                            ctx=ctx,
+                            step=step,
+                        )
+                    )
+                except MaxRetriesExceeded as e:
+                    # All retries exhausted - return FAILED outcome
+                    return (
+                        RowResult(
+                            token=current_token,
+                            final_data=current_token.row_data,
+                            outcome=RowOutcome.FAILED,
+                            error={
+                                "exception": "MaxRetriesExceeded",
+                                "message": str(e),
+                                "attempts": e.attempts,
+                                "last_error": str(e.last_error),
+                            },
+                        ),
+                        child_items,
+                    )
 
                 if result.status == "error":
                     # Determine outcome based on error routing

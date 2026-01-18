@@ -93,12 +93,20 @@ class RowResult:
     Uses RowOutcome enum. The outcome is derived at query time
     from node_states/routing_events/batch_members, but this type
     is used to communicate the result during processing.
+
+    Fields:
+        token: Token identity for this row instance
+        final_data: Final row data after processing (may be original if failed early)
+        outcome: Terminal state (COMPLETED, FAILED, QUARANTINED, etc.)
+        sink_name: For ROUTED outcomes, the destination sink name
+        error: For FAILED outcomes, error details for audit
     """
 
     token: TokenInfo
     final_data: dict[str, Any]
     outcome: RowOutcome
     sink_name: str | None = None
+    error: dict[str, Any] | None = None
 
     @property
     def token_id(self) -> str:

@@ -22,10 +22,11 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.enums import RoutingKind, RoutingMode
 from elspeth.core.canonical import stable_hash
-from elspeth.core.config import GateSettings
+from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape import LandscapeRecorder
 from elspeth.engine.expression_parser import ExpressionParser
 from elspeth.engine.spans import SpanFactory
+from elspeth.engine.triggers import TriggerEvaluator
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import (
     AggregationProtocol,
@@ -692,6 +693,8 @@ class AggregationExecutor:
         recorder: LandscapeRecorder,
         span_factory: SpanFactory,
         run_id: str,
+        *,
+        aggregation_settings: dict[str, AggregationSettings] | None = None,
     ) -> None:
         """Initialize executor.
 
@@ -699,12 +702,19 @@ class AggregationExecutor:
             recorder: Landscape recorder for audit trail
             span_factory: Span factory for tracing
             run_id: Run identifier for batch creation
+            aggregation_settings: Map of node_id -> AggregationSettings for trigger evaluation
         """
         self._recorder = recorder
         self._spans = span_factory
         self._run_id = run_id
         self._member_counts: dict[str, int] = {}  # batch_id -> count for ordinals
         self._batch_ids: dict[str, str | None] = {}  # node_id -> current batch_id
+        self._aggregation_settings = aggregation_settings or {}
+        self._trigger_evaluators: dict[str, TriggerEvaluator] = {}
+
+        # Create trigger evaluators for each configured aggregation
+        for node_id, settings in self._aggregation_settings.items():
+            self._trigger_evaluators[node_id] = TriggerEvaluator(settings.trigger)
 
     def get_batch_id(self, node_id: str) -> str | None:
         """Get current batch ID for an aggregation node.
@@ -712,6 +722,20 @@ class AggregationExecutor:
         Primarily for testing - production code should use AcceptResult.batch_id.
         """
         return self._batch_ids.get(node_id)
+
+    def should_flush(self, node_id: str) -> bool:
+        """Check if the aggregation should flush based on trigger config.
+
+        Args:
+            node_id: Aggregation node ID
+
+        Returns:
+            True if trigger condition is met, False otherwise
+        """
+        evaluator = self._trigger_evaluators.get(node_id)
+        if evaluator is None:
+            return False
+        return evaluator.should_trigger()
 
     def accept(
         self,
@@ -774,6 +798,11 @@ class AggregationExecutor:
                 )
                 self._member_counts[batch_id] = ordinal + 1
                 result.batch_id = batch_id
+
+                # Update trigger evaluator if row was accepted
+                evaluator = self._trigger_evaluators.get(node_id)
+                if evaluator is not None:
+                    evaluator.record_accept()
 
                 # Output for accepted rows: the input row + batch membership metadata
                 # This records exactly what was accepted and where it went
@@ -872,6 +901,11 @@ class AggregationExecutor:
                 self._batch_ids[node_id] = None
                 if batch_id in self._member_counts:
                     del self._member_counts[batch_id]
+
+                # Reset trigger evaluator for next batch
+                evaluator = self._trigger_evaluators.get(node_id)
+                if evaluator is not None:
+                    evaluator.reset()
 
                 return outputs
 

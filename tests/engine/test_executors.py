@@ -2197,6 +2197,189 @@ class TestAggregationExecutor:
             assert len(members) == 2
 
 
+class TestAggregationExecutorTriggers:
+    """Tests for config-driven trigger evaluation in AggregationExecutor."""
+
+    def test_executor_evaluates_count_trigger(self) -> None:
+        """Executor evaluates count trigger and returns should_flush."""
+        from elspeth.contracts.identity import TokenInfo
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.base import BaseAggregation
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import AcceptResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Create a simple mock aggregation
+        class SimpleAggregation(BaseAggregation):
+            name = "test"
+            input_schema = None
+            output_schema = None
+
+            def __init__(self) -> None:
+                super().__init__({})
+                self._buffer: list[dict[str, Any]] = []
+
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
+                self._buffer.append(row)
+                return AcceptResult(accepted=True)
+
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+                result = list(self._buffer)
+                self._buffer = []
+                return result
+
+        aggregation = SimpleAggregation()
+        aggregation.node_id = agg_node.node_id
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=3),
+        )
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # First two accepts - should not trigger
+        for i in range(2):
+            token = TokenInfo(
+                row_id=f"row-{i}",
+                token_id=f"token-{i}",
+                row_data={"value": i},
+            )
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=agg_node.node_id,
+                row_index=i,
+                data=token.row_data,
+                row_id=token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+            executor.accept(aggregation, token, ctx, step_in_pipeline=1)
+            assert executor.should_flush(agg_node.node_id) is False
+
+        # Third accept - should trigger
+        token = TokenInfo(
+            row_id="row-2",
+            token_id="token-2",
+            row_data={"value": 2},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=agg_node.node_id,
+            row_index=2,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+        executor.accept(aggregation, token, ctx, step_in_pipeline=1)
+        assert executor.should_flush(agg_node.node_id) is True
+
+    def test_executor_reset_trigger_after_flush(self) -> None:
+        """Executor resets trigger state after flush."""
+        from elspeth.contracts.identity import TokenInfo
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.base import BaseAggregation
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import AcceptResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        class SimpleAggregation(BaseAggregation):
+            name = "test"
+            input_schema = None
+            output_schema = None
+
+            def __init__(self) -> None:
+                super().__init__({})
+                self._buffer: list[dict[str, Any]] = []
+
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
+                self._buffer.append(row)
+                return AcceptResult(accepted=True)
+
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+                result = list(self._buffer)
+                self._buffer = []
+                return result
+
+        aggregation = SimpleAggregation()
+        aggregation.node_id = agg_node.node_id
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=2),
+        )
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Accept until trigger
+        for i in range(2):
+            token = TokenInfo(
+                row_id=f"row-{i}",
+                token_id=f"token-{i}",
+                row_data={"value": i},
+            )
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=agg_node.node_id,
+                row_index=i,
+                data=token.row_data,
+                row_id=token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+            executor.accept(aggregation, token, ctx, step_in_pipeline=1)
+
+        assert executor.should_flush(agg_node.node_id) is True
+
+        # Flush
+        executor.flush(aggregation, ctx, "count", step_in_pipeline=1)
+
+        # After flush, trigger should be reset
+        assert executor.should_flush(agg_node.node_id) is False
+
+
 class TestSinkExecutor:
     """Sink execution with artifact recording."""
 

@@ -1475,6 +1475,512 @@ class TestAggregationIntegration:
         assert len(artifacts) == 1
         assert artifacts[0].content_hash == "test_hash"
 
+    def test_aggregation_output_mode_passthrough(self) -> None:
+        """output_mode=passthrough: batch releases all rows unchanged.
+
+        Pipeline: source (5 rows) -> aggregation (count=3) -> sink
+        Result: sink receives all 5 rows (3 from first batch, 2 from end_of_source)
+
+        This test verifies that passthrough mode:
+        - Buffers rows until trigger condition
+        - Releases all buffered rows unchanged (no aggregation)
+        - end_of_source flushes remaining partial batch
+        """
+        from elspeth.contracts import NodeType, PluginSchema, TokenInfo
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.executors import AggregationExecutor, SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+        from elspeth.plugins.base import BaseAggregation
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import AcceptResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Start a run
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        # Register nodes
+        source_node = recorder.register_node(
+            run_id=run_id,
+            node_id="source",
+            plugin_name="list_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        agg_node = recorder.register_node(
+            run_id=run_id,
+            node_id="buffer_agg",
+            plugin_name="buffer_agg",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="output_sink",
+            plugin_name="collect_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        class BufferAggregation(BaseAggregation):
+            """Aggregation that buffers and releases rows unchanged."""
+
+            name = "buffer_agg"
+            input_schema = RowSchema
+            output_schema = RowSchema
+            plugin_version = "1.0.0"
+
+            def __init__(self) -> None:
+                super().__init__({})
+                self._buffer: list[dict[str, Any]] = []
+
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
+                self._buffer.append(row)
+                return AcceptResult(accepted=True)
+
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+                # Passthrough mode: return all buffered rows unchanged
+                result = list(self._buffer)
+                self._buffer = []
+                return result
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://output", size_bytes=0, content_hash="test_hash"
+                )
+
+            def close(self) -> None:
+                pass
+
+        # Configure aggregation: flush after 3 rows, output_mode=passthrough
+        agg_settings = AggregationSettings(
+            name="buffer_agg",
+            plugin="buffer_agg",
+            trigger=TriggerConfig(count=3),
+            output_mode="passthrough",
+        )
+
+        # Create aggregation instance and assign node_id
+        aggregation = BufferAggregation()
+        aggregation.node_id = agg_node.node_id
+
+        # Create sink instance and assign node_id
+        sink = CollectSink()
+        sink.node_id = sink_node.node_id
+
+        # Create executors
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        agg_executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            run_id=run_id,
+            aggregation_settings={agg_node.node_id: agg_settings},
+        )
+
+        sink_executor = SinkExecutor(recorder, span_factory, run_id)
+
+        ctx = PluginContext(run_id=run_id, config={})
+
+        # Source with 5 rows to test partial batch at end_of_source
+        source_rows = [{"value": i} for i in range(1, 6)]  # 1, 2, 3, 4, 5
+
+        # Track all tokens and output rows
+        all_tokens: list[TokenInfo] = []
+        all_output_rows: list[dict[str, Any]] = []
+
+        for row_index, row_data in enumerate(source_rows):
+            # Create token for each source row
+            token = token_manager.create_initial_token(
+                run_id=run_id,
+                source_node_id=source_node.node_id,
+                row_index=row_index,
+                row_data=row_data,
+            )
+            all_tokens.append(token)
+
+            # Accept row into aggregation
+            result = agg_executor.accept(
+                aggregation=aggregation,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=1,
+            )
+            assert result.accepted is True
+
+            # Check if trigger condition is met (after 3 rows)
+            if agg_executor.should_flush(agg_node.node_id):
+                # Flush the batch
+                output_rows = agg_executor.flush(
+                    aggregation=aggregation,
+                    ctx=ctx,
+                    trigger_reason="count_reached",
+                    step_in_pipeline=2,
+                )
+                all_output_rows.extend(output_rows)
+
+        # After processing all 5 rows:
+        # - First batch (3 rows) was flushed when count reached
+        # - 2 rows remain in buffer
+
+        # Simulate end_of_source: flush remaining rows
+        remaining_rows = agg_executor.flush(
+            aggregation=aggregation,
+            ctx=ctx,
+            trigger_reason="end_of_source",
+            step_in_pipeline=2,
+        )
+        all_output_rows.extend(remaining_rows)
+
+        # output_mode=passthrough: all 5 rows should be output unchanged
+        assert len(all_output_rows) == 5, (
+            f"Expected 5 rows (passthrough), got {len(all_output_rows)}. "
+            "Passthrough mode should release all buffered rows unchanged."
+        )
+
+        # Verify order: first batch (1,2,3), then end_of_source flush (4,5)
+        expected_values = [1, 2, 3, 4, 5]
+        actual_values = [r["value"] for r in all_output_rows]
+        assert actual_values == expected_values, (
+            f"Expected values {expected_values}, got {actual_values}. "
+            "Rows should maintain original order through passthrough."
+        )
+
+        # Create tokens for output rows and write to sink
+        for idx, output_row in enumerate(all_output_rows):
+            output_token = TokenInfo(
+                row_id=f"passthrough_output_{idx}",
+                token_id=f"passthrough_token_{idx}",
+                row_data=output_row,
+            )
+            sink_executor.write(
+                sink=sink,
+                tokens=[output_token],
+                ctx=ctx,
+                step_in_pipeline=3,
+            )
+
+        # CRITICAL VERIFICATION: Sink received all 5 rows unchanged
+        assert len(sink.results) == 5, (
+            f"Expected 5 rows in sink, got {len(sink.results)}. "
+            "Passthrough mode should pass all rows to sink unchanged."
+        )
+
+        # Verify values are unchanged
+        sink_values = [r["value"] for r in sink.results]
+        assert sink_values == [1, 2, 3, 4, 5], (
+            f"Expected [1, 2, 3, 4, 5], got {sink_values}. "
+            "Passthrough should not modify row values."
+        )
+
+        # Complete the run
+        recorder.complete_run(run_id, status="completed")
+
+        # Verify audit trail completeness
+        rows = recorder.get_rows(run_id)
+        assert len(rows) == 5, f"Expected 5 source rows, got {len(rows)}"
+
+        # Verify batches were created:
+        # - 1 batch for first 3 rows (count trigger)
+        # - 1 batch for remaining 2 rows (end_of_source)
+        batches = recorder.get_batches(run_id)
+        assert len(batches) == 2, f"Expected 2 batches, got {len(batches)}"
+
+        # Verify batch member counts
+        batch_sizes = []
+        for batch in batches:
+            members = recorder.get_batch_members(batch.batch_id)
+            batch_sizes.append(len(members))
+
+        # First batch has 3 members, second has 2
+        assert sorted(batch_sizes) == [2, 3], (
+            f"Expected batch sizes [2, 3], got {sorted(batch_sizes)}. "
+            "First batch should have 3 rows, end_of_source batch should have 2."
+        )
+
+    def test_aggregation_flushes_on_source_exhaustion(self) -> None:
+        """Aggregation flushes remaining rows when source exhausts.
+
+        Pipeline: source (5 rows) -> aggregation (count=100) -> sink
+        - count=100 never triggers (only 5 rows)
+        - end_of_source implicit trigger flushes the 5 accumulated rows
+
+        This is critical for not losing data: even when the explicit trigger
+        (count=100) never fires, the aggregation MUST flush at end_of_source.
+        """
+        from elspeth.contracts import NodeType, PluginSchema, TokenInfo
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.executors import AggregationExecutor, SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.engine.tokens import TokenManager
+        from elspeth.plugins.base import BaseAggregation
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import AcceptResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Start a run
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        run_id = run.run_id
+
+        DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
+
+        class RowSchema(PluginSchema):
+            value: int
+
+        # Register nodes
+        source_node = recorder.register_node(
+            run_id=run_id,
+            node_id="source",
+            plugin_name="list_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        agg_node = recorder.register_node(
+            run_id=run_id,
+            node_id="buffer_agg",
+            plugin_name="buffer_agg",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        sink_node = recorder.register_node(
+            run_id=run_id,
+            node_id="output_sink",
+            plugin_name="collect_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        class BufferAggregation(BaseAggregation):
+            """Aggregation that buffers and releases rows unchanged."""
+
+            name = "buffer_agg"
+            input_schema = RowSchema
+            output_schema = RowSchema
+            plugin_version = "1.0.0"
+
+            def __init__(self) -> None:
+                super().__init__({})
+                self._buffer: list[dict[str, Any]] = []
+
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
+                self._buffer.append(row)
+                return AcceptResult(accepted=True)
+
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+                result = list(self._buffer)
+                self._buffer = []
+                return result
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="memory://output", size_bytes=0, content_hash="test_hash"
+                )
+
+            def close(self) -> None:
+                pass
+
+        # CRITICAL: Configure aggregation with count=100 trigger
+        # This will NEVER fire for only 5 rows - we rely on end_of_source
+        agg_settings = AggregationSettings(
+            name="buffer_agg",
+            plugin="buffer_agg",
+            trigger=TriggerConfig(count=100),  # Will never fire!
+            output_mode="passthrough",
+        )
+
+        # Create aggregation instance and assign node_id
+        aggregation = BufferAggregation()
+        aggregation.node_id = agg_node.node_id
+
+        # Create sink instance and assign node_id
+        sink = CollectSink()
+        sink.node_id = sink_node.node_id
+
+        # Create executors
+        span_factory = SpanFactory()
+        token_manager = TokenManager(recorder)
+
+        agg_executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=span_factory,
+            run_id=run_id,
+            aggregation_settings={agg_node.node_id: agg_settings},
+        )
+
+        sink_executor = SinkExecutor(recorder, span_factory, run_id)
+
+        ctx = PluginContext(run_id=run_id, config={})
+
+        # Source provides only 5 rows
+        source_rows = [{"value": i} for i in range(1, 6)]  # 1, 2, 3, 4, 5
+
+        # Process all 5 rows - count trigger will NEVER fire (need 100)
+        for row_index, row_data in enumerate(source_rows):
+            token = token_manager.create_initial_token(
+                run_id=run_id,
+                source_node_id=source_node.node_id,
+                row_index=row_index,
+                row_data=row_data,
+            )
+
+            result = agg_executor.accept(
+                aggregation=aggregation,
+                token=token,
+                ctx=ctx,
+                step_in_pipeline=1,
+            )
+            assert result.accepted is True
+
+            # Verify count trigger has NOT fired (only 5 rows, need 100)
+            assert (
+                agg_executor.should_flush(agg_node.node_id) is False
+            ), f"Count trigger should not fire with only {row_index + 1} rows (need 100)"
+
+        # At this point:
+        # - 5 rows have been accepted
+        # - count=100 trigger has NOT fired
+        # - Without end_of_source flush, data would be LOST
+
+        # Simulate SOURCE EXHAUSTION: flush with end_of_source trigger
+        # This is the implicit trigger that always fires when source ends
+        output_rows = agg_executor.flush(
+            aggregation=aggregation,
+            ctx=ctx,
+            trigger_reason="end_of_source",  # The implicit trigger
+            step_in_pipeline=2,
+        )
+
+        # CRITICAL VERIFICATION: All 5 rows were flushed
+        assert len(output_rows) == 5, (
+            f"Expected 5 rows from end_of_source flush, got {len(output_rows)}. "
+            "end_of_source must flush ALL accumulated rows regardless of count trigger."
+        )
+
+        # Verify row values are preserved
+        flushed_values = [r["value"] for r in output_rows]
+        assert flushed_values == [
+            1,
+            2,
+            3,
+            4,
+            5,
+        ], f"Expected values [1, 2, 3, 4, 5], got {flushed_values}"
+
+        # Write flushed rows to sink
+        for idx, output_row in enumerate(output_rows):
+            output_token = TokenInfo(
+                row_id=f"eos_output_{idx}",
+                token_id=f"eos_token_{idx}",
+                row_data=output_row,
+            )
+            sink_executor.write(
+                sink=sink,
+                tokens=[output_token],
+                ctx=ctx,
+                step_in_pipeline=3,
+            )
+
+        # CRITICAL VERIFICATION: Sink received all 5 rows
+        assert len(sink.results) == 5, (
+            f"Expected 5 rows in sink, got {len(sink.results)}. "
+            "All rows must reach sink via end_of_source flush."
+        )
+
+        # Verify values in sink
+        sink_values = [r["value"] for r in sink.results]
+        assert sink_values == [
+            1,
+            2,
+            3,
+            4,
+            5,
+        ], f"Expected [1, 2, 3, 4, 5] in sink, got {sink_values}"
+
+        # Complete the run
+        recorder.complete_run(run_id, status="completed")
+
+        # Verify audit trail completeness
+        rows = recorder.get_rows(run_id)
+        assert len(rows) == 5, f"Expected 5 source rows, got {len(rows)}"
+
+        # Verify exactly 1 batch was created (end_of_source flush)
+        batches = recorder.get_batches(run_id)
+        assert len(batches) == 1, (
+            f"Expected 1 batch (from end_of_source), got {len(batches)}. "
+            "Count trigger should never have fired."
+        )
+
+        # Verify the single batch has all 5 members
+        members = recorder.get_batch_members(batches[0].batch_id)
+        assert len(members) == 5, (
+            f"Expected 5 batch members, got {len(members)}. "
+            "All rows should be in the end_of_source batch."
+        )
+
+        # Verify batch was triggered by end_of_source
+        assert (
+            batches[0].trigger_reason == "end_of_source"
+        ), f"Expected trigger_reason='end_of_source', got '{batches[0].trigger_reason}'"
+
 
 class TestForkCoalescePipelineIntegration:
     """End-to-end fork -> coalesce -> sink tests.

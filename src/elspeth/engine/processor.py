@@ -17,6 +17,7 @@ from elspeth.contracts import RowOutcome, RowResult, TokenInfo, TransformResult
 
 if TYPE_CHECKING:
     from elspeth.engine.coalesce_executor import CoalesceExecutor
+
 from elspeth.contracts.enums import RoutingKind
 from elspeth.contracts.results import FailureInfo
 from elspeth.core.config import AggregationSettings, GateSettings

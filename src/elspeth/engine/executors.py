@@ -684,8 +684,7 @@ class AggregationExecutor:
 
         # Accept rows into batch
         result = executor.accept(aggregation, token, ctx, step_in_pipeline)
-        if result.trigger:
-            outputs = executor.flush(aggregation, ctx, "count_reached", step_in_pipeline)
+        # Engine uses TriggerEvaluator to decide when to flush (WP-06)
     """
 
     def __init__(
@@ -733,7 +732,7 @@ class AggregationExecutor:
             step_in_pipeline: Current position in DAG (Orchestrator is authority)
 
         Returns:
-            AcceptResult with accepted flag, trigger flag, and batch_id
+            AcceptResult with accepted flag and batch_id
 
         Raises:
             Exception: Re-raised from aggregation.accept() after recording failure

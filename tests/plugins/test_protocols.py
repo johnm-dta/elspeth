@@ -211,8 +211,7 @@ class TestAggregationProtocol:
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._values.append(row["value"])
-                trigger = len(self._values) >= self.batch_size
-                return AcceptResult(accepted=True, trigger=trigger)
+                return AcceptResult(accepted=True)
 
             def should_trigger(self) -> bool:
                 return len(self._values) >= self.batch_size
@@ -246,14 +245,14 @@ class TestAggregationProtocol:
 
         ctx = PluginContext(run_id="test", config={})
 
-        # First row - no trigger
+        # First row - no trigger yet
         result = agg.accept({"value": 10}, ctx)
         assert result.accepted is True
-        assert result.trigger is False
+        assert agg.should_trigger() is False
 
-        # Second row - trigger
+        # Second row - should trigger
         result = agg.accept({"value": 20}, ctx)
-        assert result.trigger is True
+        assert agg.should_trigger() is True
 
         # Flush
         outputs = agg.flush(ctx)

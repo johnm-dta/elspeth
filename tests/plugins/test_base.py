@@ -86,10 +86,7 @@ class TestBaseAggregation:
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._values.append(row["value"])
-                return AcceptResult(
-                    accepted=True,
-                    trigger=len(self._values) >= self._batch_size,
-                )
+                return AcceptResult(accepted=True)
 
             def should_trigger(self) -> bool:
                 return len(self._values) >= self._batch_size
@@ -103,8 +100,8 @@ class TestBaseAggregation:
         ctx = PluginContext(run_id="test", config={})
 
         agg.accept({"value": 10}, ctx)
-        result = agg.accept({"value": 20}, ctx)
-        assert result.trigger is True
+        agg.accept({"value": 20}, ctx)
+        assert agg.should_trigger() is True
 
         outputs = agg.flush(ctx)
         assert outputs == [{"total": 30}]

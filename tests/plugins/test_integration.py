@@ -168,8 +168,7 @@ class TestPluginSystemIntegration:
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._values.append(row["value"])
-                trigger = len(self._values) >= self._batch_size
-                return AcceptResult(accepted=True, trigger=trigger)
+                return AcceptResult(accepted=True)
 
             def should_trigger(self) -> bool:
                 return len(self._values) >= self._batch_size
@@ -192,8 +191,8 @@ class TestPluginSystemIntegration:
         outputs = []
 
         for v in values:
-            result = agg.accept({"value": v}, ctx)
-            if result.trigger:
+            agg.accept({"value": v}, ctx)
+            if agg.should_trigger():
                 outputs.extend(agg.flush(ctx))
 
         # Force final flush for any remaining items

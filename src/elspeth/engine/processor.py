@@ -232,20 +232,13 @@ class RowProcessor:
 
             elif isinstance(transform, BaseAggregation):
                 # Aggregation transform
-                accept_result = self._aggregation_executor.accept(
+                # NOTE: accept() just accepts rows, flush logic moved to engine (WP-06 Tasks 7-8)
+                self._aggregation_executor.accept(
                     aggregation=transform,
                     token=current_token,
                     ctx=ctx,
                     step_in_pipeline=step,
                 )
-
-                if accept_result.trigger:
-                    self._aggregation_executor.flush(
-                        aggregation=transform,
-                        ctx=ctx,
-                        trigger_reason="threshold",
-                        step_in_pipeline=step,
-                    )
 
                 return (
                     RowResult(

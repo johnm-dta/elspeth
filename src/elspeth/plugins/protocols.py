@@ -285,10 +285,10 @@ class AggregationProtocol(Protocol):
 
             def accept(self, row, ctx) -> AcceptResult:
                 self._values.append(row["value"])
-                return AcceptResult(
-                    accepted=True,
-                    trigger=len(self._values) >= self.batch_size,
-                )
+                return AcceptResult(accepted=True)
+
+            def should_trigger(self) -> bool:
+                return len(self._values) >= self.batch_size
 
             def flush(self, ctx) -> list[dict]:
                 result = {"mean": statistics.mean(self._values)}
@@ -318,7 +318,7 @@ class AggregationProtocol(Protocol):
 
         Called for each row. Implementation should:
         1. Store the row in internal buffer
-        2. Return trigger=True when batch should flush
+        2. Implement should_trigger() for flush condition (WP-06)
 
         Note: In Phase 3, the engine wraps this to manage Landscape batches.
 
@@ -327,7 +327,7 @@ class AggregationProtocol(Protocol):
             ctx: Plugin context
 
         Returns:
-            AcceptResult indicating acceptance and trigger state
+            AcceptResult indicating acceptance
         """
         ...
 

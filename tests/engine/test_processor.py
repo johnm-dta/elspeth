@@ -773,7 +773,7 @@ class TestRowProcessorAggregation:
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._count += 1
-                return AcceptResult(accepted=True, trigger=False)
+                return AcceptResult(accepted=True)
 
             def should_trigger(self) -> bool:
                 return False
@@ -804,8 +804,8 @@ class TestRowProcessorAggregation:
 
         assert result.outcome == RowOutcome.CONSUMED_IN_BATCH
 
-    def test_aggregation_trigger_flushes(self) -> None:
-        """Aggregation trigger causes flush to be called."""
+    def test_aggregation_accepts_multiple_rows(self) -> None:
+        """Aggregation accepts rows into batch (flush is engine-controlled, WP-06)."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
@@ -831,8 +831,6 @@ class TestRowProcessorAggregation:
             schema_config=DYNAMIC_SCHEMA,
         )
 
-        flush_called: list[bool] = []
-
         class ThresholdAggregation(BaseAggregation):
             name = "threshold_agg"
             input_schema = _TestSchema
@@ -845,14 +843,12 @@ class TestRowProcessorAggregation:
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._values.append(row["value"])
-                # Trigger when we have 2 values
-                return AcceptResult(accepted=True, trigger=len(self._values) >= 2)
+                return AcceptResult(accepted=True)
 
             def should_trigger(self) -> bool:
                 return len(self._values) >= 2
 
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
-                flush_called.append(True)
                 result = [{"sum": sum(self._values)}]
                 self._values = []
                 return result
@@ -866,7 +862,7 @@ class TestRowProcessorAggregation:
             source_node_id=source.node_id,
         )
 
-        # First row - no trigger
+        # First row - accepted into batch
         results1 = processor.process_row(
             row_index=0,
             row_data={"value": 10},
@@ -875,9 +871,9 @@ class TestRowProcessorAggregation:
         )
         assert len(results1) == 1
         assert results1[0].outcome == RowOutcome.CONSUMED_IN_BATCH
-        assert len(flush_called) == 0
 
-        # Second row - triggers
+        # Second row - also accepted into batch
+        # NOTE: flush is now engine-controlled (WP-06 Tasks 7-8), not triggered by accept
         results2 = processor.process_row(
             row_index=1,
             row_data={"value": 20},
@@ -886,7 +882,10 @@ class TestRowProcessorAggregation:
         )
         assert len(results2) == 1
         assert results2[0].outcome == RowOutcome.CONSUMED_IN_BATCH
-        assert len(flush_called) == 1  # Flush was called
+
+        # Verify aggregation buffered both values (flush not automatically called)
+        assert len(aggregation._values) == 2
+        assert aggregation.should_trigger() is True
 
 
 class TestRowProcessorTokenIdentity:

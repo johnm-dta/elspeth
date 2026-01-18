@@ -79,10 +79,10 @@ class AcceptResult:
     """Result of aggregation accept check.
 
     Indicates whether the row was accepted into a batch.
+    The engine evaluates trigger conditions separately (WP-06).
     """
 
     accepted: bool
-    trigger: bool
     batch_id: str | None = field(default=None, repr=False)
 
 

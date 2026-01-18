@@ -141,34 +141,34 @@ class TestGateResult:
 class TestAcceptResult:
     """Tests for AcceptResult."""
 
-    def test_accepted_no_trigger(self) -> None:
-        """Row accepted but batch not ready to trigger."""
-        result = AcceptResult(accepted=True, trigger=False)
+    def test_accepted(self) -> None:
+        """Row accepted into batch."""
+        result = AcceptResult(accepted=True)
 
         assert result.accepted is True
-        assert result.trigger is False
         assert result.batch_id is None
-
-    def test_accepted_with_trigger(self) -> None:
-        """Row accepted and batch should trigger."""
-        result = AcceptResult(accepted=True, trigger=True)
-
-        assert result.accepted is True
-        assert result.trigger is True
 
     def test_rejected(self) -> None:
         """Row rejected by aggregation."""
-        result = AcceptResult(accepted=False, trigger=False)
+        result = AcceptResult(accepted=False)
 
         assert result.accepted is False
-        assert result.trigger is False
 
     def test_batch_id_can_be_set(self) -> None:
         """Batch ID set by executor."""
-        result = AcceptResult(accepted=True, trigger=False)
+        result = AcceptResult(accepted=True)
         result.batch_id = "batch-123"
 
         assert result.batch_id == "batch-123"
+
+    def test_accept_result_has_no_trigger_field(self) -> None:
+        """AcceptResult should NOT have a trigger field (moved to engine)."""
+        from dataclasses import fields
+
+        from elspeth.contracts.results import AcceptResult
+
+        field_names = [f.name for f in fields(AcceptResult)]
+        assert "trigger" not in field_names, "trigger field should be removed (WP-06)"
 
 
 class TestRowResult:

@@ -150,24 +150,23 @@ class TestGateResult:
 class TestAcceptResult:
     """Results from aggregation accept()."""
 
-    def test_accepted_no_trigger(self) -> None:
+    def test_accepted(self) -> None:
         from elspeth.plugins.results import AcceptResult
 
-        result = AcceptResult(accepted=True, trigger=False)
+        result = AcceptResult(accepted=True)
         assert result.accepted is True
-        assert result.trigger is False
 
-    def test_accepted_with_trigger(self) -> None:
+    def test_rejected(self) -> None:
         from elspeth.plugins.results import AcceptResult
 
-        result = AcceptResult(accepted=True, trigger=True)
-        assert result.trigger is True
+        result = AcceptResult(accepted=False)
+        assert result.accepted is False
 
     def test_has_batch_id_field(self) -> None:
         """Phase 3 integration: batch_id for Landscape."""
         from elspeth.plugins.results import AcceptResult
 
-        result = AcceptResult(accepted=True, trigger=False)
+        result = AcceptResult(accepted=True)
         assert hasattr(result, "batch_id")
         assert result.batch_id is None  # Set by engine in Phase 3
 

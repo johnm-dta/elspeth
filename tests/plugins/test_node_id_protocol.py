@@ -147,7 +147,7 @@ class TestNodeIdProtocol:
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._buffer.append(row)
-                return AcceptResult(accepted=True, trigger=len(self._buffer) >= 10)
+                return AcceptResult(accepted=True)
 
             def should_trigger(self) -> bool:
                 return len(self._buffer) >= 10

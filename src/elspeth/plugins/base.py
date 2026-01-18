@@ -192,10 +192,10 @@ class BaseAggregation(ABC):
 
             def accept(self, row, ctx) -> AcceptResult:
                 self._values.append(row["value"])
-                return AcceptResult(
-                    accepted=True,
-                    trigger=len(self._values) >= 100,
-                )
+                return AcceptResult(accepted=True)
+
+            def should_trigger(self) -> bool:
+                return len(self._values) >= 100
 
             def flush(self, ctx) -> list[dict]:
                 result = {"mean": statistics.mean(self._values)}

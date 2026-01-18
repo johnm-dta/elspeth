@@ -102,7 +102,7 @@ class TestPluginTypeDetection:
             name = "duck"
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
-                return AcceptResult(accepted=True, trigger=False)
+                return AcceptResult(accepted=True)
 
         duck = DuckTypedAggregation()
         # Has the method but NOT an instance of BaseAggregation
@@ -154,7 +154,7 @@ class _TestAggregation(BaseAggregation):
 
     def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
         self._batch.append(row)
-        return AcceptResult(accepted=True, trigger=len(self._batch) >= self._batch_size)
+        return AcceptResult(accepted=True)
 
     def should_trigger(self) -> bool:
         return len(self._batch) >= self._batch_size

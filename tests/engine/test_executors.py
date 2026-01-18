@@ -1707,8 +1707,10 @@ class TestAggregationExecutor:
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._values.append(row["value"])
-                trigger = len(self._values) >= 2
-                return AcceptResult(accepted=True, trigger=trigger)
+                return AcceptResult(accepted=True)
+
+            def should_trigger(self) -> bool:
+                return len(self._values) >= 2
 
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 total = sum(self._values)
@@ -1793,7 +1795,10 @@ class TestAggregationExecutor:
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._count += 1
-                return AcceptResult(accepted=True, trigger=self._count >= 3)
+                return AcceptResult(accepted=True)
+
+            def should_trigger(self) -> bool:
+                return self._count >= 3
 
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 result = [{"count": self._count}]
@@ -1874,7 +1879,10 @@ class TestAggregationExecutor:
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._values.append(row["value"])
-                return AcceptResult(accepted=True, trigger=len(self._values) >= 2)
+                return AcceptResult(accepted=True)
+
+            def should_trigger(self) -> bool:
+                return len(self._values) >= 2
 
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 avg = sum(self._values) / len(self._values) if self._values else 0
@@ -1903,8 +1911,8 @@ class TestAggregationExecutor:
             recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
             result = executor.accept(aggregation, token, ctx, step_in_pipeline=1)
-            if result.trigger:
-                batch_id = result.batch_id
+            batch_id = result.batch_id
+            if aggregation.should_trigger():
                 break
 
         assert batch_id is not None  # Trigger condition reached after 2 rows
@@ -1955,7 +1963,10 @@ class TestAggregationExecutor:
             node_id = agg_node.node_id
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
-                return AcceptResult(accepted=True, trigger=False)
+                return AcceptResult(accepted=True)
+
+            def should_trigger(self) -> bool:
+                return False
 
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 return []
@@ -2059,7 +2070,10 @@ class TestAggregationExecutor:
             node_id = agg_node.node_id
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
-                return AcceptResult(accepted=True, trigger=True)
+                return AcceptResult(accepted=True)
+
+            def should_trigger(self) -> bool:
+                return True
 
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 raise RuntimeError("flush failed!")
@@ -2130,7 +2144,10 @@ class TestAggregationExecutor:
 
             def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
                 self._count += 1
-                return AcceptResult(accepted=True, trigger=self._count >= 2)
+                return AcceptResult(accepted=True)
+
+            def should_trigger(self) -> bool:
+                return self._count >= 2
 
             def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
                 self._batch_num += 1
@@ -2161,7 +2178,7 @@ class TestAggregationExecutor:
             recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
             result = executor.accept(aggregation, token, ctx, step_in_pipeline=1)
-            if result.trigger:
+            if aggregation.should_trigger():
                 assert result.batch_id is not None  # Batch exists when trigger fires
                 batch_ids.append(result.batch_id)
                 _outputs = executor.flush(

@@ -849,11 +849,14 @@ class TestOrchestratorInvalidRouting:
     def test_gate_routing_to_unknown_sink_raises_error(self) -> None:
         """Gate routing to non-existent sink must fail loudly, not silently."""
         from elspeth.contracts import PluginSchema
+        from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
-        from elspeth.engine.executors import MissingEdgeError
-        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-        from elspeth.plugins.results import GateResult, RoutingAction
+        from elspeth.engine.orchestrator import (
+            Orchestrator,
+            PipelineConfig,
+            RouteValidationError,
+        )
 
         db = LandscapeDB.in_memory()
 
@@ -876,21 +879,6 @@ class TestOrchestratorInvalidRouting:
             def close(self) -> None:
                 pass
 
-        class MisroutingGate(BaseGate):
-            name = "misrouting_gate"
-            input_schema = RowSchema
-            output_schema = RowSchema
-
-            def __init__(self) -> None:
-                super().__init__({})
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                # Route to a label that wasn't configured
-                return GateResult(
-                    row=row,
-                    action=RoutingAction.route("nonexistent_sink"),
-                )
-
         class CollectSink(_TestSinkBase):
             name = "collect"
 
@@ -912,22 +900,29 @@ class TestOrchestratorInvalidRouting:
             def close(self) -> None:
                 pass
 
+        # Config-driven gate that always routes to a non-existent sink
+        misrouting_gate = GateSettings(
+            name="misrouting_gate",
+            condition="True",  # Always routes
+            routes={"true": "nonexistent_sink"},  # Invalid sink for error test
+        )
+
         source = ListSource([{"value": 42}])
-        gate = MisroutingGate()
         sink = CollectSink()
 
         config = PipelineConfig(
             source=source,
-            transforms=[gate],
+            transforms=[],
             sinks={"default": sink},  # Note: "nonexistent_sink" is NOT here
+            gates=[misrouting_gate],
         )
 
         orchestrator = Orchestrator(db)
 
         # This MUST fail loudly - silent counting was the bug
-        # The GateExecutor catches this first via MissingEdgeError,
-        # which is even better since it happens at the routing level
-        with pytest.raises(MissingEdgeError, match="nonexistent_sink"):
+        # Config-driven gates are validated at pipeline init via RouteValidationError,
+        # catching the misconfiguration before any rows are processed
+        with pytest.raises(RouteValidationError, match="nonexistent_sink"):
             orchestrator.run(config, graph=_build_test_graph(config))
 
 

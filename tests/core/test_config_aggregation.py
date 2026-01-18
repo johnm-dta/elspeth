@@ -123,3 +123,11 @@ class TestTriggerConfig:
 
         assert with_condition.has_condition is True
         assert without_condition.has_condition is False
+
+    def test_condition_rejects_forbidden_constructs(self) -> None:
+        """Condition trigger rejects security-forbidden constructs."""
+        from elspeth.core.config import TriggerConfig
+
+        # Forbidden function call
+        with pytest.raises(ValidationError, match="Forbidden"):
+            TriggerConfig(condition="__import__('os')")

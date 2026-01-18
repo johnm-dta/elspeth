@@ -34,7 +34,7 @@ class TriggerConfig(BaseModel):
     Example YAML (combined triggers):
         trigger:
           count: 1000           # Fire after 1000 rows
-          timeout: 3600         # Or after 1 hour
+          timeout_seconds: 3600         # Or after 1 hour
           condition: "row['type'] == 'flush_signal'"  # Or on special row
     """
 

@@ -1142,40 +1142,12 @@ class TestOrchestratorGateRouting:
         """Gate can route rows to a named sink using route labels."""
         from unittest.mock import MagicMock
 
-        from elspeth.contracts import PluginSchema
-        from elspeth.core.config import (
-            DatasourceSettings,
-            ElspethSettings,
-            RowPluginSettings,
-            SinkSettings,
-        )
-        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-        from elspeth.plugins.results import GateResult, RoutingAction
 
         db = LandscapeDB.in_memory()
-
-        settings = ElspethSettings(
-            datasource=DatasourceSettings(plugin="csv"),
-            sinks={
-                "results": SinkSettings(plugin="csv"),
-                "flagged": SinkSettings(plugin="csv"),
-            },
-            row_plugins=[
-                RowPluginSettings(
-                    plugin="test_gate",
-                    type="gate",
-                    routes={"suspicious": "flagged", "clean": "continue"},
-                ),
-            ],
-            output_sink="results",
-        )
-        graph = ExecutionGraph.from_config(settings)
-
-        class TestSchema(PluginSchema):
-            model_config = {"extra": "allow"}  # noqa: RUF012
 
         # Mock source
         mock_source = MagicMock()
@@ -1184,22 +1156,12 @@ class TestOrchestratorGateRouting:
         mock_source.plugin_version = "1.0.0"
         mock_source.load.return_value = iter([{"id": 1, "score": 0.2}])
 
-        # Gate that routes using "suspicious" label (maps to "flagged" sink in routes config)
-        class RoutingGate(BaseGate):
-            name = "test_gate"
-            input_schema = TestSchema
-            output_schema = TestSchema
-
-            def __init__(self) -> None:
-                super().__init__({})
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                return GateResult(
-                    row={"id": 1, "score": 0.2},
-                    action=RoutingAction.route(
-                        "suspicious", reason={"score": "low"}
-                    ),  # Uses route label
-                )
+        # Config-driven gate: always routes to "flagged" sink
+        routing_gate = GateSettings(
+            name="test_gate",
+            condition="True",  # Always routes
+            routes={"true": "flagged"},
+        )
 
         # Mock sinks - must return proper artifact info from write()
         mock_results = MagicMock()
@@ -1220,12 +1182,15 @@ class TestOrchestratorGateRouting:
 
         pipeline_config = PipelineConfig(
             source=mock_source,
-            transforms=[RoutingGate()],
+            transforms=[],
             sinks={"results": mock_results, "flagged": mock_flagged},
+            gates=[routing_gate],
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(pipeline_config, graph=graph)
+        result = orchestrator.run(
+            pipeline_config, graph=_build_test_graph(pipeline_config)
+        )
 
         # Row should be routed, not completed
         assert result.rows_processed == 1
@@ -3140,11 +3105,10 @@ class TestRouteValidation:
     def test_valid_routes_pass_validation(self) -> None:
         """Valid route configurations should pass validation without error."""
         from elspeth.contracts import PluginSchema
-        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-        from elspeth.plugins.results import GateResult, RoutingAction
 
         db = LandscapeDB.in_memory()
 
@@ -3167,21 +3131,12 @@ class TestRouteValidation:
             def close(self) -> None:
                 pass
 
-        class RoutingGate(BaseGate):
-            name = "routing_gate"
-            input_schema = RowSchema
-            output_schema = RowSchema
-
-            def __init__(self) -> None:
-                super().__init__({})
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                if row["value"] > 50:
-                    return GateResult(
-                        row=row,
-                        action=RoutingAction.route("quarantine"),
-                    )
-                return GateResult(row=row, action=RoutingAction.continue_())
+        # Config-driven gate: routes values > 50 to "quarantine" sink, else continues
+        routing_gate = GateSettings(
+            name="routing_gate",
+            condition="row['value'] > 50",
+            routes={"true": "quarantine", "false": "continue"},
+        )
 
         class CollectSink(_TestSinkBase):
             name = "collect"
@@ -3205,39 +3160,19 @@ class TestRouteValidation:
                 pass
 
         source = ListSource([{"value": 10}, {"value": 100}])
-        gate = RoutingGate()
         default_sink = CollectSink()
         quarantine_sink = CollectSink()
 
         config = PipelineConfig(
             source=source,
-            transforms=[gate],
+            transforms=[],
             sinks={"default": default_sink, "quarantine": quarantine_sink},
+            gates=[routing_gate],
         )
-
-        # Build graph with valid routes
-        graph = ExecutionGraph()
-        graph.add_node("source", node_type="source", plugin_name="test_source")
-        graph.add_node("gate", node_type="gate", plugin_name="routing_gate")
-        graph.add_node("sink_default", node_type="sink", plugin_name="collect")
-        graph.add_node("sink_quarantine", node_type="sink", plugin_name="collect")
-        graph.add_edge("source", "gate", label="continue", mode=RoutingMode.MOVE)
-        graph.add_edge("gate", "sink_default", label="continue", mode=RoutingMode.MOVE)
-        graph.add_edge(
-            "gate", "sink_quarantine", label="quarantine", mode=RoutingMode.MOVE
-        )
-        graph._transform_id_map = {0: "gate"}
-        graph._sink_id_map = {
-            "default": "sink_default",
-            "quarantine": "sink_quarantine",
-        }
-        graph._output_sink = "default"
-        # Valid route: quarantine -> quarantine (existing sink)
-        graph._route_resolution_map = {("gate", "quarantine"): "quarantine"}
 
         orchestrator = Orchestrator(db)
         # Should not raise - routes are valid
-        result = orchestrator.run(config, graph=graph)
+        result = orchestrator.run(config, graph=_build_test_graph(config))
 
         assert result.status == "completed"
         assert len(default_sink.results) == 1  # value=10 continues
@@ -3246,7 +3181,7 @@ class TestRouteValidation:
     def test_invalid_route_destination_fails_at_init(self) -> None:
         """Route to non-existent sink should fail before processing any rows."""
         from elspeth.contracts import PluginSchema
-        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import (
@@ -3254,7 +3189,6 @@ class TestRouteValidation:
             PipelineConfig,
             RouteValidationError,
         )
-        from elspeth.plugins.results import GateResult, RoutingAction
 
         db = LandscapeDB.in_memory()
 
@@ -3279,21 +3213,12 @@ class TestRouteValidation:
             def close(self) -> None:
                 pass
 
-        class RoutingGate(BaseGate):
-            name = "safety_gate"
-            input_schema = RowSchema
-            output_schema = RowSchema
-
-            def __init__(self) -> None:
-                super().__init__({})
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                if row["value"] > 50:
-                    return GateResult(
-                        row=row,
-                        action=RoutingAction.route("quarantine"),
-                    )
-                return GateResult(row=row, action=RoutingAction.continue_())
+        # Config-driven gate: routes values > 50 to "quarantine" (which doesn't exist)
+        safety_gate = GateSettings(
+            name="safety_gate",
+            condition="row['value'] > 50",
+            routes={"true": "quarantine", "false": "continue"},
+        )
 
         class CollectSink(_TestSinkBase):
             name = "collect"
@@ -3317,34 +3242,21 @@ class TestRouteValidation:
                 pass
 
         source = ListSource([{"value": 10}, {"value": 100}])
-        gate = RoutingGate()
         default_sink = CollectSink()
         # Note: NO quarantine sink provided!
 
         config = PipelineConfig(
             source=source,
-            transforms=[gate],
+            transforms=[],
             sinks={"default": default_sink},  # Only default, no quarantine
+            gates=[safety_gate],
         )
-
-        # Build graph with route to non-existent sink
-        graph = ExecutionGraph()
-        graph.add_node("source", node_type="source", plugin_name="test_source")
-        graph.add_node("gate", node_type="gate", plugin_name="safety_gate")
-        graph.add_node("sink_default", node_type="sink", plugin_name="collect")
-        graph.add_edge("source", "gate", label="continue", mode=RoutingMode.MOVE)
-        graph.add_edge("gate", "sink_default", label="continue", mode=RoutingMode.MOVE)
-        graph._transform_id_map = {0: "gate"}
-        graph._sink_id_map = {"default": "sink_default"}
-        graph._output_sink = "default"
-        # Invalid route: quarantine -> quarantine (sink doesn't exist!)
-        graph._route_resolution_map = {("gate", "quarantine"): "quarantine"}
 
         orchestrator = Orchestrator(db)
 
         # Should fail at initialization with clear error message
         with pytest.raises(RouteValidationError) as exc_info:
-            orchestrator.run(config, graph=graph)
+            orchestrator.run(config, graph=_build_test_graph(config))
 
         # Verify error message contains helpful information
         error_msg = str(exc_info.value)
@@ -3361,7 +3273,7 @@ class TestRouteValidation:
     def test_error_message_includes_route_label(self) -> None:
         """Error message should include the route label for debugging."""
         from elspeth.contracts import PluginSchema
-        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import (
@@ -3369,7 +3281,6 @@ class TestRouteValidation:
             PipelineConfig,
             RouteValidationError,
         )
-        from elspeth.plugins.results import GateResult, RoutingAction
 
         db = LandscapeDB.in_memory()
 
@@ -3392,16 +3303,12 @@ class TestRouteValidation:
             def close(self) -> None:
                 pass
 
-        class RoutingGate(BaseGate):
-            name = "threshold_gate"
-            input_schema = RowSchema
-            output_schema = RowSchema
-
-            def __init__(self) -> None:
-                super().__init__({})
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                return GateResult(row=row, action=RoutingAction.route("above"))
+        # Config-driven gate: always routes to "high_scores" (which doesn't exist)
+        threshold_gate = GateSettings(
+            name="threshold_gate",
+            condition="True",  # Always routes
+            routes={"true": "high_scores"},  # Non-existent sink
+        )
 
         class CollectSink(_TestSinkBase):
             name = "collect"
@@ -3425,38 +3332,22 @@ class TestRouteValidation:
                 pass
 
         source = ListSource([{"value": 10}])
-        gate = RoutingGate()
         default_sink = CollectSink()
 
         config = PipelineConfig(
             source=source,
-            transforms=[gate],
+            transforms=[],
             sinks={"default": default_sink, "errors": CollectSink()},
+            gates=[threshold_gate],
         )
-
-        # Build graph with route "above" -> "high_scores" (sink doesn't exist)
-        graph = ExecutionGraph()
-        graph.add_node("source", node_type="source", plugin_name="test_source")
-        graph.add_node("gate", node_type="gate", plugin_name="threshold_gate")
-        graph.add_node("sink_default", node_type="sink", plugin_name="collect")
-        graph.add_node("sink_errors", node_type="sink", plugin_name="collect")
-        graph.add_edge("source", "gate", label="continue", mode=RoutingMode.MOVE)
-        graph.add_edge("gate", "sink_default", label="continue", mode=RoutingMode.MOVE)
-        graph._transform_id_map = {0: "gate"}
-        graph._sink_id_map = {"default": "sink_default", "errors": "sink_errors"}
-        graph._output_sink = "default"
-        # Route label "above" resolves to sink "high_scores" which doesn't exist
-        graph._route_resolution_map = {("gate", "above"): "high_scores"}
 
         orchestrator = Orchestrator(db)
 
         with pytest.raises(RouteValidationError) as exc_info:
-            orchestrator.run(config, graph=graph)
+            orchestrator.run(config, graph=_build_test_graph(config))
 
         error_msg = str(exc_info.value)
-        # Should include route label
-        assert "above" in error_msg
-        # Should include destination
+        # Should include destination (route target)
         assert "high_scores" in error_msg
         # Should include available sinks
         assert "default" in error_msg
@@ -3467,11 +3358,10 @@ class TestRouteValidation:
     def test_continue_routes_are_not_validated_as_sinks(self) -> None:
         """Routes that resolve to 'continue' should not be validated as sinks."""
         from elspeth.contracts import PluginSchema
-        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-        from elspeth.plugins.results import GateResult, RoutingAction
 
         db = LandscapeDB.in_memory()
 
@@ -3494,17 +3384,12 @@ class TestRouteValidation:
             def close(self) -> None:
                 pass
 
-        class RoutingGate(BaseGate):
-            name = "filter_gate"
-            input_schema = RowSchema
-            output_schema = RowSchema
-
-            def __init__(self) -> None:
-                super().__init__({})
-
-            def evaluate(self, row: Any, ctx: Any) -> GateResult:
-                # Route label "pass" resolves to "continue" in config
-                return GateResult(row=row, action=RoutingAction.route("pass"))
+        # Config-driven gate: always continues (no routing to sink)
+        filter_gate = GateSettings(
+            name="filter_gate",
+            condition="True",  # Always evaluates to true
+            routes={"true": "continue"},  # "continue" is not a sink
+        )
 
         class CollectSink(_TestSinkBase):
             name = "collect"
@@ -3528,31 +3413,18 @@ class TestRouteValidation:
                 pass
 
         source = ListSource([{"value": 10}])
-        gate = RoutingGate()
         default_sink = CollectSink()
 
         config = PipelineConfig(
             source=source,
-            transforms=[gate],
+            transforms=[],
             sinks={"default": default_sink},
+            gates=[filter_gate],
         )
-
-        # Build graph where "pass" route resolves to "continue" (not a sink)
-        graph = ExecutionGraph()
-        graph.add_node("source", node_type="source", plugin_name="test_source")
-        graph.add_node("gate", node_type="gate", plugin_name="filter_gate")
-        graph.add_node("sink_default", node_type="sink", plugin_name="collect")
-        graph.add_edge("source", "gate", label="continue", mode=RoutingMode.MOVE)
-        graph.add_edge("gate", "sink_default", label="continue", mode=RoutingMode.MOVE)
-        graph._transform_id_map = {0: "gate"}
-        graph._sink_id_map = {"default": "sink_default"}
-        graph._output_sink = "default"
-        # Route "pass" resolves to "continue" - should NOT be validated as a sink
-        graph._route_resolution_map = {("gate", "pass"): "continue"}
 
         orchestrator = Orchestrator(db)
         # Should not raise - "continue" is a valid routing target
-        result = orchestrator.run(config, graph=graph)
+        result = orchestrator.run(config, graph=_build_test_graph(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 1

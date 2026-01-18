@@ -260,3 +260,23 @@ class TestPhase5CheckpointSchema:
             aggregation_state_json='{"buffer": [1, 2, 3]}',
         )
         assert checkpoint.aggregation_state_json == '{"buffer": [1, 2, 3]}'
+
+
+class TestArtifactsIdempotencyKey:
+    """Tests for idempotency_key column in artifacts table (WP-05 Task 2)."""
+
+    def test_artifacts_table_has_idempotency_key(self) -> None:
+        """artifacts table should have idempotency_key column."""
+        from elspeth.core.landscape.schema import artifacts_table
+
+        column_names = [c.name for c in artifacts_table.columns]
+        assert "idempotency_key" in column_names
+
+    def test_artifact_model_has_idempotency_key(self) -> None:
+        """Artifact model should have idempotency_key field."""
+        from dataclasses import fields
+
+        from elspeth.core.landscape.models import Artifact
+
+        field_names = [f.name for f in fields(Artifact)]
+        assert "idempotency_key" in field_names

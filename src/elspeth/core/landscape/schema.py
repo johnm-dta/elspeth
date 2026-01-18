@@ -192,6 +192,7 @@ artifacts_table = Table(
     Column("path_or_uri", String(512), nullable=False),
     Column("content_hash", String(64), nullable=False),
     Column("size_bytes", Integer, nullable=False),
+    Column("idempotency_key", String(256)),  # For retry deduplication
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 

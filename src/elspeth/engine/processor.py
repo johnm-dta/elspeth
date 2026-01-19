@@ -92,6 +92,7 @@ class RowProcessor:
         retry_manager: RetryManager | None = None,
         coalesce_executor: "CoalesceExecutor | None" = None,
         coalesce_node_ids: dict[str, str] | None = None,
+        restored_aggregation_state: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """Initialize processor.
 
@@ -108,6 +109,7 @@ class RowProcessor:
             retry_manager: Optional retry manager for transform execution
             coalesce_executor: Optional coalesce executor for fork/join operations
             coalesce_node_ids: Map of coalesce_name -> node_id for coalesce points
+            restored_aggregation_state: Map of node_id -> state dict for crash recovery
         """
         self._recorder = recorder
         self._spans = span_factory
@@ -127,6 +129,11 @@ class RowProcessor:
         self._aggregation_executor = AggregationExecutor(
             recorder, span_factory, run_id, aggregation_settings=aggregation_settings
         )
+
+        # Restore aggregation state if provided (crash recovery)
+        if restored_aggregation_state:
+            for node_id, state in restored_aggregation_state.items():
+                self._aggregation_executor.restore_state(node_id, state)
 
     def _execute_transform_with_retry(
         self,

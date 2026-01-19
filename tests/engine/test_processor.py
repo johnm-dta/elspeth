@@ -6,6 +6,7 @@ because the processor uses isinstance() for type-safe plugin detection.
 Gates are config-driven using GateSettings.
 """
 
+from pathlib import Path
 from typing import Any
 
 from elspeth.contracts import PluginSchema, RoutingMode
@@ -3152,3 +3153,38 @@ class TestRowProcessorRetry:
         assert "MaxRetriesExceeded" in str(result.error) or "attempts" in str(
             result.error
         )
+
+
+class TestRowProcessorRecovery:
+    """Tests for RowProcessor recovery support."""
+
+    def test_processor_accepts_restored_aggregation_state(self, tmp_path: Path) -> None:
+        """RowProcessor passes restored state to AggregationExecutor."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        restored_state = {
+            "agg_node": {"buffer": [1, 2], "count": 2},
+        }
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id="source",
+            edge_map={},
+            route_resolution_map={},
+            restored_aggregation_state=restored_state,  # New parameter
+        )
+
+        # Verify state was passed to executor
+        assert processor._aggregation_executor.get_restored_state("agg_node") == {
+            "buffer": [1, 2],
+            "count": 2,
+        }

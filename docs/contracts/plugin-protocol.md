@@ -1,8 +1,10 @@
 # ELSPETH Plugin Protocol Contract
 
-> **Status:** FINAL (v1.4)
+> **Status:** FINAL (v1.5)
 > **Last Updated:** 2026-01-19
 > **Authority:** This document is the master reference for all plugin interactions.
+
+> ⚠️ **Implementation Status:** Features in v1.5 (multi-row output, `creates_tokens`, aggregation output modes) are **specified but not yet implemented**. See [`docs/plans/2026-01-19-multi-row-output.md`](../plans/2026-01-19-multi-row-output.md) for the implementation plan.
 
 ## Overview
 
@@ -339,7 +341,35 @@ node_id: str | None
 determinism: Determinism
 plugin_version: str
 is_batch_aware: bool = False  # Set True for batch processing at aggregation nodes
+creates_tokens: bool = False  # Set True for deaggregation (1→N row expansion)
 ```
+
+#### Token Creation (Deaggregation)
+
+Transforms that expand one row into multiple rows must declare `creates_tokens = True`:
+
+```python
+class JSONExplode(BaseTransform):
+    name = "json_explode"
+    creates_tokens = True  # Engine creates new tokens for each output row
+    # ...
+
+    def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+        items = row["items"]  # Trust: source validated this is a list
+        return TransformResult.success_multi([
+            {**row, "item": item, "item_index": i}
+            for i, item in enumerate(items)
+        ])
+```
+
+**Invariants:**
+- `creates_tokens=True` + `success()` → single output (allowed, like passthrough)
+- `creates_tokens=True` + `success_multi()` → engine creates new tokens per output row
+- `creates_tokens=False` + `success_multi()` → RuntimeError (except in aggregation passthrough mode)
+- `success_multi([])` is invalid (no silent drops) - use `success()` for a single-row empty case
+
+**Engine semantics:**
+- When a deaggregation transform (`creates_tokens=True`) returns `success_multi()` for a single input token, the engine creates N child tokens via `expand_token()` and the parent token reaches terminal state `EXPANDED` (children continue).
 
 #### Batch-Aware Transforms
 
@@ -462,21 +492,55 @@ def on_complete(self, ctx: PluginContext) -> None:
 @dataclass
 class TransformResult:
     status: Literal["success", "error"]
-    row: dict[str, Any] | None      # Output row (success) or None (error)
-    reason: dict[str, Any] | None   # Error details or None (success)
-    retryable: bool = False         # Can this operation be retried?
+    row: dict[str, Any] | None           # Single output row (mutually exclusive with rows)
+    rows: list[dict[str, Any]] | None    # Multi-row output (mutually exclusive with row)
+    reason: dict[str, Any] | None        # Error details or None (success)
+    retryable: bool = False              # Can this operation be retried?
 
     # Audit fields (set by executor, NOT by plugin)
     input_hash: str | None
     output_hash: str | None
     duration_ms: float | None
+
+    @property
+    def is_multi_row(self) -> bool:
+        """True if this result contains multiple output rows."""
+        return self.rows is not None
+
+    @property
+    def has_output_data(self) -> bool:
+        """True if this result has any output data (single or multi-row)."""
+        return self.row is not None or self.rows is not None
 ```
+
+**Invariants:**
+- `status == "success"` requires `has_output_data == True`
+- `row` and `rows` are mutually exclusive (exactly one is set on success)
+- `status == "error"` requires `reason is not None`
 
 **Factory methods:**
 
 ```python
-TransformResult.success(row)                    # Success with output
+TransformResult.success(row)                    # Success with single output row
+TransformResult.success_multi(rows)             # Success with multiple output rows
 TransformResult.error(reason, retryable=False)  # Failure
+```
+
+**Multi-row usage:**
+
+```python
+# Deaggregation: 1 input → N outputs
+def process(self, row, ctx) -> TransformResult:
+    items = row["items"]
+    return TransformResult.success_multi([
+        {**row, "item": item} for item in items
+    ])
+
+# Aggregation passthrough: N inputs → N enriched outputs
+def process(self, rows: list[dict], ctx) -> TransformResult:
+    return TransformResult.success_multi([
+        {**r, "batch_size": len(rows)} for r in rows
+    ])
 ```
 
 #### Lifecycle
@@ -953,6 +1017,33 @@ pipeline:
       # Transform must have is_batch_aware = True
 ```
 
+#### Output Mode
+
+Aggregation supports three output modes that determine how batch results are handled:
+
+```yaml
+aggregations:
+  - node_id: batch_stats
+    trigger: { count: 100 }
+    output_mode: single      # default: N inputs → 1 output
+```
+
+| Mode | Input → Output | Token Handling | While Buffering | Use Case |
+|------|----------------|----------------|-----------------|----------|
+| `single` | N → 1 | Triggering token reused | `CONSUMED_IN_BATCH` | Aggregation (sum, count, mean) |
+| `passthrough` | N → N | Same tokens preserved | `BUFFERED` | Batch enrichment |
+| `transform` | N → M | New tokens created | `CONSUMED_IN_BATCH` | Group-by, splitting |
+
+**Outcome semantics:**
+
+- **`single`** (default): Classic aggregation. N rows become 1 aggregated row. All input tokens are terminal (`CONSUMED_IN_BATCH`). The triggering token is reused for the output.
+
+- **`passthrough`**: Batch enrichment. N rows become N enriched rows with the same token IDs. Buffered tokens get `BUFFERED` (non-terminal) while waiting, then reappear as `COMPLETED` on flush. Transform must return `success_multi()` with exactly N rows.
+
+- **`transform`**: Batch transformation. N rows become M rows with new tokens. All input tokens are terminal (`CONSUMED_IN_BATCH`). New tokens are created via `expand_token()` with parent linkage to the triggering token.
+
+**Error handling:** All modes are atomic - if the transform returns `error`, ALL buffered rows fail together.
+
 #### Trigger Types
 
 | Trigger | Fires When |
@@ -971,13 +1062,18 @@ Multiple triggers can be combined (first one to fire wins).
    - Assigns `batch_id`
    - Records batch membership in audit trail
    - Updates trigger evaluator
-   - Token marked `CONSUMED_IN_BATCH`
+   - Token outcome depends on `output_mode`:
+     - `single`/`transform`: `CONSUMED_IN_BATCH` (terminal)
+     - `passthrough`: `BUFFERED` (non-terminal, will reappear as `COMPLETED`)
 3. Engine checks trigger conditions
 4. When trigger fires:
    - Engine retrieves buffered rows as `list[dict]`
    - Engine calls `transform.process(rows, ctx)` with the batch
    - Batch state: `draft` → `executing` → `completed`
-   - Output token continues downstream
+   - Output handling depends on `output_mode`:
+     - `single`: Triggering token continues with aggregated data
+     - `passthrough`: All buffered tokens continue with enriched data
+     - `transform`: New tokens created via `expand_token()` continue
    - Buffer is cleared for next batch
 
 **Important:** The engine owns the buffer, not the transform. Transforms simply receive `list[dict]` and return a result. This enables:
@@ -1073,14 +1169,20 @@ Plugins declare their determinism level:
 ```python
 class Determinism(Enum):
     DETERMINISTIC = "deterministic"          # Same input → same output, always
-    NON_DETERMINISTIC = "non_deterministic"  # Output may vary (timestamps, random)
-    EXTERNAL = "external"                    # Depends on external state (API, DB)
+    SEEDED = "seeded"                        # Same input → same output given captured seed
+    IO_READ = "io_read"                      # Reads from external state (files/env/time)
+    IO_WRITE = "io_write"                    # Writes side effects (files/db)
+    EXTERNAL_CALL = "external_call"          # Network/API calls (record request/response)
+    NON_DETERMINISTIC = "non_deterministic"  # Cannot be reproduced (record outputs)
 ```
 
 **Implications:**
-- `DETERMINISTIC`: Safe to replay, verify mode can compare outputs
-- `NON_DETERMINISTIC`: Replay produces different output (expected)
-- `EXTERNAL`: Output depends on external world state
+- `DETERMINISTIC`: Safe to replay; verify can recompute and compare
+- `SEEDED`: Capture and replay with same seed
+- `IO_READ`: Capture what was read (inputs/metadata) for replay/verify
+- `IO_WRITE`: Side effects; replay requires care and idempotency
+- `EXTERNAL_CALL`: Record request/response for replay; verify can diff responses
+- `NON_DETERMINISTIC`: Record outputs; verify cannot recompute deterministically
 
 ---
 
@@ -1128,6 +1230,7 @@ Plugins make calls; the engine throttles them.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.5 | 2026-01-19 | Multi-row output: `creates_tokens` attribute, `TransformResult.success_multi()`, `rows` field, aggregation `output_mode` (single/passthrough/transform), `BUFFERED` and `EXPANDED` outcomes |
 | 1.4 | 2026-01-19 | Batch-aware transforms (`is_batch_aware`), structural aggregation (engine owns buffers), crash recovery for batches |
 | 1.3 | 2026-01-17 | Source `on_validation_failure` (required), Transform `on_error` (optional), QuarantineEvent, TransformErrorEvent |
 | 1.2 | 2026-01-17 | Three-tier trust model, coercion rules by plugin type, type-safe ≠ operation-safe |

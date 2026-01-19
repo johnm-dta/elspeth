@@ -120,11 +120,23 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str) -> None:
 
         current_grade = row[0]
 
+        # Tier 1 (Landscape) validation - crash on corrupt audit data
+        # Per Data Manifesto: "Bad data in the audit trail = crash immediately"
+        if current_grade is None:
+            raise ValueError(
+                f"NULL reproducibility_grade for run {run_id} - audit data corruption"
+            )
+
+        try:
+            grade_enum = ReproducibilityGrade(current_grade)
+        except ValueError:
+            raise ValueError(
+                f"Invalid reproducibility_grade '{current_grade}' for run {run_id} - "
+                f"expected one of {[g.value for g in ReproducibilityGrade]}"
+            ) from None
+
         # Only REPLAY_REPRODUCIBLE needs to degrade
-        # TODO: Remove defensive NULL grade handling - Landscape is Tier 1 (FULL TRUST).
-        # If grade is NULL, that's database corruption or a bug in our code - should crash,
-        # not silently skip the update. See CLAUDE.md Three-Tier Trust Model.
-        if current_grade == ReproducibilityGrade.REPLAY_REPRODUCIBLE.value:
+        if grade_enum == ReproducibilityGrade.REPLAY_REPRODUCIBLE:
             conn.execute(
                 runs_table.update()
                 .where(runs_table.c.run_id == run_id)

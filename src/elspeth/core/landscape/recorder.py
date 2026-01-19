@@ -900,6 +900,77 @@ class LandscapeRecorder:
             created_at=now,
         )
 
+    def expand_token(
+        self,
+        parent_token_id: str,
+        row_id: str,
+        count: int,
+        step_in_pipeline: int,
+    ) -> list[Token]:
+        """Expand a token into multiple child tokens (deaggregation).
+
+        Creates N child tokens from a single parent for 1->N expansion.
+        All children share the same row_id (same source row) and are
+        linked to the parent via token_parents table.
+
+        Unlike fork_token (parallel DAG paths with branch names), expand_token
+        creates sequential children for deaggregation transforms.
+
+        Args:
+            parent_token_id: Token being expanded
+            row_id: Row ID (same for all children)
+            count: Number of child tokens to create (must be >= 1)
+            step_in_pipeline: Step where expansion occurs
+
+        Returns:
+            List of child Token models
+
+        Raises:
+            ValueError: If count < 1
+        """
+        if count < 1:
+            raise ValueError("expand_token requires at least 1 child")
+
+        expand_group_id = _generate_id()
+        children = []
+
+        with self._db.connection() as conn:
+            for ordinal in range(count):
+                child_id = _generate_id()
+                now = _now()
+
+                # Create child token with expand_group_id
+                conn.execute(
+                    tokens_table.insert().values(
+                        token_id=child_id,
+                        row_id=row_id,
+                        expand_group_id=expand_group_id,
+                        step_in_pipeline=step_in_pipeline,
+                        created_at=now,
+                    )
+                )
+
+                # Record parent relationship
+                conn.execute(
+                    token_parents_table.insert().values(
+                        token_id=child_id,
+                        parent_token_id=parent_token_id,
+                        ordinal=ordinal,
+                    )
+                )
+
+                children.append(
+                    Token(
+                        token_id=child_id,
+                        row_id=row_id,
+                        expand_group_id=expand_group_id,
+                        step_in_pipeline=step_in_pipeline,
+                        created_at=now,
+                    )
+                )
+
+        return children
+
     # === Node State Recording ===
 
     def begin_node_state(
@@ -1668,6 +1739,7 @@ class LandscapeRecorder:
                 row_id=r.row_id,
                 fork_group_id=r.fork_group_id,
                 join_group_id=r.join_group_id,
+                expand_group_id=r.expand_group_id,
                 branch_name=r.branch_name,
                 step_in_pipeline=r.step_in_pipeline,
                 created_at=r.created_at,
@@ -1778,6 +1850,7 @@ class LandscapeRecorder:
             row_id=r.row_id,
             fork_group_id=r.fork_group_id,
             join_group_id=r.join_group_id,
+            expand_group_id=r.expand_group_id,
             branch_name=r.branch_name,
             step_in_pipeline=r.step_in_pipeline,
             created_at=r.created_at,

@@ -108,10 +108,13 @@ tokens_table = Table(
     Column("row_id", String(64), ForeignKey("rows.row_id"), nullable=False),
     Column("fork_group_id", String(64)),
     Column("join_group_id", String(64)),
+    Column(
+        "expand_group_id", String(32), nullable=True, index=True
+    ),  # For deaggregation
     Column("branch_name", String(64)),
     Column(
         "step_in_pipeline", Integer
-    ),  # Step where this token was created (fork/coalesce)
+    ),  # Step where this token was created (fork/coalesce/expand)
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 

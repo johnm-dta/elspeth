@@ -109,8 +109,11 @@ class Token:
     created_at: datetime
     fork_group_id: str | None = None
     join_group_id: str | None = None
+    expand_group_id: str | None = None  # For deaggregation grouping
     branch_name: str | None = None
-    step_in_pipeline: int | None = None
+    step_in_pipeline: int | None = (
+        None  # Step where token was created (fork/coalesce/expand)
+    )
 
 
 @dataclass

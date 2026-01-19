@@ -149,6 +149,7 @@ class TokenRepository:
             created_at=row.created_at,
             fork_group_id=row.fork_group_id,
             join_group_id=row.join_group_id,
+            expand_group_id=row.expand_group_id,
             branch_name=row.branch_name,
             step_in_pipeline=row.step_in_pipeline,
         )

@@ -399,6 +399,7 @@ class TestTokenRepository:
             created_at: datetime
             fork_group_id: str | None = None
             join_group_id: str | None = None
+            expand_group_id: str | None = None
             branch_name: str | None = None
             step_in_pipeline: int | None = None
 
@@ -407,6 +408,7 @@ class TestTokenRepository:
             row_id="row-456",
             created_at=datetime.now(UTC),
             fork_group_id="fork-789",
+            expand_group_id="expand-abc",
             branch_name="sentiment",
         )
 
@@ -415,6 +417,7 @@ class TestTokenRepository:
 
         assert token.token_id == "tok-123"
         assert token.fork_group_id == "fork-789"
+        assert token.expand_group_id == "expand-abc"
         assert token.branch_name == "sentiment"
 
 

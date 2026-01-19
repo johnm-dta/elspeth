@@ -2717,6 +2717,231 @@ class TestBatchRecoveryQueries:
         assert incomplete[1].batch_id == batch2.batch_id
         assert incomplete[2].batch_id == batch3.batch_id
 
+
+class TestExpandToken:
+    """Tests for expand_token (deaggregation audit trail)."""
+
+    def test_expand_token_creates_children_with_parent_relationship(self) -> None:
+        """expand_token creates child tokens linked to parent via token_parents."""
+        from elspeth.contracts.enums import Determinism, NodeType
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Setup: create run, node, row, and parent token
+        run = recorder.begin_run(config={"test": True}, canonical_version="1.0")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="json_explode",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={"items": [1, 2, 3]},
+        )
+        parent_token = recorder.create_token(row_id=row.row_id)
+
+        # Act: expand parent into 3 children
+        children = recorder.expand_token(
+            parent_token_id=parent_token.token_id,
+            row_id=row.row_id,
+            count=3,
+            step_in_pipeline=2,
+        )
+
+        # Assert: 3 children created
+        assert len(children) == 3
+
+        # All children share same row_id (same source row)
+        for child in children:
+            assert child.row_id == row.row_id
+            assert child.token_id != parent_token.token_id
+
+        # All children share same expand_group_id
+        expand_group_ids = {c.expand_group_id for c in children}
+        assert len(expand_group_ids) == 1
+        assert None not in expand_group_ids
+
+        # Verify parent relationships recorded
+        for i, child in enumerate(children):
+            parents = recorder.get_token_parents(child.token_id)
+            assert len(parents) == 1
+            assert parents[0].parent_token_id == parent_token.token_id
+            assert parents[0].ordinal == i
+
+    def test_expand_token_with_zero_count_raises(self) -> None:
+        """expand_token raises ValueError for count=0."""
+        import pytest
+
+        from elspeth.contracts.enums import Determinism, NodeType
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="1.0")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            determinism=Determinism.IO_READ,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={},
+        )
+        token = recorder.create_token(row_id=row.row_id)
+
+        with pytest.raises(ValueError, match="at least 1"):
+            recorder.expand_token(
+                parent_token_id=token.token_id,
+                row_id=row.row_id,
+                count=0,
+                step_in_pipeline=1,
+            )
+
+    def test_expand_token_stores_step_in_pipeline(self) -> None:
+        """expand_token stores step_in_pipeline on child tokens."""
+        from elspeth.contracts.enums import Determinism, NodeType
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="1.0")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="explode",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={"list": [1, 2]},
+        )
+        parent = recorder.create_token(row_id=row.row_id)
+
+        children = recorder.expand_token(
+            parent_token_id=parent.token_id,
+            row_id=row.row_id,
+            count=2,
+            step_in_pipeline=5,
+        )
+
+        # Verify step_in_pipeline stored
+        for child in children:
+            assert child.step_in_pipeline == 5
+            # Verify retrieval via get_token
+            retrieved = recorder.get_token(child.token_id)
+            assert retrieved is not None
+            assert retrieved.step_in_pipeline == 5
+
+    def test_expand_token_with_single_child(self) -> None:
+        """expand_token works with count=1."""
+        from elspeth.contracts.enums import Determinism, NodeType
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="1.0")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="singleton",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={},
+        )
+        parent = recorder.create_token(row_id=row.row_id)
+
+        children = recorder.expand_token(
+            parent_token_id=parent.token_id,
+            row_id=row.row_id,
+            count=1,
+            step_in_pipeline=1,
+        )
+
+        assert len(children) == 1
+        assert children[0].expand_group_id is not None
+
+        parents = recorder.get_token_parents(children[0].token_id)
+        assert len(parents) == 1
+        assert parents[0].parent_token_id == parent.token_id
+        assert parents[0].ordinal == 0
+
+    def test_expand_token_preserves_expand_group_id_through_retrieval(self) -> None:
+        """expand_group_id is preserved when retrieving tokens via get_token."""
+        from elspeth.contracts.enums import Determinism, NodeType
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="1.0")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="explode",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={},
+        )
+        parent = recorder.create_token(row_id=row.row_id)
+
+        children = recorder.expand_token(
+            parent_token_id=parent.token_id,
+            row_id=row.row_id,
+            count=2,
+            step_in_pipeline=3,
+        )
+
+        # Retrieve each child and verify expand_group_id matches
+        for child in children:
+            retrieved = recorder.get_token(child.token_id)
+            assert retrieved is not None
+            assert retrieved.expand_group_id == child.expand_group_id
+
+
+class TestBatchRetry:
+    """Tests for batch retry functionality."""
+
     def test_retry_batch_increments_attempt_and_resets_status(self) -> None:
         """retry_batch() creates new attempt with draft status."""
 

@@ -2,6 +2,8 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+> ⚠️ **Implementation Note:** This plan depends on features from Plugin Protocol v1.5 (`TransformResult.success_multi()`, `is_batch_aware`, aggregation `output_mode`). These are implemented - see `docs/plans/completed/2026-01-19-multi-row-output.md`. The `PluginContext.record_external_call()` method is **not yet implemented** and is delivered as Task C5 in this plan.
+
 **Goal:** Add LLM transform plugins (OpenRouter single, Azure single, Azure batch) with Jinja2 templating, Azure blob storage sources/sinks, and supporting infrastructure for external call recording.
 
 **Architecture:** Three-part implementation:
@@ -127,9 +129,10 @@ Analyze these items:
 
     def test_sandboxed_prevents_dangerous_operations(self):
         """Sandboxed environment blocks dangerous operations."""
-        # Attempt to access file system
+        # Attempt to access dunder attributes (blocked by SandboxedEnvironment)
         dangerous = PromptTemplate("{{ ''.__class__.__mro__ }}")
-        with pytest.raises(TemplateError):
+        # SecurityError is wrapped in TemplateError with "Sandbox violation" message
+        with pytest.raises(TemplateError, match="Sandbox violation"):
             dangerous.render()
 ```
 
@@ -160,13 +163,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from jinja2 import Environment, StrictUndefined, TemplateSyntaxError, UndefinedError
-from jinja2.sandbox import SandboxedEnvironment
+from jinja2.sandbox import SandboxedEnvironment, SecurityError
 
 from elspeth.core.canonical import canonical_json
 
 
 class TemplateError(Exception):
-    """Error in template rendering."""
+    """Error in template rendering (including sandbox violations)."""
     pass
 
 
@@ -247,12 +250,14 @@ class PromptTemplate:
             Rendered prompt string
 
         Raises:
-            TemplateError: If rendering fails (undefined variable, etc.)
+            TemplateError: If rendering fails (undefined variable, sandbox violation, etc.)
         """
         try:
             return self._template.render(**variables)
         except UndefinedError as e:
             raise TemplateError(f"Undefined variable: {e}") from e
+        except SecurityError as e:
+            raise TemplateError(f"Sandbox violation: {e}") from e
         except Exception as e:
             raise TemplateError(f"Template rendering failed: {e}") from e
 
@@ -322,6 +327,7 @@ EOF
 """Tests for base LLM transform."""
 
 import pytest
+from pydantic import ValidationError
 from unittest.mock import Mock, AsyncMock
 
 from elspeth.plugins.llm.base import BaseLLMTransform, LLMConfig, LLMResponse
@@ -331,9 +337,9 @@ class TestBaseLLMTransform:
     """Tests for BaseLLMTransform abstract base class."""
 
     def test_config_requires_template(self):
-        """LLMConfig requires a prompt template."""
-        with pytest.raises(ValueError, match="template"):
-            LLMConfig(model="gpt-4")
+        """LLMConfig requires a prompt template (Pydantic required field)."""
+        with pytest.raises(ValidationError):
+            LLMConfig(model="gpt-4")  # Missing required 'template' field
 
     def test_config_accepts_template_string(self):
         """LLMConfig can take template as string."""
@@ -344,9 +350,9 @@ class TestBaseLLMTransform:
         assert config.template is not None
 
     def test_config_validates_model(self):
-        """LLMConfig requires model name."""
-        with pytest.raises(ValueError, match="model"):
-            LLMConfig(template="Hello")
+        """LLMConfig requires model name (Pydantic required field)."""
+        with pytest.raises(ValidationError):
+            LLMConfig(template="Hello")  # Missing required 'model' field
 
     def test_llm_response_has_required_fields(self):
         """LLMResponse has content and metadata."""
@@ -368,6 +374,7 @@ class TestBaseLLMTransform:
 
 from __future__ import annotations
 
+import hashlib
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -378,6 +385,11 @@ from elspeth.contracts import TransformResult
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.templates import PromptTemplate
+
+
+def _sha256(content: str) -> str:
+    """Compute SHA-256 hash of string content."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 class LLMConfig(BaseModel):
@@ -488,12 +500,6 @@ class BaseLLMTransform(BaseTransform):
         output[f"{self._config.response_field}_usage"] = response.usage
 
         return TransformResult.success(output)
-
-
-def _sha256(content: str) -> str:
-    """Compute SHA-256 hash."""
-    import hashlib
-    return hashlib.sha256(content.encode()).hexdigest()
 ```
 
 **Step 3: Run tests and commit**
@@ -531,6 +537,7 @@ transforms:
 import time
 import httpx
 
+from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.base import BaseLLMTransform, LLMConfig, LLMResponse
 
 
@@ -677,6 +684,7 @@ aggregations:
     trigger:
       count: 100                   # Fire after 100 rows
       timeout_seconds: 3600        # Or after 1 hour
+    output_mode: passthrough       # N rows in → N enriched rows out
 
 transforms:
   - plugin: azure_batch_llm
@@ -691,6 +699,8 @@ transforms:
       poll_interval_seconds: 300   # How often to check batch status (5 min default)
       max_wait_hours: 24           # Maximum wait time
 ```
+
+**Output Mode Note:** Use `output_mode: passthrough` because this transform returns `success_multi()` with the same number of rows as input (each enriched with its LLM response). Use `output_mode: single` if you want classic N→1 aggregation (e.g., summarizing all rows into one).
 
 **Architecture:**
 
@@ -724,6 +734,7 @@ transforms:
 # src/elspeth/plugins/llm/azure_batch.py
 """Azure OpenAI Batch API transform - 50% cost savings for high volume."""
 
+import hashlib
 import json
 import time
 from typing import Any
@@ -734,6 +745,11 @@ from elspeth.contracts import TransformResult
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.templates import PromptTemplate
+
+
+def _sha256(content: str) -> str:
+    """Compute SHA-256 hash of string content."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 class AzureBatchLLMTransform(BaseTransform):
@@ -847,40 +863,86 @@ class AzureBatchLLMTransform(BaseTransform):
         # 5. Poll until complete
         results = self._poll_until_complete(batch_id, ctx)
 
-        # 6. Map results back to input rows
+        # 6. Map results back to input rows (passthrough: N in → N out)
         output_results = []
         for i, req in enumerate(rendered_prompts):
             custom_id = req["custom_id"]
+            output_row = dict(req["row_data"])
+
             if custom_id in results:
                 result_content = results[custom_id]
-                output_row = dict(req["row_data"])
                 output_row[self._config.response_field] = result_content
-                output_results.append(output_row)
             else:
-                # Missing result - record error in row
-                output_row = dict(req["row_data"])
+                # Missing result - record error in row (still include in output)
+                output_row[self._config.response_field] = None
                 output_row[f"{self._config.response_field}_error"] = "No response in batch"
-                output_results.append(output_row)
 
-        # Return aggregated result
-        return TransformResult.success({
-            "results": output_results,
-            "count": len(output_results),
-            "batch_id": batch_id,
-        })
+            # Add batch metadata for audit trail correlation
+            output_row[f"{self._config.response_field}_batch_id"] = batch_id
+            output_results.append(output_row)
+
+        # Return N enriched rows (use with aggregation output_mode: passthrough)
+        # Each original row comes out with its LLM response attached
+        return TransformResult.success_multi(output_results)
 
     def _process_single(
         self,
         row: dict[str, Any],
         ctx: PluginContext,
     ) -> TransformResult:
-        """Fallback for single row - use regular Azure API."""
-        # For single rows, delegate to regular AzureLLMTransform behavior
-        # (or could implement direct call here)
-        raise NotImplementedError(
-            "AzureBatchLLMTransform should be used at aggregation nodes. "
-            "For single-row processing, use AzureLLMTransform instead."
+        """Fallback for single row - use regular Azure API (not batch).
+
+        This allows the transform to work outside aggregation nodes,
+        though at full price (no 50% batch discount).
+        """
+        import time
+
+        rendered = self._template.render_with_metadata(**row)
+
+        messages = []
+        if self._config.system_prompt:
+            messages.append({"role": "system", "content": self._config.system_prompt})
+        messages.append({"role": "user", "content": rendered.prompt})
+
+        start = time.perf_counter()
+        response = self._client.chat.completions.create(
+            model=self._config.deployment_name,
+            messages=messages,
+            temperature=self._config.temperature,
+            max_tokens=self._config.max_tokens,
         )
+        latency_ms = (time.perf_counter() - start) * 1000
+
+        # Record in audit trail (single call, not batch)
+        ctx.record_external_call(
+            call_type="llm",
+            request={
+                "model": self._config.deployment_name,
+                "template_hash": rendered.template_hash,
+                "variables_hash": rendered.variables_hash,
+                "rendered_hash": rendered.rendered_hash,
+                "temperature": self._config.temperature,
+                "note": "single_row_fallback",  # Flag that this wasn't batched
+            },
+            response={
+                "content_hash": _sha256(response.choices[0].message.content),
+                "model": response.model,
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                },
+            },
+            latency_ms=latency_ms,
+        )
+
+        output = dict(row)
+        output[self._config.response_field] = response.choices[0].message.content
+        output[f"{self._config.response_field}_usage"] = {
+            "prompt_tokens": response.usage.prompt_tokens,
+            "completion_tokens": response.usage.completion_tokens,
+        }
+
+        return TransformResult.success(output)
 
     def _poll_until_complete(
         self,
@@ -1125,15 +1187,20 @@ Wire the `ctx.record_external_call()` method used by LLM transforms to CallRecor
 | **B: Azure Storage** | B1-B3 | 2 days | azure-storage-blob, azure-identity |
 | **C: Call Infrastructure** | C1-C5 | 2-3 days | DeepDiff, PayloadStore |
 
-**Recommended order:**
-1. **C1** (CallRecorder) - foundation for audit
-2. **A1** (Templates) - needed by all LLM plugins
-3. **A2** (BaseLLMTransform) - shared base class
-4. **A3** (OpenRouter) - quickest to test
-5. **A4** (Azure Single) - validates Azure integration
-6. **B1-B2** (Azure Storage) - enables Azure-native pipelines
-7. **A5** (Azure Batch) - the big one for your workload
-8. **C2-C5** (Replay/Verify) - nice-to-have for testing
+**Recommended order (UPDATED):**
+
+> **Critical dependency:** Tasks A2-A5 call `ctx.record_external_call()`, which requires C1 + C5 to be implemented first. The order below ensures no broken dependencies.
+
+1. **A1** (PromptTemplate) - no dependencies, foundation for all LLM plugins
+2. **C1** (CallRecorder) - foundation for audit trail recording
+3. **C5** (PluginContext.record_external_call) - wires recording to context ⚠️ **BEFORE A2**
+4. **A2** (BaseLLMTransform) - shared base class, now can use record_external_call
+5. **A3** (OpenRouter) - quickest to integration test
+6. **A4** (Azure Single) - validates Azure integration
+7. **B1-B2** (Azure Storage) - enables Azure-native pipelines
+8. **A5** (Azure Batch) - the big one for your workload
+9. **C2-C4** (Replay/Verify) - nice-to-have for testing
+10. **A6** (Integration tests) - validates full flow
 
 ---
 
@@ -1157,4 +1224,120 @@ azure = [
 Install with:
 ```bash
 uv pip install -e ".[llm,azure]"
+```
+
+---
+
+## Appendix: Additional Test Coverage Recommendations
+
+Beyond the unit tests specified in each task, consider these additional test scenarios:
+
+### Template Engine Edge Cases
+
+```python
+# tests/plugins/llm/test_templates_edge_cases.py
+
+def test_template_hash_reproducible_across_process_restarts():
+    """Same template produces same hash even after restart.
+
+    Critical for audit trail integrity - hash must be deterministic.
+    """
+    template_str = "Hello, {{ name }}!"
+    t1 = PromptTemplate(template_str)
+    hash1 = t1.template_hash
+
+    # Simulate restart by creating fresh instance
+    t2 = PromptTemplate(template_str)
+    hash2 = t2.template_hash
+
+    assert hash1 == hash2, "Hash must be reproducible for audit trail"
+
+
+def test_template_with_unicode_characters():
+    """Templates with emoji, CJK, RTL text work correctly."""
+    template = PromptTemplate("Analyze: {{ text }} 🎉")
+    result = template.render(text="日本語テスト")
+    assert "日本語テスト" in result
+    assert "🎉" in result
+
+
+def test_template_with_large_variables():
+    """Templates handle large variable payloads."""
+    template = PromptTemplate("Analyze: {{ text }}")
+    large_text = "x" * 100_000  # 100KB
+    result = template.render_with_metadata(text=large_text)
+    assert len(result.prompt) > 100_000
+
+
+def test_variables_hash_ignores_field_order():
+    """Variables hash is stable regardless of dict key order."""
+    template = PromptTemplate("{{ a }} {{ b }}")
+    r1 = template.render_with_metadata(a="x", b="y")
+    r2 = template.render_with_metadata(b="y", a="x")
+    assert r1.variables_hash == r2.variables_hash, "Canonical JSON must normalize order"
+```
+
+### LLM Transform Error Boundaries
+
+```python
+# tests/plugins/llm/test_error_boundaries.py
+
+def test_openrouter_timeout_records_partial_call():
+    """Timeout mid-request still records attempt in audit trail."""
+    # Mock httpx to timeout after connection but before response
+    # Verify ctx.record_external_call was called with error status
+
+
+def test_azure_batch_partial_failure_handling():
+    """Batch with some failed rows returns all results."""
+    # Mock Azure batch to fail on 2 of 5 rows
+    # Verify success_multi returns all 5 rows with appropriate error markers
+
+
+def test_llm_response_with_invalid_json():
+    """LLM returns malformed JSON in response field."""
+    # Some LLMs return JSON-ish but invalid responses
+    # Verify graceful handling
+
+
+def test_api_rate_limit_error_is_retryable():
+    """429 errors are marked retryable in TransformResult."""
+    # Mock 429 response
+    # Verify TransformResult.error(retryable=True)
+```
+
+### Audit Trail Integrity
+
+```python
+# tests/integration/test_audit_integrity.py
+
+def test_all_hashes_are_64_char_hex():
+    """All hash fields are valid SHA-256 hex strings."""
+    # Run a transform, query landscape
+    # Verify template_hash, variables_hash, rendered_hash, content_hash
+    # are all 64-character lowercase hex
+
+
+def test_batch_results_traceable_to_inputs():
+    """Each batch output row traces back to its input."""
+    # Run batch transform with 5 rows
+    # Verify each output has batch_id that exists in calls table
+    # Verify row count matches
+```
+
+### Trust Tier Compliance
+
+```python
+# tests/plugins/llm/test_trust_tiers.py
+
+def test_transform_does_not_coerce_row_types():
+    """LLM transform fails on wrong input types (no coercion)."""
+    # Pass row with str where int expected
+    # Verify pipeline crashes (Tier 2: transforms don't coerce)
+
+
+def test_llm_response_treated_as_external_data():
+    """LLM response content is not trusted for type operations."""
+    # LLM returns "42" when we expected int
+    # Downstream should handle this as external data
 ```

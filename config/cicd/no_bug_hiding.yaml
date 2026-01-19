@@ -589,3 +589,102 @@ allow_hits:
     reason: "Trust boundary: OpenRouter API may return different model than requested"
     safety: "Graceful fallback to requested model - audit still captures actual value"
     expires: null  # Permanent - intentional design
+
+  # ============================================================
+  # AZURE BATCH LLM TRANSFORM (Permanent)
+  # ============================================================
+  # AzureBatchLLMTransform has two categories of defensive patterns:
+  # 1. Checkpoint API forward-compatibility: PluginContext doesn't have
+  #    checkpoint methods yet. hasattr checks allow the transform to work
+  #    with future engine versions that add checkpoint support.
+  # 2. Azure Batch API response parsing: External API responses may have
+  #    different structures based on success/failure/version. These are
+  #    external data at a trust boundary.
+  # ============================================================
+
+  # --- Checkpoint API forward-compatibility ---
+  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_get_checkpoint:line=277"
+    owner: "architecture"
+    reason: "Forward-compatibility: PluginContext checkpoint API not yet defined"
+    safety: "Returns None if method doesn't exist - graceful no-op for current engine"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_update_checkpoint:line=288"
+    owner: "architecture"
+    reason: "Forward-compatibility: PluginContext checkpoint API not yet defined"
+    safety: "No-op if method doesn't exist - graceful no-op for current engine"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_clear_checkpoint:line=297"
+    owner: "architecture"
+    reason: "Forward-compatibility: PluginContext checkpoint API not yet defined"
+    safety: "No-op if method doesn't exist - graceful no-op for current engine"
+    expires: null  # Permanent - intentional design
+
+  # --- Checkpoint data access ---
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_process_batch:line=261"
+    owner: "architecture"
+    reason: "Checkpoint may be None or empty dict - checking for batch_id existence"
+    safety: "None/missing batch_id means PHASE 1 (fresh submit), explicit logic follows"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_check_batch_status:line=470"
+    owner: "architecture"
+    reason: "submitted_at may not exist in old checkpoint format"
+    safety: "Missing submitted_at skips timeout check - graceful degradation"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=514"
+    owner: "architecture"
+    reason: "row_mapping may not exist in corrupted checkpoint"
+    safety: "Empty dict default allows graceful recovery - rows return with error"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=515"
+    owner: "architecture"
+    reason: "template_errors may not exist in old checkpoint format"
+    safety: "Empty list default means no template errors tracked - graceful degradation"
+    expires: null  # Permanent - intentional design
+
+  # --- Azure Batch API response trust boundary ---
+  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_check_batch_status:line=440"
+    owner: "architecture"
+    reason: "Trust boundary: Azure batch.errors may not exist on all batch statuses"
+    safety: "Graceful handling - error info still returned without detailed errors"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=569"
+    owner: "architecture"
+    reason: "Trust boundary: Azure batch result 'error' field is optional"
+    safety: "Graceful handling - checks for error before extracting response"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=583"
+    owner: "architecture"
+    reason: "Trust boundary: Azure batch result 'response' field structure varies"
+    safety: "Graceful default to {} - handles missing/malformed responses"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=584"
+    owner: "architecture"
+    reason: "Trust boundary: Azure batch response 'body' field may be missing"
+    safety: "Graceful default to {} - handles missing/malformed responses"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=585"
+    owner: "architecture"
+    reason: "Trust boundary: Azure batch response 'choices' field may be missing"
+    safety: "Graceful default to [] - explicit check for empty choices follows"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=588"
+    owner: "architecture"
+    reason: "Trust boundary: Azure choice 'message.content' structure may vary"
+    safety: "Graceful default to '' - empty content is valid for audit trail"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=589"
+    owner: "architecture"
+    reason: "Trust boundary: Azure response 'usage' field is optional"
+    safety: "Graceful default to {} - usage is metadata, not critical"
+    expires: null  # Permanent - intentional design

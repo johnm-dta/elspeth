@@ -475,3 +475,236 @@ class TestResumeCheck:
         check = ResumeCheck(can_resume=True)
         with pytest.raises(AttributeError):
             check.can_resume = False  # type: ignore[misc]
+
+
+class TestGetUnprocessedRowsForkScenarios:
+    """Tests that verify correct row boundary in fork scenarios.
+
+    These tests expose the bug where sequence_number != row_index.
+    """
+
+    @pytest.fixture
+    def landscape_db(self, tmp_path: Path) -> LandscapeDB:
+        db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
+        return db
+
+    @pytest.fixture
+    def checkpoint_manager(self, landscape_db: LandscapeDB) -> CheckpointManager:
+        return CheckpointManager(landscape_db)
+
+    @pytest.fixture
+    def recovery_manager(
+        self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager
+    ) -> RecoveryManager:
+        return RecoveryManager(landscape_db, checkpoint_manager)
+
+    def _setup_fork_scenario(
+        self,
+        landscape_db: LandscapeDB,
+        checkpoint_manager: CheckpointManager,
+    ) -> str:
+        """Create scenario where row 0 forks to 3 tokens, sequence_number=3 but row_index=0."""
+        from elspeth.core.landscape.schema import (
+            nodes_table,
+            rows_table,
+            runs_table,
+            tokens_table,
+        )
+
+        run_id = "fork-test-run"
+        now = datetime.now(UTC)
+
+        with landscape_db.engine.connect() as conn:
+            # Create run
+            conn.execute(
+                runs_table.insert().values(
+                    run_id=run_id,
+                    started_at=now,
+                    config_hash="abc",
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status="failed",
+                )
+            )
+            # Create node
+            conn.execute(
+                nodes_table.insert().values(
+                    node_id="gate-fork",
+                    run_id=run_id,
+                    plugin_name="test",
+                    node_type="gate",
+                    plugin_version="1.0",
+                    determinism="deterministic",
+                    config_hash="xyz",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+            # Create 5 source rows (indices 0-4)
+            for i in range(5):
+                conn.execute(
+                    rows_table.insert().values(
+                        row_id=f"row-{i:03d}",
+                        run_id=run_id,
+                        source_node_id="gate-fork",
+                        row_index=i,
+                        source_data_hash=f"hash{i}",
+                        created_at=now,
+                    )
+                )
+            # Row 0 forks to 3 tokens (simulating fork gate)
+            conn.execute(
+                tokens_table.insert().values(
+                    token_id="tok-0-a", row_id="row-000", created_at=now
+                )
+            )
+            conn.execute(
+                tokens_table.insert().values(
+                    token_id="tok-0-b", row_id="row-000", created_at=now
+                )
+            )
+            conn.execute(
+                tokens_table.insert().values(
+                    token_id="tok-0-c", row_id="row-000", created_at=now
+                )
+            )
+            conn.commit()
+
+        # Checkpoint at token tok-0-c with sequence_number=3
+        # (simulating 3 terminal token events from one source row)
+        checkpoint_manager.create_checkpoint(
+            run_id, "tok-0-c", "gate-fork", sequence_number=3
+        )
+
+        return run_id
+
+    def test_fork_scenario_does_not_skip_unprocessed_rows(
+        self,
+        landscape_db: LandscapeDB,
+        checkpoint_manager: CheckpointManager,
+        recovery_manager: RecoveryManager,
+    ) -> None:
+        """Fork: Row 0 -> 3 tokens. Resume must process rows 1-4, not skip them."""
+        run_id = self._setup_fork_scenario(landscape_db, checkpoint_manager)
+
+        # BUG: Old code returns [] because row_index(1,2,3,4) > sequence_number(3) is only true for row 4
+        # FIX: Should return rows 1,2,3,4 because row_index > 0 (the checkpointed row's index)
+        unprocessed = recovery_manager.get_unprocessed_rows(run_id)
+
+        # All rows after row 0 should be unprocessed
+        assert (
+            len(unprocessed) == 4
+        ), f"Expected 4 unprocessed rows, got {len(unprocessed)}: {unprocessed}"
+        assert "row-001" in unprocessed
+        assert "row-002" in unprocessed
+        assert "row-003" in unprocessed
+        assert "row-004" in unprocessed
+
+
+class TestGetUnprocessedRowsFailureScenarios:
+    """Tests for rows that failed/quarantined without checkpointing."""
+
+    @pytest.fixture
+    def landscape_db(self, tmp_path: Path) -> LandscapeDB:
+        db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
+        return db
+
+    @pytest.fixture
+    def checkpoint_manager(self, landscape_db: LandscapeDB) -> CheckpointManager:
+        return CheckpointManager(landscape_db)
+
+    @pytest.fixture
+    def recovery_manager(
+        self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager
+    ) -> RecoveryManager:
+        return RecoveryManager(landscape_db, checkpoint_manager)
+
+    def _setup_failure_scenario(
+        self,
+        landscape_db: LandscapeDB,
+        checkpoint_manager: CheckpointManager,
+    ) -> str:
+        """Create scenario: rows 0,1 processed, row 2 failed (no checkpoint), rows 3,4 pending."""
+        from elspeth.core.landscape.schema import (
+            nodes_table,
+            rows_table,
+            runs_table,
+            tokens_table,
+        )
+
+        run_id = "failure-test-run"
+        now = datetime.now(UTC)
+
+        with landscape_db.engine.connect() as conn:
+            conn.execute(
+                runs_table.insert().values(
+                    run_id=run_id,
+                    started_at=now,
+                    config_hash="abc",
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status="failed",
+                )
+            )
+            conn.execute(
+                nodes_table.insert().values(
+                    node_id="transform-1",
+                    run_id=run_id,
+                    plugin_name="test",
+                    node_type="transform",
+                    plugin_version="1.0",
+                    determinism="deterministic",
+                    config_hash="xyz",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+            # Create 5 source rows
+            for i in range(5):
+                conn.execute(
+                    rows_table.insert().values(
+                        row_id=f"row-{i:03d}",
+                        run_id=run_id,
+                        source_node_id="transform-1",
+                        row_index=i,
+                        source_data_hash=f"hash{i}",
+                        created_at=now,
+                    )
+                )
+            # Tokens for rows 0, 1, 2 (row 2 failed before checkpoint)
+            for i in range(3):
+                conn.execute(
+                    tokens_table.insert().values(
+                        token_id=f"tok-{i:03d}",
+                        row_id=f"row-{i:03d}",
+                        created_at=now,
+                    )
+                )
+            conn.commit()
+
+        # Checkpoint at row 1 (row 2 failed before it could checkpoint)
+        # sequence_number=2 but we're at row_index=1
+        checkpoint_manager.create_checkpoint(
+            run_id, "tok-001", "transform-1", sequence_number=2
+        )
+
+        return run_id
+
+    def test_failure_scenario_includes_failed_row_in_resume(
+        self,
+        landscape_db: LandscapeDB,
+        checkpoint_manager: CheckpointManager,
+        recovery_manager: RecoveryManager,
+    ) -> None:
+        """Failure: Row 2 failed after row 1 checkpointed. Resume must include rows 2,3,4."""
+        run_id = self._setup_failure_scenario(landscape_db, checkpoint_manager)
+
+        unprocessed = recovery_manager.get_unprocessed_rows(run_id)
+
+        # Rows after row 1 (the checkpointed row) should be unprocessed
+        assert (
+            len(unprocessed) == 3
+        ), f"Expected 3 unprocessed rows, got {len(unprocessed)}: {unprocessed}"
+        assert "row-002" in unprocessed  # The failed row - must be retried
+        assert "row-003" in unprocessed
+        assert "row-004" in unprocessed

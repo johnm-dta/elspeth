@@ -17,7 +17,7 @@ from sqlalchemy.engine import Row
 from elspeth.contracts import Checkpoint, RunStatus
 from elspeth.core.checkpoint.manager import CheckpointManager
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.schema import rows_table, runs_table
+from elspeth.core.landscape.schema import rows_table, runs_table, tokens_table
 
 
 @dataclass(frozen=True)
@@ -154,8 +154,12 @@ class RecoveryManager:
     def get_unprocessed_rows(self, run_id: str) -> list[str]:
         """Get row IDs that were not processed before the run failed.
 
-        Returns rows with row_index greater than the checkpoint's sequence_number,
-        representing rows that still need processing after recovery.
+        Derives the row boundary from token lineage:
+        checkpoint.token_id -> tokens.row_id -> rows.row_index
+
+        This is correct even when sequence_number != row_index (e.g., forks
+        where one row produces multiple tokens, or failures where sequence
+        doesn't advance).
 
         Args:
             run_id: The run to get unprocessed rows for
@@ -169,10 +173,35 @@ class RecoveryManager:
             return []
 
         with self._db.engine.connect() as conn:
+            # Step 1: Find the row_index of the checkpointed token's source row
+            # Join: checkpoint.token_id -> tokens.row_id -> rows.row_index
+            checkpointed_row_index_query = (
+                select(rows_table.c.row_index)
+                .select_from(
+                    tokens_table.join(
+                        rows_table,
+                        tokens_table.c.row_id == rows_table.c.row_id,
+                    )
+                )
+                .where(tokens_table.c.token_id == checkpoint.token_id)
+            )
+            checkpointed_row_result = conn.execute(
+                checkpointed_row_index_query
+            ).fetchone()
+
+            if checkpointed_row_result is None:
+                raise RuntimeError(
+                    f"Checkpoint references non-existent token: {checkpoint.token_id}. "
+                    "This indicates database corruption or a bug in checkpoint creation."
+                )
+
+            checkpointed_row_index = checkpointed_row_result.row_index
+
+            # Step 2: Find all rows with row_index > checkpointed_row_index
             result = conn.execute(
                 select(rows_table.c.row_id)
                 .where(rows_table.c.run_id == run_id)
-                .where(rows_table.c.row_index > checkpoint.sequence_number)
+                .where(rows_table.c.row_index > checkpointed_row_index)
                 .order_by(rows_table.c.row_index)
             ).fetchall()
 

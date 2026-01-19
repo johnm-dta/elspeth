@@ -2990,12 +2990,34 @@ class TestProcessorBatchTransforms:
             ),
         }
 
+        # Create rows and tokens that will be referenced by the checkpoint
+        row0 = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            data={"value": 1},
+        )
+        token0 = recorder.create_token(row_id=row0.row_id)
+        row1 = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=1,
+            data={"value": 2},
+        )
+        token1 = recorder.create_token(row_id=row1.row_id)
+
+        # Create the batch that will be restored from checkpoint
+        old_batch = recorder.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id=sum_node.node_id,
+        )
+
         # Simulate restored checkpoint with 2 rows already buffered
         restored_buffer_state = {
             sum_node.node_id: {
                 "rows": [{"value": 1}, {"value": 2}],
-                "token_ids": ["token-0", "token-1"],
-                "batch_id": "batch-old",
+                "token_ids": [token0.token_id, token1.token_id],
+                "batch_id": old_batch.batch_id,
             }
         }
 

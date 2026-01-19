@@ -40,12 +40,21 @@ class LandscapeDB:
 
         # SQLite-specific configuration
         if self.connection_string.startswith("sqlite"):
-            self._configure_sqlite()
+            LandscapeDB._configure_sqlite(self._engine)
 
-    def _configure_sqlite(self) -> None:
-        """Configure SQLite for reliability."""
+    @staticmethod
+    def _configure_sqlite(engine: Engine) -> None:
+        """Configure SQLite engine for reliability.
 
-        @event.listens_for(self._engine, "connect")
+        Registers a connection event hook that sets:
+        - PRAGMA journal_mode=WAL (better concurrency)
+        - PRAGMA foreign_keys=ON (referential integrity)
+
+        Args:
+            engine: SQLAlchemy Engine to configure
+        """
+
+        @event.listens_for(engine, "connect")
         def set_sqlite_pragma(
             dbapi_connection: object, connection_record: object
         ) -> None:
@@ -94,6 +103,7 @@ class LandscapeDB:
             LandscapeDB instance with in-memory SQLite
         """
         engine = create_engine("sqlite:///:memory:", echo=False)
+        cls._configure_sqlite(engine)
         metadata.create_all(engine)
         instance = cls.__new__(cls)
         instance.connection_string = "sqlite:///:memory:"
@@ -113,6 +123,9 @@ class LandscapeDB:
             LandscapeDB instance
         """
         engine = create_engine(url, echo=False)
+        # SQLite-specific configuration
+        if url.startswith("sqlite"):
+            cls._configure_sqlite(engine)
         if create_tables:
             metadata.create_all(engine)
         instance = cls.__new__(cls)

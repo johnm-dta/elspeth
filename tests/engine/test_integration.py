@@ -3246,6 +3246,25 @@ class TestExplainQuery:
             sequence=3,
             schema_config=DYNAMIC_SCHEMA,
         )
+        # Register branch transform nodes for FK integrity
+        recorder.register_node(
+            run_id=run_id,
+            node_id="transform_path_a",
+            plugin_name="branch_transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        recorder.register_node(
+            run_id=run_id,
+            node_id="transform_path_b",
+            plugin_name="branch_transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
 
         # Create initial token (before fork)
         token_manager = TokenManager(recorder)

@@ -555,18 +555,26 @@ class TestResumeCommand:
 
         from elspeth.cli import app
         from elspeth.core.landscape import LandscapeDB
-        from elspeth.core.landscape.schema import checkpoints_table, runs_table
+        from elspeth.core.landscape.schema import (
+            checkpoints_table,
+            nodes_table,
+            rows_table,
+            runs_table,
+            tokens_table,
+        )
 
         # Set up database with a failed run that has a checkpoint
         db_file = tmp_path / "test.db"
         db_url = f"sqlite:///{db_file}"
         db = LandscapeDB.from_url(db_url)
 
+        run_id = "failed-with-checkpoint-001"
         now = datetime.now(UTC)
         with db.connection() as conn:
+            # Insert run
             conn.execute(
                 insert(runs_table).values(
-                    run_id="failed-with-checkpoint-001",
+                    run_id=run_id,
                     status="failed",
                     started_at=now,
                     completed_at=now,
@@ -575,10 +583,57 @@ class TestResumeCommand:
                     canonical_version="1.0.0",
                 )
             )
+            # Insert nodes (source and transform) for FK integrity
+            conn.execute(
+                insert(nodes_table).values(
+                    node_id="source-node",
+                    run_id=run_id,
+                    plugin_name="CSVSource",
+                    node_type="source",
+                    plugin_version="1.0.0",
+                    determinism="deterministic",
+                    config_hash="hash1",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+            conn.execute(
+                insert(nodes_table).values(
+                    node_id="transform-xyz",
+                    run_id=run_id,
+                    plugin_name="TestTransform",
+                    node_type="transform",
+                    plugin_version="1.0.0",
+                    determinism="deterministic",
+                    config_hash="hash2",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+            # Insert row (references source node)
+            conn.execute(
+                insert(rows_table).values(
+                    row_id="row-001",
+                    run_id=run_id,
+                    source_node_id="source-node",
+                    row_index=0,
+                    source_data_hash="hash123",
+                    created_at=now,
+                )
+            )
+            # Insert token (references row)
+            conn.execute(
+                insert(tokens_table).values(
+                    token_id="token-abc",
+                    row_id="row-001",
+                    created_at=now,
+                )
+            )
+            # Insert checkpoint (references token and node)
             conn.execute(
                 insert(checkpoints_table).values(
                     checkpoint_id="cp-test123",
-                    run_id="failed-with-checkpoint-001",
+                    run_id=run_id,
                     token_id="token-abc",
                     node_id="transform-xyz",
                     sequence_number=42,

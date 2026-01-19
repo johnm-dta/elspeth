@@ -644,14 +644,16 @@ class TestLandscapeExporterSigning:
             )
 
         # Multiple edges (tests get_edges ordering)
+        edges = []
         for i in range(2):
-            recorder.register_edge(
+            edge = recorder.register_edge(
                 run_id=run.run_id,
                 from_node_id=f"node_{i}",
                 to_node_id=f"node_{i + 1}",
                 label="continue",
                 mode=RoutingMode.MOVE,
             )
+            edges.append(edge)
 
         # Multiple rows (tests get_rows ordering)
         for i in range(3):
@@ -689,7 +691,7 @@ class TestLandscapeExporterSigning:
                     if k == 0:
                         recorder.record_routing_event(
                             state_id=state.state_id,
-                            edge_id="edge_placeholder",  # Not validated
+                            edge_id=edges[0].edge_id,  # Use actual edge
                             mode=RoutingMode.MOVE,
                         )
 

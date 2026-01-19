@@ -237,7 +237,7 @@ allow_hits:
   # others use dynamic. The default value is well-defined.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_execute_run:line=484"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_execute_run:line=529"
     owner: "architecture"
     reason: "Optional schema config with explicit default - not all nodes define schemas"
     safety: "Default value is well-defined: dynamic fields"

@@ -250,6 +250,51 @@ class Orchestrator:
                     f"'{destination}' exists. Available sinks: {sorted(available_sinks)}"
                 )
 
+    def _validate_transform_error_sinks(
+        self,
+        transforms: list[RowPlugin],
+        available_sinks: set[str],
+        _transform_id_map: dict[int, str],
+    ) -> None:
+        """Validate all transform on_error destinations reference existing sinks.
+
+        Called at pipeline initialization, BEFORE any rows are processed.
+        This catches config errors early instead of failing mid-run with KeyError.
+
+        Args:
+            transforms: List of transform plugins
+            available_sinks: Set of sink names from PipelineConfig
+            _transform_id_map: Maps transform sequence -> node_id (unused, kept for
+                API consistency with _validate_route_destinations)
+
+        Raises:
+            RouteValidationError: If any transform on_error references a non-existent sink
+        """
+        for transform in transforms:
+            # Only BaseTransform has _on_error; BaseGate uses routing, not error sinks
+            if not isinstance(transform, BaseTransform):
+                continue
+
+            # Access _on_error directly - defined in TransformProtocol and BaseTransform
+            on_error = transform._on_error
+
+            if on_error is None:
+                # No error routing configured - that's fine
+                continue
+
+            if on_error == "discard":
+                # "discard" is a special value, not a sink name
+                continue
+
+            # on_error should reference an existing sink
+            if on_error not in available_sinks:
+                raise RouteValidationError(
+                    f"Transform '{transform.name}' has on_error='{on_error}' "
+                    f"but no sink named '{on_error}' exists. "
+                    f"Available sinks: {sorted(available_sinks)}. "
+                    f"Use 'discard' to drop error rows without routing."
+                )
+
     def _assign_plugin_node_ids(
         self,
         source: SourceProtocol,
@@ -523,6 +568,13 @@ class Orchestrator:
             transforms=config.transforms,
             config_gate_id_map=config_gate_id_map,
             config_gates=config.gates,
+        )
+
+        # Validate transform error sink destinations
+        self._validate_transform_error_sinks(
+            transforms=config.transforms,
+            available_sinks=set(config.sinks.keys()),
+            _transform_id_map=transform_id_map,
         )
 
         # Get explicit node ID mappings from graph

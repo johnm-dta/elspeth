@@ -87,3 +87,14 @@
 ## Notes / Links
 - Related issues/PRs: N/A
 - Related design docs: `src/elspeth/plugins/protocols.py`, `docs/design/requirements.md`
+
+## Resolution
+
+**Fixed in:** 2026-01-19 (verified during triage)
+**Fix:** Orchestrator now correctly invokes lifecycle hooks for all plugin types:
+- `on_start`: Called in order (source → transforms → sinks) before processing
+- `on_complete`: Called in reverse order (transforms → sinks → source) even on error, wrapped in `suppress(Exception)` to ensure all plugins get cleanup
+
+**Evidence:**
+- `src/elspeth/engine/orchestrator.py:530-536`: on_start for all plugins
+- `src/elspeth/engine/orchestrator.py:655-665`: on_complete for all plugins

@@ -1,11 +1,12 @@
-# Bug Report: Node registration ignores plugin metadata
+# Bug Report: Config gate nodes use hardcoded metadata
 
 ## Summary
-- Orchestrator registers all nodes with `plugin_version="1.0.0"` and default determinism, ignoring actual plugin metadata (version/determinism/schema), so Landscape audit records are inaccurate.
+- ~~Orchestrator registers all nodes with `plugin_version="1.0.0"` and default determinism~~
+- **UPDATE 2026-01-19:** Plugin nodes (source, transforms, sinks) now correctly extract metadata from plugin instances. Only **config gates** still use hardcoded `plugin_version="1.0.0"` since they are engine-internal expression evaluators without plugin instances.
 
 ## Severity
-- Severity: major
-- Priority: P1
+- Severity: minor (downgraded from major - only affects config gates)
+- Priority: P2 (downgraded from P1)
 
 ## Reporter
 - Name or handle: Codex
@@ -82,3 +83,16 @@
 ## Notes / Links
 - Related issues/PRs: N/A
 - Related design docs: `docs/design/architecture.md`
+
+## Partial Resolution
+
+**Partially fixed in:** 2026-01-19 (verified during triage)
+
+**What's fixed:**
+- Plugin nodes (source, transforms, sinks) now correctly extract `plugin_version` and `determinism` from the plugin instance (`src/elspeth/engine/orchestrator.py:451-456`)
+
+**What remains:**
+- Config gates still use hardcoded `plugin_version="1.0.0"` (line 445)
+- This may be acceptable since config gates are engine-internal expression evaluators, not user-facing plugins
+
+**Recommendation:** Consider closing as "by design" - config gates don't have plugin instances and their behavior is deterministic by nature. Alternatively, define a version scheme for the config gate "pseudo-plugin".

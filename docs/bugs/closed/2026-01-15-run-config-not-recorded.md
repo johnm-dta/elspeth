@@ -82,3 +82,12 @@
 ## Notes / Links
 - Related issues/PRs: N/A
 - Related design docs: `docs/design/architecture.md`
+
+## Resolution
+
+**Fixed in:** 2026-01-19 (verified during triage)
+**Fix:** CLI now properly populates `PipelineConfig.config` using `resolve_config()`:
+
+**Evidence:**
+- `src/elspeth/cli.py:293`: `config=resolve_config(config)` populates the config field
+- `src/elspeth/engine/orchestrator.py:337,526`: Uses the populated `config.config`

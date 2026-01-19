@@ -86,3 +86,15 @@
 ## Notes / Links
 - Related issues/PRs: N/A
 - Related design docs: `docs/design/subsystems/00-overview.md`
+
+## Resolution
+
+**Fixed in:** 2026-01-19 (verified during triage)
+**Fix:** Artifact system now uses proper `ArtifactDescriptor` contract:
+- Database sink returns `ArtifactDescriptor.for_database()` with proper fields
+- SinkExecutor uses `artifact_info.path_or_uri`, `artifact_info.content_hash`, etc.
+
+**Evidence:**
+- `src/elspeth/plugins/sinks/database_sink.py:109-165`: Returns proper `ArtifactDescriptor`
+- `src/elspeth/engine/executors.py:1051-1072`: Uses descriptor fields correctly
+- `src/elspeth/contracts/__init__.py`: `ArtifactDescriptor` with factory methods for different sink types

@@ -2,11 +2,12 @@
 
 ## Summary
 
-- Forked and aggregated outcomes are returned by `RowProcessor` but ignored by `Orchestrator`, causing silent token drops and incomplete lineage.
+- ~~Forked and aggregated outcomes are returned by `RowProcessor` but ignored by `Orchestrator`, causing silent token drops and incomplete lineage.~~
+- **UPDATE 2026-01-19:** Significant progress made. Orchestrator now handles fork outcomes and routes fork children to branch-named sinks. Needs verification that all fork children reach terminal states.
 
 ## Severity
 
-- Severity: critical
+- Severity: major (downgraded from critical - partial fix in place)
 - Priority: P1
 
 ## Reporter
@@ -97,3 +98,20 @@
 
 - Related issues/PRs: N/A
 - Related design docs: `docs/design/architecture.md`
+
+## Triage Update (2026-01-19)
+
+**Status:** Promoted from pending to open for verification.
+
+**Evidence of partial fix:**
+- `src/elspeth/engine/orchestrator.py:566`: Tracks `rows_forked` counter
+- `src/elspeth/engine/orchestrator.py:631-634`: Handles `RowOutcome.FORKED`
+- `src/elspeth/engine/orchestrator.py:602-609`: Fork children route to branch-named sinks
+- `src/elspeth/engine/processor.py:322-338`: Processor generates fork results with proper child tokens
+
+**What needs verification:**
+1. Fork children actually reach terminal states (COMPLETED/ROUTED)
+2. Aggregation flush outputs are processed downstream
+3. Integration tests cover multi-branch fork scenarios
+
+**Next steps:** Write integration test that verifies fork child tokens appear in sink outputs.

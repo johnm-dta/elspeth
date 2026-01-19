@@ -93,3 +93,14 @@
 
 - Related issues/PRs: N/A
 - Related design docs: `docs/design/architecture.md`
+
+## Triage Note (2026-01-19)
+
+**Status:** Kept in pending - needs investigation.
+
+`RoutingMode.COPY` exists in the codebase (`dag.py:369,377`, `routing.py:95`) but it's unclear if the processor implements "route AND continue" semantics correctly.
+
+**Needs investigation:**
+1. Trace `RoutingMode.COPY` through gate execution to see if dual outputs are produced
+2. Check if processor handles COPY differently from MOVE
+3. Write test that verifies COPY results in output to both routed sink AND downstream processing

@@ -47,34 +47,32 @@
 
 ## Evidence
 
-Non-trust-boundary candidates (review/whitelist or refactor):
+**⚠️ STALE DATA (2026-01-19 Triage Note)**
+The line numbers below are from the original audit and no longer match current code. A re-audit is needed.
 
-- `src/elspeth/core/dag.py:129` (data.get("info"))
-- `src/elspeth/core/dag.py:164` (data.get("info"))
-- `src/elspeth/core/dag.py:177` (data.get("info"))
-- `src/elspeth/core/rate_limit/limiter.py:251` (_suppressed_threads.get)
-- `src/elspeth/engine/executors.py:327` (route_resolution_map.get)
-- `src/elspeth/engine/executors.py:405` (edge_map.get)
-- `src/elspeth/engine/executors.py:419` (edge_map.get)
-- `src/elspeth/engine/adapters.py:131` (artifact_descriptor.get)
-- `src/elspeth/engine/adapters.py:145` (artifact_descriptor.get)
-- `src/elspeth/engine/adapters.py:168` (artifact_descriptor.get)
-- `src/elspeth/engine/adapters.py:169` (artifact_descriptor.get)
-- `src/elspeth/engine/adapters.py:176` (artifact_descriptor.get)
-- `src/elspeth/engine/adapters.py:177` (artifact_descriptor.get)
-- `src/elspeth/cli.py:419` (PLUGIN_REGISTRY.get)
-- `src/elspeth/tui/widgets/node_detail.py:38` (node_state.get)
-- `src/elspeth/tui/widgets/node_detail.py:45` (node_state.get)
-- `src/elspeth/tui/widgets/node_detail.py:51` (node_state.get)
-- `src/elspeth/tui/widgets/node_detail.py:63` (node_state.get)
-- `src/elspeth/tui/widgets/node_detail.py:70` (node_state.get)
-- `src/elspeth/tui/widgets/node_detail.py:82` (node_state.get)
-- `src/elspeth/tui/widgets/lineage_tree.py:50` (lineage_data.get)
-- `src/elspeth/tui/widgets/lineage_tree.py:54` (lineage_data.get)
-- `src/elspeth/tui/widgets/lineage_tree.py:63` (lineage_data.get)
-- `src/elspeth/tui/widgets/lineage_tree.py:76` (lineage_data.get)
-- `src/elspeth/tui/widgets/lineage_tree.py:90` (lineage_data.get)
-- `src/elspeth/tui/widgets/lineage_tree.py:98` (lineage_data.get)
+**Known Status from 2026-01-19 triage:**
+- `dag.py`: Now uses direct access (`data["info"]`), not `.get()`. FIXED.
+- `lineage_tree.py`: Uses direct access with documented contracts. FIXED.
+- `node_detail.py`: Correctly distinguishes required fields (direct access) from optional display fields (`.get()` with explicit fallback for display purposes like `"N/A"`). This is the CORRECT pattern per CLAUDE.md.
+
+**Original list (stale line numbers):**
+
+- `src/elspeth/core/dag.py:129` (data.get("info")) - **FIXED: now direct access**
+- `src/elspeth/core/dag.py:164` (data.get("info")) - **FIXED: now direct access**
+- `src/elspeth/core/dag.py:177` (data.get("info")) - **FIXED: now direct access**
+- `src/elspeth/core/rate_limit/limiter.py:251` (_suppressed_threads.get) - needs re-check
+- `src/elspeth/engine/executors.py:327` (route_resolution_map.get) - needs re-check
+- `src/elspeth/engine/executors.py:405` (edge_map.get) - needs re-check
+- `src/elspeth/engine/executors.py:419` (edge_map.get) - needs re-check
+- `src/elspeth/engine/adapters.py:131` (artifact_descriptor.get) - needs re-check
+- `src/elspeth/engine/adapters.py:145` (artifact_descriptor.get) - needs re-check
+- `src/elspeth/engine/adapters.py:168` (artifact_descriptor.get) - needs re-check
+- `src/elspeth/engine/adapters.py:169` (artifact_descriptor.get) - needs re-check
+- `src/elspeth/engine/adapters.py:176` (artifact_descriptor.get) - needs re-check
+- `src/elspeth/engine/adapters.py:177` (artifact_descriptor.get) - needs re-check
+- `src/elspeth/cli.py:419` (PLUGIN_REGISTRY.get) - needs re-check
+- `src/elspeth/tui/widgets/node_detail.py` - **REVIEWED: Uses correct pattern (direct access for required, .get() for optional display)**
+- `src/elspeth/tui/widgets/lineage_tree.py` - **FIXED: now direct access**
 
 ## Impact
 

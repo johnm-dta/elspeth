@@ -1149,6 +1149,24 @@ class Orchestrator:
         # Get route resolution map
         route_resolution_map = graph.get_route_resolution_map()
 
+        # Validate route destinations (config may have changed since original run)
+        # This catches config errors early instead of after partial processing
+        self._validate_route_destinations(
+            route_resolution_map=route_resolution_map,
+            available_sinks=set(config.sinks.keys()),
+            transform_id_map=transform_id_map,
+            transforms=config.transforms,
+            config_gate_id_map=config_gate_id_map,
+            config_gates=config.gates,
+        )
+
+        # Validate transform error sink destinations
+        self._validate_transform_error_sinks(
+            transforms=config.transforms,
+            available_sinks=set(config.sinks.keys()),
+            _transform_id_map=transform_id_map,
+        )
+
         # Assign node_ids to all plugins
         self._assign_plugin_node_ids(
             source=config.source,

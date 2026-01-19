@@ -32,7 +32,6 @@ from elspeth.contracts import (
     validate_row,
 )
 from elspeth.plugins.base import (
-    BaseAggregation,
     BaseGate,
     BaseSink,
     BaseSource,
@@ -60,7 +59,6 @@ from elspeth.plugins.manager import PluginManager, PluginSpec
 
 # Protocols
 from elspeth.plugins.protocols import (
-    AggregationProtocol,
     CoalescePolicy,
     CoalesceProtocol,
     GateProtocol,
@@ -94,7 +92,6 @@ __all__ = [  # Grouped by category for readability
     "check_compatibility",
     "validate_row",
     # Protocols
-    "AggregationProtocol",
     "CoalescePolicy",
     "CoalesceProtocol",
     "GateProtocol",
@@ -102,7 +99,6 @@ __all__ = [  # Grouped by category for readability
     "SourceProtocol",
     "TransformProtocol",
     # Base classes
-    "BaseAggregation",
     "BaseGate",
     "BaseSink",
     "BaseSource",

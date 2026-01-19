@@ -298,74 +298,33 @@ class TestTransformBatchSupport:
         assert batch.is_batch_aware is True
 
 
-class TestAggregationProtocol:
-    """Aggregation plugin protocol (stateful batching)."""
+class TestAggregationProtocolDeleted:
+    """Verify AggregationProtocol has been deleted.
 
-    def test_aggregation_implementation(self) -> None:
-        from elspeth.contracts import Determinism, PluginSchema
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.protocols import AggregationProtocol
-        from elspeth.plugins.results import AcceptResult
+    Aggregation is now fully structural:
+    - Engine buffers rows internally
+    - Engine evaluates triggers (WP-06)
+    - Engine calls batch-aware Transform.process(rows: list[dict])
+    - No plugin-level aggregation interface
 
-        class InputSchema(PluginSchema):
-            value: int
+    Use is_batch_aware=True on BaseTransform for batch processing.
+    """
 
-        class OutputSchema(PluginSchema):
-            total: int
-            count: int
+    def test_aggregation_protocol_deleted(self) -> None:
+        """AggregationProtocol should be deleted (aggregation is structural)."""
+        import elspeth.plugins.protocols as protocols
 
-        class SumAggregation:
-            name = "sum"
-            input_schema = InputSchema
-            output_schema = OutputSchema
-            node_id: str | None = None  # Set by orchestrator
-            determinism = Determinism.DETERMINISTIC
-            plugin_version = "1.0.0"
+        assert not hasattr(
+            protocols, "AggregationProtocol"
+        ), "AggregationProtocol should be deleted - aggregation is structural"
 
-            def __init__(self, config: dict[str, Any]) -> None:
-                self.batch_size: int = config["batch_size"]
-                self._values: list[int] = []
+    def test_base_aggregation_deleted(self) -> None:
+        """BaseAggregation should be deleted (aggregation is structural)."""
+        import elspeth.plugins.base as base
 
-            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
-                self._values.append(row["value"])
-                return AcceptResult(accepted=True)
-
-            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
-                result = {
-                    "total": sum(self._values),
-                    "count": len(self._values),
-                }
-                self._values = []
-                return [result]
-
-            def on_start(self, ctx: PluginContext) -> None:
-                pass
-
-            def on_complete(self, ctx: PluginContext) -> None:
-                pass
-
-        agg = SumAggregation({"batch_size": 2})
-
-        # IMPORTANT: Verify protocol conformance at runtime
-        assert isinstance(
-            agg, AggregationProtocol
-        ), "Must conform to AggregationProtocol"
-
-        ctx = PluginContext(run_id="test", config={})
-
-        # First row - accepted into batch
-        result = agg.accept({"value": 10}, ctx)
-        assert result.accepted is True
-
-        # Second row - also accepted
-        result = agg.accept({"value": 20}, ctx)
-        assert result.accepted is True
-        # Engine now handles trigger evaluation via TriggerEvaluator (WP-06)
-
-        # Flush
-        outputs = agg.flush(ctx)
-        assert len(outputs) == 1
-        assert outputs[0] == {"total": 30, "count": 2}
+        assert not hasattr(
+            base, "BaseAggregation"
+        ), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
 
 
 class TestCoalesceProtocol:

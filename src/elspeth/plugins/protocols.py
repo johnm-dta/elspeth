@@ -22,7 +22,7 @@ from elspeth.contracts import Determinism
 if TYPE_CHECKING:
     from elspeth.contracts import ArtifactDescriptor, PluginSchema, SourceRow
     from elspeth.plugins.context import PluginContext
-    from elspeth.plugins.results import AcceptResult, GateResult, TransformResult
+    from elspeth.plugins.results import GateResult, TransformResult
 
 
 @runtime_checkable
@@ -273,96 +273,12 @@ class CoalescePolicy(Enum):
     FIRST = "first"  # Take first arrival, don't wait for others
 
 
-@runtime_checkable
-class AggregationProtocol(Protocol):
-    """Protocol for aggregation transforms (stateful batching).
-
-    Aggregations accumulate rows until a trigger condition, then flush.
-
-    Phase 3 Integration:
-    - Engine creates Landscape batch on first accept()
-    - Engine persists batch membership on every accept()
-    - Engine transitions batch status on flush()
-    - Engine evaluates trigger conditions via TriggerEvaluator (WP-06)
-
-    Example:
-        class StatsAggregation:
-            name = "stats"
-            input_schema = InputSchema
-            output_schema = StatsSchema
-
-            def accept(self, row, ctx) -> AcceptResult:
-                self._values.append(row["value"])
-                return AcceptResult(accepted=True)
-
-            def flush(self, ctx) -> list[dict]:
-                result = {"mean": statistics.mean(self._values)}
-                self._values = []
-                return [result]
-    """
-
-    name: str
-    input_schema: type["PluginSchema"]
-    output_schema: type["PluginSchema"]
-    node_id: str | None  # Set by orchestrator after registration
-
-    # Metadata for Phase 3 audit/reproducibility
-    determinism: Determinism
-    plugin_version: str
-
-    def __init__(self, config: dict[str, Any]) -> None:
-        """Initialize with configuration."""
-        ...
-
-    def accept(
-        self,
-        row: dict[str, Any],
-        ctx: "PluginContext",
-    ) -> "AcceptResult":
-        """Accept a row into the batch.
-
-        Called for each row. Implementation should store the row in internal buffer.
-
-        Note: In Phase 3, the engine wraps this to manage Landscape batches.
-        Trigger evaluation is handled by the engine via TriggerEvaluator (WP-06).
-
-        Args:
-            row: Input row
-            ctx: Plugin context
-
-        Returns:
-            AcceptResult indicating acceptance
-        """
-        ...
-
-    def flush(self, ctx: "PluginContext") -> list[dict[str, Any]]:
-        """Process accumulated rows and return results.
-
-        Called when trigger condition is met or at end of source.
-        Should reset internal state after processing.
-
-        Note: In Phase 3, the engine wraps this to:
-        1. Transition batch to "executing"
-        2. Record results
-        3. Transition batch to "completed" or "failed"
-
-        Args:
-            ctx: Plugin context
-
-        Returns:
-            List of output rows (usually one aggregate result)
-        """
-        ...
-
-    # === Optional Lifecycle Hooks ===
-
-    def on_start(self, ctx: "PluginContext") -> None:
-        """Called at start of run."""
-        ...
-
-    def on_complete(self, ctx: "PluginContext") -> None:
-        """Called at end of run."""
-        ...
+# NOTE: AggregationProtocol was DELETED in aggregation structural cleanup.
+# Aggregation is now fully structural:
+# - Engine buffers rows internally
+# - Engine evaluates triggers (WP-06)
+# - Engine calls batch-aware Transform.process(rows: list[dict])
+# Use is_batch_aware=True on BaseTransform for batch processing.
 
 
 @runtime_checkable

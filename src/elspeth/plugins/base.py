@@ -16,7 +16,6 @@ from typing import Any
 from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema, SourceRow
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import (
-    AcceptResult,
     GateResult,
     TransformResult,
 )
@@ -169,74 +168,12 @@ class BaseGate(ABC):
         """Called at end of run."""
 
 
-class BaseAggregation(ABC):
-    """Base class for aggregation transforms (stateful batching).
-
-    Subclass and implement accept() and flush().
-
-    Phase 3 Integration:
-    - Engine creates Landscape batch on first accept()
-    - Engine persists batch membership on every accept()
-    - Engine manages batch state transitions
-    - Engine evaluates trigger conditions via TriggerEvaluator (WP-06)
-
-    Example:
-        class StatsAggregation(BaseAggregation):
-            name = "stats"
-            input_schema = InputSchema
-            output_schema = StatsSchema
-
-            def __init__(self, config):
-                super().__init__(config)
-                self._values = []
-
-            def accept(self, row, ctx) -> AcceptResult:
-                self._values.append(row["value"])
-                return AcceptResult(accepted=True)
-
-            def flush(self, ctx) -> list[dict]:
-                result = {"mean": statistics.mean(self._values)}
-                self._values = []
-                return [result]
-    """
-
-    name: str
-    input_schema: type[PluginSchema]
-    output_schema: type[PluginSchema]
-    node_id: str | None = None  # Set by orchestrator after registration
-
-    # Metadata for Phase 3 audit/reproducibility
-    determinism: Determinism = Determinism.DETERMINISTIC
-    plugin_version: str = "0.0.0"
-
-    def __init__(self, config: dict[str, Any]) -> None:
-        """Initialize with configuration."""
-        self.config = config
-
-    @abstractmethod
-    def accept(
-        self,
-        row: dict[str, Any],
-        ctx: PluginContext,
-    ) -> AcceptResult:
-        """Accept a row into the batch."""
-        ...
-
-    @abstractmethod
-    def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
-        """Process batch and return results."""
-        ...
-
-    def close(self) -> None:  # noqa: B027
-        """Clean up resources after pipeline completion."""
-
-    # === Lifecycle Hooks (Phase 3) ===
-
-    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
-        """Called at start of run."""
-
-    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027
-        """Called at end of run."""
+# NOTE: BaseAggregation was DELETED in aggregation structural cleanup.
+# Aggregation is now fully structural:
+# - Engine buffers rows internally
+# - Engine evaluates triggers (WP-06)
+# - Engine calls batch-aware Transform.process(rows: list[dict])
+# Use is_batch_aware=True on BaseTransform for batch processing.
 
 
 class BaseSink(ABC):

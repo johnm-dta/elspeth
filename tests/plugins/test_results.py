@@ -317,7 +317,6 @@ class TestPluginsPublicAPI:
 
     def test_protocols_importable(self) -> None:
         from elspeth.plugins import (
-            AggregationProtocol,
             CoalescePolicy,
             CoalesceProtocol,
             GateProtocol,
@@ -326,7 +325,7 @@ class TestPluginsPublicAPI:
             TransformProtocol,
         )
 
-        assert AggregationProtocol is not None
+        # NOTE: AggregationProtocol deleted in aggregation structural cleanup
         assert CoalescePolicy is not None
         assert CoalesceProtocol is not None
         assert GateProtocol is not None
@@ -334,20 +333,35 @@ class TestPluginsPublicAPI:
         assert SourceProtocol is not None
         assert TransformProtocol is not None
 
+    def test_aggregation_protocol_not_exported(self) -> None:
+        """AggregationProtocol should NOT be exported (aggregation is structural)."""
+        import elspeth.plugins as plugins
+
+        assert not hasattr(
+            plugins, "AggregationProtocol"
+        ), "AggregationProtocol should be deleted"
+
     def test_base_classes_importable(self) -> None:
         from elspeth.plugins import (
-            BaseAggregation,
             BaseGate,
             BaseSink,
             BaseSource,
             BaseTransform,
         )
 
-        assert BaseAggregation is not None
+        # NOTE: BaseAggregation deleted in aggregation structural cleanup
         assert BaseGate is not None
         assert BaseSink is not None
         assert BaseSource is not None
         assert BaseTransform is not None
+
+    def test_base_aggregation_not_exported(self) -> None:
+        """BaseAggregation should NOT be exported (aggregation is structural)."""
+        import elspeth.plugins as plugins
+
+        assert not hasattr(
+            plugins, "BaseAggregation"
+        ), "BaseAggregation should be deleted"
 
     def test_manager_importable(self) -> None:
         from elspeth.plugins import PluginManager

@@ -2,16 +2,17 @@
 """Tests for type-safe plugin detection in processor.
 
 These tests verify that isinstance-based plugin detection works correctly
-with the base class hierarchy (BaseTransform, BaseGate, BaseAggregation).
+with the base class hierarchy (BaseTransform, BaseGate).
+
+NOTE: BaseAggregation tests were DELETED in aggregation structural cleanup.
+Aggregation is now handled by batch-aware transforms (is_batch_aware=True).
 """
 
 from typing import Any
 
-from elspeth.contracts import PluginSchema
-from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
+from elspeth.plugins.base import BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import (
-    AcceptResult,
     GateResult,
     RoutingAction,
     TransformResult,
@@ -28,12 +29,6 @@ class TestPluginTypeDetection:
         transform = PassThrough({"schema": {"fields": "dynamic"}})
         assert isinstance(transform, BaseTransform)
 
-    def test_aggregation_is_base_aggregation(self) -> None:
-        """Aggregations should be instances of BaseAggregation."""
-        # Create a minimal concrete aggregation for testing
-        agg = _TestAggregation({"batch_size": 10})
-        assert isinstance(agg, BaseAggregation)
-
     def test_unknown_type_is_not_recognized(self) -> None:
         """Unknown plugin types should not match any base class."""
 
@@ -45,7 +40,6 @@ class TestPluginTypeDetection:
         unknown = UnknownPlugin()
         assert not isinstance(unknown, BaseTransform)
         assert not isinstance(unknown, BaseGate)
-        assert not isinstance(unknown, BaseAggregation)
 
     def test_duck_typed_transform_not_recognized(self) -> None:
         """Duck-typed transforms without inheritance should NOT be recognized.
@@ -89,26 +83,6 @@ class TestPluginTypeDetection:
         assert hasattr(duck, "evaluate")
         assert not isinstance(duck, BaseGate)
 
-    def test_duck_typed_aggregation_not_recognized(self) -> None:
-        """Duck-typed aggregations without inheritance should NOT be recognized.
-
-        This is the key behavior change - hasattr checks would have accepted
-        this class, but isinstance checks correctly reject it.
-        """
-
-        class DuckTypedAggregation:
-            """Looks like an aggregation but doesn't inherit from BaseAggregation."""
-
-            name = "duck"
-
-            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
-                return AcceptResult(accepted=True)
-
-        duck = DuckTypedAggregation()
-        # Has the method but NOT an instance of BaseAggregation
-        assert hasattr(duck, "accept")
-        assert not isinstance(duck, BaseAggregation)
-
 
 class TestPluginInheritanceHierarchy:
     """Tests verifying proper inheritance hierarchy."""
@@ -120,42 +94,3 @@ class TestPluginInheritanceHierarchy:
         transform = PassThrough({"schema": {"fields": "dynamic"}})
         # mypy knows these are incompatible hierarchies - that's what we're verifying
         assert not isinstance(transform, BaseGate)  # type: ignore[unreachable]
-
-    def test_aggregation_not_transform_or_gate(self) -> None:
-        """Aggregations should NOT be instances of BaseTransform or BaseGate."""
-        agg = _TestAggregation({"batch_size": 10})
-        # mypy knows these are incompatible hierarchies - that's what we're verifying
-        assert not isinstance(agg, BaseTransform)  # type: ignore[unreachable]
-        assert not isinstance(agg, BaseGate)  # type: ignore[unreachable]
-
-
-# Test-only aggregation implementation (no concrete aggregations exist yet)
-class _TestSchema(PluginSchema):
-    """Schema for test aggregation."""
-
-    model_config = {"extra": "allow"}  # noqa: RUF012
-
-
-class _TestAggregation(BaseAggregation):
-    """Minimal aggregation for testing isinstance checks.
-
-    This exists because no concrete aggregations are implemented yet.
-    Once a real aggregation exists, this can be replaced.
-    """
-
-    name = "test_aggregation"
-    input_schema = _TestSchema
-    output_schema = _TestSchema
-
-    def __init__(self, config: dict[str, Any]) -> None:
-        super().__init__(config)
-        self._batch: list[dict[str, Any]] = []
-
-    def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
-        self._batch.append(row)
-        return AcceptResult(accepted=True)
-
-    def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
-        result = self._batch.copy()
-        self._batch = []
-        return result

@@ -116,49 +116,21 @@ class TestNodeIdProtocol:
         gate.node_id = "gate-789"
         assert gate.node_id == "gate-789"
 
-    def test_aggregation_protocol_has_node_id(self) -> None:
-        """AggregationProtocol defines node_id attribute."""
-        from elspeth.plugins.protocols import AggregationProtocol
+    def test_aggregation_protocol_deleted(self) -> None:
+        """AggregationProtocol should be deleted (aggregation is structural)."""
+        import elspeth.plugins.protocols as protocols
 
-        annotations = AggregationProtocol.__annotations__
-        assert "node_id" in annotations, "AggregationProtocol should define node_id"
-        assert annotations["node_id"] == str | None
+        assert not hasattr(
+            protocols, "AggregationProtocol"
+        ), "AggregationProtocol should be deleted - aggregation is structural"
 
-    def test_base_aggregation_has_node_id(self) -> None:
-        """BaseAggregation has node_id attribute with default None."""
-        from typing import Any
+    def test_base_aggregation_deleted(self) -> None:
+        """BaseAggregation should be deleted (aggregation is structural)."""
+        import elspeth.plugins.base as base
 
-        from elspeth.contracts import PluginSchema
-        from elspeth.plugins.base import BaseAggregation
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import AcceptResult
-
-        class TestSchema(PluginSchema):
-            pass
-
-        class TestAggregation(BaseAggregation):
-            name = "test"
-            input_schema = TestSchema
-            output_schema = TestSchema
-
-            def __init__(self, config: dict[str, Any]) -> None:
-                super().__init__(config)
-                self._buffer: list[dict[str, Any]] = []
-
-            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
-                self._buffer.append(row)
-                return AcceptResult(accepted=True)
-
-            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
-                result = list(self._buffer)
-                self._buffer = []
-                return result
-
-        aggregation = TestAggregation({})
-        assert aggregation.node_id is None
-
-        aggregation.node_id = "agg-101"
-        assert aggregation.node_id == "agg-101"
+        assert not hasattr(
+            base, "BaseAggregation"
+        ), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
 
     def test_coalesce_protocol_has_node_id(self) -> None:
         """CoalesceProtocol defines node_id attribute."""

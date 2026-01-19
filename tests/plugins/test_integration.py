@@ -140,72 +140,15 @@ class TestPluginSystemIntegration:
         assert result.compatible is False
         assert "c" in result.missing_fields
 
-    def test_aggregation_workflow(self) -> None:
-        """Test aggregation batching behavior.
+    def test_aggregation_workflow_deleted(self) -> None:
+        """Verify BaseAggregation deleted (aggregation is now structural).
 
-        Note: Trigger evaluation is now engine-controlled via TriggerEvaluator (WP-06).
-        This test demonstrates the aggregation plugin's accept/flush contract.
+        OLD: Tested accept/flush contract with BaseAggregation plugin.
+        NEW: Aggregation is engine-controlled via batch-aware transforms
+             with is_batch_aware=True, no plugin-level aggregation interface.
         """
-        from elspeth.core.config import TriggerConfig
-        from elspeth.engine.triggers import TriggerEvaluator
-        from elspeth.plugins import (
-            AcceptResult,
-            BaseAggregation,
-            PluginContext,
-            PluginSchema,
-        )
+        import elspeth.plugins.base as base
 
-        class InputSchema(PluginSchema):
-            value: int
-
-        class OutputSchema(PluginSchema):
-            total: int
-            count: int
-
-        class SumAggregation(BaseAggregation):
-            name = "sum"
-            input_schema = InputSchema
-            output_schema = OutputSchema
-
-            def __init__(self, config: dict[str, Any]) -> None:
-                super().__init__(config)
-                self._values: list[int] = []
-
-            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
-                self._values.append(row["value"])
-                return AcceptResult(accepted=True)
-
-            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
-                if not self._values:
-                    return []
-                result = {
-                    "total": sum(self._values),
-                    "count": len(self._values),
-                }
-                self._values = []
-                return [result]
-
-        agg = SumAggregation({})
-        ctx = PluginContext(run_id="test", config={})
-        # Engine uses TriggerEvaluator to manage trigger conditions (WP-06)
-        trigger_evaluator = TriggerEvaluator(TriggerConfig(count=3))
-
-        # Add 5 values: trigger fires at count=3, then again at end-of-source
-        values = [10, 20, 30, 40, 50]
-        outputs = []
-
-        for v in values:
-            result = agg.accept({"value": v}, ctx)
-            if result.accepted:
-                trigger_evaluator.record_accept()
-                if trigger_evaluator.should_trigger():
-                    outputs.extend(agg.flush(ctx))
-                    trigger_evaluator.reset()
-
-        # Force final flush for any remaining items (end-of-source)
-        outputs.extend(agg.flush(ctx))
-
-        # First batch: 10+20+30=60, Second batch: 40+50=90
-        assert len(outputs) == 2
-        assert outputs[0] == {"total": 60, "count": 3}
-        assert outputs[1] == {"total": 90, "count": 2}
+        assert not hasattr(
+            base, "BaseAggregation"
+        ), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"

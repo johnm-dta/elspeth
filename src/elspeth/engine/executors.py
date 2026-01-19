@@ -29,13 +29,11 @@ from elspeth.engine.spans import SpanFactory
 from elspeth.engine.triggers import TriggerEvaluator
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import (
-    AggregationProtocol,
     GateProtocol,
     SinkProtocol,
     TransformProtocol,
 )
 from elspeth.plugins.results import (
-    AcceptResult,
     GateResult,
     TransformResult,
 )
@@ -956,185 +954,13 @@ class AggregationExecutor:
         members = self._recorder.get_batch_members(batch_id)
         self._member_counts[batch_id] = len(members)
 
-    def accept(
-        self,
-        aggregation: AggregationProtocol,
-        token: TokenInfo,
-        ctx: PluginContext,
-        step_in_pipeline: int,
-    ) -> AcceptResult:
-        """Accept a row into an aggregation batch.
-
-        Creates batch on first accept (if no batch_id for this node).
-        Records batch membership for accepted rows.
-
-        Args:
-            aggregation: Aggregation plugin to execute
-            token: Current token with row data
-            ctx: Plugin context
-            step_in_pipeline: Current position in DAG (Orchestrator is authority)
-
-        Returns:
-            AcceptResult with accepted flag and batch_id
-
-        Raises:
-            Exception: Re-raised from aggregation.accept() after recording failure
-        """
-        node_id = aggregation.node_id
-        assert node_id is not None, "node_id must be set by orchestrator"
-
-        # Create batch on first accept
-        if self._batch_ids.get(node_id) is None:
-            batch = self._recorder.create_batch(
-                run_id=self._run_id,
-                aggregation_node_id=node_id,
-            )
-            self._batch_ids[node_id] = batch.batch_id
-            self._member_counts[batch.batch_id] = 0
-
-        batch_id = self._batch_ids[node_id]
-        assert batch_id is not None  # We just created it if it was None
-
-        # Begin node state for this accept operation
-        state = self._recorder.begin_node_state(
-            token_id=token.token_id,
-            node_id=node_id,
-            step_index=step_in_pipeline,
-            input_data=token.row_data,
-        )
-
-        start = time.perf_counter()
-        try:
-            result = aggregation.accept(token.row_data, ctx)
-            duration_ms = (time.perf_counter() - start) * 1000
-
-            if result.accepted:
-                ordinal = self._member_counts[batch_id]
-                self._recorder.add_batch_member(
-                    batch_id=batch_id,
-                    token_id=token.token_id,
-                    ordinal=ordinal,
-                )
-                self._member_counts[batch_id] = ordinal + 1
-                result.batch_id = batch_id
-
-                # Update trigger evaluator if row was accepted
-                evaluator = self._trigger_evaluators.get(node_id)
-                if evaluator is not None:
-                    evaluator.record_accept()
-
-                # Output for accepted rows: the input row + batch membership metadata
-                # This records exactly what was accepted and where it went
-                accept_output = {
-                    "row": token.row_data,
-                    "batch_id": batch_id,
-                    "ordinal": ordinal,
-                }
-            else:
-                # Output for rejected rows: the input row + rejection indicator
-                # This records what was rejected and why (no batch_id)
-                accept_output = {
-                    "row": token.row_data,
-                    "accepted": False,
-                }
-
-            # Complete node state - always "completed" for successful accept
-            # Terminal state CONSUMED_IN_BATCH is derived from batch_members
-            self._recorder.complete_node_state(
-                state_id=state.state_id,
-                status="completed" if result.accepted else "rejected",
-                output_data=accept_output,
-                duration_ms=duration_ms,
-            )
-            return result
-
-        except Exception as e:
-            duration_ms = (time.perf_counter() - start) * 1000
-            # Record failure
-            error: ExecutionError = {
-                "exception": str(e),
-                "type": type(e).__name__,
-            }
-            self._recorder.complete_node_state(
-                state_id=state.state_id,
-                status="failed",
-                duration_ms=duration_ms,
-                error=error,
-            )
-            raise
-
-    def flush(
-        self,
-        aggregation: AggregationProtocol,
-        ctx: PluginContext,
-        trigger_reason: str,
-        step_in_pipeline: int,
-    ) -> list[dict[str, Any]]:
-        """Flush an aggregation batch and return output rows.
-
-        Transitions batch through: draft -> executing -> completed/failed.
-        Resets batch_id to None for next batch.
-
-        Args:
-            aggregation: Aggregation plugin to flush
-            ctx: Plugin context
-            trigger_reason: Why the batch was triggered (e.g., "count_reached", "end_of_input")
-            step_in_pipeline: Current position in DAG (for audit context)
-
-        Returns:
-            List of output rows from the aggregation
-
-        Raises:
-            ValueError: If no batch to flush (no batch_id for this node)
-            Exception: Re-raised from aggregation.flush() after recording failure
-        """
-        node_id = aggregation.node_id
-        assert node_id is not None, "node_id must be set by orchestrator"
-
-        batch_id = self._batch_ids.get(node_id)
-        if batch_id is None:
-            raise ValueError(
-                f"No batch to flush for aggregation {node_id}. "
-                "Call accept() first to create a batch."
-            )
-
-        # Transition batch to executing
-        self._recorder.update_batch_status(
-            batch_id=batch_id,
-            status="executing",
-            trigger_reason=trigger_reason,
-        )
-
-        # Execute flush within aggregation span
-        with self._spans.aggregation_span(aggregation.name, batch_id=batch_id):
-            try:
-                outputs = aggregation.flush(ctx)
-
-                # Transition batch to completed
-                self._recorder.update_batch_status(
-                    batch_id=batch_id,
-                    status="completed",
-                )
-
-                # Reset for next batch
-                self._batch_ids[node_id] = None
-                if batch_id in self._member_counts:
-                    del self._member_counts[batch_id]
-
-                # Reset trigger evaluator for next batch
-                evaluator = self._trigger_evaluators.get(node_id)
-                if evaluator is not None:
-                    evaluator.reset()
-
-                return outputs
-
-            except Exception:
-                # Transition batch to failed
-                self._recorder.update_batch_status(
-                    batch_id=batch_id,
-                    status="failed",
-                )
-                raise
+    # NOTE: The old accept() and flush() methods that took AggregationProtocol
+    # were DELETED in the aggregation structural cleanup.
+    # Aggregation is now fully structural:
+    # - Use buffer_row() to buffer rows
+    # - Use should_flush() to check trigger
+    # - Use flush_buffer() to get rows when trigger fires
+    # - Call Transform.process(rows) for batch processing
 
 
 class SinkExecutor:

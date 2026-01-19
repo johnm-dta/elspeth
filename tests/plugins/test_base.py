@@ -58,65 +58,16 @@ class TestBaseTransform:
         assert hasattr(BaseTransform, "on_complete")
 
 
-class TestBaseAggregation:
-    """Base class for aggregations."""
+class TestBaseAggregationDeleted:
+    """Verify BaseAggregation has been deleted (aggregation is structural now)."""
 
-    def test_base_aggregation_no_should_trigger(self) -> None:
-        """BaseAggregation should NOT have should_trigger() (moved to engine)."""
-        from elspeth.plugins.base import BaseAggregation
-
-        assert not hasattr(
-            BaseAggregation, "should_trigger"
-        ), "should_trigger() should be removed (WP-06)"
-
-    def test_base_aggregation_no_reset(self) -> None:
-        """BaseAggregation should NOT have reset() (engine manages batch lifecycle)."""
-        from elspeth.plugins.base import BaseAggregation
+    def test_base_aggregation_deleted(self) -> None:
+        """BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform."""
+        import elspeth.plugins.base as base
 
         assert not hasattr(
-            BaseAggregation, "reset"
-        ), "reset() should be removed (WP-06)"
-
-    def test_base_aggregation_implementation(self) -> None:
-        from elspeth.contracts import PluginSchema
-        from elspeth.plugins.base import BaseAggregation
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.results import AcceptResult
-
-        class InputSchema(PluginSchema):
-            value: int
-
-        class OutputSchema(PluginSchema):
-            total: int
-
-        class SumAggregation(BaseAggregation):
-            name = "sum"
-            input_schema = InputSchema
-            output_schema = OutputSchema
-
-            def __init__(self, config: dict[str, Any]) -> None:
-                super().__init__(config)
-                self._values: list[int] = []
-                self._batch_size: int = config["batch_size"]
-
-            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
-                self._values.append(row["value"])
-                return AcceptResult(accepted=True)
-
-            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
-                result = {"total": sum(self._values)}
-                self._values = []
-                return [result]
-
-        agg = SumAggregation({"batch_size": 2})
-        ctx = PluginContext(run_id="test", config={})
-
-        agg.accept({"value": 10}, ctx)
-        agg.accept({"value": 20}, ctx)
-        # Engine now handles trigger evaluation via TriggerEvaluator (WP-06)
-
-        outputs = agg.flush(ctx)
-        assert outputs == [{"total": 30}]
+            base, "BaseAggregation"
+        ), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
 
 
 class TestBaseSink:

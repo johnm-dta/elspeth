@@ -30,7 +30,7 @@ from elspeth.engine.executors import (
 from elspeth.engine.retry import MaxRetriesExceeded, RetryManager
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenManager
-from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
+from elspeth.plugins.base import BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
 
 # Iteration guard to prevent infinite loops from bugs
@@ -428,36 +428,9 @@ class RowProcessor:
                         child_items,
                     )
 
-            elif isinstance(transform, BaseAggregation):
-                # Aggregation transform
-                self._aggregation_executor.accept(
-                    aggregation=transform,
-                    token=current_token,
-                    ctx=ctx,
-                    step_in_pipeline=step,
-                )
-
-                # Check if engine-controlled trigger condition is met (WP-06)
-                node_id = transform.node_id
-                assert node_id is not None, "node_id must be set by orchestrator"
-                if self._aggregation_executor.should_flush(node_id):
-                    trigger_type = self._aggregation_executor.get_trigger_type(node_id)
-                    trigger_reason = trigger_type.value if trigger_type else "manual"
-                    self._aggregation_executor.flush(
-                        aggregation=transform,
-                        ctx=ctx,
-                        trigger_reason=trigger_reason,
-                        step_in_pipeline=step,
-                    )
-
-                return (
-                    RowResult(
-                        token=current_token,
-                        final_data=current_token.row_data,
-                        outcome=RowOutcome.CONSUMED_IN_BATCH,
-                    ),
-                    child_items,
-                )
+            # NOTE: BaseAggregation branch was DELETED in aggregation structural cleanup.
+            # Aggregation is now handled by batch-aware transforms (is_batch_aware=True).
+            # The engine buffers rows and calls Transform.process(rows: list[dict]).
 
             elif isinstance(transform, BaseTransform):
                 # Check if this is a batch-aware transform at an aggregation node
@@ -525,7 +498,7 @@ class RowProcessor:
             else:
                 raise TypeError(
                     f"Unknown transform type: {type(transform).__name__}. "
-                    f"Expected BaseTransform, BaseGate, or BaseAggregation."
+                    f"Expected BaseTransform or BaseGate."
                 )
 
         # Process config-driven gates (after all plugin transforms)

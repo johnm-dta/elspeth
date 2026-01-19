@@ -23,12 +23,14 @@ from elspeth.engine.processor import RowProcessor
 from elspeth.engine.retry import RetryConfig, RetryManager
 from elspeth.engine.schema_validator import validate_pipeline_schemas
 from elspeth.engine.spans import SpanFactory
-from elspeth.plugins.base import BaseAggregation, BaseGate, BaseTransform
+from elspeth.plugins.base import BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.protocols import SinkProtocol, SourceProtocol
 
 # Type alias for row-processing plugins in the transforms pipeline
-RowPlugin = BaseTransform | BaseGate | BaseAggregation
+# NOTE: BaseAggregation was DELETED - aggregation is now handled by
+# batch-aware transforms (is_batch_aware=True on BaseTransform)
+RowPlugin = BaseTransform | BaseGate
 """Union of all row-processing plugin types for pipeline transforms list."""
 
 if TYPE_CHECKING:

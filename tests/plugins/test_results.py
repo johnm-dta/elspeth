@@ -147,28 +147,24 @@ class TestGateResult:
         assert hasattr(result, "duration_ms")
 
 
-class TestAcceptResult:
-    """Results from aggregation accept()."""
+class TestAcceptResultDeleted:
+    """Verify AcceptResult was deleted in aggregation structural cleanup."""
 
-    def test_accepted(self) -> None:
-        from elspeth.plugins.results import AcceptResult
+    def test_accept_result_deleted_from_plugins_results(self) -> None:
+        """AcceptResult should be deleted from plugins.results."""
+        import elspeth.plugins.results as results
 
-        result = AcceptResult(accepted=True)
-        assert result.accepted is True
+        assert not hasattr(
+            results, "AcceptResult"
+        ), "AcceptResult should be deleted - aggregation is structural"
 
-    def test_rejected(self) -> None:
-        from elspeth.plugins.results import AcceptResult
+    def test_accept_result_not_exported_from_plugins(self) -> None:
+        """AcceptResult should NOT be exported from elspeth.plugins."""
+        import elspeth.plugins as plugins
 
-        result = AcceptResult(accepted=False)
-        assert result.accepted is False
-
-    def test_has_batch_id_field(self) -> None:
-        """Phase 3 integration: batch_id for Landscape."""
-        from elspeth.plugins.results import AcceptResult
-
-        result = AcceptResult(accepted=True)
-        assert hasattr(result, "batch_id")
-        assert result.batch_id is None  # Set by engine in Phase 3
+        assert not hasattr(
+            plugins, "AcceptResult"
+        ), "AcceptResult should not be exported - aggregation is structural"
 
 
 class TestRoutingActionEnums:
@@ -289,7 +285,6 @@ class TestPluginsPublicAPI:
 
     def test_results_importable(self) -> None:
         from elspeth.plugins import (
-            AcceptResult,
             GateResult,
             RoutingAction,
             RowOutcome,
@@ -297,7 +292,7 @@ class TestPluginsPublicAPI:
             TransformResult,
         )
 
-        assert AcceptResult is not None
+        # NOTE: AcceptResult deleted in aggregation structural cleanup
         assert GateResult is not None
         assert RoutingAction is not None
         assert RowOutcome is not None

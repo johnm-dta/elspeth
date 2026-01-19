@@ -67,7 +67,6 @@ from elspeth.plugins.protocols import (
     TransformProtocol,
 )
 from elspeth.plugins.results import (
-    AcceptResult,
     GateResult,
     RoutingAction,
     RowOutcome,
@@ -76,8 +75,7 @@ from elspeth.plugins.results import (
 )
 
 __all__ = [  # Grouped by category for readability
-    # Results
-    "AcceptResult",
+    # Results (NOTE: AcceptResult deleted in aggregation structural cleanup)
     "GateResult",
     "RoutingAction",
     "RowOutcome",

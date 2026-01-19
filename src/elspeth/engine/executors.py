@@ -873,7 +873,7 @@ class AggregationExecutor:
     def get_batch_id(self, node_id: str) -> str | None:
         """Get current batch ID for an aggregation node.
 
-        Primarily for testing - production code should use AcceptResult.batch_id.
+        Primarily for testing - production code accesses this via checkpoint state.
         """
         return self._batch_ids.get(node_id)
 

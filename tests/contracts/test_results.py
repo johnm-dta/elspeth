@@ -5,20 +5,21 @@ Tests for:
 - TransformResult status is Literal (not enum) - can compare to string directly
 - TransformResult has audit fields
 - GateResult creation and audit fields
-- AcceptResult creation
 - RowResult creation with TokenInfo
 - RowResult.error uses FailureInfo (not dict)
 - FailureInfo creation and factory methods
 - ArtifactDescriptor required fields (content_hash, size_bytes)
 - ArtifactDescriptor uses artifact_type (not kind)
 - ArtifactDescriptor factory methods
+
+NOTE: AcceptResult tests deleted in aggregation structural cleanup.
+Aggregation is now engine-controlled via batch-aware transforms.
 """
 
 import pytest
 
 from elspeth.contracts import RoutingAction, RowOutcome, TokenInfo
 from elspeth.contracts.results import (
-    AcceptResult,
     ArtifactDescriptor,
     FailureInfo,
     GateResult,
@@ -142,37 +143,24 @@ class TestGateResult:
         assert result.duration_ms == 5.0
 
 
-class TestAcceptResult:
-    """Tests for AcceptResult."""
+class TestAcceptResultDeleted:
+    """Verify AcceptResult was deleted in aggregation structural cleanup."""
 
-    def test_accepted(self) -> None:
-        """Row accepted into batch."""
-        result = AcceptResult(accepted=True)
+    def test_accept_result_deleted_from_contracts(self) -> None:
+        """AcceptResult should be deleted from contracts.results."""
+        import elspeth.contracts.results as results
 
-        assert result.accepted is True
-        assert result.batch_id is None
+        assert not hasattr(
+            results, "AcceptResult"
+        ), "AcceptResult should be deleted - aggregation is structural"
 
-    def test_rejected(self) -> None:
-        """Row rejected by aggregation."""
-        result = AcceptResult(accepted=False)
+    def test_accept_result_not_exported(self) -> None:
+        """AcceptResult should NOT be exported from elspeth.contracts."""
+        import elspeth.contracts as contracts
 
-        assert result.accepted is False
-
-    def test_batch_id_can_be_set(self) -> None:
-        """Batch ID set by executor."""
-        result = AcceptResult(accepted=True)
-        result.batch_id = "batch-123"
-
-        assert result.batch_id == "batch-123"
-
-    def test_accept_result_has_no_trigger_field(self) -> None:
-        """AcceptResult should NOT have a trigger field (moved to engine)."""
-        from dataclasses import fields
-
-        from elspeth.contracts.results import AcceptResult
-
-        field_names = [f.name for f in fields(AcceptResult)]
-        assert "trigger" not in field_names, "trigger field should be removed (WP-06)"
+        assert not hasattr(
+            contracts, "AcceptResult"
+        ), "AcceptResult should not be exported - aggregation is structural"
 
 
 class TestRowResult:

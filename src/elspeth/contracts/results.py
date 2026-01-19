@@ -115,16 +115,9 @@ class GateResult:
     duration_ms: float | None = field(default=None, repr=False)
 
 
-@dataclass
-class AcceptResult:
-    """Result of aggregation accept check.
-
-    Indicates whether the row was accepted into a batch.
-    The engine evaluates trigger conditions separately (WP-06).
-    """
-
-    accepted: bool
-    batch_id: str | None = field(default=None, repr=False)
+# NOTE: AcceptResult was deleted in aggregation structural cleanup.
+# Aggregation is now engine-controlled via batch-aware transforms.
+# The engine buffers rows and decides when to flush via TriggerEvaluator.
 
 
 @dataclass

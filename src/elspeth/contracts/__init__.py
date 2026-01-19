@@ -57,7 +57,6 @@ from elspeth.contracts.audit import (
 )
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.results import (
-    AcceptResult,
     ArtifactDescriptor,
     FailureInfo,
     GateResult,
@@ -146,8 +145,7 @@ __all__ = [
     "TriggerType",
     # identity
     "TokenInfo",
-    # results
-    "AcceptResult",
+    # results (NOTE: AcceptResult deleted in aggregation structural cleanup)
     "ArtifactDescriptor",
     "FailureInfo",
     "GateResult",

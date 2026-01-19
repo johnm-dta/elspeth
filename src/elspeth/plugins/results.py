@@ -5,10 +5,12 @@ These types define the contracts between plugins and the SDA engine.
 
 IMPORTANT: Types are now defined in elspeth.contracts.results.
 This module re-exports them as part of the public plugin API.
+
+NOTE: AcceptResult was deleted in aggregation structural cleanup.
+Aggregation is now engine-controlled via batch-aware transforms.
 """
 
 from elspeth.contracts import (
-    AcceptResult,
     GateResult,
     RoutingAction,
     RowOutcome,
@@ -18,7 +20,7 @@ from elspeth.contracts import (
 
 # Re-export types as part of public plugin API
 __all__ = [
-    "AcceptResult",
+    # NOTE: AcceptResult deleted in aggregation structural cleanup
     "GateResult",
     "RoutingAction",
     "RowOutcome",

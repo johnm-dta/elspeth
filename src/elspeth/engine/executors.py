@@ -999,6 +999,11 @@ class AggregationExecutor:
         self._buffers[node_id] = []
         self._buffer_tokens[node_id] = []
 
+        # Reset trigger evaluator for next batch
+        evaluator = self._trigger_evaluators.get(node_id)
+        if evaluator is not None:
+            evaluator.reset()
+
         return result, buffered_tokens
 
     def _reset_batch_state(self, node_id: str) -> None:

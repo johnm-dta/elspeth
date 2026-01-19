@@ -820,6 +820,57 @@ class AggregationExecutor:
 
         return rows
 
+    def get_checkpoint_state(self) -> dict[str, Any]:
+        """Get serializable state for checkpointing.
+
+        Returns a dict that can be JSON-serialized and stored in
+        checkpoint.aggregation_state_json. On recovery, pass this
+        to restore_from_checkpoint().
+
+        Returns:
+            Dict mapping node_id -> buffer state (only non-empty buffers)
+        """
+        state: dict[str, Any] = {}
+        for node_id in self._buffers:
+            if self._buffers[node_id]:  # Only include non-empty buffers
+                state[node_id] = {
+                    "rows": list(self._buffers[node_id]),
+                    "token_ids": [t.token_id for t in self._buffer_tokens[node_id]],
+                    "batch_id": self._batch_ids.get(node_id),
+                }
+        return state
+
+    def restore_from_checkpoint(self, state: dict[str, Any]) -> None:
+        """Restore buffer state from checkpoint.
+
+        Called during recovery to restore buffers from a previous
+        run's checkpoint. Also restores trigger evaluator counts.
+
+        Args:
+            state: Dict from get_checkpoint_state() of previous run
+        """
+        for node_id, node_state in state.items():
+            rows = node_state.get("rows", [])
+            batch_id = node_state.get("batch_id")
+
+            # Restore buffer (we don't store full TokenInfo, just rows)
+            self._buffers[node_id] = list(rows)
+
+            # Restore batch ID
+            if batch_id:
+                self._batch_ids[node_id] = batch_id
+
+            # Restore trigger evaluator count
+            evaluator = self._trigger_evaluators.get(node_id)
+            if evaluator:
+                for _ in range(len(rows)):
+                    evaluator.record_accept()
+
+            # Note: We don't restore full TokenInfo objects - only token_ids
+            # are stored. The actual TokenInfo will be reconstructed if needed
+            # from the tokens table. Clear the list for now.
+            self._buffer_tokens[node_id] = []
+
     def get_batch_id(self, node_id: str) -> str | None:
         """Get current batch ID for an aggregation node.
 

@@ -3325,3 +3325,293 @@ class TestAggregationExecutorBuffering:
         executor.buffer_row(agg_node.node_id, token)
 
         assert executor.should_flush(agg_node.node_id) is True
+
+
+class TestAggregationExecutorCheckpoint:
+    """Tests for buffer serialization/deserialization for crash recovery."""
+
+    def test_get_checkpoint_state_returns_buffer_contents(self) -> None:
+        """get_checkpoint_state() returns serializable buffer state."""
+        import json
+
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="checkpoint_test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=10),  # High count so we don't trigger
+        )
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        # Buffer some rows
+        for i in range(3):
+            token = TokenInfo(
+                row_id=f"row-{i}",
+                token_id=f"token-{i}",
+                row_data={"value": i},
+            )
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=agg_node.node_id,
+                row_index=i,
+                data=token.row_data,
+                row_id=token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+            executor.buffer_row(agg_node.node_id, token)
+
+        # Get checkpoint state
+        state = executor.get_checkpoint_state()
+
+        assert agg_node.node_id in state
+        assert state[agg_node.node_id]["rows"] == [
+            {"value": 0},
+            {"value": 1},
+            {"value": 2},
+        ]
+        assert state[agg_node.node_id]["token_ids"] == [
+            "token-0",
+            "token-1",
+            "token-2",
+        ]
+        assert state[agg_node.node_id]["batch_id"] is not None
+
+        # Must be JSON serializable
+        json_str = json.dumps(state)
+        restored = json.loads(json_str)
+        assert restored == state
+
+    def test_get_checkpoint_state_excludes_empty_buffers(self) -> None:
+        """get_checkpoint_state() only includes non-empty buffers."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="empty_buffer_test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=10),
+        )
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        # Don't buffer anything
+        state = executor.get_checkpoint_state()
+        assert state == {}  # Empty buffers not included
+
+    def test_restore_from_checkpoint_restores_buffers(self) -> None:
+        """restore_from_checkpoint() restores buffer state."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="restore_test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=10),
+        )
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        # Simulate checkpoint state from previous run
+        checkpoint_state = {
+            agg_node.node_id: {
+                "rows": [{"value": 0}, {"value": 1}, {"value": 2}],
+                "token_ids": ["token-0", "token-1", "token-2"],
+                "batch_id": "batch-123",
+            }
+        }
+
+        executor.restore_from_checkpoint(checkpoint_state)
+
+        # Buffer should be restored
+        buffered = executor.get_buffered_rows(agg_node.node_id)
+        assert len(buffered) == 3
+        assert buffered == [{"value": 0}, {"value": 1}, {"value": 2}]
+
+        # Batch ID should be restored
+        assert executor.get_batch_id(agg_node.node_id) == "batch-123"
+
+    def test_restore_from_checkpoint_restores_trigger_count(self) -> None:
+        """restore_from_checkpoint() restores trigger evaluator count."""
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="trigger_restore_test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=5),  # Trigger at 5
+        )
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        # Simulate checkpoint state with 4 rows buffered
+        checkpoint_state = {
+            agg_node.node_id: {
+                "rows": [{"value": i} for i in range(4)],
+                "token_ids": [f"token-{i}" for i in range(4)],
+                "batch_id": "batch-123",
+            }
+        }
+
+        executor.restore_from_checkpoint(checkpoint_state)
+
+        # Trigger evaluator should reflect restored count (4 rows)
+        # Should NOT trigger yet (need 5)
+        assert executor.should_flush(agg_node.node_id) is False
+
+        # Trigger evaluator internal count should be 4
+        evaluator = executor._trigger_evaluators[agg_node.node_id]
+        assert evaluator.batch_count == 4
+
+    def test_checkpoint_roundtrip(self) -> None:
+        """Buffer state survives checkpoint/restore cycle."""
+        import json
+
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="roundtrip_test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=10),
+        )
+
+        # First executor - buffer some rows
+        executor1 = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        for i in range(3):
+            token = TokenInfo(
+                row_id=f"row-{i}",
+                token_id=f"token-{i}",
+                row_data={"value": i * 10},
+            )
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=agg_node.node_id,
+                row_index=i,
+                data=token.row_data,
+                row_id=token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+            executor1.buffer_row(agg_node.node_id, token)
+
+        # Get checkpoint state and serialize (simulates crash)
+        state = executor1.get_checkpoint_state()
+        serialized = json.dumps(state)
+
+        # Second executor - restore from checkpoint
+        executor2 = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        restored_state = json.loads(serialized)
+        executor2.restore_from_checkpoint(restored_state)
+
+        # Verify buffer restored correctly
+        buffered = executor2.get_buffered_rows(agg_node.node_id)
+        assert buffered == [{"value": 0}, {"value": 10}, {"value": 20}]
+
+        # Verify trigger count restored
+        evaluator = executor2._trigger_evaluators[agg_node.node_id]
+        assert evaluator.batch_count == 3

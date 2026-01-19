@@ -6,9 +6,6 @@ persisted to the landscape database and queryable. This confirms the
 SDA-029 implementation for validation error audit trail.
 """
 
-from typing import Any
-
-import pytest
 from sqlalchemy import select
 
 from elspeth.contracts.schema import SchemaConfig
@@ -28,23 +25,10 @@ DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
 class TestValidationErrorPersistence:
     """Verify validation errors are persisted to landscape database."""
 
-    @pytest.fixture
-    def test_env(self) -> dict[str, Any]:
-        """Set up test environment with in-memory database."""
-        db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        return {
-            "db": db,
-            "recorder": recorder,
-        }
-
     def test_validation_error_persisted_to_database(
-        self, test_env: dict[str, Any]
+        self, landscape_db: LandscapeDB, recorder: LandscapeRecorder
     ) -> None:
         """Validation error from source should be queryable in database."""
-        db: LandscapeDB = test_env["db"]
-        recorder: LandscapeRecorder = test_env["recorder"]
-
         # Arrange: Create a run
         run = recorder.begin_run(
             config={"test": True},
@@ -69,7 +53,7 @@ class TestValidationErrorPersistence:
         )
 
         # Assert: Error is in database
-        with db.connection() as conn:
+        with landscape_db.connection() as conn:
             result = conn.execute(
                 select(validation_errors_table).where(
                     validation_errors_table.c.error_id == error_token.error_id
@@ -84,12 +68,9 @@ class TestValidationErrorPersistence:
         assert result.destination == "quarantine_sink"
 
     def test_validation_error_with_discard_still_recorded(
-        self, test_env: dict[str, Any]
+        self, landscape_db: LandscapeDB, recorder: LandscapeRecorder
     ) -> None:
         """Even 'discard' destination records error for audit completeness."""
-        db: LandscapeDB = test_env["db"]
-        recorder: LandscapeRecorder = test_env["recorder"]
-
         # Arrange: Create a run
         run = recorder.begin_run(
             config={},
@@ -113,7 +94,7 @@ class TestValidationErrorPersistence:
         )
 
         # Assert: Still recorded (audit completeness)
-        with db.connection() as conn:
+        with landscape_db.connection() as conn:
             result = conn.execute(
                 select(validation_errors_table).where(
                     validation_errors_table.c.error_id == error_token.error_id
@@ -127,23 +108,10 @@ class TestValidationErrorPersistence:
 class TestTransformErrorPersistence:
     """Verify transform errors are persisted to landscape database."""
 
-    @pytest.fixture
-    def test_env(self) -> dict[str, Any]:
-        """Set up test environment with in-memory database."""
-        db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        return {
-            "db": db,
-            "recorder": recorder,
-        }
-
     def test_transform_error_persisted_to_database(
-        self, test_env: dict[str, Any]
+        self, landscape_db: LandscapeDB, recorder: LandscapeRecorder
     ) -> None:
         """Transform error should be queryable in database."""
-        db: LandscapeDB = test_env["db"]
-        recorder: LandscapeRecorder = test_env["recorder"]
-
         # Arrange: Create a run
         run = recorder.begin_run(
             config={"test": True},
@@ -169,7 +137,7 @@ class TestTransformErrorPersistence:
         )
 
         # Assert: Error is in database
-        with db.connection() as conn:
+        with landscape_db.connection() as conn:
             result = conn.execute(
                 select(transform_errors_table).where(
                     transform_errors_table.c.error_id == error_token.error_id
@@ -184,12 +152,9 @@ class TestTransformErrorPersistence:
         assert result.destination == "failed_calculations"
 
     def test_transform_error_with_discard_still_recorded(
-        self, test_env: dict[str, Any]
+        self, landscape_db: LandscapeDB, recorder: LandscapeRecorder
     ) -> None:
         """Even 'discard' destination records TransformErrorEvent."""
-        db: LandscapeDB = test_env["db"]
-        recorder: LandscapeRecorder = test_env["recorder"]
-
         # Arrange: Create a run
         run = recorder.begin_run(
             config={},
@@ -214,7 +179,7 @@ class TestTransformErrorPersistence:
         )
 
         # Assert: Still recorded (audit completeness)
-        with db.connection() as conn:
+        with landscape_db.connection() as conn:
             result = conn.execute(
                 select(transform_errors_table).where(
                     transform_errors_table.c.error_id == error_token.error_id
@@ -228,20 +193,10 @@ class TestTransformErrorPersistence:
 class TestErrorEventExplainQuery:
     """Verify explain() includes error events in lineage."""
 
-    @pytest.fixture
-    def test_env(self) -> dict[str, Any]:
-        """Set up test environment with in-memory database."""
-        db = LandscapeDB.in_memory()
-        recorder = LandscapeRecorder(db)
-        return {
-            "db": db,
-            "recorder": recorder,
-        }
-
-    def test_explain_includes_validation_errors(self, test_env: dict[str, Any]) -> None:
+    def test_explain_includes_validation_errors(
+        self, recorder: LandscapeRecorder
+    ) -> None:
         """explain() should return validation errors for queried row."""
-        recorder: LandscapeRecorder = test_env["recorder"]
-
         # Arrange: Create run and source node
         run = recorder.begin_run(
             config={"test": True},
@@ -298,10 +253,10 @@ class TestErrorEventExplainQuery:
         assert lineage.validation_errors[0].error_id == error_token.error_id
         assert "Expected int" in lineage.validation_errors[0].error
 
-    def test_explain_includes_transform_errors(self, test_env: dict[str, Any]) -> None:
+    def test_explain_includes_transform_errors(
+        self, recorder: LandscapeRecorder
+    ) -> None:
         """explain() should return transform errors for queried token."""
-        recorder: LandscapeRecorder = test_env["recorder"]
-
         # Arrange: Create run, source node, and transform node
         run = recorder.begin_run(
             config={"test": True},
@@ -369,11 +324,9 @@ class TestErrorEventExplainQuery:
         assert lineage.transform_errors[0].token_id == token.token_id
 
     def test_explain_returns_empty_lists_when_no_errors(
-        self, test_env: dict[str, Any]
+        self, recorder: LandscapeRecorder
     ) -> None:
         """explain() should return empty error lists for clean rows."""
-        recorder: LandscapeRecorder = test_env["recorder"]
-
         # Arrange: Create run, node, row, token (no errors)
         run = recorder.begin_run(
             config={},
@@ -412,11 +365,9 @@ class TestErrorEventExplainQuery:
         assert lineage.transform_errors == []
 
     def test_explain_multiple_errors_for_same_token(
-        self, test_env: dict[str, Any]
+        self, recorder: LandscapeRecorder
     ) -> None:
         """explain() should return multiple transform errors for same token."""
-        recorder: LandscapeRecorder = test_env["recorder"]
-
         # Arrange: Create run with multiple transforms
         run = recorder.begin_run(
             config={},

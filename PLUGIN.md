@@ -6,6 +6,30 @@ This document describes how to create plugins for ELSPETH, from initial setup th
 > - `docs/contracts/plugin-protocol.md` - Authoritative protocol specification
 > - `CLAUDE.md` - Project overview and Three-Tier Trust Model
 
+## Prerequisites
+
+Before creating plugins, you should be familiar with:
+
+- **Python 3.11+** - Type hints, dataclasses, context managers
+- **Pydantic v2** - Model validation, `Field()`, `model_validate()` ([docs](https://docs.pydantic.dev/))
+- **pytest** - Fixtures, parametrization ([docs](https://docs.pytest.org/))
+- **ELSPETH concepts** - Read `CLAUDE.md` for the Three-Tier Trust Model
+
+**Development environment:**
+
+```bash
+# Clone and setup
+git clone https://github.com/your-org/elspeth-rapid.git
+cd elspeth-rapid
+
+# Create venv with uv (required)
+uv venv && source .venv/bin/activate
+uv pip install -e ".[dev]"
+
+# Verify setup
+uv run elspeth plugins list
+```
+
 ## Table of Contents
 
 1. [Plugin Types Overview](#plugin-types-overview)
@@ -491,6 +515,47 @@ class MySink(BaseSink):
 
 ---
 
+## About Gate Plugins
+
+Gates in ELSPETH are **config-driven** using the `gates:` YAML section with condition expressions. Custom gate plugins are rarely needed.
+
+```yaml
+# Config-driven gate (preferred approach)
+gates:
+  - name: quality_check
+    condition: "row['score'] >= 0.8"
+    routes:
+      "true": high_quality_sink
+      "false": continue
+```
+
+**When to use config-driven gates:**
+- Boolean conditions on field values
+- Threshold checks
+- Category routing
+
+**When you might need a custom gate plugin:**
+- Complex multi-field logic that's hard to express in a condition string
+- External lookups during routing decisions
+- Stateful routing based on accumulated data
+
+If you need custom gate logic, implement it as a **Transform** that returns routing decisions:
+
+```python
+class CustomRouter(BaseTransform):
+    """Custom routing logic as a transform."""
+
+    name = "custom_router"
+
+    def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+        # Complex routing logic here
+        if self._should_route_to_special(row):
+            return TransformResult.route_to("special_sink", row)
+        return TransformResult.success(row)  # Continue to next node
+```
+
+---
+
 ## Plugin Registration
 
 Plugins must be registered in two places:
@@ -683,9 +748,17 @@ class TestMyTransformContract(TransformContractPropertyTestBase):
 class TestMySourceContract(SourceContractPropertyTestBase):
 
     @pytest.fixture
-    def source(self) -> SourceProtocol:
+    def source(self, tmp_path: Path) -> SourceProtocol:
         """REQUIRED: Return a configured source instance."""
-        return MySource({...})
+        # Create test input file
+        input_file = tmp_path / "input.csv"
+        input_file.write_text("id,value\n1,100\n2,200\n")
+
+        return MySource({
+            "path": str(input_file),
+            "schema": {"fields": "dynamic"},
+            "on_validation_failure": "discard",
+        })
 ```
 
 #### Transform Plugins
@@ -696,12 +769,16 @@ class TestMyTransformContract(TransformContractPropertyTestBase):
     @pytest.fixture
     def transform(self) -> TransformProtocol:
         """REQUIRED: Return a configured transform instance."""
-        return MyTransform({...})
+        return MyTransform({
+            "schema": {"fields": "dynamic"},
+            "multiplier": 2.0,
+            "target_field": "value",
+        })
 
     @pytest.fixture
     def valid_input(self) -> dict:
         """REQUIRED: Return input that should process successfully."""
-        return {"id": 1, "name": "test"}
+        return {"id": 1, "value": 10.0}
 ```
 
 #### Sink Plugins
@@ -800,6 +877,97 @@ Before submitting a new plugin:
 - [ ] Sinks return `ArtifactDescriptor` with valid `content_hash`
 - [ ] `close()` method is idempotent
 - [ ] No type coercion in transforms/sinks
+
+---
+
+## Troubleshooting Plugin Development
+
+### Common Errors
+
+#### "Plugin not found" when running pipeline
+
+```
+KeyError: 'my_transform'
+```
+
+**Cause:** Plugin not registered in both required locations.
+**Fix:** Ensure plugin is added to both `hookimpl.py` AND `cli.py`:
+
+```python
+# 1. src/elspeth/plugins/transforms/hookimpl.py
+return [PassThrough, FieldMapper, MyTransform]  # Add here
+
+# 2. src/elspeth/cli.py (in BOTH _execute_pipeline and _resume_run)
+TRANSFORM_PLUGINS = {
+    "my_transform": MyTransform,  # Add here
+}
+```
+
+#### "schema is required" validation error
+
+```
+ValidationError: schema_config is required
+```
+
+**Cause:** Plugin config class missing schema requirement.
+**Fix:** Ensure your config extends `TransformDataConfig` (not `PluginConfig`):
+
+```python
+# WRONG - PluginConfig doesn't require schema
+class MyConfig(PluginConfig): ...
+
+# RIGHT - TransformDataConfig requires schema
+class MyConfig(TransformDataConfig): ...
+```
+
+#### Contract test fails with "has no attribute 'name'"
+
+```
+AttributeError: 'MyTransform' object has no attribute 'name'
+```
+
+**Cause:** Missing class attribute.
+**Fix:** Add `name` as a class attribute, not instance attribute:
+
+```python
+class MyTransform(BaseTransform):
+    name = "my_transform"  # Class attribute (correct)
+
+    def __init__(self, config):
+        self.name = "my_transform"  # Instance attribute (wrong)
+```
+
+#### "allow_coercion" causing validation failures
+
+**Symptom:** Source works but transform fails on same data.
+**Cause:** Transform using `allow_coercion=True` (should be False).
+**Fix:** Only sources should coerce:
+
+```python
+# Source: allow_coercion=True (external data boundary)
+# Transform/Sink: allow_coercion=False (trust upstream)
+```
+
+### Debugging Tips
+
+1. **Run contract tests first:**
+   ```bash
+   .venv/bin/python -m pytest tests/contracts/transform_contracts/test_my_transform_contract.py -v
+   ```
+
+2. **Test plugin in isolation:**
+   ```python
+   plugin = MyTransform({"schema": {"fields": "dynamic"}})
+   result = plugin.process({"id": 1, "value": 10}, mock_ctx)
+   print(result)
+   ```
+
+3. **Check plugin attributes:**
+   ```python
+   print(f"name: {plugin.name}")
+   print(f"input_schema: {plugin.input_schema}")
+   print(f"is_batch_aware: {plugin.is_batch_aware}")
+   ```
 
 ---
 

@@ -54,6 +54,34 @@ cat examples/boolean_routing/output/approved.csv
 cat examples/boolean_routing/output/rejected.csv
 ```
 
+### Verifying Pipeline Success
+
+A successful run displays output like:
+
+```
+✓ Pipeline completed
+  Source: 10 rows loaded
+  Sink 'approved': 5 rows written
+  Sink 'rejected': 5 rows written
+  Audit trail: examples/boolean_routing/runs/audit.db
+```
+
+**Success checklist:**
+
+- [ ] Exit code is 0 (no error)
+- [ ] Output files exist with expected row counts
+- [ ] No `ERROR` or `FAILED` lines in output
+- [ ] Audit database created/updated
+
+**Verify with explain:**
+
+```bash
+# Check all tokens reached terminal state
+uv run elspeth explain -r latest --no-tui
+```
+
+All tokens should show a terminal state: `COMPLETED`, `ROUTED`, or `QUARANTINED`.
+
 ### Minimal Pipeline Configuration
 
 ```yaml
@@ -197,11 +225,33 @@ Output shows registered sources, transforms, and sinks.
 
 ### `elspeth purge`
 
-Purge old payloads to free storage.
+Purge old payloads to free storage based on retention policies.
 
 ```bash
 elspeth purge [OPTIONS]
 ```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--database` | `-d` | Path to Landscape database |
+| `--older-than` | | Purge payloads older than N days |
+| `--dry-run` | `-n` | Show what would be purged without deleting |
+| `--force` | `-f` | Skip confirmation prompt |
+
+**Examples:**
+
+```bash
+# Preview what would be purged (payloads older than 30 days)
+uv run elspeth purge --database runs/audit.db --older-than 30 --dry-run
+
+# Actually purge old payloads
+uv run elspeth purge --database runs/audit.db --older-than 30
+
+# Force purge without confirmation
+uv run elspeth purge --database runs/audit.db --older-than 7 --force
+```
+
+**Note:** Purging removes payload data but preserves audit metadata (hashes, timestamps). The audit trail remains complete for compliance purposes.
 
 ---
 
@@ -574,6 +624,13 @@ uv run elspeth run -s examples/boolean_routing/settings.yaml --execute
 **Input:** CSV with `approved` column (true/false)
 **Output:** Separate CSVs for approved and rejected rows
 
+**Verify:**
+```bash
+wc -l examples/boolean_routing/output/*.csv
+#   6 approved.csv   (5 data rows + header)
+#   6 rejected.csv   (5 data rows + header)
+```
+
 ### 2. Threshold Gate
 
 Routes high-value transactions to separate output.
@@ -584,6 +641,14 @@ uv run elspeth run -s examples/threshold_gate/settings.yaml --execute
 
 **Input:** CSV with `amount` column
 **Output:** High values (>1000) and normal values in separate files
+
+**Verify:**
+```bash
+cat examples/threshold_gate/output/high_values.csv | head -3
+# id,amount,description
+# 2,1500,Large purchase
+# 4,2000,Premium service
+```
 
 ### 3. Batch Aggregation
 
@@ -596,6 +661,15 @@ uv run elspeth run -s examples/batch_aggregation/settings.yaml --execute
 **Input:** 15 transactions
 **Output:** 3 batch summaries (one per 5 rows, grouped by category)
 
+**Verify:**
+```bash
+cat examples/batch_aggregation/output/batch_summaries.csv
+# category,count,sum,mean
+# electronics,5,2750,550.0
+# clothing,5,1250,250.0
+# groceries,5,375,75.0
+```
+
 ### 4. Deaggregation
 
 Demonstrates N→M row expansion with new tokens.
@@ -604,8 +678,20 @@ Demonstrates N→M row expansion with new tokens.
 uv run elspeth run -s examples/deaggregation/settings.yaml --execute
 ```
 
-**Input:** 6 rows with `copies` field
+**Input:** 6 rows with `copies` field (values: 2,1,3,2,1,2 = 11 total)
 **Output:** 11 rows (each replicated by its copies value)
+
+**Verify:**
+```bash
+wc -l examples/deaggregation/output/replicated.csv
+# 12 (11 data rows + header)
+
+head -4 examples/deaggregation/output/replicated.csv
+# id,name,copies,category,copy_index
+# 1,Alice,2,standard,0
+# 1,Alice,2,standard,1
+# 2,Bob,1,premium,0
+```
 
 ### 5. JSON Explode
 
@@ -618,6 +704,12 @@ uv run elspeth run -s examples/json_explode/settings.yaml --execute
 **Input:** 3 orders with `items` arrays
 **Output:** 6 rows (one per item)
 
+**Verify:**
+```bash
+cat examples/json_explode/output/order_items.json | head -20
+# Shows individual items with order_id, item details, and item_index
+```
+
 ### 6. Audit Export
 
 Exports complete audit trail to JSON for compliance.
@@ -628,6 +720,18 @@ uv run elspeth run -s examples/audit_export/settings.yaml --execute
 
 **Input:** 8 submissions
 **Output:** Routed results + complete audit trail JSON
+
+**Verify:**
+```bash
+# Check routed outputs
+wc -l examples/audit_export/output/*.csv
+#   5 corporate.csv      (4 data rows + header)
+#   5 non_corporate.csv  (4 data rows + header)
+
+# Check audit trail exists and has content
+ls -la examples/audit_export/output/audit_trail.json
+# Should show non-zero file size
+```
 
 ---
 

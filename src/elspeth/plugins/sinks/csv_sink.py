@@ -28,6 +28,7 @@ class CSVSinkConfig(PathConfig):
     delimiter: str = ","
     encoding: str = "utf-8"
     validate_input: bool = False  # Optional runtime validation of incoming rows
+    mode: str = "write"  # "write" (truncate) or "append"
 
 
 class CSVSink(BaseSink):
@@ -41,11 +42,16 @@ class CSVSink(BaseSink):
         delimiter: Field delimiter (default: ",")
         encoding: File encoding (default: "utf-8")
         validate_input: Validate incoming rows against schema (default: False)
+        mode: "write" (truncate, default) or "append" (add to existing file)
 
     The schema can be:
         - Dynamic: {"fields": "dynamic"} - accept any fields
         - Strict: {"mode": "strict", "fields": ["id: int", "name: str"]}
         - Free: {"mode": "free", "fields": ["id: int"]} - at least these fields
+
+    Append mode behavior:
+        - If file exists: reads headers from it and appends rows without header
+        - If file doesn't exist or is empty: creates file with header (like write mode)
     """
 
     name = "csv"
@@ -60,6 +66,7 @@ class CSVSink(BaseSink):
         self._delimiter = cfg.delimiter
         self._encoding = cfg.encoding
         self._validate_input = cfg.validate_input
+        self._mode = cfg.mode
 
         # Store schema config for audit trail
         # PathConfig (via DataPluginConfig) ensures schema_config is not None
@@ -111,29 +118,21 @@ class CSVSink(BaseSink):
                 # Raises ValidationError on failure - this is intentional
                 self._schema_class.model_validate(row)
 
-        # Lazy initialization - discover fieldnames from first row
+        # Lazy initialization - open file on first write
         if self._file is None:
-            self._fieldnames = list(rows[0].keys())
-            self._file = open(  # noqa: SIM115 - lifecycle managed by class
-                self._path, "w", encoding=self._encoding, newline=""
-            )
-            self._writer = csv.DictWriter(
-                self._file,
-                fieldnames=self._fieldnames,
-                delimiter=self._delimiter,
-            )
-            self._writer.writeheader()
+            self._open_file(rows)
 
         # Write all rows in batch
-        # Invariant: _file and _writer are always set together (above block ensures this)
+        # Invariant: _file and _writer are always set together (by _open_file above)
+        file = self._file
         writer = self._writer
-        if writer is None:
+        if file is None or writer is None:
             raise RuntimeError("CSVSink writer not initialized - this is a bug")
         for row in rows:
             writer.writerow(row)
 
         # Flush to ensure content is on disk for hashing
-        self._file.flush()
+        file.flush()
 
         # Compute content hash from file
         content_hash = self._compute_file_hash()
@@ -144,6 +143,52 @@ class CSVSink(BaseSink):
             content_hash=content_hash,
             size_bytes=size_bytes,
         )
+
+    def _open_file(self, rows: list[dict[str, Any]]) -> None:
+        """Open file for writing, handling append mode.
+
+        In append mode:
+        - If file exists with headers: read headers from it, open in append mode
+        - If file doesn't exist or is empty: create with headers (like write mode)
+
+        In write mode:
+        - Always truncate and write headers
+
+        Args:
+            rows: First batch of rows (used to determine fieldnames if needed)
+        """
+        if self._mode == "append" and self._path.exists():
+            # Try to read existing headers from file
+            with open(self._path, encoding=self._encoding, newline="") as f:
+                reader = csv.DictReader(f, delimiter=self._delimiter)
+                existing_fieldnames = reader.fieldnames
+
+            if existing_fieldnames:
+                # Use existing headers, append mode (no header write)
+                self._fieldnames = list(existing_fieldnames)
+                self._file = open(  # noqa: SIM115 - lifecycle managed by class
+                    self._path, "a", encoding=self._encoding, newline=""
+                )
+                self._writer = csv.DictWriter(
+                    self._file,
+                    fieldnames=self._fieldnames,
+                    delimiter=self._delimiter,
+                )
+                # No header write - already exists
+                return
+
+        # Write mode OR append to non-existent/empty file
+        # In both cases: determine fieldnames from first row, write header
+        self._fieldnames = list(rows[0].keys())
+        self._file = open(  # noqa: SIM115 - lifecycle managed by class
+            self._path, "w", encoding=self._encoding, newline=""
+        )
+        self._writer = csv.DictWriter(
+            self._file,
+            fieldnames=self._fieldnames,
+            delimiter=self._delimiter,
+        )
+        self._writer.writeheader()
 
     def _compute_file_hash(self) -> str:
         """Compute SHA-256 hash of the file contents."""

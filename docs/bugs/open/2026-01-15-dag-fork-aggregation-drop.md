@@ -34,11 +34,10 @@
 
 ## Steps To Reproduce
 
-1. Create a gate plugin that returns `RoutingAction.fork_to_paths(["path_a", "path_b"])`.
-2. Configure a pipeline with that gate and sinks for each path.
-3. Run a pipeline execution and observe sink outputs and counters.
+1. Configure a **config gate** that routes to `fork`, e.g. `routes: {all: fork}` with `fork_to: [path_a, path_b]`, and define sinks for `path_a` and `path_b`.
+2. Run a pipeline execution and observe sink outputs and counters for branch-named sinks.
 
-(Alternative) Configure an aggregation plugin that accepts rows and triggers a flush, then run a pipeline and observe downstream outputs.
+(Alternative) Configure an aggregation (via `aggregations:`) that accepts rows and triggers a flush, then run a pipeline and observe downstream outputs.
 
 ## Expected Behavior
 
@@ -47,13 +46,17 @@
 
 ## Actual Behavior
 
-- `RowProcessor` returns `outcome="forked"` or `outcome="consumed"`, but `Orchestrator._execute_run` ignores those outcomes, dropping tokens silently.
+- ~~`RowProcessor` returns `outcome="forked"` or `outcome="consumed"`, but `Orchestrator` ignores those outcomes, dropping tokens silently.~~
+- **UPDATE 2026-01-19:** Fork outcomes are now handled and fork children are routed to branch-named sinks. Aggregation flush outputs are still not propagated as downstream work (flush does not emit sink-bound tokens/results).
 
 ## Evidence
 
-- `src/elspeth/engine/processor.py:108-183` returns `"forked"` and `"consumed"` outcomes with an explicit note that the caller must handle them.
-- `src/elspeth/engine/orchestrator.py:349-381` only handles `"completed"`, `"routed"`, and `"failed"` outcomes; no handling for fork/aggregation outcomes.
-- `src/elspeth/plugins/results.py:19-32` documents the invariant: “No silent drops.”
+- Fork outcomes and aggregation consumption outcomes are produced by the processor:
+  - Fork: `src/elspeth/engine/processor.py:328-349`
+  - Aggregation consume: `src/elspeth/engine/processor.py:350-379`
+- Orchestrator now handles fork outcomes and routes fork children to branch-named sinks: `src/elspeth/engine/orchestrator.py:581-637`
+- Aggregation flush currently does not enqueue downstream work (flush has no return path into `Orchestrator`’s sink buffer): `src/elspeth/engine/processor.py:365-370`
+- Invariant: no silent drops: `src/elspeth/plugins/results.py:19-32`
 
 ## Impact
 

@@ -2,7 +2,7 @@
 
 ## Summary
 
-- `RoutingAction.route(..., mode=copy)` is treated like `move`, so routed rows do not continue down the pipeline, violating routing semantics.
+- “Route + continue” semantics (COPY routing to a sink without terminating the main path) are not supported in config gates and may be unreachable in config-only pipelines. If COPY-to-sink routing is added as a config feature, the current processing model must ensure COPY does not stop downstream execution.
 
 ## Severity
 
@@ -33,9 +33,8 @@
 
 ## Steps To Reproduce
 
-1. Create a gate that returns `RoutingAction.route("flagged", mode=RoutingMode.COPY)`.
-2. Configure a pipeline with that gate, a sink for `flagged`, and a default output sink.
-3. Run the pipeline and check both sinks.
+1. Configure a pipeline that can express “route to sink AND continue” for the same token (COPY semantics). (Config gates currently always use MOVE for sink routes.)
+2. Run the pipeline and check both the routed sink and the default output sink for the same row/token.
 
 ## Expected Behavior
 
@@ -43,13 +42,14 @@
 
 ## Actual Behavior
 
-- The row is treated as routed and terminates early; downstream transforms/default sink do not receive it.
+- In config-gate-only pipelines, COPY-to-sink routing is not expressible; sink routing is MOVE/terminal by construction.
+- If a COPY-to-sink feature is introduced, ensure it does not terminate the main path (i.e., avoid treating COPY like MOVE).
 
 ## Evidence
 
-- `src/elspeth/engine/executors.py:324-347` sets `sink_name` for all route actions without checking `action.mode`.
-- `src/elspeth/engine/processor.py:145-152` returns `outcome="routed"` as soon as `sink_name` is set, halting further processing.
-- Architecture defines `copy` as “route and continue” (`docs/design/architecture.md:138-143`).
+- Config gate sink routing is always MOVE (no COPY option): `src/elspeth/engine/executors.py:588-600`
+- Processor treats any sink route as terminal for that token: `src/elspeth/engine/processor.py:460-470`
+- Architecture defines COPY as “route and continue”: `docs/design/architecture.md:138-143`
 
 ## Impact
 
@@ -59,13 +59,14 @@
 
 ## Root Cause Hypothesis
 
-- Gate execution does not propagate routing mode; `RoutingMode.COPY` is effectively treated as `MOVE` because the executor only returns a terminal `sink_name` and the processor always stops on any routed outcome.
+- The config gate model does not provide a way to express COPY-to-sink routing, and the token-processing loop treats sink routing as terminal for that token. Adding COPY-to-sink requires explicit support in both executor outcomes and the processor/orchestrator sink buffering.
 
 ## Proposed Fix
 
 - Code changes (modules/files):
-  - Extend gate outcome to signal “route + continue” when `mode == COPY`.
-  - Update `RowProcessor` to keep processing after recording a copy route, while still enqueueing/writing to the routed sink.
+  - Decide whether COPY-to-sink routing is a supported requirement for config gates. If yes:
+    - Extend config gate routing config to express MOVE vs COPY for sink routes.
+    - Extend gate outcome to signal “route + continue” and update `RowProcessor`/`Orchestrator` to enqueue sink output while continuing downstream processing.
 - Config or schema changes: none.
 - Tests to add/update:
   - Add orchestrator-level test verifying that `RoutingMode.COPY` sends a row to the routed sink and continues to the output sink.
@@ -81,7 +82,8 @@
 
 ## Acceptance Criteria
 
-- When a gate returns `RoutingAction.route(..., mode=copy)`, the row is written to the routed sink and continues down the pipeline.
+- If COPY-to-sink routing is supported: the row is written to the routed sink and continues down the pipeline.
+- If config-only gates are the only gate mechanism: explicitly document that sink routing is terminal (MOVE) and close this report as not applicable.
 - Audit trail records routing events while downstream node states are still present.
 
 ## Tests

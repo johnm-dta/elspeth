@@ -28,20 +28,22 @@
 - Notable tool calls or steps: N/A
 
 ## Steps To Reproduce
-1. Create a plugin with `plugin_version = "0.2.0"` and `determinism = Determinism.NONDETERMINISTIC`.
-2. Run a pipeline with that plugin.
-3. Inspect the `nodes` table for the run.
+1. Configure a pipeline that includes at least one **config gate** (the `gates:` section).
+2. Run the pipeline.
+3. Inspect the `nodes` table for the run and locate the config gate node(s).
 
 ## Expected Behavior
-- `nodes.plugin_version` and `nodes.determinism` should reflect the plugin’s declared metadata (and schema hashes if available).
+- Config gate nodes should have clear, intentional metadata:
+  - a deterministic determinism value (likely deterministic), and
+  - a version scheme that reflects the engine/config gate evaluator version (not a hard-coded placeholder).
 
 ## Actual Behavior
-- `plugin_version` is always `"1.0.0"` and `determinism` defaults to deterministic regardless of plugin metadata.
+- Config gate nodes use hardcoded `plugin_version="1.0.0"` and `determinism=DETERMINISTIC`, independent of any explicit versioning scheme.
 
 ## Evidence
-- Hard-coded version in Orchestrator: `src/elspeth/engine/orchestrator.py:243`.
-- Recorder supports determinism and schema hashes but never receives them: `src/elspeth/core/landscape/recorder.py:313`.
-- Plugin metadata exists on base classes: `src/elspeth/plugins/base.py:47`.
+- Config gates use hardcoded metadata at node registration time: `src/elspeth/engine/orchestrator.py:443-447`
+- Recorder supports determinism and receives values from the orchestrator: `src/elspeth/engine/orchestrator.py:463-472`
+- Config gate semantics are engine-internal (no plugin instance exists): `src/elspeth/core/dag.py:339-344`
 
 ## Impact
 - User-facing impact: Audit records misrepresent plugin versions and determinism, undermining reproducibility and compliance.

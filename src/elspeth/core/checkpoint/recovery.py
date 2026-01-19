@@ -156,11 +156,11 @@ class RecoveryManager:
         self,
         run_id: str,
         payload_store: PayloadStore,
-    ) -> list[tuple[int, dict[str, Any]]]:
+    ) -> list[tuple[str, int, dict[str, Any]]]:
         """Get row data for unprocessed rows.
 
         Retrieves actual row data (not just IDs) for rows that need
-        processing during resume. Returns tuples of (row_index, row_data)
+        processing during resume. Returns tuples of (row_id, row_index, row_data)
         ordered by row_index for deterministic processing.
 
         Args:
@@ -168,7 +168,7 @@ class RecoveryManager:
             payload_store: PayloadStore for retrieving row data
 
         Returns:
-            List of (row_index, row_data) tuples, ordered by row_index.
+            List of (row_id, row_index, row_data) tuples, ordered by row_index.
             Empty list if run cannot be resumed or all rows were processed.
 
         Raises:
@@ -178,7 +178,7 @@ class RecoveryManager:
         if not row_ids:
             return []
 
-        result: list[tuple[int, dict[str, Any]]] = []
+        result: list[tuple[str, int, dict[str, Any]]] = []
 
         with self._db.engine.connect() as conn:
             for row_id in row_ids:
@@ -209,7 +209,7 @@ class RecoveryManager:
                         f"Row {row_id} payload has been purged - cannot resume"
                     ) from None
 
-                result.append((row_index, row_data))
+                result.append((row_id, row_index, row_data))
 
         return result
 

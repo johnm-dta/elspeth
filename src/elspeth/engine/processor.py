@@ -520,6 +520,81 @@ class RowProcessor:
 
         return results
 
+    def process_existing_row(
+        self,
+        row_id: str,
+        row_data: dict[str, Any],
+        transforms: list[Any],
+        ctx: PluginContext,
+        *,
+        coalesce_at_step: int | None = None,
+        coalesce_name: str | None = None,
+    ) -> list[RowResult]:
+        """Process an existing row (row already in database, create new token only).
+
+        Used during resume when rows were created in the original run
+        but need to be reprocessed. Unlike process_row(), this does NOT
+        create a new row record - only a new token.
+
+        Args:
+            row_id: Existing row ID in the database
+            row_data: Row data (retrieved from payload store)
+            transforms: List of transform plugins
+            ctx: Plugin context
+            coalesce_at_step: Step index at which fork children should coalesce
+            coalesce_name: Name of the coalesce point for merging
+
+        Returns:
+            List of RowResults, one per terminal token (parent + children)
+        """
+        # Create token for existing row (NOT a new row)
+        token = self._token_manager.create_token_for_existing_row(
+            row_id=row_id,
+            row_data=row_data,
+        )
+
+        # Initialize work queue with token starting at step 0
+        work_queue: deque[_WorkItem] = deque(
+            [
+                _WorkItem(
+                    token=token,
+                    start_step=0,
+                    coalesce_at_step=coalesce_at_step,
+                    coalesce_name=coalesce_name,
+                )
+            ]
+        )
+        results: list[RowResult] = []
+        iterations = 0
+
+        with self._spans.row_span(token.row_id, token.token_id):
+            while work_queue:
+                iterations += 1
+                if iterations > MAX_WORK_QUEUE_ITERATIONS:
+                    raise RuntimeError(
+                        f"Work queue exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. "
+                        "Possible infinite loop in pipeline."
+                    )
+
+                item = work_queue.popleft()
+                result, child_items = self._process_single_token(
+                    token=item.token,
+                    transforms=transforms,
+                    ctx=ctx,
+                    start_step=item.start_step,
+                    coalesce_at_step=item.coalesce_at_step,
+                    coalesce_name=item.coalesce_name,
+                )
+                if result is not None:
+                    if isinstance(result, list):
+                        results.extend(result)
+                    else:
+                        results.append(result)
+
+                work_queue.extend(child_items)
+
+        return results
+
     def _process_single_token(
         self,
         token: TokenInfo,

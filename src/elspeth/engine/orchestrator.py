@@ -960,6 +960,9 @@ class Orchestrator:
         resume_point: "ResumePoint",
         config: PipelineConfig,
         graph: ExecutionGraph,
+        *,
+        payload_store: Any = None,
+        settings: "ElspethSettings | None" = None,
     ) -> RunResult:
         """Resume a failed run from a checkpoint.
 
@@ -970,17 +973,21 @@ class Orchestrator:
             resume_point: ResumePoint from RecoveryManager.get_resume_point()
             config: Same PipelineConfig used for original run()
             graph: Same ExecutionGraph used for original run()
+            payload_store: PayloadStore for retrieving row data (required)
+            settings: Full settings (optional, for retry config etc.)
 
         Returns:
             RunResult with recovery outcome
 
-        Note:
-            This is a partial implementation that handles batch recovery
-            (marking crashed batches as failed and creating retry batches).
-            Processing of unprocessed rows is not yet implemented - the
-            returned RunResult has zero counts. Future work will add actual
-            row processing with restored aggregation state.
+        Raises:
+            ValueError: If payload_store is not provided
         """
+        if payload_store is None:
+            raise ValueError(
+                "payload_store is required for resume - row data must be retrieved "
+                "from stored payloads"
+            )
+
         run_id = resume_point.checkpoint.run_id
 
         # Create fresh recorder (stateless, like run())
@@ -997,20 +1004,289 @@ class Orchestrator:
         if resume_point.aggregation_state is not None:
             restored_state[resume_point.node_id] = resume_point.aggregation_state
 
-        # TODO: Continue processing unprocessed rows
-        # Future work will:
-        # 1. Query RecoveryManager.get_unprocessed_rows(run_id)
-        # 2. Feed unprocessed rows through RowProcessor with restored state
-        # 3. Update RunResult with actual processing counts
+        # 4. Get unprocessed row data from payload store
+        from elspeth.core.checkpoint import RecoveryManager
 
-        # For now, return partial result indicating recovery happened
+        if self._checkpoint_manager is None:
+            raise ValueError(
+                "CheckpointManager is required for resume - "
+                "Orchestrator must be initialized with checkpoint_manager"
+            )
+        recovery = RecoveryManager(self._db, self._checkpoint_manager)
+        unprocessed_rows = recovery.get_unprocessed_row_data(run_id, payload_store)
+
+        if not unprocessed_rows:
+            # All rows were processed - complete the run
+            recorder.complete_run(run_id, status="completed")
+            return RunResult(
+                run_id=run_id,
+                status=RunStatus.COMPLETED,
+                rows_processed=0,
+                rows_succeeded=0,
+                rows_failed=0,
+                rows_routed=0,
+            )
+
+        # 5. Process unprocessed rows
+        result = self._process_resumed_rows(
+            recorder=recorder,
+            run_id=run_id,
+            config=config,
+            graph=graph,
+            unprocessed_rows=unprocessed_rows,
+            restored_aggregation_state=restored_state,
+            settings=settings,
+        )
+
+        # 6. Complete the run
+        recorder.complete_run(run_id, status="completed")
+        result.status = RunStatus.COMPLETED
+
+        # 7. Delete checkpoints on successful completion
+        self._delete_checkpoints(run_id)
+
+        return result
+
+    def _process_resumed_rows(
+        self,
+        recorder: LandscapeRecorder,
+        run_id: str,
+        config: PipelineConfig,
+        graph: ExecutionGraph,
+        unprocessed_rows: list[tuple[str, int, dict[str, Any]]],
+        restored_aggregation_state: dict[str, dict[str, Any]],
+        settings: "ElspethSettings | None" = None,
+    ) -> RunResult:
+        """Process unprocessed rows during resume.
+
+        Follows the same pattern as _execute_run() but:
+        - Row data comes from unprocessed_rows (not source)
+        - Source plugin is NOT called (data already recorded)
+        - Restored aggregation state is passed to processor
+        - Uses process_existing_row() instead of process_row()
+
+        Args:
+            recorder: LandscapeRecorder for audit trail
+            run_id: Run being resumed
+            config: Pipeline configuration
+            graph: Execution graph
+            unprocessed_rows: List of (row_id, row_index, row_data) tuples
+            restored_aggregation_state: Map of node_id -> state dict
+            settings: Full settings (optional)
+
+        Returns:
+            RunResult with processing counts
+        """
+        # Get explicit node ID mappings from graph
+        source_id = graph.get_source()
+        if source_id is None:
+            raise ValueError("Graph has no source node")
+        sink_id_map = graph.get_sink_id_map()
+        transform_id_map = graph.get_transform_id_map()
+        config_gate_id_map = graph.get_config_gate_id_map()
+        coalesce_id_map = graph.get_coalesce_id_map()
+        output_sink_name = graph.get_output_sink()
+
+        # Build edge_map from graph edges
+        edge_map: dict[tuple[str, str], str] = {}
+        for i, edge_info in enumerate(graph.get_edges()):
+            # Generate synthetic edge_id for resume (edges were registered in original run)
+            edge_id = f"resume_edge_{i}"
+            edge_map[(edge_info.from_node, edge_info.label)] = edge_id
+
+        # Get route resolution map
+        route_resolution_map = graph.get_route_resolution_map()
+
+        # Assign node_ids to all plugins
+        self._assign_plugin_node_ids(
+            source=config.source,
+            transforms=config.transforms,
+            sinks=config.sinks,
+            source_id=source_id,
+            transform_id_map=transform_id_map,
+            sink_id_map=sink_id_map,
+        )
+
+        # Create context
+        ctx = PluginContext(
+            run_id=run_id,
+            config=config.config,
+            landscape=recorder,
+        )
+
+        # Call on_start for transforms and sinks.
+        # Source's on_start/on_complete are intentionally skipped because:
+        # 1. Source's load() is not called - row data comes from stored payloads
+        # 2. The source used during resume is NullSource, which has no resources to manage
+        # 3. If a real source with resources were used in the future (e.g., holding
+        #    a database connection), on_start/on_complete would need to be called here
+        for transform in config.transforms:
+            transform.on_start(ctx)
+        for sink in config.sinks.values():
+            sink.on_start(ctx)
+
+        # Create retry manager from settings if available
+        retry_manager: RetryManager | None = None
+        if settings is not None:
+            retry_manager = RetryManager(RetryConfig.from_settings(settings.retry))
+
+        # Create coalesce executor if config has coalesce settings
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        coalesce_executor: CoalesceExecutor | None = None
+        branch_to_coalesce: dict[str, str] = {}
+
+        if settings is not None and settings.coalesce:
+            branch_to_coalesce = graph.get_branch_to_coalesce_map()
+            token_manager = TokenManager(recorder)
+
+            coalesce_executor = CoalesceExecutor(
+                recorder=recorder,
+                span_factory=self._span_factory,
+                token_manager=token_manager,
+                run_id=run_id,
+            )
+
+            for coalesce_settings in settings.coalesce:
+                coalesce_node_id = coalesce_id_map[coalesce_settings.name]
+                coalesce_executor.register_coalesce(coalesce_settings, coalesce_node_id)
+
+        # Compute coalesce step positions
+        coalesce_step_map: dict[str, int] = {}
+        if settings is not None and settings.coalesce:
+            base_step = len(config.transforms) + len(config.gates)
+            for i, cs in enumerate(settings.coalesce):
+                coalesce_step_map[cs.name] = base_step + i
+
+        # Create processor with restored aggregation state
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=self._span_factory,
+            run_id=run_id,
+            source_node_id=source_id,
+            edge_map=edge_map,
+            route_resolution_map=route_resolution_map,
+            config_gates=config.gates,
+            config_gate_id_map=config_gate_id_map,
+            aggregation_settings=config.aggregation_settings,
+            retry_manager=retry_manager,
+            coalesce_executor=coalesce_executor,
+            coalesce_node_ids=coalesce_id_map,
+            branch_to_coalesce=branch_to_coalesce,
+            coalesce_step_map=coalesce_step_map,
+            restored_aggregation_state=restored_aggregation_state,
+        )
+
+        # Process rows - Buffer TOKENS
+        from elspeth.contracts import TokenInfo
+        from elspeth.engine.executors import SinkExecutor
+
+        rows_processed = 0
+        rows_succeeded = 0
+        rows_failed = 0
+        rows_routed = 0
+        rows_quarantined = 0
+        rows_forked = 0
+        rows_coalesced = 0
+        pending_tokens: dict[str, list[TokenInfo]] = {name: [] for name in config.sinks}
+
+        try:
+            # Process each unprocessed row using process_existing_row
+            # (rows already exist in DB, only tokens need to be created)
+            #
+            # NOTE: No checkpointing during resume processing.
+            # This is intentional for the following reasons:
+            # 1. Resume typically handles few rows (those after the original checkpoint)
+            # 2. Adding checkpointing during resume increases complexity significantly
+            # 3. If resume crashes, re-running from the original checkpoint is acceptable
+            # 4. For very large resume scenarios, a future enhancement could add checkpoint
+            #    support, but the current design prioritizes simplicity over edge-case
+            #    optimization
+            for row_id, _row_index, row_data in unprocessed_rows:
+                rows_processed += 1
+
+                results = processor.process_existing_row(
+                    row_id=row_id,
+                    row_data=row_data,
+                    transforms=config.transforms,
+                    ctx=ctx,
+                )
+
+                # Handle all results from this row
+                for result in results:
+                    if result.outcome == RowOutcome.COMPLETED:
+                        rows_succeeded += 1
+                        sink_name = output_sink_name
+                        if (
+                            result.token.branch_name is not None
+                            and result.token.branch_name in config.sinks
+                        ):
+                            sink_name = result.token.branch_name
+                        pending_tokens[sink_name].append(result.token)
+                    elif result.outcome == RowOutcome.ROUTED:
+                        rows_routed += 1
+                        assert result.sink_name is not None
+                        pending_tokens[result.sink_name].append(result.token)
+                    elif result.outcome == RowOutcome.FAILED:
+                        rows_failed += 1
+                    elif result.outcome == RowOutcome.QUARANTINED:
+                        rows_quarantined += 1
+                    elif result.outcome == RowOutcome.FORKED:
+                        rows_forked += 1
+                    elif result.outcome == RowOutcome.CONSUMED_IN_BATCH:
+                        pass
+                    elif result.outcome == RowOutcome.COALESCED:
+                        rows_coalesced += 1
+                        pending_tokens[output_sink_name].append(result.token)
+
+            # Flush pending coalesce operations
+            if coalesce_executor is not None:
+                flush_step = len(config.transforms) + len(config.gates)
+                pending_outcomes = coalesce_executor.flush_pending(flush_step)
+
+                for outcome in pending_outcomes:
+                    if outcome.merged_token is not None:
+                        rows_coalesced += 1
+                        pending_tokens[output_sink_name].append(outcome.merged_token)
+
+            # Write to sinks using SinkExecutor
+            sink_executor = SinkExecutor(recorder, self._span_factory, run_id)
+            step = len(config.transforms) + len(config.gates) + 1
+
+            for sink_name, tokens in pending_tokens.items():
+                if tokens and sink_name in config.sinks:
+                    sink = config.sinks[sink_name]
+                    sink_executor.write(
+                        sink=sink,
+                        tokens=tokens,
+                        ctx=ctx,
+                        step_in_pipeline=step,
+                    )
+
+        finally:
+            # Call on_complete for all plugins (even on error)
+            for transform in config.transforms:
+                with suppress(Exception):
+                    transform.on_complete(ctx)
+            for sink in config.sinks.values():
+                with suppress(Exception):
+                    sink.on_complete(ctx)
+
+            # Close all sinks (NOT source - wasn't opened)
+            for sink in config.sinks.values():
+                sink.close()
+
         return RunResult(
             run_id=run_id,
-            status=RunStatus.RUNNING,  # Will be updated by actual processing
-            rows_processed=0,
-            rows_succeeded=0,
-            rows_failed=0,
-            rows_routed=0,
+            status=RunStatus.RUNNING,  # Will be updated by caller
+            rows_processed=rows_processed,
+            rows_succeeded=rows_succeeded,
+            rows_failed=rows_failed,
+            rows_routed=rows_routed,
+            rows_quarantined=rows_quarantined,
+            rows_forked=rows_forked,
+            rows_coalesced=rows_coalesced,
         )
 
     def _handle_incomplete_batches(

@@ -12,6 +12,7 @@ from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.recorder import LandscapeRecorder
+from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 
 
@@ -40,6 +41,11 @@ class TestOrchestratorResume:
             db=landscape_db,
             checkpoint_manager=checkpoint_manager,
         )
+
+    @pytest.fixture
+    def payload_store(self, tmp_path: Path) -> FilesystemPayloadStore:
+        """Create test payload store."""
+        return FilesystemPayloadStore(tmp_path / "payloads")
 
     @pytest.fixture
     def failed_run_with_batch(
@@ -131,6 +137,7 @@ class TestOrchestratorResume:
         landscape_db: LandscapeDB,
         failed_run_with_batch: dict[str, Any],
         recovery_manager: RecoveryManager,
+        payload_store: FilesystemPayloadStore,
     ) -> None:
         """resume() retries batches that were executing when crash occurred."""
         run_id = failed_run_with_batch["run_id"]
@@ -145,7 +152,7 @@ class TestOrchestratorResume:
         graph = self._create_minimal_graph()
 
         # Act
-        orchestrator.resume(resume_point, config, graph)
+        orchestrator.resume(resume_point, config, graph, payload_store=payload_store)
 
         # Assert: Original batch marked failed, retry batch created
         recorder = LandscapeRecorder(landscape_db)

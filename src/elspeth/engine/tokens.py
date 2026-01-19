@@ -85,6 +85,32 @@ class TokenManager:
             row_data=row_data,
         )
 
+    def create_token_for_existing_row(
+        self,
+        row_id: str,
+        row_data: dict[str, Any],
+    ) -> TokenInfo:
+        """Create a token for a row that already exists in the database.
+
+        Used during resume when rows were created in the original run
+        but tokens need to be created for reprocessing.
+
+        Args:
+            row_id: Existing row ID in the database
+            row_data: Row data (retrieved from payload store)
+
+        Returns:
+            TokenInfo with row and token IDs
+        """
+        # Create token for existing row
+        token = self._recorder.create_token(row_id=row_id)
+
+        return TokenInfo(
+            row_id=row_id,
+            token_id=token.token_id,
+            row_data=row_data,
+        )
+
     def fork_token(
         self,
         parent_token: TokenInfo,

@@ -34,17 +34,21 @@ class TestRecoveryManagerRowData:
             payload_store=payload_store,
         )
 
-        # Should return list of (row_index, row_data) tuples
+        # Should return list of (row_id, row_index, row_data) tuples
         assert len(row_data_list) == 2  # rows 3 and 4
         assert all(isinstance(item, tuple) for item in row_data_list)
-        assert all(len(item) == 2 for item in row_data_list)
+        assert all(len(item) == 3 for item in row_data_list)
 
         # Verify row indices are correct and in order
-        indices = [item[0] for item in row_data_list]
+        indices = [item[1] for item in row_data_list]
         assert indices == [3, 4]
 
+        # Verify row_ids are strings
+        row_ids = [item[0] for item in row_data_list]
+        assert all(isinstance(r, str) for r in row_ids)
+
         # Verify row data is correct
-        for row_index, row_data in row_data_list:
+        for _row_id, row_index, row_data in row_data_list:
             assert isinstance(row_data, dict)
             assert row_data["id"] == row_index
             assert row_data["value"] == f"data-{row_index}"

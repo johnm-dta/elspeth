@@ -1,7 +1,7 @@
 # ELSPETH Plugin Protocol Contract
 
-> **Status:** FINAL (v1.3)
-> **Last Updated:** 2026-01-17
+> **Status:** FINAL (v1.4)
+> **Last Updated:** 2026-01-19
 > **Authority:** This document is the master reference for all plugin interactions.
 
 ## Overview
@@ -325,9 +325,9 @@ close()                 ← Release resources
 
 ### Transform
 
-**Purpose:** Apply business logic to a row. Stateless between rows.
+**Purpose:** Apply business logic to rows. Stateless between calls.
 
-**Data Flow:** One row in → one row out (possibly modified).
+**Data Flow:** Row(s) in → row(s) out (possibly modified).
 
 #### Required Attributes
 
@@ -338,7 +338,44 @@ output_schema: type[PluginSchema]
 node_id: str | None
 determinism: Determinism
 plugin_version: str
+is_batch_aware: bool = False  # Set True for batch processing at aggregation nodes
 ```
+
+#### Batch-Aware Transforms
+
+Transforms can declare `is_batch_aware = True` to receive batched rows when used at aggregation nodes:
+
+```python
+class SummaryTransform(BaseTransform):
+    name = "summary"
+    is_batch_aware = True  # Engine will pass list[dict] when used at aggregation node
+    # ... other attrs ...
+
+    def process(
+        self,
+        row: dict[str, Any] | list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        if isinstance(row, list):
+            # Batch mode: aggregate the rows
+            total = sum(r["value"] for r in row)
+            return TransformResult.success({"total": total, "count": len(row)})
+        # Single row mode
+        return TransformResult.success(row)
+```
+
+**How it works:**
+
+1. Transform is configured at an aggregation node (see "Aggregation" below)
+2. Engine buffers rows until trigger fires (count, timeout, condition)
+3. Engine calls `transform.process(rows: list[dict], ctx)` with the batch
+4. Transform returns aggregated result
+
+**Key points:**
+- `is_batch_aware = False` (default): Transform always receives single `dict`
+- `is_batch_aware = True`: Transform MAY receive `list[dict]` at aggregation nodes
+- Transforms should handle both cases if `is_batch_aware = True`
+- The engine decides when to batch based on pipeline configuration
 
 #### Optional Configuration
 
@@ -381,15 +418,23 @@ def process(self, row: dict, ctx: PluginContext) -> TransformResult:
 def __init__(self, config: dict[str, Any]) -> None:
     """Initialize with configuration."""
 
-def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
-    """Process a single row.
+def process(
+    self,
+    row: dict[str, Any] | list[dict[str, Any]],
+    ctx: PluginContext,
+) -> TransformResult:
+    """Process row(s).
 
-    MUST be a pure function for DETERMINISTIC transforms:
-    - Same input → same output
-    - No side effects
+    For non-batch-aware transforms (is_batch_aware=False):
+    - `row` is always a single dict
+    - MUST be a pure function for DETERMINISTIC transforms
+
+    For batch-aware transforms (is_batch_aware=True):
+    - `row` may be a list[dict] when used at aggregation nodes
+    - Should handle both single dict and list[dict] cases
 
     Returns:
-        TransformResult.success(row) - processed row
+        TransformResult.success(row) - processed row(s)
         TransformResult.error(reason, retryable=bool) - processing failed
 
     Exception handling:
@@ -878,9 +923,15 @@ Merged Token (T5)
 
 ### Aggregation (Token Batching)
 
-**Purpose:** Collect multiple tokens until a trigger fires, then release as batch.
+**Purpose:** Collect multiple tokens until a trigger fires, then process as batch.
 
 **Key property:** Converts N input tokens into M output tokens (often N→1 for aggregates).
+
+**Architecture:** Aggregation is **fully structural** - the engine owns the buffer and decides when to flush. There is no plugin-level aggregation protocol. When you need batch processing:
+
+1. Configure an aggregation node in the pipeline
+2. Use a batch-aware transform (`is_batch_aware = True`) at that node
+3. Engine buffers rows and calls `transform.process(rows: list[dict])` when trigger fires
 
 #### Configuration
 
@@ -888,12 +939,18 @@ Merged Token (T5)
 pipeline:
   - source: events
 
-  - aggregate: batch_hourly
-    trigger:
-      count: 1000           # Fire after 1000 rows
-      timeout: 1h           # Or after 1 hour
-      condition: "row['type'] == 'flush_signal'"  # Or on special row
-    output: single          # Emit one summary row (vs 'passthrough')
+  # Aggregation configuration
+  aggregations:
+    - node_id: batch_stats      # Links to transform below
+      trigger:
+        count: 100              # Fire after 100 rows
+        timeout_seconds: 3600   # Or after 1 hour
+        # condition: "row['type'] == 'flush_signal'"  # Optional: trigger on special row
+
+  transforms:
+    - plugin: summary_transform
+      node_id: batch_stats      # Same as aggregation node_id
+      # Transform must have is_batch_aware = True
 ```
 
 #### Trigger Types
@@ -901,47 +958,47 @@ pipeline:
 | Trigger | Fires When |
 |---------|------------|
 | `count` | N tokens accumulated |
-| `timeout` | Duration elapsed since batch start |
+| `timeout_seconds` | Duration elapsed since batch start |
 | `condition` | Row matches expression |
 | `end_of_source` | Source exhausted (implicit, always checked) |
 
 Multiple triggers can be combined (first one to fire wins).
 
-#### Output Modes
-
-| Mode | Behavior |
-|------|----------|
-| `single` | Batch produces one output token (aggregated result) |
-| `passthrough` | Batch releases all accumulated tokens |
-| `transform` | Apply transform to batch, emit result(s) |
-
-#### How It Works
+#### How It Works (Engine-Level)
 
 1. Tokens arrive at aggregation node
-2. Engine adds token to current batch:
+2. **Engine buffers** the row internally:
    - Assigns `batch_id`
    - Records batch membership in audit trail
+   - Updates trigger evaluator
    - Token marked `CONSUMED_IN_BATCH`
 3. Engine checks trigger conditions
 4. When trigger fires:
+   - Engine retrieves buffered rows as `list[dict]`
+   - Engine calls `transform.process(rows, ctx)` with the batch
    - Batch state: `draft` → `executing` → `completed`
-   - Output token(s) created and continue downstream
-   - Batch membership recorded for audit
+   - Output token continues downstream
+   - Buffer is cleared for next batch
+
+**Important:** The engine owns the buffer, not the transform. Transforms simply receive `list[dict]` and return a result. This enables:
+- Crash recovery (buffers are checkpointed)
+- Consistent trigger evaluation
+- Clean audit trail
 
 #### Batch Lifecycle
 
 ```
-Batch B1 (draft)
+Batch B1 (draft) - Engine buffers rows
     │
-    ├── Accept T1 → batch_members: [T1]
-    ├── Accept T2 → batch_members: [T1, T2]
-    ├── Accept T3 → batch_members: [T1, T2, T3]
+    ├── Buffer T1.row_data → batch: [row1]
+    ├── Buffer T2.row_data → batch: [row1, row2]
+    ├── Buffer T3.row_data → batch: [row1, row2, row3]
     │
     ▼ (trigger: count >= 3)
     │
 Batch B1 (executing)
     │
-    ▼ (compute aggregate)
+    ▼ Engine calls transform.process([row1, row2, row3], ctx)
     │
 Batch B1 (completed)
     │
@@ -951,12 +1008,22 @@ Batch B1 (completed)
 Input tokens T1, T2, T3 → terminal state: CONSUMED_IN_BATCH
 ```
 
+#### Crash Recovery
+
+The engine persists buffer state in checkpoints:
+- `get_checkpoint_state()` serializes buffered rows and batch metadata
+- `restore_from_checkpoint()` restores buffers after crash
+- Trigger evaluators resume from correct count
+
+This means in-progress batches survive crashes and can be resumed.
+
 #### Audit Trail
 
-- Batch created: batch_id, trigger config
-- Batch membership: which tokens belong to which batch
+- Batch created: batch_id, trigger config, aggregation_node_id
+- Batch membership: which tokens belong to which batch (ordinal position)
 - Batch state transitions: draft → executing → completed/failed
 - Trigger event: which condition fired, when
+- Transform input/output hashes for the batch call
 
 ---
 
@@ -1061,6 +1128,7 @@ Plugins make calls; the engine throttles them.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.4 | 2026-01-19 | Batch-aware transforms (`is_batch_aware`), structural aggregation (engine owns buffers), crash recovery for batches |
 | 1.3 | 2026-01-17 | Source `on_validation_failure` (required), Transform `on_error` (optional), QuarantineEvent, TransformErrorEvent |
 | 1.2 | 2026-01-17 | Three-tier trust model, coercion rules by plugin type, type-safe ≠ operation-safe |
 | 1.1 | 2026-01-17 | Add content_hash requirements, expression safety, engine concerns |

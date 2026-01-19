@@ -180,6 +180,45 @@ class TokenManager:
             branch_name=token.branch_name,
         )
 
+    def expand_token(
+        self,
+        parent_token: TokenInfo,
+        expanded_rows: list[dict[str, Any]],
+        step_in_pipeline: int,
+    ) -> list[TokenInfo]:
+        """Create child tokens for deaggregation (1 input -> N outputs).
+
+        Unlike fork_token (which creates parallel paths through the same DAG),
+        expand_token creates sequential children that all continue down the
+        same path. Used when a transform outputs multiple rows from single input.
+
+        Args:
+            parent_token: The token being expanded
+            expanded_rows: List of output row dicts
+            step_in_pipeline: Current step (for audit)
+
+        Returns:
+            List of child TokenInfo, one per expanded row
+        """
+        # Delegate to recorder which handles DB operations and parent linking
+        db_children = self._recorder.expand_token(
+            parent_token_id=parent_token.token_id,
+            row_id=parent_token.row_id,
+            count=len(expanded_rows),
+            step_in_pipeline=step_in_pipeline,
+        )
+
+        # Build TokenInfo objects with row data
+        return [
+            TokenInfo(
+                row_id=parent_token.row_id,
+                token_id=db_child.token_id,
+                row_data=row_data,
+                branch_name=parent_token.branch_name,  # Inherit branch
+            )
+            for db_child, row_data in zip(db_children, expanded_rows, strict=True)
+        ]
+
     # NOTE: No advance_step() method - step position is the authority of
     # Orchestrator/RowProcessor, not TokenManager. They track where tokens
     # are in the DAG and pass step_in_pipeline when needed.

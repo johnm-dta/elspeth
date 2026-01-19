@@ -363,3 +363,148 @@ class TestTokenManagerStepInPipeline:
         merged_token = recorder.get_token(merged.token_id)
         assert merged_token is not None
         assert merged_token.step_in_pipeline == 3
+
+
+class TestTokenManagerExpand:
+    """Test token expansion (deaggregation: 1 input -> N outputs)."""
+
+    def test_expand_token_creates_children(self) -> None:
+        """expand_token creates child tokens for each expanded row."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        manager = TokenManager(recorder)
+
+        # Create initial token
+        parent = manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            row_data={"original": "data"},
+        )
+
+        expanded_rows = [
+            {"id": 1, "value": "a"},
+            {"id": 2, "value": "b"},
+            {"id": 3, "value": "c"},
+        ]
+
+        # Act
+        children = manager.expand_token(
+            parent_token=parent,
+            expanded_rows=expanded_rows,
+            step_in_pipeline=2,
+        )
+
+        # Assert: correct number of children
+        assert len(children) == 3
+
+        # All children share same row_id (same source row)
+        for child in children:
+            assert child.row_id == parent.row_id
+            assert child.token_id != parent.token_id
+
+        # Each child has its expanded row data
+        assert children[0].row_data == {"id": 1, "value": "a"}
+        assert children[1].row_data == {"id": 2, "value": "b"}
+        assert children[2].row_data == {"id": 3, "value": "c"}
+
+        # Verify parent relationships in database
+        for i, child in enumerate(children):
+            parents = recorder.get_token_parents(child.token_id)
+            assert len(parents) == 1
+            assert parents[0].parent_token_id == parent.token_id
+            assert parents[0].ordinal == i
+
+    def test_expand_token_inherits_branch_name(self) -> None:
+        """expand_token children inherit parent's branch_name."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        manager = TokenManager(recorder)
+
+        # Create initial token and fork to get a branch_name
+        initial = manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            row_data={},
+        )
+
+        # Fork to get a token with branch_name
+        forked = manager.fork_token(
+            parent_token=initial,
+            branches=["stats_branch"],
+            step_in_pipeline=1,
+        )
+        parent = forked[0]  # Has branch_name="stats_branch"
+
+        children = manager.expand_token(
+            parent_token=parent,
+            expanded_rows=[{"a": 1}, {"a": 2}],
+            step_in_pipeline=2,
+        )
+
+        # Children inherit branch_name
+        assert all(c.branch_name == "stats_branch" for c in children)
+
+    def test_expand_token_stores_step_in_pipeline(self) -> None:
+        """expand_token passes step_in_pipeline to recorder."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        manager = TokenManager(recorder)
+        parent = manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            row_data={"x": 1},
+        )
+
+        children = manager.expand_token(
+            parent_token=parent,
+            expanded_rows=[{"a": 1}, {"a": 2}],
+            step_in_pipeline=5,
+        )
+
+        # Verify step_in_pipeline is stored in audit trail
+        for child in children:
+            db_token = recorder.get_token(child.token_id)
+            assert db_token is not None
+            assert db_token.step_in_pipeline == 5

@@ -1742,31 +1742,6 @@ output_sink: output
         assert settings.datasource.options["path"] == "input.csv"
         assert settings.datasource.options["delimiter"] == ","
 
-    def test_fingerprinting_skipped_when_no_key(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When ELSPETH_FINGERPRINT_KEY is not set, secrets are preserved as-is."""
-        from elspeth.core.config import load_settings
-
-        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
-
-        config_file = tmp_path / "settings.yaml"
-        config_file.write_text("""
-datasource:
-  plugin: http_source
-  options:
-    api_key: sk-secret-key
-sinks:
-  output:
-    plugin: csv_sink
-output_sink: output
-""")
-
-        settings = load_settings(config_file)
-
-        # Without fingerprint key, original value should be preserved
-        assert settings.datasource.options["api_key"] == "sk-secret-key"
-
     def test_row_plugin_options_are_fingerprinted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1796,3 +1771,249 @@ row_plugins:
         assert "api_key_fingerprint" in settings.row_plugins[0].options
         # Non-secret field preserved
         assert settings.row_plugins[0].options["model"] == "gpt-4"
+
+    # === Tests for recursive/nested fingerprinting ===
+
+    def test_nested_secrets_are_fingerprinted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Secrets in nested dicts should be fingerprinted."""
+        from elspeth.core.config import _fingerprint_secrets
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        options = {
+            "api_key": "sk-top-level",
+            "auth": {
+                "api_key": "sk-nested",
+                "nested": {"token": "nested-token"},
+            },
+        }
+
+        result = _fingerprint_secrets(options)
+
+        # Top-level secret fingerprinted
+        assert "api_key" not in result
+        assert "api_key_fingerprint" in result
+
+        # Nested secrets fingerprinted
+        assert "api_key" not in result["auth"]
+        assert "api_key_fingerprint" in result["auth"]
+        assert "token" not in result["auth"]["nested"]
+        assert "token_fingerprint" in result["auth"]["nested"]
+
+    def test_secrets_in_lists_are_fingerprinted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Secrets inside list elements should be fingerprinted."""
+        from elspeth.core.config import _fingerprint_secrets
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        options = {
+            "providers": [
+                {"name": "openai", "api_key": "sk-openai"},
+                {"name": "anthropic", "api_key": "sk-anthropic"},
+            ]
+        }
+
+        result = _fingerprint_secrets(options)
+
+        for provider in result["providers"]:
+            assert "api_key" not in provider
+            assert "api_key_fingerprint" in provider
+
+    # === Tests for fail-closed behavior ===
+
+    def test_missing_key_raises_error_on_fingerprint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing fingerprint key should raise SecretFingerprintError."""
+        from elspeth.core.config import SecretFingerprintError, _fingerprint_secrets
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        options = {"api_key": "sk-secret"}
+
+        with pytest.raises(SecretFingerprintError) as exc_info:
+            _fingerprint_secrets(options, fail_if_no_key=True)
+
+        assert "ELSPETH_FINGERPRINT_KEY" in str(exc_info.value)
+        assert "api_key" in str(exc_info.value)
+
+    def test_missing_key_raises_error_on_load_settings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """load_settings should raise SecretFingerprintError when key missing."""
+        from elspeth.core.config import SecretFingerprintError, load_settings
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: http_source
+  options:
+    api_key: sk-secret-key
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+""")
+
+        with pytest.raises(SecretFingerprintError) as exc_info:
+            load_settings(config_file)
+
+        assert "ELSPETH_FINGERPRINT_KEY" in str(exc_info.value)
+
+    def test_dev_mode_redacts_without_fingerprint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ELSPETH_ALLOW_RAW_SECRETS=true should redact without crashing."""
+        from elspeth.core.config import _fingerprint_secrets
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
+
+        options = {"api_key": "sk-secret"}
+
+        result = _fingerprint_secrets(options, fail_if_no_key=False)
+
+        assert "api_key" not in result
+        assert result.get("api_key_redacted") == "[REDACTED]"
+
+    def test_dev_mode_allows_load_settings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ELSPETH_ALLOW_RAW_SECRETS=true should allow load without fingerprint key."""
+        from elspeth.core.config import load_settings
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: http_source
+  options:
+    api_key: sk-secret-key
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+
+        assert "api_key" not in settings.datasource.options
+        assert settings.datasource.options.get("api_key_redacted") == "[REDACTED]"
+
+    # === Tests for DSN password handling ===
+
+    def test_dsn_password_sanitized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """DSN passwords should be removed and fingerprinted."""
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = "postgresql://user:secret_password@localhost:5432/mydb"
+        sanitized, fingerprint, had_password = _sanitize_dsn(url)
+
+        assert "secret_password" not in sanitized
+        assert "user@localhost" in sanitized
+        assert "***" not in sanitized  # Should NOT have placeholder
+        assert fingerprint is not None
+        assert len(fingerprint) == 64  # SHA256 hex
+        assert had_password is True
+
+    def test_dsn_without_password_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DSN without password should pass through."""
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        url = "sqlite:///path/to/db.sqlite"
+        sanitized, fingerprint, had_password = _sanitize_dsn(url)
+
+        assert sanitized == url
+        assert fingerprint is None
+        assert had_password is False
+
+    def test_dsn_password_raises_without_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DSN with password should raise when no fingerprint key."""
+        from elspeth.core.config import SecretFingerprintError, _sanitize_dsn
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        url = "postgresql://user:secret@localhost/db"
+
+        with pytest.raises(SecretFingerprintError) as exc_info:
+            _sanitize_dsn(url, fail_if_no_key=True)
+
+        assert "ELSPETH_FINGERPRINT_KEY" in str(exc_info.value)
+
+    def test_dsn_password_redacted_in_dev_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DSN password should be removed (not fingerprinted) in dev mode."""
+        from elspeth.core.config import _sanitize_dsn
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+
+        url = "postgresql://user:secret@localhost/db"
+        sanitized, fingerprint, had_password = _sanitize_dsn(url, fail_if_no_key=False)
+
+        assert "secret" not in sanitized
+        assert fingerprint is None
+        assert had_password is True
+
+    def test_landscape_url_password_fingerprinted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """landscape.url password should be fingerprinted."""
+        from elspeth.core.config import _fingerprint_config_options
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        raw_config = {
+            "landscape": {"url": "postgresql://user:mysecret@host/db"},
+            "datasource": {"plugin": "csv", "options": {}},
+            "sinks": {"output": {"plugin": "csv_sink"}},
+            "output_sink": "output",
+        }
+
+        result = _fingerprint_config_options(raw_config)
+
+        assert "mysecret" not in result["landscape"]["url"]
+        assert "***" not in result["landscape"]["url"]
+        assert "url_password_fingerprint" in result["landscape"]
+        assert len(result["landscape"]["url_password_fingerprint"]) == 64
+
+    def test_landscape_url_password_redacted_in_dev_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """landscape.url password should be redacted (with flag) in dev mode."""
+        from elspeth.core.config import _fingerprint_config_options
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
+
+        raw_config = {
+            "landscape": {"url": "postgresql://user:mysecret@host/db"},
+            "datasource": {"plugin": "csv", "options": {}},
+            "sinks": {"output": {"plugin": "csv_sink"}},
+            "output_sink": "output",
+        }
+
+        result = _fingerprint_config_options(raw_config)
+
+        assert "mysecret" not in result["landscape"]["url"]
+        assert "url_password_fingerprint" not in result["landscape"]
+        assert result["landscape"]["url_password_redacted"] is True

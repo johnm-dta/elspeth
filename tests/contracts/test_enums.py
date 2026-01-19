@@ -65,6 +65,50 @@ class TestRowOutcome:
         assert hasattr(RowOutcome, "CONSUMED_IN_BATCH")
         assert hasattr(RowOutcome, "COALESCED")
 
+    def test_row_outcome_expanded_exists(self) -> None:
+        """RowOutcome.EXPANDED is available for deaggregation."""
+        from elspeth.contracts.enums import RowOutcome
+
+        assert RowOutcome.EXPANDED.value == "expanded"
+
+    def test_row_outcome_buffered_exists(self) -> None:
+        """RowOutcome.BUFFERED is available for passthrough batching."""
+        from elspeth.contracts.enums import RowOutcome
+
+        assert RowOutcome.BUFFERED.value == "buffered"
+
+    def test_row_outcome_buffered_is_not_terminal(self) -> None:
+        """BUFFERED is non-terminal - token will reappear with final outcome."""
+        from elspeth.contracts.enums import RowOutcome
+
+        assert RowOutcome.BUFFERED.is_terminal is False
+
+    def test_row_outcome_consumed_in_batch_is_terminal(self) -> None:
+        """CONSUMED_IN_BATCH is terminal - token is absorbed into aggregate."""
+        from elspeth.contracts.enums import RowOutcome
+
+        assert RowOutcome.CONSUMED_IN_BATCH.is_terminal is True
+
+    def test_row_outcome_expanded_is_terminal(self) -> None:
+        """EXPANDED is terminal - parent token's journey ends, children continue."""
+        from elspeth.contracts.enums import RowOutcome
+
+        assert RowOutcome.EXPANDED.is_terminal is True
+
+    def test_row_outcome_completed_is_terminal(self) -> None:
+        """COMPLETED is terminal."""
+        from elspeth.contracts.enums import RowOutcome
+
+        assert RowOutcome.COMPLETED.is_terminal is True
+
+    def test_all_outcomes_have_is_terminal(self) -> None:
+        """All RowOutcome values have is_terminal property."""
+        from elspeth.contracts.enums import RowOutcome
+
+        for outcome in RowOutcome:
+            # Should not raise - property exists for all values
+            _ = outcome.is_terminal
+
 
 class TestRoutingMode:
     """Tests for RoutingMode enum."""

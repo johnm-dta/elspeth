@@ -137,15 +137,29 @@ class RoutingMode(str, Enum):
 
 
 class RowOutcome(Enum):
-    """Terminal outcome for a token in the pipeline.
+    """Outcome for a token in the pipeline.
 
     IMPORTANT: These are DERIVED at query time from node_states,
     routing_events, and batch_members - NOT stored in the database.
     Therefore this is plain Enum, not (str, Enum).
 
     If you need the string value, use .value explicitly.
+
+    Most outcomes are TERMINAL - the token's journey is complete:
+    - COMPLETED: Reached output sink successfully
+    - ROUTED: Sent to named sink by gate
+    - FORKED: Split into multiple parallel paths (parent token)
+    - FAILED: Processing failed, not recoverable
+    - QUARANTINED: Failed validation, stored for investigation
+    - CONSUMED_IN_BATCH: Absorbed into aggregate (single/transform mode)
+    - COALESCED: Merged in join from parallel paths
+    - EXPANDED: Deaggregated into child tokens (parent token)
+
+    One outcome is NON-TERMINAL - the token will reappear:
+    - BUFFERED: Held for batch processing in passthrough mode
     """
 
+    # Terminal outcomes
     COMPLETED = "completed"
     ROUTED = "routed"
     FORKED = "forked"
@@ -153,6 +167,20 @@ class RowOutcome(Enum):
     QUARANTINED = "quarantined"
     CONSUMED_IN_BATCH = "consumed_in_batch"
     COALESCED = "coalesced"
+    EXPANDED = "expanded"
+
+    # Non-terminal outcomes
+    BUFFERED = "buffered"
+
+    @property
+    def is_terminal(self) -> bool:
+        """Check if this outcome represents a final state for the token.
+
+        Terminal outcomes mean the token's journey is complete - it won't
+        appear again in results. Non-terminal outcomes (BUFFERED) mean
+        the token is temporarily held and will reappear with a final outcome.
+        """
+        return self != RowOutcome.BUFFERED
 
 
 class CallType(str, Enum):

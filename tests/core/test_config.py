@@ -1061,6 +1061,60 @@ class TestGateSettings:
         )
         assert "and" in gate.condition
 
+    def test_gate_settings_reserved_route_label_rejected(self) -> None:
+        """Route label 'continue' is reserved and must be rejected.
+
+        Using 'continue' as a route label would cause edge_map collisions
+        in the orchestrator (the DAG builder already uses 'continue' for
+        edges between sequential nodes), leading to routing events being
+        recorded against the wrong edge - corrupting the audit trail.
+        """
+        from elspeth.core.config import GateSettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            GateSettings(
+                name="bad_gate",
+                condition="row['score'] >= 0.5",
+                routes={"continue": "some_sink"},  # 'continue' as label is forbidden
+            )
+        assert "reserved" in str(exc_info.value).lower()
+        assert "continue" in str(exc_info.value)
+
+    def test_gate_settings_reserved_fork_branch_rejected(self) -> None:
+        """Fork branch 'continue' is reserved and must be rejected.
+
+        Fork branches become edge labels, so using 'continue' would cause
+        the same edge_map collision issue as reserved route labels.
+        """
+        from elspeth.core.config import GateSettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            GateSettings(
+                name="bad_fork_gate",
+                condition="True",
+                routes={"all": "fork"},
+                fork_to=["path_a", "continue"],  # 'continue' as branch is forbidden
+            )
+        assert "reserved" in str(exc_info.value).lower()
+        assert "continue" in str(exc_info.value)
+
+    def test_gate_settings_continue_as_destination_allowed(self) -> None:
+        """'continue' as a route DESTINATION (not label) is still valid.
+
+        The restriction is on route LABELS (dict keys), not destinations.
+        'continue' as a destination means "proceed to next node" which is
+        the expected semantic.
+        """
+        from elspeth.core.config import GateSettings
+
+        # This should NOT raise - 'continue' is the destination, not the label
+        gate = GateSettings(
+            name="valid_gate",
+            condition="row['valid']",
+            routes={"pass": "continue", "fail": "error_sink"},
+        )
+        assert gate.routes["pass"] == "continue"
+
 
 class TestElspethSettingsWithGates:
     """Tests for ElspethSettings with engine-level gates."""
@@ -1508,3 +1562,199 @@ class TestElspethSettingsWithCoalesce:
         assert "coalesce" in resolved
         assert len(resolved["coalesce"]) == 1
         assert resolved["coalesce"][0]["name"] == "merge_results"
+
+
+class TestSecretFieldFingerprinting:
+    """Test that secret fields are fingerprinted during config load."""
+
+    def test_api_key_is_fingerprinted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """API keys in config should be fingerprinted, not stored raw."""
+        from elspeth.core.config import load_settings
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: http_source
+  options:
+    api_key: sk-secret-key-12345
+    url: https://api.example.com
+sinks:
+  output:
+    plugin: csv_sink
+    options:
+      path: output.csv
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+
+        # API key should be removed (not stored raw)
+        assert "api_key" not in settings.datasource.options
+        # Should have a 64-char hex fingerprint
+        fingerprint = settings.datasource.options.get("api_key_fingerprint")
+        assert fingerprint is not None
+        assert len(fingerprint) == 64
+        assert all(c in "0123456789abcdef" for c in fingerprint)
+
+    def test_token_is_fingerprinted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Token fields should be fingerprinted."""
+        from elspeth.core.config import load_settings
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: webhook_source
+  options:
+    token: bearer-token-xyz
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+
+        assert "token" not in settings.datasource.options
+        assert "token_fingerprint" in settings.datasource.options
+
+    def test_secret_suffix_is_fingerprinted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fields ending in _secret should be fingerprinted."""
+        from elspeth.core.config import load_settings
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: custom_source
+  options:
+    database_secret: my-db-password
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+
+        assert "database_secret" not in settings.datasource.options
+        assert "database_secret_fingerprint" in settings.datasource.options
+
+    def test_sink_options_are_fingerprinted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Secret fields in sink options should also be fingerprinted."""
+        from elspeth.core.config import load_settings
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv_source
+sinks:
+  output:
+    plugin: database_sink
+    options:
+      password: super-secret-password
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+
+        assert "password" not in settings.sinks["output"].options
+        assert "password_fingerprint" in settings.sinks["output"].options
+
+    def test_non_secret_fields_preserved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-secret fields should remain unchanged."""
+        from elspeth.core.config import load_settings
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv_source
+  options:
+    path: input.csv
+    delimiter: ","
+sinks:
+  output:
+    plugin: csv_sink
+    options:
+      path: output.csv
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+
+        # Regular fields should be preserved
+        assert settings.datasource.options["path"] == "input.csv"
+        assert settings.datasource.options["delimiter"] == ","
+
+    def test_fingerprinting_skipped_when_no_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ELSPETH_FINGERPRINT_KEY is not set, secrets are preserved as-is."""
+        from elspeth.core.config import load_settings
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: http_source
+  options:
+    api_key: sk-secret-key
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+
+        # Without fingerprint key, original value should be preserved
+        assert settings.datasource.options["api_key"] == "sk-secret-key"
+
+    def test_row_plugin_options_are_fingerprinted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Secret fields in row_plugins options should be fingerprinted."""
+        from elspeth.core.config import load_settings
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv_source
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+row_plugins:
+  - plugin: llm_transform
+    options:
+      api_key: openai-key-123
+      model: gpt-4
+""")
+
+        settings = load_settings(config_file)
+
+        assert "api_key" not in settings.row_plugins[0].options
+        assert "api_key_fingerprint" in settings.row_plugins[0].options
+        # Non-secret field preserved
+        assert settings.row_plugins[0].options["model"] == "gpt-4"

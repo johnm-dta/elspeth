@@ -15,6 +15,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # Compiled regex for validating route destination identifiers
 _IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
+# Reserved edge labels that cannot be used as route labels or fork branch names.
+# "continue" is used by the DAG builder for edges between sequential nodes.
+# Using these as user-defined labels would cause edge_map collisions in the orchestrator,
+# leading to routing events recorded against wrong edges (audit corruption).
+_RESERVED_EDGE_LABELS = frozenset({"continue"})
+
 
 class TriggerConfig(BaseModel):
     """Trigger configuration for aggregation batches.
@@ -201,17 +207,47 @@ class GateSettings(BaseModel):
     @field_validator("routes")
     @classmethod
     def validate_routes(cls, v: dict[str, str]) -> dict[str, str]:
-        """Routes must have at least one entry with valid destinations."""
+        """Routes must have at least one entry with valid destinations.
+
+        Also validates that route labels don't use reserved edge labels,
+        which would cause edge_map collisions in the orchestrator.
+        """
         if not v:
             raise ValueError("routes must have at least one entry")
 
         for label, destination in v.items():
+            # Check route label is not reserved
+            if label in _RESERVED_EDGE_LABELS:
+                raise ValueError(
+                    f"Route label '{label}' is reserved and cannot be used. "
+                    f"Reserved labels: {sorted(_RESERVED_EDGE_LABELS)}"
+                )
+
             if destination in ("continue", "fork"):
                 continue
             if not _IDENTIFIER_PATTERN.match(destination):
                 raise ValueError(
                     f"Route destination '{destination}' for label '{label}' "
                     "must be 'continue', 'fork', or a valid identifier"
+                )
+        return v
+
+    @field_validator("fork_to")
+    @classmethod
+    def validate_fork_to_labels(cls, v: list[str] | None) -> list[str] | None:
+        """Validate fork branch names don't use reserved edge labels.
+
+        Fork branches become edge labels in the DAG, so they must not collide
+        with reserved labels like 'continue'.
+        """
+        if v is None:
+            return v
+
+        for branch in v:
+            if branch in _RESERVED_EDGE_LABELS:
+                raise ValueError(
+                    f"Fork branch '{branch}' is reserved and cannot be used. "
+                    f"Reserved labels: {sorted(_RESERVED_EDGE_LABELS)}"
                 )
         return v
 
@@ -661,6 +697,119 @@ class ElspethSettings(BaseModel):
         return v
 
 
+# Secret field names that should be fingerprinted (exact matches)
+_SECRET_FIELD_NAMES = frozenset(
+    {"api_key", "token", "password", "secret", "credential"}
+)
+
+# Secret field suffixes that should be fingerprinted
+_SECRET_FIELD_SUFFIXES = ("_secret", "_key", "_token", "_password", "_credential")
+
+
+def _is_secret_field(field_name: str) -> bool:
+    """Check if a field name represents a secret that should be fingerprinted."""
+    return field_name in _SECRET_FIELD_NAMES or field_name.endswith(
+        _SECRET_FIELD_SUFFIXES
+    )
+
+
+def _fingerprint_secrets(options: dict[str, Any]) -> dict[str, Any]:
+    """Replace secret fields with their fingerprints.
+
+    Fields matching secret patterns are replaced with a fingerprint and
+    the original removed. If ELSPETH_FINGERPRINT_KEY is not set, secrets
+    are preserved as-is (for development/testing convenience).
+
+    Args:
+        options: Plugin options dict
+
+    Returns:
+        New dict with secrets replaced by fingerprints
+    """
+    from elspeth.core.security import secret_fingerprint
+
+    result = dict(options)
+
+    for key, value in list(result.items()):
+        if _is_secret_field(key) and isinstance(value, str):
+            try:
+                fp = secret_fingerprint(value)
+                result[f"{key}_fingerprint"] = fp
+                del result[key]
+            except ValueError:
+                # No fingerprint key available (ELSPETH_FINGERPRINT_KEY not set)
+                # Keep original value - this allows development without the key
+                pass
+
+    return result
+
+
+def _fingerprint_config_options(raw_config: dict[str, Any]) -> dict[str, Any]:
+    """Walk config and fingerprint secrets in all plugin options.
+
+    Processes:
+    - datasource.options
+    - sinks.*.options
+    - row_plugins[*].options
+    - aggregations[*].options
+
+    Args:
+        raw_config: Raw config dict from Dynaconf
+
+    Returns:
+        Config with secrets fingerprinted
+    """
+    config = dict(raw_config)
+
+    # Datasource options
+    if "datasource" in config and isinstance(config["datasource"], dict):
+        ds = dict(config["datasource"])
+        if "options" in ds and isinstance(ds["options"], dict):
+            ds["options"] = _fingerprint_secrets(ds["options"])
+        config["datasource"] = ds
+
+    # Sink options
+    if "sinks" in config and isinstance(config["sinks"], dict):
+        sinks = {}
+        for name, sink_config in config["sinks"].items():
+            if isinstance(sink_config, dict):
+                sink = dict(sink_config)
+                if "options" in sink and isinstance(sink["options"], dict):
+                    sink["options"] = _fingerprint_secrets(sink["options"])
+                sinks[name] = sink
+            else:
+                sinks[name] = sink_config
+        config["sinks"] = sinks
+
+    # Row plugin options
+    if "row_plugins" in config and isinstance(config["row_plugins"], list):
+        plugins = []
+        for plugin_config in config["row_plugins"]:
+            if isinstance(plugin_config, dict):
+                plugin = dict(plugin_config)
+                if "options" in plugin and isinstance(plugin["options"], dict):
+                    plugin["options"] = _fingerprint_secrets(plugin["options"])
+                plugins.append(plugin)
+            else:
+                plugins.append(plugin_config)
+        config["row_plugins"] = plugins
+
+    # Aggregation options
+    if "aggregations" in config and isinstance(config["aggregations"], list):
+        aggs = []
+        for agg_config in config["aggregations"]:
+            if isinstance(agg_config, dict):
+                agg = dict(agg_config)
+                if "options" in agg and isinstance(agg["options"], dict):
+                    agg["options"] = _fingerprint_secrets(agg["options"])
+                aggs.append(agg)
+            else:
+                aggs.append(agg_config)
+        config["aggregations"] = aggs
+
+    return config
+
+
 def load_settings(config_path: Path) -> ElspethSettings:
     """Load settings from YAML file with environment variable overrides.
 
@@ -704,6 +853,10 @@ def load_settings(config_path: Path) -> ElspethSettings:
         for k, v in dynaconf_settings.as_dict().items()
         if k not in internal_keys
     }
+
+    # Fingerprint secrets in plugin options before validation
+    raw_config = _fingerprint_config_options(raw_config)
+
     return ElspethSettings(**raw_config)
 
 

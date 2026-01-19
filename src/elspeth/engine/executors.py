@@ -716,9 +716,109 @@ class AggregationExecutor:
         self._trigger_evaluators: dict[str, TriggerEvaluator] = {}
         self._restored_states: dict[str, dict[str, Any]] = {}  # node_id -> state
 
+        # Engine-owned row buffers (node_id -> list of row dicts)
+        self._buffers: dict[str, list[dict[str, Any]]] = {}
+        # Token tracking for audit trail (node_id -> list of TokenInfo)
+        self._buffer_tokens: dict[str, list[TokenInfo]] = {}
+
         # Create trigger evaluators for each configured aggregation
         for node_id, settings in self._aggregation_settings.items():
             self._trigger_evaluators[node_id] = TriggerEvaluator(settings.trigger)
+            self._buffers[node_id] = []
+            self._buffer_tokens[node_id] = []
+
+    def buffer_row(
+        self,
+        node_id: str,
+        token: TokenInfo,
+    ) -> None:
+        """Buffer a row for aggregation.
+
+        The engine owns the buffer. When trigger fires, buffered rows
+        are passed to a batch-aware Transform.
+
+        Args:
+            node_id: Aggregation node ID
+            token: Token with row data to buffer
+        """
+        if node_id not in self._buffers:
+            self._buffers[node_id] = []
+            self._buffer_tokens[node_id] = []
+
+        # Create batch on first row if needed
+        if self._batch_ids.get(node_id) is None:
+            batch = self._recorder.create_batch(
+                run_id=self._run_id,
+                aggregation_node_id=node_id,
+            )
+            self._batch_ids[node_id] = batch.batch_id
+            self._member_counts[batch.batch_id] = 0
+
+        batch_id = self._batch_ids[node_id]
+        assert batch_id is not None  # We just created it if it was None
+
+        # Buffer the row
+        self._buffers[node_id].append(token.row_data)
+        self._buffer_tokens[node_id].append(token)
+
+        # Record batch membership for audit trail
+        ordinal = self._member_counts[batch_id]
+        self._recorder.add_batch_member(
+            batch_id=batch_id,
+            token_id=token.token_id,
+            ordinal=ordinal,
+        )
+        self._member_counts[batch_id] = ordinal + 1
+
+        # Update trigger evaluator
+        evaluator = self._trigger_evaluators.get(node_id)
+        if evaluator is not None:
+            evaluator.record_accept()
+
+    def get_buffered_rows(self, node_id: str) -> list[dict[str, Any]]:
+        """Get currently buffered rows (does not clear buffer).
+
+        Args:
+            node_id: Aggregation node ID
+
+        Returns:
+            List of buffered row dicts
+        """
+        return list(self._buffers.get(node_id, []))
+
+    def get_buffered_tokens(self, node_id: str) -> list[TokenInfo]:
+        """Get currently buffered tokens (does not clear buffer).
+
+        Args:
+            node_id: Aggregation node ID
+
+        Returns:
+            List of buffered TokenInfo objects
+        """
+        return list(self._buffer_tokens.get(node_id, []))
+
+    def flush_buffer(self, node_id: str) -> list[dict[str, Any]]:
+        """Get buffered rows and clear the buffer.
+
+        Args:
+            node_id: Aggregation node ID
+
+        Returns:
+            List of buffered row dicts
+        """
+        rows = list(self._buffers.get(node_id, []))
+        self._buffers[node_id] = []
+        self._buffer_tokens[node_id] = []
+
+        # Reset trigger evaluator for next batch
+        evaluator = self._trigger_evaluators.get(node_id)
+        if evaluator is not None:
+            evaluator.reset()
+
+        # Clear batch ID for next batch
+        self._batch_ids[node_id] = None
+
+        return rows
 
     def get_batch_id(self, node_id: str) -> str | None:
         """Get current batch ID for an aggregation node.

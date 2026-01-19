@@ -3022,3 +3022,306 @@ class TestAggregationExecutorRestore:
         assert len(members) == 4
         assert members[3].ordinal == 3
         assert members[3].token_id == "token-3"
+
+
+class TestAggregationExecutorBuffering:
+    """Tests for engine-level row buffering in AggregationExecutor."""
+
+    def test_executor_buffers_rows_internally(self) -> None:
+        """Executor buffers rows without calling plugin.accept()."""
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="buffer_test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=3),
+        )
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        # Buffer 3 rows
+        for i in range(3):
+            token = TokenInfo(
+                row_id=f"row-{i}",
+                token_id=f"token-{i}",
+                row_data={"value": i},
+            )
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=agg_node.node_id,
+                row_index=i,
+                data=token.row_data,
+                row_id=token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+            executor.buffer_row(agg_node.node_id, token)
+
+        # Check buffer
+        buffered = executor.get_buffered_rows(agg_node.node_id)
+        assert len(buffered) == 3
+        assert [r["value"] for r in buffered] == [0, 1, 2]
+
+    def test_executor_clears_buffer_after_flush(self) -> None:
+        """Executor clears buffer after flush."""
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="buffer_flush_test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=2),
+        )
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        # Buffer rows
+        for i in range(2):
+            token = TokenInfo(
+                row_id=f"row-{i}",
+                token_id=f"token-{i}",
+                row_data={"value": i},
+            )
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=agg_node.node_id,
+                row_index=i,
+                data=token.row_data,
+                row_id=token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+            executor.buffer_row(agg_node.node_id, token)
+
+        # Get buffered rows (this also clears the buffer)
+        buffered = executor.flush_buffer(agg_node.node_id)
+        assert len(buffered) == 2
+
+        # Buffer should be empty
+        assert executor.get_buffered_rows(agg_node.node_id) == []
+
+    def test_buffered_tokens_are_tracked(self) -> None:
+        """Executor tracks TokenInfo objects alongside buffered rows."""
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="token_track_test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=2),
+        )
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        # Buffer 2 rows
+        for i in range(2):
+            token = TokenInfo(
+                row_id=f"row-{i}",
+                token_id=f"token-{i}",
+                row_data={"value": i * 10},
+            )
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=agg_node.node_id,
+                row_index=i,
+                data=token.row_data,
+                row_id=token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+            executor.buffer_row(agg_node.node_id, token)
+
+        # Check buffered tokens
+        tokens = executor.get_buffered_tokens(agg_node.node_id)
+        assert len(tokens) == 2
+        assert tokens[0].token_id == "token-0"
+        assert tokens[1].token_id == "token-1"
+
+    def test_buffer_creates_batch_on_first_row(self) -> None:
+        """buffer_row() creates a batch on first row just like accept()."""
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="batch_create_test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=5),
+        )
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        # No batch yet
+        assert executor.get_batch_id(agg_node.node_id) is None
+
+        # Buffer first row
+        token = TokenInfo(
+            row_id="row-0",
+            token_id="token-0",
+            row_data={"value": 42},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=agg_node.node_id,
+            row_index=0,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+        executor.buffer_row(agg_node.node_id, token)
+
+        # Batch should now exist
+        batch_id = executor.get_batch_id(agg_node.node_id)
+        assert batch_id is not None
+
+        # Batch should be in landscape
+        batch = recorder.get_batch(batch_id)
+        assert batch is not None
+        assert batch.aggregation_node_id == agg_node.node_id
+
+    def test_buffer_updates_trigger_evaluator(self) -> None:
+        """buffer_row() updates trigger evaluator count."""
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="trigger_update_test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=3),  # Trigger at 3
+        )
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        # Buffer 2 rows - should not trigger
+        for i in range(2):
+            token = TokenInfo(
+                row_id=f"row-{i}",
+                token_id=f"token-{i}",
+                row_data={"value": i},
+            )
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=agg_node.node_id,
+                row_index=i,
+                data=token.row_data,
+                row_id=token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+            executor.buffer_row(agg_node.node_id, token)
+
+        assert executor.should_flush(agg_node.node_id) is False
+
+        # Buffer 3rd row - should trigger
+        token = TokenInfo(
+            row_id="row-2",
+            token_id="token-2",
+            row_data={"value": 2},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=agg_node.node_id,
+            row_index=2,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+        executor.buffer_row(agg_node.node_id, token)
+
+        assert executor.should_flush(agg_node.node_id) is True

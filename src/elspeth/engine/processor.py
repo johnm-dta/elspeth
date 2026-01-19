@@ -289,8 +289,62 @@ class RowProcessor:
                     return (results, child_items)
 
             elif output_mode == "transform":
-                # Transform mode: handled in Task 9
-                raise NotImplementedError("transform output_mode handled in Task 9")
+                # Transform mode: N input rows -> M output rows with NEW tokens
+                # Previously-buffered tokens already returned CONSUMED_IN_BATCH
+                # when they were buffered (non-flushing path at bottom of method).
+                # Only the triggering token (current_token) hasn't been returned yet.
+                # New tokens are created for output rows via expand_token()
+
+                # Get output rows - can be single or multi
+                if result.is_multi_row:
+                    assert result.rows is not None  # Guaranteed by is_multi_row
+                    output_rows = result.rows
+                else:
+                    # Single row output is valid for transform mode
+                    output_rows = [result.row] if result.row is not None else [{}]
+
+                # Create new tokens via expand_token using triggering token as parent
+                # This establishes audit trail linkage
+                expanded_tokens = self._token_manager.expand_token(
+                    parent_token=current_token,
+                    expanded_rows=output_rows,
+                    step_in_pipeline=step,
+                )
+
+                # The triggering token becomes CONSUMED_IN_BATCH
+                triggering_result = RowResult(
+                    token=current_token,
+                    final_data=current_token.row_data,
+                    outcome=RowOutcome.CONSUMED_IN_BATCH,
+                )
+
+                # Check if there are more transforms after this one
+                more_transforms = step < total_steps
+
+                if more_transforms:
+                    # Queue expanded tokens as work items for remaining transforms
+                    for token in expanded_tokens:
+                        child_items.append(
+                            _WorkItem(
+                                token=token,
+                                start_step=step,  # Continue from current step (0-indexed next)
+                            )
+                        )
+                    # Return triggering result - expanded tokens will produce results via work queue
+                    return (triggering_result, child_items)
+                else:
+                    # No more transforms - return COMPLETED for expanded tokens
+                    output_results: list[RowResult] = [triggering_result]
+                    for token in expanded_tokens:
+                        output_results.append(
+                            RowResult(
+                                token=token,
+                                final_data=token.row_data,
+                                outcome=RowOutcome.COMPLETED,
+                            )
+                        )
+                    # Return triggering + completed results
+                    return (output_results, child_items)
 
             else:
                 raise ValueError(f"Unknown output_mode: {output_mode}")

@@ -3537,3 +3537,386 @@ class TestProcessorPassthroughMode:
         # Values should be doubled: 1*2=2, 2*2=4
         values = {r.final_data["value"] for r in completed}
         assert values == {2, 4}
+
+
+class TestProcessorTransformMode:
+    """Tests for transform output_mode in aggregation."""
+
+    def test_aggregation_transform_mode(self) -> None:
+        """Transform mode returns M rows from N input rows with new tokens."""
+        from elspeth.contracts import Determinism
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import RowOutcome, TransformResult
+
+        class GroupSplitter(BaseTransform):
+            """Splits batch into groups, outputs one row per group."""
+
+            name = "splitter"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True
+            creates_tokens = True  # Transform mode creates new tokens
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0"
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                if isinstance(rows, list):
+                    # Group by 'category' and output one row per group
+                    groups: dict[str, dict[str, Any]] = {}
+                    for row in rows:
+                        cat = row.get("category", "default")
+                        if cat not in groups:
+                            groups[cat] = {"category": cat, "count": 0, "total": 0}
+                        groups[cat]["count"] += 1
+                        groups[cat]["total"] += row.get("value", 0)
+                    return TransformResult.success_multi(list(groups.values()))
+                # Single row mode - not used in this test
+                return TransformResult.success(rows)
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        splitter_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="splitter",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        aggregation_settings = {
+            splitter_node.node_id: AggregationSettings(
+                name="group_split",
+                plugin="splitter",
+                trigger=TriggerConfig(count=5),
+                output_mode="transform",  # KEY: transform mode
+            ),
+        }
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            edge_map={},
+            route_resolution_map={},
+            aggregation_settings=aggregation_settings,
+        )
+
+        transform = GroupSplitter(splitter_node.node_id)
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process 5 rows with 2 categories (A and B)
+        test_rows = [
+            {"category": "A", "value": 10},
+            {"category": "B", "value": 20},
+            {"category": "A", "value": 30},
+            {"category": "B", "value": 40},
+            {"category": "A", "value": 50},
+        ]
+
+        all_results = []
+        for i, row_data in enumerate(test_rows):
+            results = processor.process_row(
+                row_index=i,
+                row_data=row_data,
+                transforms=[transform],
+                ctx=ctx,
+            )
+            all_results.extend(results)
+
+        # All 5 input rows get CONSUMED_IN_BATCH
+        # The batch produces 2 COMPLETED outputs (one per category)
+        consumed = [r for r in all_results if r.outcome == RowOutcome.CONSUMED_IN_BATCH]
+        completed = [r for r in all_results if r.outcome == RowOutcome.COMPLETED]
+
+        assert len(consumed) == 5, f"Expected 5 consumed, got {len(consumed)}"
+        assert len(completed) == 2, f"Expected 2 completed, got {len(completed)}"
+
+        # Verify group data
+        categories = {r.final_data["category"] for r in completed}
+        assert categories == {"A", "B"}
+
+        # Verify counts and totals
+        for result in completed:
+            if result.final_data["category"] == "A":
+                assert result.final_data["count"] == 3  # 3 A's
+                assert result.final_data["total"] == 90  # 10 + 30 + 50
+            else:
+                assert result.final_data["count"] == 2  # 2 B's
+                assert result.final_data["total"] == 60  # 20 + 40
+
+        # Verify new token_ids created (not reusing input tokens)
+        completed_tokens = {r.token_id for r in completed}
+        consumed_tokens = {r.token_id for r in consumed}
+        assert completed_tokens.isdisjoint(
+            consumed_tokens
+        ), "Transform mode should create NEW tokens"
+
+    def test_aggregation_transform_mode_single_row_output(self) -> None:
+        """Transform mode with single row output still creates new token."""
+        from elspeth.contracts import Determinism
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import RowOutcome, TransformResult
+
+        class BatchAggregator(BaseTransform):
+            """Aggregates batch into a single summary row."""
+
+            name = "aggregator"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True
+            creates_tokens = True  # Transform mode
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0"
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                if isinstance(rows, list):
+                    # Single aggregated output
+                    total = sum(r.get("value", 0) for r in rows)
+                    return TransformResult.success({"total": total, "count": len(rows)})
+                return TransformResult.success(rows)
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="aggregator",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        aggregation_settings = {
+            agg_node.node_id: AggregationSettings(
+                name="batch_sum",
+                plugin="aggregator",
+                trigger=TriggerConfig(count=3),
+                output_mode="transform",  # Transform mode with single output
+            ),
+        }
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            edge_map={},
+            route_resolution_map={},
+            aggregation_settings=aggregation_settings,
+        )
+
+        transform = BatchAggregator(agg_node.node_id)
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process 3 rows
+        all_results = []
+        for i in range(3):
+            results = processor.process_row(
+                row_index=i,
+                row_data={"value": (i + 1) * 10},  # 10, 20, 30
+                transforms=[transform],
+                ctx=ctx,
+            )
+            all_results.extend(results)
+
+        consumed = [r for r in all_results if r.outcome == RowOutcome.CONSUMED_IN_BATCH]
+        completed = [r for r in all_results if r.outcome == RowOutcome.COMPLETED]
+
+        assert len(consumed) == 3, f"Expected 3 consumed, got {len(consumed)}"
+        assert len(completed) == 1, f"Expected 1 completed, got {len(completed)}"
+
+        # Verify aggregated data
+        assert completed[0].final_data["total"] == 60  # 10 + 20 + 30
+        assert completed[0].final_data["count"] == 3
+
+        # Verify new token created
+        completed_token = completed[0].token_id
+        consumed_tokens = {r.token_id for r in consumed}
+        assert completed_token not in consumed_tokens
+
+    def test_aggregation_transform_mode_continues_to_next_transform(self) -> None:
+        """Transform mode output rows continue through remaining transforms."""
+        from elspeth.contracts import Determinism
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import RowOutcome, TransformResult
+
+        class GroupSplitter(BaseTransform):
+            """Splits batch into groups."""
+
+            name = "splitter"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True
+            creates_tokens = True
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0"
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                if isinstance(rows, list):
+                    groups: dict[str, dict[str, Any]] = {}
+                    for row in rows:
+                        cat = row.get("category", "default")
+                        if cat not in groups:
+                            groups[cat] = {"category": cat, "count": 0}
+                        groups[cat]["count"] += 1
+                    return TransformResult.success_multi(list(groups.values()))
+                return TransformResult.success(rows)
+
+        class DoubleCount(BaseTransform):
+            """Doubles the count field."""
+
+            name = "doubler"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0"
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success(
+                    {**row, "count": row["count"] * 2, "doubled": True}
+                )
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        splitter_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="splitter",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        doubler_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="doubler",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        aggregation_settings = {
+            splitter_node.node_id: AggregationSettings(
+                name="group_split",
+                plugin="splitter",
+                trigger=TriggerConfig(count=3),
+                output_mode="transform",
+            ),
+        }
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            edge_map={},
+            route_resolution_map={},
+            aggregation_settings=aggregation_settings,
+        )
+
+        splitter = GroupSplitter(splitter_node.node_id)
+        doubler = DoubleCount(doubler_node.node_id)
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process 3 rows with 2 categories
+        test_rows = [
+            {"category": "A"},
+            {"category": "B"},
+            {"category": "A"},
+        ]
+
+        all_results = []
+        for i, row_data in enumerate(test_rows):
+            results = processor.process_row(
+                row_index=i,
+                row_data=row_data,
+                transforms=[splitter, doubler],
+                ctx=ctx,
+            )
+            all_results.extend(results)
+
+        consumed = [r for r in all_results if r.outcome == RowOutcome.CONSUMED_IN_BATCH]
+        completed = [r for r in all_results if r.outcome == RowOutcome.COMPLETED]
+
+        assert len(consumed) == 3
+        assert len(completed) == 2
+
+        # Both outputs should have passed through doubler
+        for result in completed:
+            assert result.final_data["doubled"] is True
+
+        # Counts should be doubled: A had count=2 -> 4, B had count=1 -> 2
+        counts = {r.final_data["category"]: r.final_data["count"] for r in completed}
+        assert counts["A"] == 4  # 2 * 2
+        assert counts["B"] == 2  # 1 * 2

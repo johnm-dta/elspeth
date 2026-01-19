@@ -4102,3 +4102,278 @@ class TestCoalesceWiring:
             tokens_written = write_call.kwargs.get("tokens") or write_call.args[1]
             assert len(tokens_written) == 1
             assert tokens_written[0].token_id == "merged_token_1"
+
+    def test_orchestrator_calls_flush_pending_at_end(self) -> None:
+        """flush_pending should be called on coalesce executor at end of source."""
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv", options={"path": "test.csv"}),
+            sinks={"output": SinkSettings(plugin="csv", options={"path": "out.csv"})},
+            output_sink="output",
+            gates=[
+                GateSettings(
+                    name="forker",
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches=["path_a", "path_b"],
+                    policy="require_all",
+                    merge="union",
+                ),
+            ],
+        )
+
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([])  # Empty - immediate end
+        mock_source.plugin_version = "1.0.0"
+        mock_source.determinism = "deterministic"
+        mock_source.output_schema = _TestSchema
+
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+        mock_sink.plugin_version = "1.0.0"
+        mock_sink.determinism = "deterministic"
+        mock_sink.input_schema = _TestSchema
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[],
+            sinks={"output": mock_sink},
+            gates=settings.gates,
+        )
+
+        db = LandscapeDB.in_memory()
+        orchestrator = Orchestrator(db=db)
+        graph = ExecutionGraph.from_config(settings)
+
+        with patch(
+            "elspeth.engine.coalesce_executor.CoalesceExecutor"
+        ) as mock_executor_cls:
+            mock_executor = MagicMock()
+            mock_executor.flush_pending.return_value = []
+            mock_executor_cls.return_value = mock_executor
+
+            orchestrator.run(config, graph=graph, settings=settings)
+
+            # flush_pending should have been called
+            mock_executor.flush_pending.assert_called_once()
+
+    def test_orchestrator_flush_pending_routes_merged_tokens_to_sink(self) -> None:
+        """Merged tokens from flush_pending should be routed to output sink."""
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.coalesce_executor import CoalesceOutcome
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv", options={"path": "test.csv"}),
+            sinks={"output": SinkSettings(plugin="csv", options={"path": "out.csv"})},
+            output_sink="output",
+            gates=[
+                GateSettings(
+                    name="forker",
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches=["path_a", "path_b"],
+                    policy="best_effort",  # best_effort merges whatever arrived
+                    merge="union",
+                    timeout_seconds=10.0,  # Required for best_effort
+                ),
+            ],
+        )
+
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([])  # Empty - immediate end
+        mock_source.plugin_version = "1.0.0"
+        mock_source.determinism = "deterministic"
+        mock_source.output_schema = _TestSchema
+
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+        mock_sink.plugin_version = "1.0.0"
+        mock_sink.determinism = "deterministic"
+        mock_sink.input_schema = _TestSchema
+        mock_sink.write.return_value = ArtifactDescriptor.for_file(
+            path="memory", size_bytes=0, content_hash="abc123"
+        )
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[],
+            sinks={"output": mock_sink},
+            gates=settings.gates,
+        )
+
+        db = LandscapeDB.in_memory()
+        orchestrator = Orchestrator(db=db)
+        graph = ExecutionGraph.from_config(settings)
+
+        # Create a merged token that flush_pending will return
+        merged_token = TokenInfo(
+            row_id="row_1",
+            token_id="flushed_merged_token",
+            row_data={"merged_at_flush": True},
+            branch_name=None,
+        )
+
+        with (
+            patch(
+                "elspeth.engine.coalesce_executor.CoalesceExecutor"
+            ) as mock_executor_cls,
+            patch("elspeth.engine.executors.SinkExecutor") as mock_sink_executor_cls,
+        ):
+            mock_executor = MagicMock()
+            # flush_pending returns a merged token
+            mock_executor.flush_pending.return_value = [
+                CoalesceOutcome(
+                    held=False,
+                    merged_token=merged_token,
+                    consumed_tokens=[],
+                    coalesce_metadata={"policy": "best_effort"},
+                )
+            ]
+            mock_executor_cls.return_value = mock_executor
+
+            mock_sink_executor = MagicMock()
+            mock_sink_executor_cls.return_value = mock_sink_executor
+
+            result = orchestrator.run(config, graph=graph, settings=settings)
+
+            # flush_pending should have been called
+            mock_executor.flush_pending.assert_called_once()
+
+            # The merged token from flush should count toward rows_coalesced
+            assert result.rows_coalesced == 1
+
+            # The merged token should be written to the sink
+            assert mock_sink_executor.write.called
+            write_call = mock_sink_executor.write.call_args
+            tokens_written = write_call.kwargs.get("tokens") or write_call.args[1]
+            assert len(tokens_written) == 1
+            assert tokens_written[0].token_id == "flushed_merged_token"
+
+    def test_orchestrator_flush_pending_handles_failures(self) -> None:
+        """Failed coalesce outcomes from flush_pending should not crash."""
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.coalesce_executor import CoalesceOutcome
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv", options={"path": "test.csv"}),
+            sinks={"output": SinkSettings(plugin="csv", options={"path": "out.csv"})},
+            output_sink="output",
+            gates=[
+                GateSettings(
+                    name="forker",
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches=["path_a", "path_b"],
+                    policy="require_all",  # Will fail if not all branches arrive
+                    merge="union",
+                ),
+            ],
+        )
+
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([])  # Empty - immediate end
+        mock_source.plugin_version = "1.0.0"
+        mock_source.determinism = "deterministic"
+        mock_source.output_schema = _TestSchema
+
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+        mock_sink.plugin_version = "1.0.0"
+        mock_sink.determinism = "deterministic"
+        mock_sink.input_schema = _TestSchema
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[],
+            sinks={"output": mock_sink},
+            gates=settings.gates,
+        )
+
+        db = LandscapeDB.in_memory()
+        orchestrator = Orchestrator(db=db)
+        graph = ExecutionGraph.from_config(settings)
+
+        with patch(
+            "elspeth.engine.coalesce_executor.CoalesceExecutor"
+        ) as mock_executor_cls:
+            mock_executor = MagicMock()
+            # flush_pending returns a failure outcome (incomplete branches)
+            mock_executor.flush_pending.return_value = [
+                CoalesceOutcome(
+                    held=False,
+                    merged_token=None,  # No merged token on failure
+                    failure_reason="incomplete_branches",
+                    coalesce_metadata={
+                        "policy": "require_all",
+                        "expected_branches": ["path_a", "path_b"],
+                        "branches_arrived": ["path_a"],
+                    },
+                )
+            ]
+            mock_executor_cls.return_value = mock_executor
+
+            # Should not raise - failures are recorded but don't crash
+            result = orchestrator.run(config, graph=graph, settings=settings)
+
+            # flush_pending should have been called
+            mock_executor.flush_pending.assert_called_once()
+
+            # No merged tokens means no rows_coalesced increment
+            assert result.rows_coalesced == 0

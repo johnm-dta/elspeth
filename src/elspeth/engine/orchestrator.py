@@ -617,6 +617,20 @@ class Orchestrator:
         rows_coalesced = 0
         pending_tokens: dict[str, list[TokenInfo]] = {name: [] for name in config.sinks}
 
+        # Compute default last_node_id for end-of-source checkpointing
+        # (e.g., flush_pending when no rows were processed in the main loop)
+        # This mirrors the in-loop logic for consistency
+        default_last_node_id: str
+        if config.gates:
+            last_gate_name = config.gates[-1].name
+            default_last_node_id = config_gate_id_map[last_gate_name]
+        elif config.transforms:
+            transform_node_id = config.transforms[-1].node_id
+            assert transform_node_id is not None
+            default_last_node_id = transform_node_id
+        else:
+            default_last_node_id = source_id
+
         try:
             with self._span_factory.source_span(config.source.name):
                 for row_index, source_item in enumerate(config.source.load(ctx)):
@@ -721,6 +735,33 @@ class Orchestrator:
                                 token_id=result.token.token_id,
                                 node_id=last_node_id,
                             )
+
+            # Flush pending coalesce operations at end-of-source
+            if coalesce_executor is not None:
+                # Step for coalesce flush = after all transforms and gates
+                flush_step = len(config.transforms) + len(config.gates)
+                pending_outcomes = coalesce_executor.flush_pending(flush_step)
+
+                # Handle any merged tokens from flush
+                for outcome in pending_outcomes:
+                    if outcome.merged_token is not None:
+                        # Successful merge - route to output sink
+                        rows_coalesced += 1
+                        pending_tokens[output_sink_name].append(outcome.merged_token)
+
+                        # Checkpoint the flushed merged token
+                        # Use default_last_node_id since we're outside the row loop
+                        self._maybe_checkpoint(
+                            run_id=run_id,
+                            token_id=outcome.merged_token.token_id,
+                            node_id=default_last_node_id,
+                        )
+                    elif outcome.failure_reason:
+                        # Coalesce failed (timeout, missing branches, etc.)
+                        # Failure is recorded in audit trail by executor.
+                        # Not counted as rows_failed since the individual fork children
+                        # were already counted when they reached their terminal states.
+                        pass
 
             # Write to sinks using SinkExecutor
             sink_executor = SinkExecutor(recorder, self._span_factory, run_id)

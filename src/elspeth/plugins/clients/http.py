@@ -1,0 +1,156 @@
+# src/elspeth/plugins/clients/http.py
+"""Audited HTTP client with automatic call recording."""
+
+from __future__ import annotations
+
+import time
+from typing import TYPE_CHECKING, Any
+
+import httpx
+
+from elspeth.contracts import CallStatus, CallType
+from elspeth.plugins.clients.base import AuditedClientBase
+
+if TYPE_CHECKING:
+    from elspeth.core.landscape.recorder import LandscapeRecorder
+
+
+class AuditedHTTPClient(AuditedClientBase):
+    """HTTP client that automatically records all calls to audit trail.
+
+    Wraps httpx to ensure every HTTP call is recorded to the Landscape
+    audit trail. Supports:
+    - Automatic request/response recording
+    - Auth header filtering (not recorded for security)
+    - Latency measurement
+    - Error recording
+
+    Example:
+        client = AuditedHTTPClient(
+            recorder=recorder,
+            state_id=state_id,
+            base_url="https://api.example.com",
+            headers={"Authorization": "Bearer ..."},
+        )
+
+        response = client.post("/v1/process", json={"data": "value"})
+        print(response.json())
+    """
+
+    def __init__(
+        self,
+        recorder: LandscapeRecorder,
+        state_id: str,
+        *,
+        timeout: float = 30.0,
+        base_url: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        """Initialize audited HTTP client.
+
+        Args:
+            recorder: LandscapeRecorder for audit trail storage
+            state_id: Node state ID to associate calls with
+            timeout: Request timeout in seconds (default: 30.0)
+            base_url: Optional base URL to prepend to all requests
+            headers: Default headers for all requests
+        """
+        super().__init__(recorder, state_id)
+        self._timeout = timeout
+        self._base_url = base_url
+        self._default_headers = headers or {}
+
+    def _filter_sensitive_headers(self, headers: dict[str, str]) -> dict[str, str]:
+        """Filter out sensitive headers from audit recording.
+
+        Auth headers are not recorded to avoid storing secrets.
+
+        Args:
+            headers: Full headers dict
+
+        Returns:
+            Headers dict with auth-related headers removed
+        """
+        return {
+            k: v
+            for k, v in headers.items()
+            if "auth" not in k.lower() and "key" not in k.lower()
+        }
+
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        """Make POST request with automatic audit recording.
+
+        Args:
+            url: URL path (appended to base_url if configured)
+            json: JSON body to send (optional)
+            headers: Additional headers for this request
+
+        Returns:
+            httpx.Response object
+
+        Raises:
+            httpx.HTTPError: For network/HTTP errors
+        """
+        call_index = self._next_call_index()
+
+        full_url = f"{self._base_url}{url}" if self._base_url else url
+        merged_headers = {**self._default_headers, **(headers or {})}
+
+        # Filter auth headers from recorded request
+        request_data = {
+            "method": "POST",
+            "url": full_url,
+            "json": json,
+            "headers": self._filter_sensitive_headers(merged_headers),
+        }
+
+        start = time.perf_counter()
+
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(
+                    full_url,
+                    json=json,
+                    headers=merged_headers,
+                )
+
+            latency_ms = (time.perf_counter() - start) * 1000
+
+            self._recorder.record_call(
+                state_id=self._state_id,
+                call_index=call_index,
+                call_type=CallType.HTTP,
+                status=CallStatus.SUCCESS,
+                request_data=request_data,
+                response_data={
+                    "status_code": response.status_code,
+                    "headers": dict(response.headers),
+                    "body_size": len(response.content),
+                },
+                latency_ms=latency_ms,
+            )
+
+            return response
+
+        except Exception as e:
+            latency_ms = (time.perf_counter() - start) * 1000
+
+            self._recorder.record_call(
+                state_id=self._state_id,
+                call_index=call_index,
+                call_type=CallType.HTTP,
+                status=CallStatus.ERROR,
+                request_data=request_data,
+                error={
+                    "type": type(e).__name__,
+                    "message": str(e),
+                },
+                latency_ms=latency_ms,
+            )
+            raise

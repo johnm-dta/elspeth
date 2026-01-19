@@ -550,3 +550,23 @@ allow_hits:
     reason: "Optional env var: ELSPETH_ALLOW_RAW_SECRETS is not required in production"
     safety: "Missing env var = empty string = False = production mode (fail-closed)"
     expires: null  # Permanent - intentional design
+
+  # ============================================================
+  # AUDITED LLM CLIENT TRUST BOUNDARY (Permanent)
+  # ============================================================
+  # AuditedLLMClient wraps external LLM APIs (OpenAI, Azure, etc).
+  # The usage dict comes from external APIs and may not include all fields.
+  # The model_dump check is for SDK version compatibility.
+  # ============================================================
+
+  - key: "plugins/clients/llm.py:R1:LLMResponse:total_tokens:line=45"
+    owner: "architecture"
+    reason: "Trust boundary: LLM API usage dict may not include all token counts"
+    safety: "Graceful default to 0 - total_tokens is convenience property, not critical"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/clients/llm.py:R3:AuditedLLMClient:chat_completion:line=195"
+    owner: "architecture"
+    reason: "SDK version compatibility: older OpenAI SDK versions lack model_dump()"
+    safety: "None is safe for raw_response - only used for debugging, not audit"
+    expires: null  # Permanent - intentional design

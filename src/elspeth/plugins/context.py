@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 
     from elspeth.core.landscape.recorder import LandscapeRecorder
     from elspeth.core.payload_store import PayloadStore
+    from elspeth.plugins.clients.http import AuditedHTTPClient
+    from elspeth.plugins.clients.llm import AuditedLLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,11 @@ class PluginContext:
     # Additional metadata
     node_id: str | None = field(default=None)
     plugin_name: str | None = field(default=None)
+
+    # === Phase 6: Audited Clients ===
+    # Set by executor when processing LLM transforms
+    llm_client: "AuditedLLMClient | None" = None
+    http_client: "AuditedHTTPClient | None" = None
 
     def get(self, key: str, *, default: Any = None) -> Any:
         """Get a config value by dotted path.

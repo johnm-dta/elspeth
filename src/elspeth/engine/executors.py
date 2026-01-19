@@ -714,6 +714,7 @@ class AggregationExecutor:
         self._batch_ids: dict[str, str | None] = {}  # node_id -> current batch_id
         self._aggregation_settings = aggregation_settings or {}
         self._trigger_evaluators: dict[str, TriggerEvaluator] = {}
+        self._restored_states: dict[str, dict[str, Any]] = {}  # node_id -> state
 
         # Create trigger evaluators for each configured aggregation
         for node_id, settings in self._aggregation_settings.items():
@@ -753,6 +754,55 @@ class AggregationExecutor:
         if evaluator is None:
             return None
         return evaluator.get_trigger_type()
+
+    def restore_state(self, node_id: str, state: dict[str, Any]) -> None:
+        """Restore aggregation state from checkpoint.
+
+        Called during recovery to restore plugin state. The state is stored
+        for the aggregation plugin to access via get_restored_state().
+
+        Args:
+            node_id: Aggregation node ID
+            state: Deserialized aggregation_state from checkpoint
+        """
+        self._restored_states[node_id] = state
+
+    def get_restored_state(self, node_id: str) -> dict[str, Any] | None:
+        """Get restored state for an aggregation node.
+
+        Used by aggregation plugins during recovery to restore their
+        internal state from checkpoint.
+
+        Args:
+            node_id: Aggregation node ID
+
+        Returns:
+            Restored state dict, or None if no state was restored
+        """
+        return self._restored_states.get(node_id)
+
+    def restore_batch(self, batch_id: str) -> None:
+        """Restore a batch as the current in-progress batch.
+
+        Called during recovery to resume a batch that was in progress
+        when the crash occurred.
+
+        Args:
+            batch_id: The batch to restore as current
+
+        Raises:
+            ValueError: If batch not found
+        """
+        batch = self._recorder.get_batch(batch_id)
+        if batch is None:
+            raise ValueError(f"Batch not found: {batch_id}")
+
+        node_id = batch.aggregation_node_id
+        self._batch_ids[node_id] = batch_id
+
+        # Restore member count from database
+        members = self._recorder.get_batch_members(batch_id)
+        self._member_counts[batch_id] = len(members)
 
     def accept(
         self,

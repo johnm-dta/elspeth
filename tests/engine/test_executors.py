@@ -2819,3 +2819,206 @@ class TestSinkExecutor:
         # Verify artifact is linked to first state
         assert artifact is not None
         assert artifact.produced_by_state_id == first_state_id
+
+
+class TestAggregationExecutorRestore:
+    """Tests for aggregation state restoration."""
+
+    def test_restore_state_sets_internal_state(self) -> None:
+        """restore_state() stores state for plugin access."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+        )
+
+        state = {"buffer": [1, 2, 3], "sum": 6, "count": 3}
+
+        executor.restore_state("agg_node", state)
+
+        assert executor.get_restored_state("agg_node") == state
+
+    def test_restore_state_returns_none_for_unknown_node(self) -> None:
+        """get_restored_state() returns None for nodes without restored state."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+        )
+
+        assert executor.get_restored_state("unknown_node") is None
+
+    def test_restore_batch_sets_current_batch(self) -> None:
+        """restore_batch() makes batch the current batch for its node."""
+        from elspeth.contracts.enums import Determinism, NodeType
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register aggregation node
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="agg_node",
+            plugin_name="test",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Create a batch
+        batch = recorder.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id="agg_node",
+        )
+
+        # Create executor for this run
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+        )
+
+        # Act
+        executor.restore_batch(batch.batch_id)
+
+        # Assert
+        assert executor.get_batch_id("agg_node") == batch.batch_id
+
+    def test_restore_batch_not_found_raises_error(self) -> None:
+        """restore_batch() raises ValueError for unknown batch_id."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+        )
+
+        with pytest.raises(ValueError, match="Batch not found"):
+            executor.restore_batch("nonexistent-batch-id")
+
+    def test_restore_batch_restores_member_count(self) -> None:
+        """restore_batch() restores member count from database."""
+        from elspeth.contracts import TokenInfo
+        from elspeth.contracts.enums import Determinism, NodeType
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import AcceptResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register aggregation node
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            node_id="agg_node",
+            plugin_name="test",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Create a batch and add members directly to database
+        batch = recorder.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id="agg_node",
+        )
+
+        # Create tokens and add them as batch members
+        for i in range(3):
+            token_id = f"token-{i}"
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=agg_node.node_id,
+                row_index=i,
+                data={"value": i},
+                row_id=f"row-{i}",
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token_id)
+            recorder.add_batch_member(
+                batch_id=batch.batch_id,
+                token_id=token_id,
+                ordinal=i,
+            )
+
+        # Create a new executor and restore the batch
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+        )
+
+        executor.restore_batch(batch.batch_id)
+
+        # Mock aggregation for accepting a new row
+        class TestAggregation:
+            name = "test"
+            node_id = agg_node.node_id
+
+            def accept(self, row: dict[str, Any], ctx: PluginContext) -> AcceptResult:
+                return AcceptResult(accepted=True)
+
+            def flush(self, ctx: PluginContext) -> list[dict[str, Any]]:
+                return []
+
+        aggregation = TestAggregation()
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Accept a new row - it should get ordinal 3 (since 3 members already exist)
+        token = TokenInfo(
+            row_id="row-3",
+            token_id="token-3",
+            row_data={"value": 3},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=agg_node.node_id,
+            row_index=3,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+
+        result = executor.accept(aggregation, token, ctx, step_in_pipeline=1)
+
+        # Verify the new row was added to the existing batch
+        assert result.batch_id == batch.batch_id
+
+        # Verify all members including the new one
+        members = recorder.get_batch_members(batch.batch_id)
+        assert len(members) == 4
+        assert members[3].ordinal == 3
+        assert members[3].token_id == "token-3"

@@ -42,7 +42,7 @@ from elspeth.contracts import (
     Token,
     TokenParent,
 )
-from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
 from elspeth.core.landscape.exporter import LandscapeExporter
 from elspeth.core.landscape.formatters import (
     CSVFormatter,
@@ -107,6 +107,7 @@ __all__ = [
     "RowLineage",
     "Run",
     "RunStatus",
+    "SchemaCompatibilityError",
     "Token",
     "TokenParent",
     "artifacts_table",

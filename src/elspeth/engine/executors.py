@@ -186,7 +186,12 @@ class TransformExecutor:
 
         # Populate audit fields
         result.input_hash = input_hash
-        result.output_hash = stable_hash(result.row) if result.row else None
+        if result.row is not None:
+            result.output_hash = stable_hash(result.row)
+        elif result.rows is not None:
+            result.output_hash = stable_hash(result.rows)
+        else:
+            result.output_hash = None
         result.duration_ms = duration_ms
 
         # Initialize error_sink - will be set if transform errors with on_error configured
@@ -194,19 +199,30 @@ class TransformExecutor:
 
         # Complete node state
         if result.status == "success":
-            # TransformResult.success() always sets row - this is a contract
-            assert result.row is not None, "success status requires row data"
+            # TransformResult.success() or success_multi() always sets output data
+            assert result.has_output_data, "success status requires row or rows data"
+
+            # For single-row: output_data is the row
+            # For multi-row: output_data is the rows list (engine handles expansion)
+            output_data: dict[str, Any] | list[dict[str, Any]]
+            if result.row is not None:
+                output_data = result.row
+            else:
+                assert result.rows is not None  # guaranteed by has_output_data
+                output_data = result.rows
+
             self._recorder.complete_node_state(
                 state_id=state.state_id,
                 status="completed",
-                output_data=result.row,
+                output_data=output_data,
                 duration_ms=duration_ms,
             )
             # Update token with new row data
+            # For multi-row results, keep original row_data (engine will expand tokens later)
             updated_token = TokenInfo(
                 row_id=token.row_id,
                 token_id=token.token_id,
-                row_data=result.row,
+                row_data=result.row if result.row is not None else token.row_data,
                 branch_name=token.branch_name,
             )
         else:

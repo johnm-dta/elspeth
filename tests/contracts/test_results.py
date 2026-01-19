@@ -29,6 +29,59 @@ from elspeth.contracts.results import (
 from elspeth.engine.retry import MaxRetriesExceeded
 
 
+class TestTransformResultMultiRow:
+    """Tests for multi-row output support in TransformResult."""
+
+    def test_transform_result_multi_row_success(self) -> None:
+        """TransformResult.success_multi returns multiple rows."""
+        rows = [{"id": 1, "value": "a"}, {"id": 2, "value": "b"}]
+        result = TransformResult.success_multi(rows)
+
+        assert result.status == "success"
+        assert result.row is None  # Single row field is None
+        assert result.rows == rows
+        assert len(result.rows) == 2
+
+    def test_transform_result_success_single_sets_rows_none(self) -> None:
+        """TransformResult.success() sets rows to None for single-row output."""
+        result = TransformResult.success({"id": 1})
+
+        assert result.status == "success"
+        assert result.row == {"id": 1}
+        assert result.rows is None
+
+    def test_transform_result_is_multi_row(self) -> None:
+        """is_multi_row property distinguishes single vs multi output."""
+        single = TransformResult.success({"id": 1})
+        multi = TransformResult.success_multi([{"id": 1}, {"id": 2}])
+
+        assert single.is_multi_row is False
+        assert multi.is_multi_row is True
+
+    def test_transform_result_success_multi_rejects_empty_list(self) -> None:
+        """success_multi raises ValueError for empty list."""
+        with pytest.raises(ValueError, match="at least one row"):
+            TransformResult.success_multi([])
+
+    def test_transform_result_error_has_rows_none(self) -> None:
+        """TransformResult.error() sets rows to None."""
+        result = TransformResult.error({"reason": "failed"})
+
+        assert result.status == "error"
+        assert result.row is None
+        assert result.rows is None
+
+    def test_transform_result_has_output_data(self) -> None:
+        """has_output_data property checks if ANY output exists."""
+        single = TransformResult.success({"id": 1})
+        multi = TransformResult.success_multi([{"id": 1}])
+        error = TransformResult.error({"reason": "failed"})
+
+        assert single.has_output_data is True
+        assert multi.has_output_data is True
+        assert error.has_output_data is False
+
+
 class TestTransformResult:
     """Tests for TransformResult."""
 

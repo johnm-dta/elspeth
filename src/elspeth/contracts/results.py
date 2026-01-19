@@ -65,22 +65,56 @@ class TransformResult:
 
     IMPORTANT: status uses Literal["success", "error"], NOT enum, per architecture.
     Audit fields (input_hash, output_hash, duration_ms) are populated by executors.
+
+    Multi-row output:
+    - Single-row: success(row) sets row=row, rows=None
+    - Multi-row: success_multi(rows) sets row=None, rows=rows
+    - Use is_multi_row property to distinguish
+    - Use has_output_data property to check if ANY output exists
     """
 
     status: Literal["success", "error"]
     row: dict[str, Any] | None
     reason: dict[str, Any] | None
     retryable: bool = False
+    rows: list[dict[str, Any]] | None = None
 
     # Audit fields - set by executor, not by plugin
     input_hash: str | None = field(default=None, repr=False)
     output_hash: str | None = field(default=None, repr=False)
     duration_ms: float | None = field(default=None, repr=False)
 
+    @property
+    def is_multi_row(self) -> bool:
+        """True if this result contains multiple output rows."""
+        return self.rows is not None
+
+    @property
+    def has_output_data(self) -> bool:
+        """True if this result has any output data (row or rows)."""
+        return self.row is not None or self.rows is not None
+
     @classmethod
     def success(cls, row: dict[str, Any]) -> "TransformResult":
-        """Create successful result with output row."""
-        return cls(status="success", row=row, reason=None)
+        """Create successful result with single output row."""
+        return cls(status="success", row=row, reason=None, rows=None)
+
+    @classmethod
+    def success_multi(cls, rows: list[dict[str, Any]]) -> "TransformResult":
+        """Create successful result with multiple output rows.
+
+        Args:
+            rows: List of output rows (must not be empty)
+
+        Returns:
+            TransformResult with status="success", row=None, rows=rows
+
+        Raises:
+            ValueError: If rows is empty
+        """
+        if not rows:
+            raise ValueError("success_multi requires at least one row")
+        return cls(status="success", row=None, reason=None, rows=rows)
 
     @classmethod
     def error(
@@ -95,6 +129,7 @@ class TransformResult:
             row=None,
             reason=reason,
             retryable=retryable,
+            rows=None,
         )
 
 

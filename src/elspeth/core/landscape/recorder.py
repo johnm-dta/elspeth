@@ -967,7 +967,7 @@ class LandscapeRecorder:
         state_id: str,
         status: NodeStateStatus | str,
         *,
-        output_data: dict[str, Any] | None = None,
+        output_data: dict[str, Any] | list[dict[str, Any]] | None = None,
         duration_ms: float | None = None,
         error: ExecutionError | dict[str, Any] | None = None,
         context_after: dict[str, Any] | None = None,

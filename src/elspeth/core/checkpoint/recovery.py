@@ -18,6 +18,7 @@ from elspeth.contracts import Checkpoint, RunStatus
 from elspeth.core.checkpoint.manager import CheckpointManager
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import rows_table, runs_table, tokens_table
+from elspeth.core.payload_store import PayloadStore
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,67 @@ class RecoveryManager:
             sequence_number=checkpoint.sequence_number,
             aggregation_state=agg_state,
         )
+
+    def get_unprocessed_row_data(
+        self,
+        run_id: str,
+        payload_store: PayloadStore,
+    ) -> list[tuple[int, dict[str, Any]]]:
+        """Get row data for unprocessed rows.
+
+        Retrieves actual row data (not just IDs) for rows that need
+        processing during resume. Returns tuples of (row_index, row_data)
+        ordered by row_index for deterministic processing.
+
+        Args:
+            run_id: The run to get unprocessed rows for
+            payload_store: PayloadStore for retrieving row data
+
+        Returns:
+            List of (row_index, row_data) tuples, ordered by row_index.
+            Empty list if run cannot be resumed or all rows were processed.
+
+        Raises:
+            ValueError: If row data cannot be retrieved (payload purged or missing)
+        """
+        row_ids = self.get_unprocessed_rows(run_id)
+        if not row_ids:
+            return []
+
+        result: list[tuple[int, dict[str, Any]]] = []
+
+        with self._db.engine.connect() as conn:
+            for row_id in row_ids:
+                # Get row metadata
+                row_result = conn.execute(
+                    select(rows_table.c.row_index, rows_table.c.source_data_ref).where(
+                        rows_table.c.row_id == row_id
+                    )
+                ).fetchone()
+
+                if row_result is None:
+                    raise ValueError(f"Row {row_id} not found in database")
+
+                row_index = row_result.row_index
+                source_data_ref = row_result.source_data_ref
+
+                if source_data_ref is None:
+                    raise ValueError(
+                        f"Row {row_id} has no source_data_ref - cannot resume without payload"
+                    )
+
+                # Retrieve from payload store
+                try:
+                    payload_bytes = payload_store.retrieve(source_data_ref)
+                    row_data = json.loads(payload_bytes.decode("utf-8"))
+                except KeyError:
+                    raise ValueError(
+                        f"Row {row_id} payload has been purged - cannot resume"
+                    ) from None
+
+                result.append((row_index, row_data))
+
+        return result
 
     def get_unprocessed_rows(self, run_id: str) -> list[str]:
         """Get row IDs that were not processed before the run failed.

@@ -800,6 +800,98 @@ class Orchestrator:
                                 node_id=last_node_id,
                             )
 
+            # ─────────────────────────────────────────────────────────────────
+            # CRITICAL: Flush remaining aggregation buffers at end-of-source
+            # ─────────────────────────────────────────────────────────────────
+            # Without this, rows buffered but not yet flushed (e.g., 50 rows
+            # when trigger is count=100) would be silently lost.
+            if config.aggregation_settings:
+                from elspeth.contracts.enums import TriggerType
+
+                for agg_name, _agg_settings in config.aggregation_settings.items():
+                    # Get the node_id for this aggregation
+                    # Direct access: aggregation_id_map is built from the same graph that
+                    # provides aggregation_settings, so all names must be present. KeyError
+                    # here indicates a bug in graph construction.
+                    agg_node_id = aggregation_id_map[agg_name]
+
+                    # Check if there are buffered rows
+                    buffered_count = processor._aggregation_executor.get_buffer_count(
+                        agg_node_id
+                    )
+                    if buffered_count == 0:
+                        continue
+
+                    # Find the batch-aware transform for this aggregation
+                    # Only BaseTransform can have is_batch_aware (gates cannot)
+                    agg_transform: BaseTransform | None = None
+                    for t in config.transforms:
+                        if (
+                            isinstance(t, BaseTransform)
+                            and t.node_id == agg_node_id
+                            and t.is_batch_aware
+                        ):
+                            agg_transform = t
+                            break
+
+                    if agg_transform is None:
+                        import structlog
+
+                        logger = structlog.get_logger()
+                        logger.warning(
+                            "No batch-aware transform found for aggregation",
+                            aggregation=agg_name,
+                            node_id=agg_node_id,
+                        )
+                        continue
+
+                    # Compute step_in_pipeline for this aggregation
+                    agg_step = next(
+                        (
+                            i
+                            for i, t in enumerate(config.transforms)
+                            if t.node_id == agg_node_id
+                        ),
+                        len(config.transforms),
+                    )
+
+                    # Execute flush with END_OF_SOURCE trigger
+                    flush_result, buffered_tokens = (
+                        processor._aggregation_executor.execute_flush(
+                            node_id=agg_node_id,
+                            transform=agg_transform,
+                            ctx=ctx,
+                            step_in_pipeline=agg_step,
+                            trigger_type=TriggerType.END_OF_SOURCE,
+                        )
+                    )
+
+                    # Handle the flushed batch result
+                    if flush_result.status == "success":
+                        if flush_result.row is not None and buffered_tokens:
+                            # Single row output - reuse first buffered token's metadata
+                            output_token = TokenInfo(
+                                token_id=buffered_tokens[0].token_id,
+                                row_id=buffered_tokens[0].row_id,
+                                row_data=flush_result.row,
+                                branch_name=buffered_tokens[0].branch_name,
+                            )
+                            pending_tokens[output_sink_name].append(output_token)
+                            rows_succeeded += 1
+                        elif flush_result.rows is not None and buffered_tokens:
+                            # Multiple row output - use expand_token for proper audit
+                            expanded = processor.token_manager.expand_token(
+                                parent_token=buffered_tokens[0],
+                                expanded_rows=flush_result.rows,
+                                step_in_pipeline=agg_step,
+                            )
+                            for exp_token in expanded:
+                                pending_tokens[output_sink_name].append(exp_token)
+                                rows_succeeded += 1
+                    else:
+                        # Flush failed
+                        rows_failed += len(buffered_tokens)
+
             # Flush pending coalesce operations at end-of-source
             if coalesce_executor is not None:
                 # Step for coalesce flush = after all transforms and gates
@@ -1137,6 +1229,7 @@ class Orchestrator:
         transform_id_map = graph.get_transform_id_map()
         config_gate_id_map = graph.get_config_gate_id_map()
         coalesce_id_map = graph.get_coalesce_id_map()
+        aggregation_id_map = graph.get_aggregation_id_map()
         output_sink_name = graph.get_output_sink()
 
         # Build edge_map from graph edges
@@ -1309,6 +1402,98 @@ class Orchestrator:
                     elif result.outcome == RowOutcome.COALESCED:
                         rows_coalesced += 1
                         pending_tokens[output_sink_name].append(result.token)
+
+            # ─────────────────────────────────────────────────────────────────
+            # CRITICAL: Flush remaining aggregation buffers at end-of-source
+            # ─────────────────────────────────────────────────────────────────
+            # Without this, rows buffered but not yet flushed (e.g., 50 rows
+            # when trigger is count=100) would be silently lost.
+            if config.aggregation_settings:
+                from elspeth.contracts.enums import TriggerType
+
+                for agg_name, _agg_settings in config.aggregation_settings.items():
+                    # Get the node_id for this aggregation
+                    # Direct access: aggregation_id_map is built from the same graph that
+                    # provides aggregation_settings, so all names must be present. KeyError
+                    # here indicates a bug in graph construction.
+                    agg_node_id = aggregation_id_map[agg_name]
+
+                    # Check if there are buffered rows
+                    buffered_count = processor._aggregation_executor.get_buffer_count(
+                        agg_node_id
+                    )
+                    if buffered_count == 0:
+                        continue
+
+                    # Find the batch-aware transform for this aggregation
+                    # Only BaseTransform can have is_batch_aware (gates cannot)
+                    agg_transform: BaseTransform | None = None
+                    for t in config.transforms:
+                        if (
+                            isinstance(t, BaseTransform)
+                            and t.node_id == agg_node_id
+                            and t.is_batch_aware
+                        ):
+                            agg_transform = t
+                            break
+
+                    if agg_transform is None:
+                        import structlog
+
+                        logger = structlog.get_logger()
+                        logger.warning(
+                            "No batch-aware transform found for aggregation",
+                            aggregation=agg_name,
+                            node_id=agg_node_id,
+                        )
+                        continue
+
+                    # Compute step_in_pipeline for this aggregation
+                    agg_step = next(
+                        (
+                            i
+                            for i, t in enumerate(config.transforms)
+                            if t.node_id == agg_node_id
+                        ),
+                        len(config.transforms),
+                    )
+
+                    # Execute flush with END_OF_SOURCE trigger
+                    flush_result, buffered_tokens = (
+                        processor._aggregation_executor.execute_flush(
+                            node_id=agg_node_id,
+                            transform=agg_transform,
+                            ctx=ctx,
+                            step_in_pipeline=agg_step,
+                            trigger_type=TriggerType.END_OF_SOURCE,
+                        )
+                    )
+
+                    # Handle the flushed batch result
+                    if flush_result.status == "success":
+                        if flush_result.row is not None and buffered_tokens:
+                            # Single row output - reuse first buffered token's metadata
+                            output_token = TokenInfo(
+                                token_id=buffered_tokens[0].token_id,
+                                row_id=buffered_tokens[0].row_id,
+                                row_data=flush_result.row,
+                                branch_name=buffered_tokens[0].branch_name,
+                            )
+                            pending_tokens[output_sink_name].append(output_token)
+                            rows_succeeded += 1
+                        elif flush_result.rows is not None and buffered_tokens:
+                            # Multiple row output - use expand_token for proper audit
+                            expanded = processor.token_manager.expand_token(
+                                parent_token=buffered_tokens[0],
+                                expanded_rows=flush_result.rows,
+                                step_in_pipeline=agg_step,
+                            )
+                            for exp_token in expanded:
+                                pending_tokens[output_sink_name].append(exp_token)
+                                rows_succeeded += 1
+                    else:
+                        # Flush failed
+                        rows_failed += len(buffered_tokens)
 
             # Flush pending coalesce operations
             if coalesce_executor is not None:

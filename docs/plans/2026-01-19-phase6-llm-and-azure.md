@@ -663,7 +663,7 @@ class AzureLLMTransform(BaseLLMTransform):
 
 ---
 
-### Task A5: Implement AzureBatchLLMTransform (Aggregation Pattern)
+### Task A5: Implement AzureBatchLLMTransform (Batch-Aware Transform)
 
 **Files:**
 - Create: `src/elspeth/plugins/llm/azure_batch.py`
@@ -671,8 +671,16 @@ class AzureLLMTransform(BaseLLMTransform):
 
 **Configuration:**
 ```yaml
+# Pipeline config - aggregation is engine-driven
+aggregations:
+  - node_id: azure_batch_node
+    trigger:
+      count: 100                   # Fire after 100 rows
+      timeout_seconds: 3600        # Or after 1 hour
+
 transforms:
   - plugin: azure_batch_llm
+    node_id: azure_batch_node      # Links to aggregation config
     options:
       model: "gpt-4o"
       deployment_name: "my-gpt4o-deployment"
@@ -680,7 +688,6 @@ transforms:
       api_key: "${AZURE_OPENAI_KEY}"
       template: |
         Analyze: {{ text }}
-      batch_size: 100              # Rows per batch
       poll_interval_seconds: 300   # How often to check batch status (5 min default)
       max_wait_hours: 24           # Maximum wait time
 ```
@@ -690,26 +697,23 @@ transforms:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                    AzureBatchLLMTransform                       │
-│                    (implements BaseAggregation)                  │
+│                    (BaseTransform with is_batch_aware=True)      │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  collect(row, ctx)                                               │
-│  ├── Render template for this row                                │
-│  ├── Store (token_id, rendered_prompt) in buffer                 │
-│  └── Return CONTINUE (row added to batch)                       │
+│  ENGINE handles buffering:                                       │
+│  ├── Buffers rows until trigger fires (count=100 or timeout)    │
+│  ├── Calls process(rows: list[dict], ctx) with batch            │
+│  └── Manages checkpoint/recovery of buffered rows               │
 │                                                                  │
-│  trigger(batch_info, ctx)                                        │
-│  ├── Check if batch_size reached                                 │
-│  └── Return FLUSH or CONTINUE                                    │
-│                                                                  │
-│  flush(ctx) -> AggregationResult                                 │
-│  ├── Build JSONL from buffered prompts                           │
+│  process(rows: list[dict], ctx) -> TransformResult              │
+│  ├── Render templates for all rows                               │
+│  ├── Build JSONL from rendered prompts                           │
 │  ├── Upload to Azure Blob Storage                                │
-│  ├── Submit batch job to Azure OpenAI                           │
+│  ├── Submit batch job to Azure OpenAI                            │
 │  ├── Poll until complete (or timeout)                            │
 │  ├── Download results                                            │
-│  ├── Map results back to original token_ids                      │
-│  └── Return AggregationResult with fan-out rows                  │
+│  ├── Map results back to input rows                              │
+│  └── Return TransformResult.success() with aggregated output     │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -722,84 +726,88 @@ transforms:
 
 import json
 import time
-from dataclasses import dataclass
 from typing import Any
 
 from openai import AzureOpenAI
 
-from elspeth.contracts import AggregationResult
-from elspeth.plugins.base import BaseAggregation
+from elspeth.contracts import TransformResult
+from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.templates import PromptTemplate
 
 
-@dataclass
-class BufferedRequest:
-    """A request waiting in the batch buffer."""
-    token_id: str
-    custom_id: str  # Unique ID for matching response to request
-    prompt: str
-    row_data: dict[str, Any]
-
-
-class AzureBatchLLMTransform(BaseAggregation):
+class AzureBatchLLMTransform(BaseTransform):
     """Batch LLM transform using Azure OpenAI Batch API.
 
-    Collects rows into batches, submits to Azure Batch API,
-    waits for completion, and fans out results.
+    This is a batch-aware transform - when configured at an aggregation node,
+    the engine buffers rows and calls process(rows: list[dict]) when trigger fires.
 
     Benefits:
     - 50% cost reduction vs real-time API
     - Separate, higher rate limits
     - Up to 24-hour turnaround
+    - Engine handles buffering and crash recovery
     """
+
+    # Declare batch awareness - engine will pass list[dict] at aggregation nodes
+    is_batch_aware = True
 
     def __init__(self, config: AzureBatchConfig) -> None:
         self._config = config
         self._template = PromptTemplate(config.template)
-        self._buffer: list[BufferedRequest] = []
         self._client = AzureOpenAI(
             azure_endpoint=config.endpoint,
             api_key=config.api_key,
             api_version=config.api_version,
         )
 
-    def collect(self, row: dict[str, Any], ctx: PluginContext) -> None:
-        """Add row to batch buffer."""
-        # Render prompt for this row
-        rendered = self._template.render_with_metadata(**row)
+    def process(
+        self,
+        row: dict[str, Any] | list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Process row(s) through Azure Batch API.
 
-        # Create unique ID for response matching
-        custom_id = f"{ctx.token_id}"
+        When used at an aggregation node, row will be list[dict].
+        When used standalone, row will be single dict (falls back to single-call API).
+        """
+        if isinstance(row, list):
+            return self._process_batch(row, ctx)
+        else:
+            # Single row - use regular Azure API instead
+            return self._process_single(row, ctx)
 
-        self._buffer.append(BufferedRequest(
-            token_id=ctx.token_id,
-            custom_id=custom_id,
-            prompt=rendered.prompt,
-            row_data=row,
-        ))
-
-    def should_flush(self, ctx: PluginContext) -> bool:
-        """Check if batch should be submitted."""
-        return len(self._buffer) >= self._config.batch_size
-
-    def flush(self, ctx: PluginContext) -> AggregationResult:
+    def _process_batch(
+        self,
+        rows: list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> TransformResult:
         """Submit batch to Azure and wait for results."""
-        if not self._buffer:
-            return AggregationResult.empty()
+        if not rows:
+            return TransformResult.success({"results": [], "count": 0})
 
-        # 1. Build JSONL content
+        # 1. Render templates for all rows
+        rendered_prompts = []
+        for i, row in enumerate(rows):
+            rendered = self._template.render_with_metadata(**row)
+            rendered_prompts.append({
+                "custom_id": f"row_{i}",
+                "prompt": rendered.prompt,
+                "row_data": row,
+            })
+
+        # 2. Build JSONL content
         jsonl_lines = []
-        for req in self._buffer:
+        for req in rendered_prompts:
             jsonl_lines.append(json.dumps({
-                "custom_id": req.custom_id,
+                "custom_id": req["custom_id"],
                 "method": "POST",
                 "url": "/chat/completions",
                 "body": {
                     "model": self._config.deployment_name,
                     "messages": [
                         {"role": "system", "content": self._config.system_prompt or ""},
-                        {"role": "user", "content": req.prompt},
+                        {"role": "user", "content": req["prompt"]},
                     ],
                     "temperature": self._config.temperature,
                     "max_tokens": self._config.max_tokens,
@@ -808,13 +816,13 @@ class AzureBatchLLMTransform(BaseAggregation):
 
         jsonl_content = "\n".join(jsonl_lines)
 
-        # 2. Upload file to Azure
+        # 3. Upload file to Azure
         file_response = self._client.files.create(
             file=("batch_input.jsonl", jsonl_content.encode()),
             purpose="batch",
         )
 
-        # 3. Submit batch job
+        # 4. Submit batch job
         batch_response = self._client.batches.create(
             input_file_id=file_response.id,
             endpoint="/chat/completions",
@@ -829,39 +837,50 @@ class AzureBatchLLMTransform(BaseAggregation):
             request={
                 "batch_id": batch_id,
                 "file_id": file_response.id,
-                "row_count": len(self._buffer),
+                "row_count": len(rows),
                 "model": self._config.deployment_name,
             },
             response={"status": "submitted"},
             latency_ms=0,
         )
 
-        # 4. Poll until complete
+        # 5. Poll until complete
         results = self._poll_until_complete(batch_id, ctx)
 
-        # 5. Map results back to tokens and build fan-out
-        output_rows = []
-        for req in self._buffer:
-            if req.custom_id in results:
-                result_content = results[req.custom_id]
-                output_row = dict(req.row_data)
+        # 6. Map results back to input rows
+        output_results = []
+        for i, req in enumerate(rendered_prompts):
+            custom_id = req["custom_id"]
+            if custom_id in results:
+                result_content = results[custom_id]
+                output_row = dict(req["row_data"])
                 output_row[self._config.response_field] = result_content
-                output_rows.append({
-                    "token_id": req.token_id,
-                    "row": output_row,
-                })
+                output_results.append(output_row)
             else:
-                # Missing result - record error
-                output_rows.append({
-                    "token_id": req.token_id,
-                    "row": req.row_data,
-                    "error": "No response in batch results",
-                })
+                # Missing result - record error in row
+                output_row = dict(req["row_data"])
+                output_row[f"{self._config.response_field}_error"] = "No response in batch"
+                output_results.append(output_row)
 
-        # Clear buffer
-        self._buffer = []
+        # Return aggregated result
+        return TransformResult.success({
+            "results": output_results,
+            "count": len(output_results),
+            "batch_id": batch_id,
+        })
 
-        return AggregationResult.fan_out(output_rows)
+    def _process_single(
+        self,
+        row: dict[str, Any],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Fallback for single row - use regular Azure API."""
+        # For single rows, delegate to regular AzureLLMTransform behavior
+        # (or could implement direct call here)
+        raise NotImplementedError(
+            "AzureBatchLLMTransform should be used at aggregation nodes. "
+            "For single-row processing, use AzureLLMTransform instead."
+        )
 
     def _poll_until_complete(
         self,

@@ -2366,3 +2366,109 @@ class LandscapeRecorder:
             )
             for r in rows
         ]
+
+    # === Call Lookup Methods (for Replay Mode) ===
+
+    def find_call_by_request_hash(
+        self,
+        run_id: str,
+        call_type: str,
+        request_hash: str,
+    ) -> Call | None:
+        """Find a call by its request hash within a run.
+
+        Used for replay mode to look up previously recorded calls by
+        the hash of their request data.
+
+        Args:
+            run_id: Run ID to search within
+            call_type: Type of call (llm, http, etc.)
+            request_hash: SHA-256 hash of the canonical request data
+
+        Returns:
+            Call model if found, None otherwise
+
+        Note:
+            If multiple calls match (same request made twice), returns
+            the first one chronologically (ordered by created_at).
+        """
+        # Need to join through node_states to get to run_id
+        query = (
+            select(calls_table)
+            .join(
+                node_states_table,
+                calls_table.c.state_id == node_states_table.c.state_id,
+            )
+            .join(nodes_table, node_states_table.c.node_id == nodes_table.c.node_id)
+            .where(nodes_table.c.run_id == run_id)
+            .where(calls_table.c.call_type == call_type)
+            .where(calls_table.c.request_hash == request_hash)
+            .order_by(calls_table.c.created_at)
+            .limit(1)
+        )
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            row = result.fetchone()
+
+        if row is None:
+            return None
+
+        return Call(
+            call_id=row.call_id,
+            state_id=row.state_id,
+            call_index=row.call_index,
+            call_type=CallType(row.call_type),
+            status=CallStatus(row.status),
+            request_hash=row.request_hash,
+            request_ref=row.request_ref,
+            response_hash=row.response_hash,
+            response_ref=row.response_ref,
+            error_json=row.error_json,
+            latency_ms=row.latency_ms,
+            created_at=row.created_at,
+        )
+
+    def get_call_response_data(self, call_id: str) -> dict[str, Any] | None:
+        """Retrieve the response data for a call.
+
+        Fetches response data from the payload store if response_ref is set,
+        otherwise returns None.
+
+        Args:
+            call_id: The call ID to get response data for
+
+        Returns:
+            Response data dict if available, None if no response was recorded
+            or if payload store is not configured
+
+        Note:
+            Returns None if:
+            - Call not found
+            - No response_ref set on the call (error calls may not have response)
+            - Payload store not configured
+            - Response data has been purged from payload store
+        """
+        # Get the call record first
+        with self._db.connection() as conn:
+            result = conn.execute(
+                select(calls_table).where(calls_table.c.call_id == call_id)
+            )
+            row = result.fetchone()
+
+        if row is None:
+            return None
+
+        if row.response_ref is None:
+            return None
+
+        if self._payload_store is None:
+            return None
+
+        try:
+            payload_bytes = self._payload_store.retrieve(row.response_ref)
+            data: dict[str, Any] = json.loads(payload_bytes.decode("utf-8"))
+            return data
+        except KeyError:
+            # Payload has been purged
+            return None

@@ -21,6 +21,13 @@ Example:
         model="gpt-4",
         messages=[{"role": "user", "content": "Hello"}],
     )
+
+For replay mode, use CallReplayer to return recorded responses:
+
+    from elspeth.plugins.clients import CallReplayer, ReplayMissError
+
+    replayer = CallReplayer(recorder, source_run_id="run-abc123")
+    result = replayer.replay(call_type="llm", request_data={...})
 """
 
 from elspeth.plugins.clients.base import AuditedClientBase
@@ -31,12 +38,20 @@ from elspeth.plugins.clients.llm import (
     LLMResponse,
     RateLimitError,
 )
+from elspeth.plugins.clients.replayer import (
+    CallReplayer,
+    ReplayedCall,
+    ReplayMissError,
+)
 
 __all__ = [
     "AuditedClientBase",
     "AuditedHTTPClient",
     "AuditedLLMClient",
+    "CallReplayer",
     "LLMClientError",
     "LLMResponse",
     "RateLimitError",
+    "ReplayedCall",
+    "ReplayMissError",
 ]

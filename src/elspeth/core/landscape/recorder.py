@@ -23,6 +23,8 @@ from elspeth.contracts import (
     BatchMember,
     BatchStatus,
     Call,
+    CallStatus,
+    CallType,
     Determinism,
     Edge,
     ExecutionError,
@@ -1955,6 +1957,88 @@ class LandscapeRecorder:
             )
             for r in db_rows
         ]
+
+    def record_call(
+        self,
+        state_id: str,
+        call_index: int,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: dict[str, Any],
+        response_data: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+        latency_ms: float | None = None,
+        *,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+    ) -> Call:
+        """Record an external call for a node state.
+
+        Args:
+            state_id: The node_state this call belongs to
+            call_index: 0-based index of this call within the state
+            call_type: Type of external call (LLM, HTTP, SQL, FILESYSTEM)
+            status: Outcome of the call (SUCCESS, ERROR)
+            request_data: Request payload (will be hashed)
+            response_data: Response payload (will be hashed, optional for errors)
+            error: Error details if status is ERROR (stored as JSON)
+            latency_ms: Call duration in milliseconds
+            request_ref: Optional payload store reference for request
+            response_ref: Optional payload store reference for response
+
+        Returns:
+            The recorded Call model
+
+        Note:
+            Duplicate (state_id, call_index) will raise IntegrityError from SQLAlchemy.
+            Invalid state_id will raise IntegrityError due to foreign key constraint.
+        """
+        call_id = _generate_id()
+        now = _now()
+
+        # Hash request (always required)
+        request_hash = stable_hash(request_data)
+
+        # Hash response (optional - None for errors without response)
+        response_hash = (
+            stable_hash(response_data) if response_data is not None else None
+        )
+
+        # Serialize error if present
+        error_json = canonical_json(error) if error is not None else None
+
+        values = {
+            "call_id": call_id,
+            "state_id": state_id,
+            "call_index": call_index,
+            "call_type": call_type.value,  # Store enum value
+            "status": status.value,  # Store enum value
+            "request_hash": request_hash,
+            "request_ref": request_ref,
+            "response_hash": response_hash,
+            "response_ref": response_ref,
+            "error_json": error_json,
+            "latency_ms": latency_ms,
+            "created_at": now,
+        }
+
+        with self._db.connection() as conn:
+            conn.execute(calls_table.insert().values(**values))
+
+        return Call(
+            call_id=call_id,
+            state_id=state_id,
+            call_index=call_index,
+            call_type=call_type,  # Pass enum directly per Call contract
+            status=status,  # Pass enum directly per Call contract
+            request_hash=request_hash,
+            request_ref=request_ref,
+            response_hash=response_hash,
+            response_ref=response_ref,
+            error_json=error_json,
+            latency_ms=latency_ms,
+            created_at=now,
+        )
 
     # === Explain Methods (Graceful Degradation) ===
 

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts import NodeType, RowOutcome, RunStatus
-from elspeth.core.config import AggregationSettings, GateSettings
+from elspeth.core.config import AggregationSettings, CoalesceSettings, GateSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 from elspeth.engine.processor import RowProcessor
@@ -53,6 +53,7 @@ class PipelineConfig:
         config: Additional run configuration
         gates: Config-driven gates (processed AFTER transforms, BEFORE sinks)
         aggregation_settings: Dict of node_id -> AggregationSettings
+        coalesce_settings: List of coalesce configurations for merging fork paths
     """
 
     source: SourceProtocol
@@ -61,6 +62,7 @@ class PipelineConfig:
     config: dict[str, Any] = field(default_factory=dict)
     gates: list[GateSettings] = field(default_factory=list)
     aggregation_settings: dict[str, AggregationSettings] = field(default_factory=dict)
+    coalesce_settings: list[CoalesceSettings] = field(default_factory=list)
 
 
 @dataclass

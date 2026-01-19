@@ -172,8 +172,11 @@ class RowProcessor:
 
         # Check if we should flush
         if self._aggregation_executor.should_flush(node_id):
-            # Get buffered rows and flush
-            buffered_rows = self._aggregation_executor.flush_buffer(node_id)
+            # Get buffered rows and tokens, then flush
+            # buffered_tokens will be used for passthrough mode in Task 8
+            buffered_rows, _buffered_tokens = self._aggregation_executor.flush_buffer(
+                node_id
+            )
 
             # Call transform with batch
             # Type ignore: batch-aware transforms accept list[dict] at runtime

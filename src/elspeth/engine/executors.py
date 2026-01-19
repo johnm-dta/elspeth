@@ -811,16 +811,21 @@ class AggregationExecutor:
         """
         return list(self._buffer_tokens.get(node_id, []))
 
-    def flush_buffer(self, node_id: str) -> list[dict[str, Any]]:
-        """Get buffered rows and clear the buffer.
+    def flush_buffer(
+        self, node_id: str
+    ) -> tuple[list[dict[str, Any]], list[TokenInfo]]:
+        """Get buffered rows and tokens, then clear the buffer.
 
         Args:
             node_id: Aggregation node ID
 
         Returns:
-            List of buffered row dicts
+            Tuple of (rows, tokens) - both lists in buffer order
         """
         rows = list(self._buffers.get(node_id, []))
+        tokens = list(self._buffer_tokens.get(node_id, []))
+
+        # Clear buffers
         self._buffers[node_id] = []
         self._buffer_tokens[node_id] = []
 
@@ -832,7 +837,7 @@ class AggregationExecutor:
         # Clear batch ID for next batch
         self._batch_ids[node_id] = None
 
-        return rows
+        return rows, tokens
 
     def get_checkpoint_state(self) -> dict[str, Any]:
         """Get serializable state for checkpointing.

@@ -2416,12 +2416,14 @@ class TestAggregationExecutorBuffering:
             recorder.create_token(row_id=row.row_id, token_id=token.token_id)
             executor.buffer_row(agg_node.node_id, token)
 
-        # Get buffered rows (this also clears the buffer)
-        buffered = executor.flush_buffer(agg_node.node_id)
-        assert len(buffered) == 2
+        # Get buffered rows and tokens (this also clears the buffer)
+        buffered_rows, buffered_tokens = executor.flush_buffer(agg_node.node_id)
+        assert len(buffered_rows) == 2
+        assert len(buffered_tokens) == 2
 
         # Buffer should be empty
         assert executor.get_buffered_rows(agg_node.node_id) == []
+        assert executor.get_buffered_tokens(agg_node.node_id) == []
 
     def test_buffered_tokens_are_tracked(self) -> None:
         """Executor tracks TokenInfo objects alongside buffered rows."""
@@ -2609,6 +2611,79 @@ class TestAggregationExecutorBuffering:
         executor.buffer_row(agg_node.node_id, token)
 
         assert executor.should_flush(agg_node.node_id) is True
+
+    def test_flush_buffer_returns_both_rows_and_tokens(self) -> None:
+        """flush_buffer() returns tuple of (rows, tokens) for passthrough mode."""
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import AggregationExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        agg_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="flush_returns_tokens_test",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        settings = AggregationSettings(
+            name="test_agg",
+            plugin="test",
+            trigger=TriggerConfig(count=2),
+        )
+
+        executor = AggregationExecutor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            aggregation_settings={agg_node.node_id: settings},
+        )
+
+        # Buffer 2 rows with distinct tokens
+        token1 = TokenInfo(
+            row_id="row-1",
+            token_id="token-1",
+            row_data={"x": 1},
+        )
+        token2 = TokenInfo(
+            row_id="row-2",
+            token_id="token-2",
+            row_data={"x": 2},
+        )
+
+        for i, token in enumerate([token1, token2]):
+            row = recorder.create_row(
+                run_id=run.run_id,
+                source_node_id=agg_node.node_id,
+                row_index=i,
+                data=token.row_data,
+                row_id=token.row_id,
+            )
+            recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+            executor.buffer_row(agg_node.node_id, token)
+
+        # flush_buffer should return tuple of (rows, tokens)
+        rows, tokens = executor.flush_buffer(agg_node.node_id)
+
+        # Verify rows
+        assert len(rows) == 2
+        assert rows[0] == {"x": 1}
+        assert rows[1] == {"x": 2}
+
+        # Verify tokens
+        assert len(tokens) == 2
+        assert tokens[0].token_id == "token-1"
+        assert tokens[1].token_id == "token-2"
+
+        # Buffer should be cleared
+        assert executor.get_buffered_rows(agg_node.node_id) == []
+        assert executor.get_buffered_tokens(agg_node.node_id) == []
 
 
 class TestAggregationExecutorCheckpoint:

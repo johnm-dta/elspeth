@@ -3181,3 +3181,359 @@ class TestProcessorDeaggregation:
                 transforms=[transform],
                 ctx=ctx,
             )
+
+
+class TestProcessorPassthroughMode:
+    """Tests for passthrough output_mode in aggregation."""
+
+    def test_aggregation_passthrough_mode(self) -> None:
+        """Passthrough mode: BUFFERED while waiting, COMPLETED on flush with same tokens."""
+        from elspeth.contracts import Determinism
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import RowOutcome, TransformResult
+
+        class PassthroughEnricher(BaseTransform):
+            """Enriches each row in a batch with batch stats, returns same number of rows."""
+
+            name = "passthrough_enricher"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True
+            creates_tokens = False  # Passthrough: same tokens, no new ones
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0"
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                if isinstance(rows, list):
+                    # Batch mode: enrich each row with batch_size
+                    batch_size = len(rows)
+                    enriched = [
+                        {**row, "batch_size": batch_size, "enriched": True}
+                        for row in rows
+                    ]
+                    return TransformResult.success_multi(enriched)
+                # Single row mode
+                return TransformResult.success(rows)
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        enricher_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="passthrough_enricher",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        aggregation_settings = {
+            enricher_node.node_id: AggregationSettings(
+                name="batch_enrich",
+                plugin="passthrough_enricher",
+                trigger=TriggerConfig(count=3),
+                output_mode="passthrough",  # KEY: passthrough mode
+            ),
+        }
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            edge_map={},
+            route_resolution_map={},
+            aggregation_settings=aggregation_settings,
+        )
+
+        transform = PassthroughEnricher(enricher_node.node_id)
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Collect results for all 3 rows
+        all_results = []
+        buffered_token_ids = []
+
+        for i in range(3):
+            result_list = processor.process_row(
+                row_index=i,
+                row_data={"value": i + 1},  # 1, 2, 3
+                transforms=[transform],
+                ctx=ctx,
+            )
+            all_results.extend(result_list)
+
+            # Track buffered tokens (first 2 rows)
+            if i < 2:
+                assert len(result_list) == 1
+                assert result_list[0].outcome == RowOutcome.BUFFERED
+                buffered_token_ids.append(result_list[0].token_id)
+
+        # After 3rd row, should have:
+        # - 2 BUFFERED from first 2 rows
+        # - 3 COMPLETED from flush (preserving original token_ids)
+        buffered = [r for r in all_results if r.outcome == RowOutcome.BUFFERED]
+        completed = [r for r in all_results if r.outcome == RowOutcome.COMPLETED]
+
+        assert len(buffered) == 2, f"Expected 2 BUFFERED, got {len(buffered)}"
+        assert len(completed) == 3, f"Expected 3 COMPLETED, got {len(completed)}"
+
+        # CRITICAL: Passthrough preserves token_ids
+        # The buffered tokens should reappear in completed results
+        completed_token_ids = {r.token_id for r in completed}
+        for token_id in buffered_token_ids:
+            assert (
+                token_id in completed_token_ids
+            ), f"Buffered token {token_id} not found in completed results"
+
+        # All completed rows should be enriched
+        for result in completed:
+            assert result.final_data["enriched"] is True
+            assert result.final_data["batch_size"] == 3
+
+        # Original values should be preserved
+        values = {r.final_data["value"] for r in completed}
+        assert values == {1, 2, 3}
+
+    def test_aggregation_passthrough_validates_row_count(self) -> None:
+        """Passthrough mode raises error if transform returns wrong row count."""
+        import pytest
+
+        from elspeth.contracts import Determinism
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class BadPassthrough(BaseTransform):
+            """Returns wrong number of rows in passthrough mode."""
+
+            name = "bad_passthrough"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True
+            creates_tokens = False
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0"
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                if isinstance(rows, list):
+                    # Wrong: returns fewer rows than input
+                    return TransformResult.success_multi([rows[0]])
+                return TransformResult.success(rows)
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        bad_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="bad_passthrough",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        aggregation_settings = {
+            bad_node.node_id: AggregationSettings(
+                name="bad_batch",
+                plugin="bad_passthrough",
+                trigger=TriggerConfig(count=3),
+                output_mode="passthrough",
+            ),
+        }
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            edge_map={},
+            route_resolution_map={},
+            aggregation_settings=aggregation_settings,
+        )
+
+        transform = BadPassthrough(bad_node.node_id)
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process first 2 rows (buffered)
+        processor.process_row(
+            row_index=0, row_data={"value": 1}, transforms=[transform], ctx=ctx
+        )
+        processor.process_row(
+            row_index=1, row_data={"value": 2}, transforms=[transform], ctx=ctx
+        )
+
+        # 3rd row triggers flush - should fail because transform returns 1 row instead of 3
+        with pytest.raises(ValueError, match="same number of output rows"):
+            processor.process_row(
+                row_index=2, row_data={"value": 3}, transforms=[transform], ctx=ctx
+            )
+
+    def test_aggregation_passthrough_continues_to_next_transform(self) -> None:
+        """Passthrough mode rows continue through remaining transforms after flush."""
+        from elspeth.contracts import Determinism
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import RowOutcome, TransformResult
+
+        class PassthroughEnricher(BaseTransform):
+            """Enriches each row in a batch."""
+
+            name = "enricher"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True
+            creates_tokens = False
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0"
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                if isinstance(rows, list):
+                    enriched = [{**row, "batch_enriched": True} for row in rows]
+                    return TransformResult.success_multi(enriched)
+                return TransformResult.success(rows)
+
+        class DoubleTransform(BaseTransform):
+            """Doubles the value field."""
+
+            name = "double"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0"
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success({**row, "value": row["value"] * 2})
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        enricher_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="enricher",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        double_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="double",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        aggregation_settings = {
+            enricher_node.node_id: AggregationSettings(
+                name="batch_enrich",
+                plugin="enricher",
+                trigger=TriggerConfig(count=2),
+                output_mode="passthrough",
+            ),
+        }
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            edge_map={},
+            route_resolution_map={},
+            aggregation_settings=aggregation_settings,
+        )
+
+        enricher = PassthroughEnricher(enricher_node.node_id)
+        doubler = DoubleTransform(double_node.node_id)
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process 2 rows through enricher (passthrough) then doubler
+        all_results = []
+        for i in range(2):
+            result_list = processor.process_row(
+                row_index=i,
+                row_data={"value": i + 1},  # 1, 2
+                transforms=[enricher, doubler],
+                ctx=ctx,
+            )
+            all_results.extend(result_list)
+
+        # First row buffered, second triggers flush
+        # After flush, both rows go through doubler
+        buffered = [r for r in all_results if r.outcome == RowOutcome.BUFFERED]
+        completed = [r for r in all_results if r.outcome == RowOutcome.COMPLETED]
+
+        assert len(buffered) == 1
+        assert len(completed) == 2
+
+        # Both completed rows should have batch_enriched AND doubled values
+        for result in completed:
+            assert result.final_data["batch_enriched"] is True
+
+        # Values should be doubled: 1*2=2, 2*2=4
+        values = {r.final_data["value"] for r in completed}
+        assert values == {2, 4}

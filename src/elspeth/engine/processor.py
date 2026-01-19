@@ -148,7 +148,8 @@ class RowProcessor:
         ctx: PluginContext,
         step: int,
         child_items: list[_WorkItem],
-    ) -> tuple[RowResult, list[_WorkItem]]:
+        total_steps: int,
+    ) -> tuple[RowResult | list[RowResult], list[_WorkItem]]:
         """Process a row at an aggregation node using engine buffering.
 
         Engine buffers rows and calls transform.process(rows: list[dict])
@@ -160,12 +161,20 @@ class RowProcessor:
             ctx: Plugin context
             step: Pipeline step number
             child_items: Work items to return with result
+            total_steps: Total number of steps in the pipeline
 
         Returns:
-            (RowResult, child_items) tuple
+            (RowResult or list[RowResult], child_items) tuple
+            - Single RowResult for single/transform modes
+            - List of RowResults for passthrough mode (one per buffered token)
         """
         node_id = transform.node_id
         assert node_id is not None
+
+        # Get output_mode from aggregation settings
+        # Caller guarantees node_id is in self._aggregation_settings (line 550 check)
+        settings = self._aggregation_settings[node_id]
+        output_mode = settings.output_mode
 
         # Buffer the row
         self._aggregation_executor.buffer_row(node_id, current_token)
@@ -173,8 +182,7 @@ class RowProcessor:
         # Check if we should flush
         if self._aggregation_executor.should_flush(node_id):
             # Get buffered rows and tokens, then flush
-            # buffered_tokens will be used for passthrough mode in Task 8
-            buffered_rows, _buffered_tokens = self._aggregation_executor.flush_buffer(
+            buffered_rows, buffered_tokens = self._aggregation_executor.flush_buffer(
                 node_id
             )
 
@@ -184,10 +192,24 @@ class RowProcessor:
             # is_batch_aware=True flag indicates it handles lists.
             result = transform.process(buffered_rows, ctx)  # type: ignore[arg-type]
 
-            if result.status == "success":
-                # result.row should always be set for success, but provide fallback
+            if result.status != "success":
+                return (
+                    RowResult(
+                        token=current_token,
+                        final_data=current_token.row_data,
+                        outcome=RowOutcome.FAILED,
+                        error=FailureInfo(
+                            exception_type="TransformError",
+                            message="Batch transform failed",
+                        ),
+                    ),
+                    child_items,
+                )
+
+            # Handle output modes
+            if output_mode == "single":
+                # Single output: one aggregated result row
                 final_data = result.row if result.row is not None else {}
-                # Create updated token with aggregated data (like TransformExecutor does)
                 updated_token = TokenInfo(
                     row_id=current_token.row_id,
                     token_id=current_token.token_id,
@@ -202,29 +224,98 @@ class RowProcessor:
                     ),
                     child_items,
                 )
-            else:
-                return (
-                    RowResult(
-                        token=current_token,
-                        final_data=current_token.row_data,
-                        outcome=RowOutcome.FAILED,
-                        error=FailureInfo(
-                            exception_type="TransformError",
-                            message="Batch transform failed",
-                        ),
-                    ),
-                    child_items,
-                )
 
-        # Not flushing yet - row consumed into batch
-        return (
-            RowResult(
-                token=current_token,
-                final_data=current_token.row_data,
-                outcome=RowOutcome.CONSUMED_IN_BATCH,
-            ),
-            child_items,
-        )
+            elif output_mode == "passthrough":
+                # Passthrough: original tokens continue with enriched data
+                # Validate result is multi-row
+                if not result.is_multi_row:
+                    raise ValueError(
+                        f"Passthrough mode requires multi-row result, "
+                        f"but transform '{transform.name}' returned single row. "
+                        f"Use TransformResult.success_multi() for passthrough."
+                    )
+
+                # Validate row count matches
+                assert result.rows is not None  # Guaranteed by is_multi_row
+                if len(result.rows) != len(buffered_tokens):
+                    raise ValueError(
+                        f"Passthrough mode requires same number of output rows "
+                        f"as input rows. Transform '{transform.name}' returned "
+                        f"{len(result.rows)} rows but received {len(buffered_tokens)} input rows."
+                    )
+
+                # Build COMPLETED results for all buffered tokens with enriched data
+                # Check if there are more transforms after this one
+                more_transforms = step < total_steps
+
+                if more_transforms:
+                    # Queue enriched tokens as work items for remaining transforms
+                    for token, enriched_data in zip(
+                        buffered_tokens, result.rows, strict=True
+                    ):
+                        updated_token = TokenInfo(
+                            row_id=token.row_id,
+                            token_id=token.token_id,
+                            row_data=enriched_data,
+                            branch_name=token.branch_name,
+                        )
+                        child_items.append(
+                            _WorkItem(
+                                token=updated_token,
+                                start_step=step,  # Continue from current step (0-indexed next)
+                            )
+                        )
+                    # Return empty list - all results will come from child items
+                    return ([], child_items)
+                else:
+                    # No more transforms - return COMPLETED for all tokens
+                    results: list[RowResult] = []
+                    for token, enriched_data in zip(
+                        buffered_tokens, result.rows, strict=True
+                    ):
+                        updated_token = TokenInfo(
+                            row_id=token.row_id,
+                            token_id=token.token_id,
+                            row_data=enriched_data,
+                            branch_name=token.branch_name,
+                        )
+                        results.append(
+                            RowResult(
+                                token=updated_token,
+                                final_data=enriched_data,
+                                outcome=RowOutcome.COMPLETED,
+                            )
+                        )
+                    return (results, child_items)
+
+            elif output_mode == "transform":
+                # Transform mode: handled in Task 9
+                raise NotImplementedError("transform output_mode handled in Task 9")
+
+            else:
+                raise ValueError(f"Unknown output_mode: {output_mode}")
+
+        # Not flushing yet - row is buffered
+        # In passthrough mode: BUFFERED (non-terminal, will reappear)
+        # In single/transform modes: CONSUMED_IN_BATCH (terminal)
+        if output_mode == "passthrough":
+            return (
+                RowResult(
+                    token=current_token,
+                    final_data=current_token.row_data,
+                    outcome=RowOutcome.BUFFERED,
+                ),
+                child_items,
+            )
+        else:
+            return (
+                RowResult(
+                    token=current_token,
+                    final_data=current_token.row_data,
+                    outcome=RowOutcome.CONSUMED_IN_BATCH,
+                ),
+                child_items,
+            )
 
     def _execute_transform_with_retry(
         self,
@@ -354,9 +445,15 @@ class RowProcessor:
                     coalesce_at_step=item.coalesce_at_step,
                     coalesce_name=item.coalesce_name,
                 )
-                # Result can be None for held coalesce tokens
+                # Result can be:
+                # - None for held coalesce tokens
+                # - Single RowResult for most operations
+                # - List of RowResults for passthrough aggregation mode
                 if result is not None:
-                    results.append(result)
+                    if isinstance(result, list):
+                        results.extend(result)
+                    else:
+                        results.append(result)
 
                 # Add any child tokens to the queue
                 work_queue.extend(child_items)
@@ -371,7 +468,7 @@ class RowProcessor:
         start_step: int,
         coalesce_at_step: int | None = None,
         coalesce_name: str | None = None,
-    ) -> tuple[RowResult | None, list[_WorkItem]]:
+    ) -> tuple[RowResult | list[RowResult] | None, list[_WorkItem]]:
         """Process a single token through transforms starting at given step.
 
         Args:
@@ -383,8 +480,11 @@ class RowProcessor:
             coalesce_name: Name of the coalesce point for merging
 
         Returns:
-            Tuple of (RowResult for this token or None if held for coalesce,
+            Tuple of (RowResult or list of RowResults or None if held for coalesce,
                       list of child WorkItems to queue)
+            - Single RowResult for most operations
+            - List of RowResults for passthrough aggregation mode
+            - None for held coalesce tokens
         """
         current_token = token
         child_items: list[_WorkItem] = []
@@ -457,6 +557,7 @@ class RowProcessor:
                         ctx=ctx,
                         step=step,
                         child_items=child_items,
+                        total_steps=len(transforms),
                     )
 
                 # Regular transform (with optional retry)

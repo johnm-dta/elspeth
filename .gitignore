@@ -112,3 +112,7 @@ credentials.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Mutation testing
+.mutmut-cache/
+mutants/

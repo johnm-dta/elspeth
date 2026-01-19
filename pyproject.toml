@@ -76,6 +76,8 @@ dev = [
     # Type stubs
     "pandas-stubs>=2.2",
     "types-networkx>=3.2",
+    # Mutation testing (Phase 3)
+    "mutmut>=2.4",
 ]
 
 llm = [
@@ -204,3 +206,14 @@ exclude_lines = [
     "raise NotImplementedError",
     "@abstractmethod",
 ]
+
+# === Mutation Testing Configuration (mutmut 2.x) ===
+[tool.mutmut]
+# Paths to mutate (start with critical audit paths)
+paths_to_mutate = "src/elspeth/core/"
+# Test runner command - run property tests and core tests with fast-fail
+runner = "python -m pytest tests/property/ tests/core/ -x --tb=no -q"
+# Tests directory
+tests_dir = "tests/"
+# Disable backup files - we use git
+backup = false

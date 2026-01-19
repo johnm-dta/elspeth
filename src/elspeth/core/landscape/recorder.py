@@ -1467,6 +1467,47 @@ class LandscapeRecorder:
             for row in rows
         ]
 
+    def retry_batch(self, batch_id: str) -> Batch:
+        """Create a new batch attempt from a failed batch.
+
+        Copies batch metadata and members to a new batch with
+        incremented attempt counter and draft status.
+
+        Args:
+            batch_id: The failed batch to retry
+
+        Returns:
+            New Batch with attempt = original.attempt + 1
+
+        Raises:
+            ValueError: If original batch not found or not in failed status
+        """
+        original = self.get_batch(batch_id)
+        if original is None:
+            raise ValueError(f"Batch not found: {batch_id}")
+        if original.status != BatchStatus.FAILED:
+            raise ValueError(
+                f"Can only retry failed batches, got status: {original.status}"
+            )
+
+        # Create new batch with incremented attempt
+        new_batch = self.create_batch(
+            run_id=original.run_id,
+            aggregation_node_id=original.aggregation_node_id,
+            attempt=original.attempt + 1,
+        )
+
+        # Copy members to new batch
+        original_members = self.get_batch_members(batch_id)
+        for member in original_members:
+            self.add_batch_member(
+                batch_id=new_batch.batch_id,
+                token_id=member.token_id,
+                ordinal=member.ordinal,
+            )
+
+        return new_batch
+
     # === Artifact Registration ===
 
     def register_artifact(

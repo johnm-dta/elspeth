@@ -856,9 +856,10 @@ class AggregationExecutor:
             # Restore buffer (we don't store full TokenInfo, just rows)
             self._buffers[node_id] = list(rows)
 
-            # Restore batch ID
+            # Restore batch ID and member count
             if batch_id:
                 self._batch_ids[node_id] = batch_id
+                self._member_counts[batch_id] = len(rows)
 
             # Restore trigger evaluator count
             evaluator = self._trigger_evaluators.get(node_id)

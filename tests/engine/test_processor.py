@@ -3188,3 +3188,279 @@ class TestRowProcessorRecovery:
             "buffer": [1, 2],
             "count": 2,
         }
+
+
+class TestProcessorBatchTransforms:
+    """Tests for batch-aware transforms in RowProcessor."""
+
+    def test_processor_buffers_rows_for_aggregation_node(self) -> None:
+        """Processor buffers rows at aggregation nodes and flushes on trigger."""
+        from elspeth.contracts import Determinism
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import RowOutcome, TransformResult
+
+        class SumTransform(BaseTransform):
+            name = "sum"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0"
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                if isinstance(rows, list):
+                    total = sum(r["value"] for r in rows)
+                    return TransformResult.success({"total": total})
+                return TransformResult.success(rows)
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        sum_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="sum",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        aggregation_settings = {
+            sum_node.node_id: AggregationSettings(
+                name="sum_batch",
+                plugin="sum",
+                trigger=TriggerConfig(count=3),
+            ),
+        }
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            edge_map={},
+            route_resolution_map={},
+            aggregation_settings=aggregation_settings,
+        )
+
+        transform = SumTransform(sum_node.node_id)
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process 3 rows - should buffer first 2, flush on 3rd
+        results = []
+        for i in range(3):
+            result_list = processor.process_row(
+                row_index=i,
+                row_data={"value": i + 1},  # 1, 2, 3
+                transforms=[transform],
+                ctx=ctx,
+            )
+            # process_row returns list[RowResult] - take first item
+            results.append(result_list[0])
+
+        # First two rows consumed into batch
+        assert results[0].outcome == RowOutcome.CONSUMED_IN_BATCH
+        assert results[1].outcome == RowOutcome.CONSUMED_IN_BATCH
+
+        # Third row triggers flush - transform receives [1, 2, 3]
+        # Result should have total = 6
+        assert results[2].outcome == RowOutcome.COMPLETED
+        assert results[2].final_data == {"total": 6}
+
+    def test_processor_batch_transform_without_aggregation_config(self) -> None:
+        """Batch-aware transform without aggregation config uses single-row mode."""
+        from elspeth.contracts import Determinism
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import RowOutcome, TransformResult
+
+        class DoubleTransform(BaseTransform):
+            name = "double"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True  # But no aggregation config
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0"
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                if isinstance(rows, list):
+                    # Batch mode - sum all values
+                    return TransformResult.success(
+                        {"value": sum(r["value"] for r in rows)}
+                    )
+                # Single-row mode - double
+                return TransformResult.success({"value": rows["value"] * 2})
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="double",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # No aggregation_settings - so batch-aware transform uses single-row mode
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            edge_map={},
+            route_resolution_map={},
+            aggregation_settings={},  # Empty - not an aggregation node
+        )
+
+        transform = DoubleTransform(transform_node.node_id)
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process row - should use single-row mode (double)
+        result_list = processor.process_row(
+            row_index=0,
+            row_data={"value": 5},
+            transforms=[transform],
+            ctx=ctx,
+        )
+
+        result = result_list[0]
+        assert result.outcome == RowOutcome.COMPLETED
+        assert result.final_data == {"value": 10}  # Doubled, not summed
+
+    def test_processor_buffers_restored_on_recovery(self) -> None:
+        """Processor restores buffer state from checkpoint."""
+        from elspeth.contracts import Determinism
+        from elspeth.core.config import AggregationSettings, TriggerConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import RowOutcome, TransformResult
+
+        class SumTransform(BaseTransform):
+            name = "sum"
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0"
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                if isinstance(rows, list):
+                    total = sum(r["value"] for r in rows)
+                    return TransformResult.success({"total": total})
+                return TransformResult.success(rows)
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        sum_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="sum",
+            node_type="aggregation",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        aggregation_settings = {
+            sum_node.node_id: AggregationSettings(
+                name="sum_batch",
+                plugin="sum",
+                trigger=TriggerConfig(count=3),  # Trigger at 3
+            ),
+        }
+
+        # Simulate restored checkpoint with 2 rows already buffered
+        restored_buffer_state = {
+            sum_node.node_id: {
+                "rows": [{"value": 1}, {"value": 2}],
+                "token_ids": ["token-0", "token-1"],
+                "batch_id": "batch-old",
+            }
+        }
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            edge_map={},
+            route_resolution_map={},
+            aggregation_settings=aggregation_settings,
+        )
+
+        # Restore buffer state
+        processor._aggregation_executor.restore_from_checkpoint(restored_buffer_state)
+
+        transform = SumTransform(sum_node.node_id)
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process 1 more row - should trigger flush (2 restored + 1 new = 3)
+        result_list = processor.process_row(
+            row_index=2,
+            row_data={"value": 3},  # Third value
+            transforms=[transform],
+            ctx=ctx,
+        )
+
+        # Should trigger and get total of all 3 rows
+        result = result_list[0]
+        assert result.outcome == RowOutcome.COMPLETED
+        assert result.final_data == {"total": 6}  # 1 + 2 + 3

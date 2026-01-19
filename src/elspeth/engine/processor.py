@@ -120,6 +120,7 @@ class RowProcessor:
         self._retry_manager = retry_manager
         self._coalesce_executor = coalesce_executor
         self._coalesce_node_ids = coalesce_node_ids or {}
+        self._aggregation_settings = aggregation_settings or {}
 
         self._token_manager = TokenManager(recorder)
         self._transform_executor = TransformExecutor(recorder, span_factory)
@@ -139,6 +140,81 @@ class RowProcessor:
     def token_manager(self) -> TokenManager:
         """Expose token manager for orchestrator to create tokens for quarantined rows."""
         return self._token_manager
+
+    def _process_batch_aggregation_node(
+        self,
+        transform: BaseTransform,
+        current_token: TokenInfo,
+        ctx: PluginContext,
+        step: int,
+        child_items: list[_WorkItem],
+    ) -> tuple[RowResult, list[_WorkItem]]:
+        """Process a row at an aggregation node using engine buffering.
+
+        Engine buffers rows and calls transform.process(rows: list[dict])
+        when the trigger fires.
+
+        Args:
+            transform: The batch-aware transform
+            current_token: Current row token
+            ctx: Plugin context
+            step: Pipeline step number
+            child_items: Work items to return with result
+
+        Returns:
+            (RowResult, child_items) tuple
+        """
+        node_id = transform.node_id
+        assert node_id is not None
+
+        # Buffer the row
+        self._aggregation_executor.buffer_row(node_id, current_token)
+
+        # Check if we should flush
+        if self._aggregation_executor.should_flush(node_id):
+            # Get buffered rows and flush
+            buffered_rows = self._aggregation_executor.flush_buffer(node_id)
+
+            # Call transform with batch
+            # Type ignore: batch-aware transforms accept list[dict] at runtime
+            # but the protocol signature is dict[str, Any]. The transform's
+            # is_batch_aware=True flag indicates it handles lists.
+            result = transform.process(buffered_rows, ctx)  # type: ignore[arg-type]
+
+            if result.status == "success":
+                # result.row should always be set for success, but provide fallback
+                final_data = result.row if result.row is not None else {}
+                return (
+                    RowResult(
+                        token=current_token,
+                        final_data=final_data,
+                        outcome=RowOutcome.COMPLETED,
+                    ),
+                    child_items,
+                )
+            else:
+                return (
+                    RowResult(
+                        token=current_token,
+                        final_data=current_token.row_data,
+                        outcome=RowOutcome.FAILED,
+                        error=FailureInfo(
+                            exception_type="TransformError",
+                            message="Batch transform failed",
+                        ),
+                    ),
+                    child_items,
+                )
+
+        # Not flushing yet - row consumed into batch
+        return (
+            RowResult(
+                token=current_token,
+                final_data=current_token.row_data,
+                outcome=RowOutcome.CONSUMED_IN_BATCH,
+            ),
+            child_items,
+        )
 
     def _execute_transform_with_retry(
         self,
@@ -384,6 +460,22 @@ class RowProcessor:
                 )
 
             elif isinstance(transform, BaseTransform):
+                # Check if this is a batch-aware transform at an aggregation node
+                node_id = transform.node_id
+                if (
+                    transform.is_batch_aware
+                    and node_id is not None
+                    and node_id in self._aggregation_settings
+                ):
+                    # Use engine buffering for aggregation
+                    return self._process_batch_aggregation_node(
+                        transform=transform,
+                        current_token=current_token,
+                        ctx=ctx,
+                        step=step,
+                        child_items=child_items,
+                    )
+
                 # Regular transform (with optional retry)
                 try:
                     result, current_token, error_sink = (

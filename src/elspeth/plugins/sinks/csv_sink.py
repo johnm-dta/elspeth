@@ -125,8 +125,12 @@ class CSVSink(BaseSink):
             self._writer.writeheader()
 
         # Write all rows in batch
+        # Invariant: _file and _writer are always set together (above block ensures this)
+        writer = self._writer
+        if writer is None:
+            raise RuntimeError("CSVSink writer not initialized - this is a bug")
         for row in rows:
-            self._writer.writerow(row)  # type: ignore[union-attr]
+            writer.writerow(row)
 
         # Flush to ensure content is on disk for hashing
         self._file.flush()

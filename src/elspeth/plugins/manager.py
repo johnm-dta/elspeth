@@ -19,6 +19,7 @@ from elspeth.plugins.hookspecs import (
 )
 from elspeth.plugins.protocols import (
     GateProtocol,
+    PluginProtocol,
     SinkProtocol,
     SourceProtocol,
     TransformProtocol,
@@ -74,48 +75,22 @@ class PluginSpec:
     output_schema_hash: str | None = None
 
     @classmethod
-    def from_plugin(cls, plugin_cls: type, node_type: NodeType) -> "PluginSpec":
+    def from_plugin(
+        cls, plugin_cls: type[PluginProtocol], node_type: NodeType
+    ) -> "PluginSpec":
         """Create spec from plugin class with schema hashes.
 
-        Required attributes (will raise if missing):
-        - name: str
-        - plugin_version: str
-
-        Optional attributes (have legitimate defaults):
-        - determinism: defaults to DETERMINISTIC
-        - input_schema: defaults to None
-        - output_schema: defaults to None
-
         Args:
-            plugin_cls: Plugin class to extract metadata from
+            plugin_cls: Plugin class implementing PluginProtocol
             node_type: Type of node this plugin represents
 
         Returns:
             PluginSpec with extracted metadata
-
-        Raises:
-            ValueError: If plugin is missing required 'name' or 'plugin_version' attributes
         """
-        # Required: name
-        try:
-            name = plugin_cls.name  # type: ignore[attr-defined]
-        except AttributeError:
-            raise ValueError(
-                f"Plugin {plugin_cls.__name__} must define 'name' attribute. "
-                f"Add: name = 'your_plugin_name' to the class."
-            ) from None
-
-        # Required: plugin_version
-        try:
-            version = plugin_cls.plugin_version  # type: ignore[attr-defined]
-        except AttributeError:
-            raise ValueError(
-                f"Plugin {plugin_cls.__name__} must define 'plugin_version' attribute. "
-                f"Add: plugin_version = '1.0.0' to the class."
-            ) from None
-
-        # All protocols define determinism with defaults in base classes.
-        determinism = plugin_cls.determinism  # type: ignore[attr-defined]
+        # PluginProtocol guarantees these attributes exist (enforced by mypy)
+        name = plugin_cls.name
+        version = plugin_cls.plugin_version
+        determinism = plugin_cls.determinism
 
         # Schemas vary by plugin type: sources have only output_schema,
         # sinks have only input_schema, transforms have both.

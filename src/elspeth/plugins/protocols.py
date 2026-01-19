@@ -26,6 +26,19 @@ if TYPE_CHECKING:
 
 
 @runtime_checkable
+class PluginProtocol(Protocol):
+    """Base protocol for all plugins.
+
+    Defines the common metadata attributes that all plugins must have.
+    Used by PluginManager.from_plugin() for type-safe metadata extraction.
+    """
+
+    name: str
+    plugin_version: str
+    determinism: Determinism
+
+
+@runtime_checkable
 class SourceProtocol(Protocol):
     """Protocol for source plugins.
 

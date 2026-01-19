@@ -626,6 +626,7 @@ all = [
     { name = "azure-identity" },
     { name = "azure-storage-blob" },
     { name = "hypothesis" },
+    { name = "jinja2" },
     { name = "litellm" },
     { name = "mutmut" },
     { name = "mypy" },
@@ -654,6 +655,7 @@ dev = [
     { name = "types-networkx" },
 ]
 llm = [
+    { name = "jinja2" },
     { name = "litellm" },
 ]
 
@@ -667,6 +669,7 @@ requires-dist = [
     { name = "elspeth", extras = ["dev", "llm", "azure"], marker = "extra == 'all'" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.98" },
+    { name = "jinja2", marker = "extra == 'llm'", specifier = ">=3.1" },
     { name = "litellm", marker = "extra == 'llm'", specifier = ">=1.30" },
     { name = "mutmut", marker = "extra == 'dev'", specifier = ">=2.4" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },

@@ -19,12 +19,13 @@ import hashlib
 import io
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 from jinja2 import Template
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from elspeth.contracts import ArtifactDescriptor, PluginSchema
+from elspeth.plugins.azure.auth import AzureAuthConfig
 from elspeth.plugins.base import BaseSink
 from elspeth.plugins.config_base import DataPluginConfig
 from elspeth.plugins.context import PluginContext
@@ -49,12 +50,65 @@ class AzureBlobSinkConfig(DataPluginConfig):
 
     Extends DataPluginConfig which requires schema configuration.
     Unlike file-based sinks, does not extend PathConfig (no local file path).
+
+    Supports three authentication methods (mutually exclusive):
+    1. connection_string - Simple connection string auth (default)
+    2. use_managed_identity + account_url - Azure Managed Identity
+    3. tenant_id + client_id + client_secret + account_url - Service Principal
+
+    Example configurations:
+
+        # Option 1: Connection string (simplest)
+        connection_string: "${AZURE_STORAGE_CONNECTION_STRING}"
+        container: "my-container"
+        blob_path: "results/{{ run_id }}/output.csv"
+
+        # Option 2: Managed Identity (for Azure-hosted workloads)
+        use_managed_identity: true
+        account_url: "https://mystorageaccount.blob.core.windows.net"
+        container: "my-container"
+        blob_path: "results/{{ run_id }}/output.csv"
+
+        # Option 3: Service Principal
+        tenant_id: "${AZURE_TENANT_ID}"
+        client_id: "${AZURE_CLIENT_ID}"
+        client_secret: "${AZURE_CLIENT_SECRET}"
+        account_url: "https://mystorageaccount.blob.core.windows.net"
+        container: "my-container"
+        blob_path: "results/{{ run_id }}/output.csv"
     """
 
-    connection_string: str = Field(
-        ...,
+    # Auth Option 1: Connection string
+    connection_string: str | None = Field(
+        default=None,
         description="Azure Storage connection string",
     )
+
+    # Auth Option 2: Managed Identity
+    use_managed_identity: bool = Field(
+        default=False,
+        description="Use Azure Managed Identity for authentication",
+    )
+    account_url: str | None = Field(
+        default=None,
+        description="Azure Storage account URL (e.g., https://mystorageaccount.blob.core.windows.net)",
+    )
+
+    # Auth Option 3: Service Principal
+    tenant_id: str | None = Field(
+        default=None,
+        description="Azure AD tenant ID for Service Principal auth",
+    )
+    client_id: str | None = Field(
+        default=None,
+        description="Azure AD client ID for Service Principal auth",
+    )
+    client_secret: str | None = Field(
+        default=None,
+        description="Azure AD client secret for Service Principal auth",
+    )
+
+    # Blob location (required for all auth methods)
     container: str = Field(
         ...,
         description="Azure Blob container name",
@@ -76,13 +130,39 @@ class AzureBlobSinkConfig(DataPluginConfig):
         description="CSV writing options (delimiter, encoding, include_header)",
     )
 
-    @field_validator("connection_string")
-    @classmethod
-    def validate_connection_string_not_empty(cls, v: str) -> str:
-        """Validate that connection_string is not empty or whitespace-only."""
-        if not v or not v.strip():
-            raise ValueError("connection_string cannot be empty")
-        return v
+    @model_validator(mode="after")
+    def validate_auth_config(self) -> Self:
+        """Validate authentication configuration via AzureAuthConfig.
+
+        Delegates to AzureAuthConfig for comprehensive auth validation,
+        ensuring exactly one auth method is configured.
+        """
+        # Create AzureAuthConfig to validate auth fields
+        # This will raise ValueError with descriptive messages if invalid
+        AzureAuthConfig(
+            connection_string=self.connection_string,
+            use_managed_identity=self.use_managed_identity,
+            account_url=self.account_url,
+            tenant_id=self.tenant_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+        )
+        return self
+
+    def get_auth_config(self) -> AzureAuthConfig:
+        """Get the AzureAuthConfig for this sink configuration.
+
+        Returns:
+            AzureAuthConfig instance with the auth fields from this config.
+        """
+        return AzureAuthConfig(
+            connection_string=self.connection_string,
+            use_managed_identity=self.use_managed_identity,
+            account_url=self.account_url,
+            tenant_id=self.tenant_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+        )
 
     @field_validator("container")
     @classmethod
@@ -105,13 +185,20 @@ class AzureBlobSink(BaseSink):
     """Write rows to Azure Blob Storage.
 
     Config options:
-        connection_string: Azure Storage connection string (required)
-        container: Blob container name (required)
-        blob_path: Path to blob within container, supports Jinja2 (required)
-        format: "csv", "json" (array), or "jsonl" (lines). Default: "csv"
-        overwrite: Whether to overwrite existing blob. Default: True
-        csv_options: CSV writing options (delimiter, encoding, include_header)
-        schema: Schema configuration (required, via DataPluginConfig)
+        Authentication (exactly one required):
+        - connection_string: Azure Storage connection string
+        - use_managed_identity + account_url: Azure Managed Identity
+        - tenant_id + client_id + client_secret + account_url: Service Principal
+
+        Blob location:
+        - container: Blob container name (required)
+        - blob_path: Path to blob within container, supports Jinja2 (required)
+        - format: "csv", "json" (array), or "jsonl" (lines). Default: "csv"
+        - overwrite: Whether to overwrite existing blob. Default: True
+
+        Writing options:
+        - csv_options: CSV writing options (delimiter, encoding, include_header)
+        - schema: Schema configuration (required, via DataPluginConfig)
 
     Blob path templating:
         The blob_path can contain Jinja2 templates for dynamic paths:
@@ -132,7 +219,8 @@ class AzureBlobSink(BaseSink):
         super().__init__(config)
         cfg = AzureBlobSinkConfig.from_dict(config)
 
-        self._connection_string = cfg.connection_string
+        # Store auth config for creating clients
+        self._auth_config = cfg.get_auth_config()
         self._container = cfg.container
         self._blob_path_template = cfg.blob_path
         self._format = cfg.format
@@ -163,24 +251,19 @@ class AzureBlobSink(BaseSink):
     def _get_container_client(self) -> ContainerClient:
         """Get or create the Azure container client.
 
+        Uses the configured authentication method (connection string,
+        managed identity, or service principal) to create the client.
+
         Returns:
             ContainerClient for the configured container.
 
         Raises:
-            ImportError: If azure-storage-blob is not installed.
+            ImportError: If azure-storage-blob (or azure-identity for
+                managed identity/service principal) is not installed.
         """
         if self._container_client is None:
-            try:
-                from azure.storage.blob import BlobServiceClient
-            except ImportError as e:
-                raise ImportError(
-                    "azure-storage-blob is required for AzureBlobSink. "
-                    "Install with: uv pip install azure-storage-blob"
-                ) from e
-
-            service_client = BlobServiceClient.from_connection_string(
-                self._connection_string
-            )
+            # Use shared auth config to create the service client
+            service_client = self._auth_config.create_blob_service_client()
             self._container_client = service_client.get_container_client(
                 self._container
             )

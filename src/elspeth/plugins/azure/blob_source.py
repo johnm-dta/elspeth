@@ -12,12 +12,13 @@ from __future__ import annotations
 import io
 import json
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import pandas as pd
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from elspeth.contracts import PluginSchema, SourceRow
+from elspeth.plugins.azure.auth import AzureAuthConfig
 from elspeth.plugins.base import BaseSource
 from elspeth.plugins.config_base import DataPluginConfig
 from elspeth.plugins.context import PluginContext
@@ -51,12 +52,65 @@ class AzureBlobSourceConfig(DataPluginConfig):
 
     Extends DataPluginConfig which requires schema configuration.
     Unlike file-based sources, does not extend PathConfig (no local file path).
+
+    Supports three authentication methods (mutually exclusive):
+    1. connection_string - Simple connection string auth (default)
+    2. use_managed_identity + account_url - Azure Managed Identity
+    3. tenant_id + client_id + client_secret + account_url - Service Principal
+
+    Example configurations:
+
+        # Option 1: Connection string (simplest)
+        connection_string: "${AZURE_STORAGE_CONNECTION_STRING}"
+        container: "my-container"
+        blob_path: "data/input.csv"
+
+        # Option 2: Managed Identity (for Azure-hosted workloads)
+        use_managed_identity: true
+        account_url: "https://mystorageaccount.blob.core.windows.net"
+        container: "my-container"
+        blob_path: "data/input.csv"
+
+        # Option 3: Service Principal
+        tenant_id: "${AZURE_TENANT_ID}"
+        client_id: "${AZURE_CLIENT_ID}"
+        client_secret: "${AZURE_CLIENT_SECRET}"
+        account_url: "https://mystorageaccount.blob.core.windows.net"
+        container: "my-container"
+        blob_path: "data/input.csv"
     """
 
-    connection_string: str = Field(
-        ...,
+    # Auth Option 1: Connection string
+    connection_string: str | None = Field(
+        default=None,
         description="Azure Storage connection string",
     )
+
+    # Auth Option 2: Managed Identity
+    use_managed_identity: bool = Field(
+        default=False,
+        description="Use Azure Managed Identity for authentication",
+    )
+    account_url: str | None = Field(
+        default=None,
+        description="Azure Storage account URL (e.g., https://mystorageaccount.blob.core.windows.net)",
+    )
+
+    # Auth Option 3: Service Principal
+    tenant_id: str | None = Field(
+        default=None,
+        description="Azure AD tenant ID for Service Principal auth",
+    )
+    client_id: str | None = Field(
+        default=None,
+        description="Azure AD client ID for Service Principal auth",
+    )
+    client_secret: str | None = Field(
+        default=None,
+        description="Azure AD client secret for Service Principal auth",
+    )
+
+    # Blob location (required for all auth methods)
     container: str = Field(
         ...,
         description="Azure Blob container name",
@@ -82,13 +136,39 @@ class AzureBlobSourceConfig(DataPluginConfig):
         description="Sink name for non-conformant rows, or 'discard' for explicit drop",
     )
 
-    @field_validator("connection_string")
-    @classmethod
-    def validate_connection_string_not_empty(cls, v: str) -> str:
-        """Validate that connection_string is not empty or whitespace-only."""
-        if not v or not v.strip():
-            raise ValueError("connection_string cannot be empty")
-        return v
+    @model_validator(mode="after")
+    def validate_auth_config(self) -> Self:
+        """Validate authentication configuration via AzureAuthConfig.
+
+        Delegates to AzureAuthConfig for comprehensive auth validation,
+        ensuring exactly one auth method is configured.
+        """
+        # Create AzureAuthConfig to validate auth fields
+        # This will raise ValueError with descriptive messages if invalid
+        AzureAuthConfig(
+            connection_string=self.connection_string,
+            use_managed_identity=self.use_managed_identity,
+            account_url=self.account_url,
+            tenant_id=self.tenant_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+        )
+        return self
+
+    def get_auth_config(self) -> AzureAuthConfig:
+        """Get the AzureAuthConfig for this source configuration.
+
+        Returns:
+            AzureAuthConfig instance with the auth fields from this config.
+        """
+        return AzureAuthConfig(
+            connection_string=self.connection_string,
+            use_managed_identity=self.use_managed_identity,
+            account_url=self.account_url,
+            tenant_id=self.tenant_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+        )
 
     @field_validator("container")
     @classmethod
@@ -119,14 +199,21 @@ class AzureBlobSource(BaseSource):
     """Load rows from Azure Blob Storage.
 
     Config options:
-        connection_string: Azure Storage connection string (required)
-        container: Blob container name (required)
-        blob_path: Path to blob within container (required)
-        format: "csv", "json" (array), or "jsonl" (lines). Default: "csv"
-        csv_options: CSV parsing options (delimiter, has_header, encoding)
-        json_options: JSON parsing options (encoding, data_key)
-        schema: Schema configuration (required, via DataPluginConfig)
-        on_validation_failure: Sink name or "discard" (required)
+        Authentication (exactly one required):
+        - connection_string: Azure Storage connection string
+        - use_managed_identity + account_url: Azure Managed Identity
+        - tenant_id + client_id + client_secret + account_url: Service Principal
+
+        Blob location:
+        - container: Blob container name (required)
+        - blob_path: Path to blob within container (required)
+        - format: "csv", "json" (array), or "jsonl" (lines). Default: "csv"
+
+        Parsing options:
+        - csv_options: CSV parsing options (delimiter, has_header, encoding)
+        - json_options: JSON parsing options (encoding, data_key)
+        - schema: Schema configuration (required, via DataPluginConfig)
+        - on_validation_failure: Sink name or "discard" (required)
 
     The schema can be:
         - Dynamic: {"fields": "dynamic"} - accept any fields
@@ -145,7 +232,8 @@ class AzureBlobSource(BaseSource):
         super().__init__(config)
         cfg = AzureBlobSourceConfig.from_dict(config)
 
-        self._connection_string = cfg.connection_string
+        # Store auth config for creating clients
+        self._auth_config = cfg.get_auth_config()
         self._container = cfg.container
         self._blob_path = cfg.blob_path
         self._format = cfg.format
@@ -177,24 +265,19 @@ class AzureBlobSource(BaseSource):
     def _get_blob_client(self) -> BlobClient:
         """Get or create the Azure Blob client.
 
+        Uses the configured authentication method (connection string,
+        managed identity, or service principal) to create the client.
+
         Returns:
             BlobClient for the configured blob.
 
         Raises:
-            ImportError: If azure-storage-blob is not installed.
+            ImportError: If azure-storage-blob (or azure-identity for
+                managed identity/service principal) is not installed.
         """
         if self._blob_client is None:
-            try:
-                from azure.storage.blob import BlobServiceClient
-            except ImportError as e:
-                raise ImportError(
-                    "azure-storage-blob is required for AzureBlobSource. "
-                    "Install with: uv pip install azure-storage-blob"
-                ) from e
-
-            service_client = BlobServiceClient.from_connection_string(
-                self._connection_string
-            )
+            # Use shared auth config to create the service client
+            service_client = self._auth_config.create_blob_service_client()
             container_client = service_client.get_container_client(self._container)
             self._blob_client = container_client.get_blob_client(self._blob_path)
 

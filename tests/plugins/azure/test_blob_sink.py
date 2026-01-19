@@ -21,6 +21,14 @@ TEST_CONNECTION_STRING = (
 TEST_CONTAINER = "output-container"
 TEST_BLOB_PATH = "results/output.csv"
 
+# Managed Identity test values
+TEST_ACCOUNT_URL = "https://mystorageaccount.blob.core.windows.net"
+
+# Service Principal test values
+TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001"
+TEST_CLIENT_ID = "00000000-0000-0000-0000-000000000002"
+TEST_CLIENT_SECRET = "test-secret-value"
+
 
 @pytest.fixture
 def ctx() -> PluginContext:
@@ -39,7 +47,16 @@ def mock_container_client():
 
 def make_config(
     *,
-    connection_string: str = TEST_CONNECTION_STRING,
+    # Auth Option 1: Connection string (default)
+    connection_string: str | None = TEST_CONNECTION_STRING,
+    # Auth Option 2: Managed Identity
+    use_managed_identity: bool = False,
+    account_url: str | None = None,
+    # Auth Option 3: Service Principal
+    tenant_id: str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+    # Blob location
     container: str = TEST_CONTAINER,
     blob_path: str = TEST_BLOB_PATH,
     format: str = "csv",
@@ -47,15 +64,33 @@ def make_config(
     csv_options: dict | None = None,
     schema: dict | None = None,
 ) -> dict:
-    """Helper to create config dicts with defaults."""
+    """Helper to create config dicts with defaults.
+
+    By default uses connection_string auth. Pass connection_string=None
+    and set other auth options for managed identity or service principal.
+    """
     config: dict = {
-        "connection_string": connection_string,
         "container": container,
         "blob_path": blob_path,
         "format": format,
         "overwrite": overwrite,
         "schema": schema or DYNAMIC_SCHEMA,
     }
+
+    # Add auth fields based on what's provided
+    if connection_string is not None:
+        config["connection_string"] = connection_string
+    if use_managed_identity:
+        config["use_managed_identity"] = use_managed_identity
+    if account_url is not None:
+        config["account_url"] = account_url
+    if tenant_id is not None:
+        config["tenant_id"] = tenant_id
+    if client_id is not None:
+        config["client_id"] = client_id
+    if client_secret is not None:
+        config["client_secret"] = client_secret
+
     if csv_options:
         config["csv_options"] = csv_options
     return config
@@ -79,9 +114,9 @@ class TestAzureBlobSinkProtocol:
 class TestAzureBlobSinkConfigValidation:
     """Tests for AzureBlobSink config validation."""
 
-    def test_missing_connection_string_raises_error(self) -> None:
-        """Missing connection_string raises PluginConfigError."""
-        with pytest.raises(PluginConfigError, match="connection_string"):
+    def test_no_auth_method_raises_error(self) -> None:
+        """Missing all auth configuration raises PluginConfigError."""
+        with pytest.raises(PluginConfigError, match="No authentication method"):
             AzureBlobSink(
                 {
                     "container": TEST_CONTAINER,
@@ -91,10 +126,8 @@ class TestAzureBlobSinkConfigValidation:
             )
 
     def test_empty_connection_string_raises_error(self) -> None:
-        """Empty connection_string raises PluginConfigError."""
-        with pytest.raises(
-            PluginConfigError, match="connection_string cannot be empty"
-        ):
+        """Empty connection_string (without other auth) raises PluginConfigError."""
+        with pytest.raises(PluginConfigError, match="No authentication method"):
             AzureBlobSink(make_config(connection_string=""))
 
     def test_missing_container_raises_error(self) -> None:
@@ -542,3 +575,250 @@ class TestAzureBlobSinkImportError:
 
             with pytest.raises(ImportError, match="azure-storage-blob"):
                 sink.write([{"id": 1}], ctx)
+
+
+class TestAzureBlobSinkAuthMethods:
+    """Tests for Azure authentication methods."""
+
+    def test_auth_connection_string(self, mock_container_client: MagicMock) -> None:
+        """Connection string auth creates sink successfully."""
+        sink = AzureBlobSink(make_config(connection_string=TEST_CONNECTION_STRING))
+        assert sink._auth_config.auth_method == "connection_string"
+        assert sink._auth_config.connection_string == TEST_CONNECTION_STRING
+
+    def test_auth_managed_identity(self, mock_container_client: MagicMock) -> None:
+        """Managed identity auth creates sink successfully."""
+        sink = AzureBlobSink(
+            make_config(
+                connection_string=None,
+                use_managed_identity=True,
+                account_url=TEST_ACCOUNT_URL,
+            )
+        )
+        assert sink._auth_config.auth_method == "managed_identity"
+        assert sink._auth_config.use_managed_identity is True
+        assert sink._auth_config.account_url == TEST_ACCOUNT_URL
+
+    def test_auth_service_principal(self, mock_container_client: MagicMock) -> None:
+        """Service principal auth creates sink successfully."""
+        sink = AzureBlobSink(
+            make_config(
+                connection_string=None,
+                tenant_id=TEST_TENANT_ID,
+                client_id=TEST_CLIENT_ID,
+                client_secret=TEST_CLIENT_SECRET,
+                account_url=TEST_ACCOUNT_URL,
+            )
+        )
+        assert sink._auth_config.auth_method == "service_principal"
+        assert sink._auth_config.tenant_id == TEST_TENANT_ID
+        assert sink._auth_config.client_id == TEST_CLIENT_ID
+        assert sink._auth_config.client_secret == TEST_CLIENT_SECRET
+        assert sink._auth_config.account_url == TEST_ACCOUNT_URL
+
+    def test_auth_mutual_exclusivity_conn_string_and_managed_identity(self) -> None:
+        """Cannot use connection string and managed identity together."""
+        with pytest.raises(PluginConfigError, match="Multiple authentication methods"):
+            AzureBlobSink(
+                make_config(
+                    connection_string=TEST_CONNECTION_STRING,
+                    use_managed_identity=True,
+                    account_url=TEST_ACCOUNT_URL,
+                )
+            )
+
+    def test_auth_mutual_exclusivity_conn_string_and_service_principal(self) -> None:
+        """Cannot use connection string and service principal together."""
+        with pytest.raises(PluginConfigError, match="Multiple authentication methods"):
+            AzureBlobSink(
+                make_config(
+                    connection_string=TEST_CONNECTION_STRING,
+                    tenant_id=TEST_TENANT_ID,
+                    client_id=TEST_CLIENT_ID,
+                    client_secret=TEST_CLIENT_SECRET,
+                    account_url=TEST_ACCOUNT_URL,
+                )
+            )
+
+    def test_auth_mutual_exclusivity_managed_identity_and_service_principal(
+        self,
+    ) -> None:
+        """Cannot use managed identity and service principal together."""
+        with pytest.raises(PluginConfigError, match="Multiple authentication methods"):
+            AzureBlobSink(
+                make_config(
+                    connection_string=None,
+                    use_managed_identity=True,
+                    tenant_id=TEST_TENANT_ID,
+                    client_id=TEST_CLIENT_ID,
+                    client_secret=TEST_CLIENT_SECRET,
+                    account_url=TEST_ACCOUNT_URL,
+                )
+            )
+
+    def test_auth_managed_identity_missing_account_url(self) -> None:
+        """Managed identity requires account_url."""
+        with pytest.raises(PluginConfigError, match="account_url"):
+            AzureBlobSink(
+                make_config(
+                    connection_string=None,
+                    use_managed_identity=True,
+                    # account_url omitted
+                )
+            )
+
+    def test_auth_service_principal_missing_tenant_id(self) -> None:
+        """Service principal requires all fields - missing tenant_id."""
+        with pytest.raises(PluginConfigError, match="tenant_id"):
+            AzureBlobSink(
+                make_config(
+                    connection_string=None,
+                    # tenant_id omitted
+                    client_id=TEST_CLIENT_ID,
+                    client_secret=TEST_CLIENT_SECRET,
+                    account_url=TEST_ACCOUNT_URL,
+                )
+            )
+
+    def test_auth_service_principal_missing_client_id(self) -> None:
+        """Service principal requires all fields - missing client_id."""
+        with pytest.raises(PluginConfigError, match="client_id"):
+            AzureBlobSink(
+                make_config(
+                    connection_string=None,
+                    tenant_id=TEST_TENANT_ID,
+                    # client_id omitted
+                    client_secret=TEST_CLIENT_SECRET,
+                    account_url=TEST_ACCOUNT_URL,
+                )
+            )
+
+    def test_auth_service_principal_missing_client_secret(self) -> None:
+        """Service principal requires all fields - missing client_secret."""
+        with pytest.raises(PluginConfigError, match="client_secret"):
+            AzureBlobSink(
+                make_config(
+                    connection_string=None,
+                    tenant_id=TEST_TENANT_ID,
+                    client_id=TEST_CLIENT_ID,
+                    # client_secret omitted
+                    account_url=TEST_ACCOUNT_URL,
+                )
+            )
+
+    def test_auth_service_principal_missing_account_url(self) -> None:
+        """Service principal requires all fields - missing account_url."""
+        with pytest.raises(PluginConfigError, match="account_url"):
+            AzureBlobSink(
+                make_config(
+                    connection_string=None,
+                    tenant_id=TEST_TENANT_ID,
+                    client_id=TEST_CLIENT_ID,
+                    client_secret=TEST_CLIENT_SECRET,
+                    # account_url omitted
+                )
+            )
+
+
+class TestAzureBlobSinkAuthClientCreation:
+    """Tests for Azure auth client creation with mocked credentials.
+
+    These tests verify that the correct Azure SDK methods are called
+    based on the authentication method. They require azure-storage-blob
+    and azure-identity to be installed to run.
+    """
+
+    @pytest.fixture(autouse=True)
+    def skip_if_no_azure(self) -> None:
+        """Skip these tests if Azure SDK is not installed."""
+        pytest.importorskip("azure.storage.blob")
+        pytest.importorskip("azure.identity")
+
+    def test_managed_identity_uses_default_credential(self, ctx: PluginContext) -> None:
+        """Managed identity auth uses DefaultAzureCredential."""
+        sink = AzureBlobSink(
+            make_config(
+                connection_string=None,
+                use_managed_identity=True,
+                account_url=TEST_ACCOUNT_URL,
+            )
+        )
+
+        # Mock the azure.identity and azure.storage.blob imports
+        with (
+            patch("azure.identity.DefaultAzureCredential") as mock_credential_cls,
+            patch("azure.storage.blob.BlobServiceClient") as mock_service_client_cls,
+        ):
+            mock_credential = MagicMock()
+            mock_credential_cls.return_value = mock_credential
+            mock_service_client = MagicMock()
+            mock_service_client_cls.return_value = mock_service_client
+
+            # Trigger client creation
+            sink._auth_config.create_blob_service_client()
+
+            # Verify DefaultAzureCredential was instantiated
+            mock_credential_cls.assert_called_once()
+            # Verify BlobServiceClient was created with account_url and credential
+            mock_service_client_cls.assert_called_once_with(
+                TEST_ACCOUNT_URL, credential=mock_credential
+            )
+
+    def test_service_principal_uses_client_secret_credential(
+        self, ctx: PluginContext
+    ) -> None:
+        """Service principal auth uses ClientSecretCredential."""
+        sink = AzureBlobSink(
+            make_config(
+                connection_string=None,
+                tenant_id=TEST_TENANT_ID,
+                client_id=TEST_CLIENT_ID,
+                client_secret=TEST_CLIENT_SECRET,
+                account_url=TEST_ACCOUNT_URL,
+            )
+        )
+
+        # Mock the azure.identity and azure.storage.blob imports
+        with (
+            patch("azure.identity.ClientSecretCredential") as mock_credential_cls,
+            patch("azure.storage.blob.BlobServiceClient") as mock_service_client_cls,
+        ):
+            mock_credential = MagicMock()
+            mock_credential_cls.return_value = mock_credential
+            mock_service_client = MagicMock()
+            mock_service_client_cls.return_value = mock_service_client
+
+            # Trigger client creation
+            sink._auth_config.create_blob_service_client()
+
+            # Verify ClientSecretCredential was instantiated with correct args
+            mock_credential_cls.assert_called_once_with(
+                tenant_id=TEST_TENANT_ID,
+                client_id=TEST_CLIENT_ID,
+                client_secret=TEST_CLIENT_SECRET,
+            )
+            # Verify BlobServiceClient was created with account_url and credential
+            mock_service_client_cls.assert_called_once_with(
+                TEST_ACCOUNT_URL, credential=mock_credential
+            )
+
+    def test_connection_string_uses_from_connection_string(
+        self, ctx: PluginContext
+    ) -> None:
+        """Connection string auth uses from_connection_string factory."""
+        sink = AzureBlobSink(make_config(connection_string=TEST_CONNECTION_STRING))
+
+        # Mock the azure.storage.blob import
+        with patch("azure.storage.blob.BlobServiceClient") as mock_service_client_cls:
+            mock_service_client = MagicMock()
+            mock_service_client_cls.from_connection_string.return_value = (
+                mock_service_client
+            )
+
+            # Trigger client creation
+            sink._auth_config.create_blob_service_client()
+
+            # Verify from_connection_string was called
+            mock_service_client_cls.from_connection_string.assert_called_once_with(
+                TEST_CONNECTION_STRING
+            )

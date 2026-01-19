@@ -140,7 +140,6 @@ class AzureBatchLLMTransform(BaseTransform):
         self._response_field = cfg.response_field
         self._poll_interval = cfg.poll_interval_seconds
         self._max_wait_hours = cfg.max_wait_hours
-        self._on_error = cfg.on_error
 
         # Schema from config
         assert cfg.schema_config is not None
@@ -246,14 +245,8 @@ class AzureBatchLLMTransform(BaseTransform):
             BatchPendingError: When batch is pending completion
         """
         if not rows:
-            # Empty batch - return empty results
-            # Note: success_multi requires at least one row, so we handle specially
-            return TransformResult(
-                status="success",
-                row=None,
-                reason=None,
-                rows=[],
-            )
+            # Empty batch - return success with metadata (matches BatchReplicate pattern)
+            return TransformResult.success({"batch_empty": True, "row_count": 0})
 
         # Check checkpoint for resume
         checkpoint = self._get_checkpoint(ctx)
@@ -273,10 +266,16 @@ class AzureBatchLLMTransform(BaseTransform):
 
         Returns:
             Checkpoint dict or None if no checkpoint
+
+        Raises:
+            RuntimeError: If checkpoint API is not available on context
         """
-        if hasattr(ctx, "get_checkpoint"):
-            return ctx.get_checkpoint()  # type: ignore[no-any-return]
-        return None
+        if not hasattr(ctx, "get_checkpoint"):
+            raise RuntimeError(
+                "AzureBatchLLMTransform requires checkpoint API on PluginContext. "
+                "Ensure engine provides get_checkpoint/update_checkpoint/clear_checkpoint methods."
+            )
+        return ctx.get_checkpoint()  # type: ignore[no-any-return]
 
     def _update_checkpoint(self, ctx: PluginContext, data: dict[str, Any]) -> None:
         """Update checkpoint state.
@@ -284,18 +283,32 @@ class AzureBatchLLMTransform(BaseTransform):
         Args:
             ctx: Plugin context
             data: Checkpoint data to save
+
+        Raises:
+            RuntimeError: If checkpoint API is not available on context
         """
-        if hasattr(ctx, "update_checkpoint"):
-            ctx.update_checkpoint(data)
+        if not hasattr(ctx, "update_checkpoint"):
+            raise RuntimeError(
+                "AzureBatchLLMTransform requires checkpoint API on PluginContext. "
+                "Ensure engine provides get_checkpoint/update_checkpoint/clear_checkpoint methods."
+            )
+        ctx.update_checkpoint(data)
 
     def _clear_checkpoint(self, ctx: PluginContext) -> None:
         """Clear checkpoint state.
 
         Args:
             ctx: Plugin context
+
+        Raises:
+            RuntimeError: If checkpoint API is not available on context
         """
-        if hasattr(ctx, "clear_checkpoint"):
-            ctx.clear_checkpoint()
+        if not hasattr(ctx, "clear_checkpoint"):
+            raise RuntimeError(
+                "AzureBatchLLMTransform requires checkpoint API on PluginContext. "
+                "Ensure engine provides get_checkpoint/update_checkpoint/clear_checkpoint methods."
+            )
+        ctx.clear_checkpoint()
 
     def _submit_batch(
         self,
@@ -532,6 +545,11 @@ class AzureBatchLLMTransform(BaseTransform):
         # Track which rows had template errors (excluded from batch)
         template_error_indices = {idx for idx, _ in template_errors}
 
+        # Build reverse mapping once (O(n) instead of O(n^2) lookup per row)
+        idx_to_custom_id: dict[int, str] = {
+            ridx: cid for cid, ridx in row_mapping.items()
+        }
+
         for idx, row in enumerate(rows):
             if idx in template_error_indices:
                 # Row had template error - include original row with error field
@@ -547,10 +565,8 @@ class AzureBatchLLMTransform(BaseTransform):
                 output_rows.append(output_row)
                 continue
 
-            # Find result by custom_id
-            custom_id = next(
-                (cid for cid, ridx in row_mapping.items() if ridx == idx), None
-            )
+            # Find result by custom_id using pre-built reverse mapping
+            custom_id = idx_to_custom_id.get(idx)
 
             if custom_id is None or custom_id not in results_by_id:
                 # Result not found - should not happen

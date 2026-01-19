@@ -345,8 +345,13 @@ class TestAzureBatchLLMTransformEmptyBatch:
 
     @pytest.fixture
     def ctx(self) -> PluginContext:
-        """Create minimal plugin context."""
-        return PluginContext(run_id="test-run", config={})
+        """Create plugin context with checkpoint support."""
+        ctx = PluginContext(run_id="test-run", config={})
+        ctx._checkpoint = {}  # type: ignore[attr-defined]
+        ctx.get_checkpoint = lambda: ctx._checkpoint or None  # type: ignore[attr-defined]
+        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[attr-defined]
+        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[attr-defined]
+        return ctx
 
     @pytest.fixture
     def transform(self) -> AzureBatchLLMTransform:
@@ -361,15 +366,48 @@ class TestAzureBatchLLMTransformEmptyBatch:
             }
         )
 
-    def test_empty_batch_returns_empty_results(
+    def test_empty_batch_returns_success_with_metadata(
         self, ctx: PluginContext, transform: AzureBatchLLMTransform
     ) -> None:
-        """Empty batch returns empty results without API call."""
+        """Empty batch returns success with batch_empty metadata."""
         result = transform.process([], ctx)
 
         assert result.status == "success"
-        assert result.rows == []
-        assert result.row is None
+        assert result.row is not None
+        assert result.row["batch_empty"] is True
+        assert result.row["row_count"] == 0
+
+
+class TestAzureBatchLLMTransformCheckpointRequired:
+    """Tests for checkpoint API requirement."""
+
+    @pytest.fixture
+    def transform(self) -> AzureBatchLLMTransform:
+        """Create a basic transform."""
+        return AzureBatchLLMTransform(
+            {
+                "deployment_name": "my-gpt4o-batch",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "azure-api-key",
+                "template": "{{ text }}",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+    def test_raises_without_checkpoint_api(
+        self, transform: AzureBatchLLMTransform
+    ) -> None:
+        """Processing fails with RuntimeError when checkpoint API is missing."""
+        # Context without checkpoint methods
+        ctx = PluginContext(run_id="test-run", config={})
+
+        rows = [{"text": "hello"}]
+
+        with pytest.raises(RuntimeError) as exc_info:
+            transform.process(rows, ctx)
+
+        assert "checkpoint API" in str(exc_info.value)
+        assert "get_checkpoint" in str(exc_info.value)
 
 
 class TestAzureBatchLLMTransformSubmit:

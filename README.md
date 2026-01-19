@@ -277,6 +277,42 @@ llm:
     api_key: ${OPENAI_API_KEY}  # Loaded from environment
 ```
 
+### Secret Fingerprinting
+
+ELSPETH fingerprints sensitive configuration values (API keys, tokens, passwords) before storing them in the audit trail. This ensures secrets are never written to the database in plain text.
+
+#### Required Environment Variable
+
+```bash
+# Production: Set a stable secret key for fingerprinting
+export ELSPETH_FINGERPRINT_KEY="your-secret-key-here"
+```
+
+**IMPORTANT:** If `ELSPETH_FINGERPRINT_KEY` is not set and your configuration contains secrets, ELSPETH will raise a `SecretFingerprintError` at startup. This is intentional - silent secret leakage to the audit database is a security risk.
+
+#### Development Mode
+
+For local development where fingerprint stability isn't required:
+
+```bash
+# Development only: Allow secrets without fingerprinting
+export ELSPETH_ALLOW_RAW_SECRETS=true
+```
+
+This will redact secrets (replacing them with `[REDACTED]`) instead of fingerprinting them. **Do not use in production.**
+
+#### What Gets Fingerprinted
+
+- Plugin options with secret-like field names (`api_key`, `token`, `password`, `secret`, etc.)
+- Nested secrets in configuration objects
+- Database passwords in `landscape.url` DSN strings
+
+#### Behavior Change Notice
+
+Prior versions silently preserved raw secrets when `ELSPETH_FINGERPRINT_KEY` was unset. Current versions fail-closed by default - you must either:
+1. Set `ELSPETH_FINGERPRINT_KEY` (recommended), or
+2. Explicitly opt-in to dev mode with `ELSPETH_ALLOW_RAW_SECRETS=true`
+
 ## Architecture
 
 ```

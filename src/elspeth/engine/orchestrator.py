@@ -587,6 +587,15 @@ class Orchestrator:
                 coalesce_node_id = coalesce_id_map[coalesce_settings.name]
                 coalesce_executor.register_coalesce(coalesce_settings, coalesce_node_id)
 
+        # Compute coalesce step positions
+        # Coalesce step = after all transforms and gates
+        coalesce_step_map: dict[str, int] = {}
+        if settings is not None and settings.coalesce:
+            base_step = len(config.transforms) + len(config.gates)
+            for i, cs in enumerate(settings.coalesce):
+                # Each coalesce gets its own step (in case of multiple)
+                coalesce_step_map[cs.name] = base_step + i
+
         # Create processor with config gates info
         processor = RowProcessor(
             recorder=recorder,
@@ -602,6 +611,7 @@ class Orchestrator:
             coalesce_executor=coalesce_executor,
             coalesce_node_ids=coalesce_id_map,
             branch_to_coalesce=branch_to_coalesce,
+            coalesce_step_map=coalesce_step_map,
         )
 
         # Process rows - Buffer TOKENS, not dicts, to preserve identity

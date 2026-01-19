@@ -4377,3 +4377,90 @@ class TestCoalesceWiring:
 
             # No merged tokens means no rows_coalesced increment
             assert result.rows_coalesced == 0
+
+    def test_orchestrator_computes_coalesce_step_map(self) -> None:
+        """Orchestrator should compute step positions for each coalesce point."""
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            RowPluginSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv", options={"path": "test.csv"}),
+            sinks={"output": SinkSettings(plugin="csv", options={"path": "out.csv"})},
+            output_sink="output",
+            row_plugins=[
+                RowPluginSettings(plugin="passthrough"),  # Step 0
+                RowPluginSettings(plugin="passthrough"),  # Step 1
+            ],
+            gates=[
+                GateSettings(
+                    name="forker",  # Step 2
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",  # Step 3
+                    branches=["path_a", "path_b"],
+                    policy="require_all",
+                    merge="union",
+                ),
+            ],
+        )
+
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([])
+        mock_source.plugin_version = "1.0.0"
+        mock_source.determinism = "deterministic"
+        mock_source.output_schema = _TestSchema
+
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+        mock_sink.plugin_version = "1.0.0"
+        mock_sink.determinism = "deterministic"
+        mock_sink.input_schema = _TestSchema
+
+        mock_transform = MagicMock()
+        mock_transform.name = "passthrough"
+        mock_transform.plugin_version = "1.0.0"
+        mock_transform.determinism = "deterministic"
+        mock_transform.is_batch_aware = False
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[mock_transform, mock_transform],
+            sinks={"output": mock_sink},
+            gates=settings.gates,
+        )
+
+        db = LandscapeDB.in_memory()
+        orchestrator = Orchestrator(db=db)
+
+        # Build the graph from settings (which includes coalesce)
+        graph = ExecutionGraph.from_config(settings)
+
+        with patch("elspeth.engine.orchestrator.RowProcessor") as mock_processor_cls:
+            mock_processor = MagicMock()
+            mock_processor.process_row.return_value = []
+            mock_processor_cls.return_value = mock_processor
+
+            orchestrator.run(config, graph=graph, settings=settings)
+
+            # Check coalesce_step_map was passed
+            call_kwargs = mock_processor_cls.call_args.kwargs
+            assert "coalesce_step_map" in call_kwargs
+            # 2 transforms + 1 gate = step 3 for coalesce
+            assert call_kwargs["coalesce_step_map"]["merge_results"] == 3

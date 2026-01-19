@@ -1,8 +1,6 @@
 """Tests for update schema TypedDicts."""
 
-from datetime import datetime
-
-import pytest
+from datetime import UTC, datetime
 
 
 class TestUpdateSchemas:
@@ -15,7 +13,7 @@ class TestUpdateSchemas:
         # Should accept all valid fields
         update: ExportStatusUpdate = {
             "export_status": ExportStatus.COMPLETED,
-            "exported_at": datetime.now(),
+            "exported_at": datetime.now(UTC),
         }
         assert "export_status" in update
 
@@ -43,7 +41,7 @@ class TestUpdateSchemas:
 
         update: BatchStatusUpdate = {
             "status": BatchStatus.COMPLETED,
-            "completed_at": datetime.now(),
+            "completed_at": datetime.now(UTC),
             "aggregation_state_id": "state-123",
         }
         assert "aggregation_state_id" in update

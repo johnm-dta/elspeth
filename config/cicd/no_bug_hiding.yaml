@@ -245,19 +245,6 @@ allow_hits:
 
 
   # ============================================================
-  # ENVIRONMENT VARIABLE LOOKUP (Permanent)
-  # ============================================================
-  # os.environ.get() is the standard Python pattern for optional environment
-  # variables. This is explicitly checked and raises if missing when required.
-  # ============================================================
-
-  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=715"
-    owner: "architecture"
-    reason: "Standard pattern: optional environment variable with explicit check"
-    safety: "Raises ValueError with clear message if signing enabled but key missing"
-    expires: null  # Permanent - intentional design
-
-  # ============================================================
   # GATE ROUTING LOOKUPS (Permanent)
   # ============================================================
   # Gate executors look up routing destinations and edge IDs. Missing

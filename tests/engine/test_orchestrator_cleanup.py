@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode
+from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.engine.artifacts import ArtifactDescriptor
@@ -106,7 +106,8 @@ class ListSource:
         pass
 
     def load(self, ctx: Any) -> Any:
-        yield from self._data
+        for _row in self._data:
+            yield SourceRow.valid(_row)
 
     def close(self) -> None:
         pass

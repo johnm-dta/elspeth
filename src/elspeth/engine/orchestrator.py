@@ -569,8 +569,30 @@ class Orchestrator:
 
         try:
             with self._span_factory.source_span(config.source.name):
-                for row_index, row_data in enumerate(config.source.load(ctx)):
+                for row_index, source_item in enumerate(config.source.load(ctx)):
                     rows_processed += 1
+
+                    # Handle quarantined source rows - route directly to sink
+                    if source_item.is_quarantined:
+                        rows_quarantined += 1
+                        # Route quarantined row to configured sink if it exists
+                        quarantine_sink = source_item.quarantine_destination
+                        if quarantine_sink and quarantine_sink in config.sinks:
+                            # Create a token for the quarantined row
+                            quarantine_token = (
+                                processor.token_manager.create_initial_token(
+                                    run_id=run_id,
+                                    source_node_id=source_id,
+                                    row_index=row_index,
+                                    row_data=source_item.row,
+                                )
+                            )
+                            pending_tokens[quarantine_sink].append(quarantine_token)
+                        # Skip normal processing - row is already handled
+                        continue
+
+                    # Extract row data from SourceRow (all source items are SourceRow)
+                    row_data: dict[str, Any] = source_item.row
 
                     results = processor.process_row(
                         row_index=row_index,
@@ -712,11 +734,12 @@ class Orchestrator:
         # Get signing key from environment if signing enabled
         signing_key: bytes | None = None
         if export_config.sign:
-            key_str = os.environ.get("ELSPETH_SIGNING_KEY")
-            if not key_str:
+            try:
+                key_str = os.environ["ELSPETH_SIGNING_KEY"]
+            except KeyError:
                 raise ValueError(
                     "ELSPETH_SIGNING_KEY environment variable required for signed export"
-                )
+                ) from None
             signing_key = key_str.encode("utf-8")
 
         # Create exporter

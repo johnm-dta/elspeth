@@ -62,6 +62,7 @@ from elspeth.contracts.results import (
     FailureInfo,
     GateResult,
     RowResult,
+    SourceRow,
     TransformResult,
 )
 from elspeth.contracts.routing import EdgeInfo, RoutingAction, RoutingSpec
@@ -151,6 +152,7 @@ __all__ = [
     "FailureInfo",
     "GateResult",
     "RowResult",
+    "SourceRow",
     "TransformResult",
     # routing
     "EdgeInfo",

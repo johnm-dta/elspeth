@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from elspeth.contracts import Determinism
 
 if TYPE_CHECKING:
-    from elspeth.contracts import ArtifactDescriptor, PluginSchema
+    from elspeth.contracts import ArtifactDescriptor, PluginSchema, SourceRow
     from elspeth.plugins.context import PluginContext
     from elspeth.plugins.results import AcceptResult, GateResult, TransformResult
 
@@ -42,11 +42,11 @@ class SourceProtocol(Protocol):
             name = "csv"
             output_schema = RowSchema
 
-            def load(self, ctx: PluginContext) -> Iterator[dict]:
+            def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
                 with open(self.path) as f:
                     reader = csv.DictReader(f)
                     for row in reader:
-                        yield row
+                        yield SourceRow.valid(row)
     """
 
     name: str
@@ -61,14 +61,15 @@ class SourceProtocol(Protocol):
         """Initialize with configuration."""
         ...
 
-    def load(self, ctx: "PluginContext") -> Iterator[dict[str, Any]]:
+    def load(self, ctx: "PluginContext") -> Iterator["SourceRow"]:
         """Load and yield rows from the source.
 
         Args:
             ctx: Plugin context with run metadata
 
         Yields:
-            Row dicts matching output_schema
+            SourceRow for each row - either SourceRow.valid() for valid rows
+            or SourceRow.quarantined() for invalid rows.
         """
         ...
 
@@ -94,12 +95,22 @@ class SourceProtocol(Protocol):
 class TransformProtocol(Protocol):
     """Protocol for stateless row transforms.
 
-    Transforms process one row and emit one row (possibly modified).
-    They are stateless between rows.
+    Transforms process rows and emit results. They can operate in two modes:
+    - Single row: process(row: dict, ctx) -> TransformResult
+    - Batch: process(rows: list[dict], ctx) -> TransformResult (if is_batch_aware=True)
+
+    The engine decides which mode to use based on:
+    - is_batch_aware attribute (default False)
+    - Aggregation configuration in pipeline
+
+    For batch-aware transforms used in aggregation nodes:
+    - Engine buffers rows until trigger fires
+    - Engine calls process(rows: list[dict], ctx)
+    - Transform returns single aggregated result
 
     Lifecycle:
         - __init__(config): Called once at pipeline construction
-        - process(row, ctx): Called for each row
+        - process(row, ctx): Called for each row (or batch if is_batch_aware)
         - close(): Called at pipeline completion for cleanup
 
     Error Routing (WP-11.99b):
@@ -126,6 +137,10 @@ class TransformProtocol(Protocol):
     # Metadata for Phase 3 audit/reproducibility
     determinism: Determinism
     plugin_version: str
+
+    # Batch support (for aggregation nodes)
+    # When True, engine may pass list[dict] instead of single dict to process()
+    is_batch_aware: bool
 
     # Error routing configuration (WP-11.99b)
     # Transforms extending TransformDataConfig set this from config.

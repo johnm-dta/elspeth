@@ -411,3 +411,136 @@ class TestNoOpLimiter:
 
         limiter = NoOpLimiter()
         limiter.close()  # Should not raise
+
+
+class TestExcepthookSuppression:
+    """Tests for the narrowly-scoped thread exception suppression.
+
+    The rate limiter installs a custom threading.excepthook to suppress
+    benign AssertionError from pyrate-limiter's leaker thread cleanup.
+    These tests verify suppression is narrowly scoped.
+    """
+
+    def test_suppression_only_for_registered_threads(self) -> None:
+        """Unregistered threads should not be suppressed."""
+
+        from elspeth.core.rate_limit.limiter import (
+            _custom_excepthook,
+            _suppressed_lock,
+            _suppressed_thread_idents,
+        )
+
+        # Create a mock ExceptHookArgs for an unregistered thread
+        class MockThread:
+            ident = 99999  # Not in suppression set
+            name = "unregistered_thread"
+
+        class MockArgs:
+            exc_type = AssertionError
+            exc_value = AssertionError("test")
+            exc_traceback = None
+            thread = MockThread()
+
+        # Ensure the thread is NOT in the suppression set
+        with _suppressed_lock:
+            _suppressed_thread_idents.discard(99999)
+
+        # Track if original hook was called
+        original_called = []
+        import elspeth.core.rate_limit.limiter as limiter_module
+
+        original_hook = limiter_module._original_excepthook
+        limiter_module._original_excepthook = lambda args: original_called.append(True)
+
+        try:
+            _custom_excepthook(MockArgs())
+            # Original hook should have been called
+            assert len(original_called) == 1
+        finally:
+            limiter_module._original_excepthook = original_hook
+
+    def test_suppression_only_for_assertion_error(self) -> None:
+        """Only AssertionError should be suppressed, not other exceptions."""
+
+        from elspeth.core.rate_limit.limiter import (
+            _custom_excepthook,
+            _suppressed_lock,
+            _suppressed_thread_idents,
+        )
+
+        class MockThread:
+            ident = 88888
+            name = "registered_thread"
+
+        # Register the thread for suppression
+        with _suppressed_lock:
+            _suppressed_thread_idents.add(88888)
+
+        try:
+            # Test with ValueError - should NOT be suppressed
+            class MockArgsValueError:
+                exc_type = ValueError  # Not AssertionError
+                exc_value = ValueError("test")
+                exc_traceback = None
+                thread = MockThread()
+
+            original_called = []
+            import elspeth.core.rate_limit.limiter as limiter_module
+
+            original_hook = limiter_module._original_excepthook
+            limiter_module._original_excepthook = lambda args: original_called.append(
+                True
+            )
+
+            try:
+                _custom_excepthook(MockArgsValueError())
+                # Original hook should have been called (not suppressed)
+                assert len(original_called) == 1
+            finally:
+                limiter_module._original_excepthook = original_hook
+        finally:
+            with _suppressed_lock:
+                _suppressed_thread_idents.discard(88888)
+
+    def test_suppression_works_for_registered_assertion_error(self) -> None:
+        """Registered thread + AssertionError should be suppressed."""
+
+        from elspeth.core.rate_limit.limiter import (
+            _custom_excepthook,
+            _suppressed_lock,
+            _suppressed_thread_idents,
+        )
+
+        class MockThread:
+            ident = 77777
+            name = "leaker_thread"
+
+        # Register the thread for suppression
+        with _suppressed_lock:
+            _suppressed_thread_idents.add(77777)
+
+        class MockArgs:
+            exc_type = AssertionError
+            exc_value = AssertionError("bucket disposed")
+            exc_traceback = None
+            thread = MockThread()
+
+        original_called = []
+        import elspeth.core.rate_limit.limiter as limiter_module
+
+        original_hook = limiter_module._original_excepthook
+        limiter_module._original_excepthook = lambda args: original_called.append(True)
+
+        try:
+            _custom_excepthook(MockArgs())
+            # Original hook should NOT have been called (suppressed)
+            assert len(original_called) == 0
+
+            # Thread should be removed from suppression set after suppression
+            with _suppressed_lock:
+                assert 77777 not in _suppressed_thread_idents
+        finally:
+            limiter_module._original_excepthook = original_hook
+            # Cleanup just in case
+            with _suppressed_lock:
+                _suppressed_thread_idents.discard(77777)

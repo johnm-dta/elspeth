@@ -239,6 +239,51 @@ class TestFreezeDictDefensiveCopy:
         assert action.reason["nested"]["value"] == 1
 
 
+class TestSourceRow:
+    """Results from source loading - valid or quarantined."""
+
+    def test_quarantined_factory(self) -> None:
+        """quarantined() creates a quarantined row with error info."""
+        from elspeth.plugins.results import SourceRow
+
+        result = SourceRow.quarantined(
+            row={"id": 1, "value": "bad"},
+            error="validation failed: value must be int",
+            destination="quarantine_sink",
+        )
+        assert result.is_quarantined is True
+        assert result.row == {"id": 1, "value": "bad"}
+        assert result.quarantine_error == "validation failed: value must be int"
+        assert result.quarantine_destination == "quarantine_sink"
+
+    def test_quarantined_preserves_original_row(self) -> None:
+        """Quarantined rows preserve the original (invalid) data."""
+        from elspeth.plugins.results import SourceRow
+
+        original = {"score": "not-a-number", "name": "test"}
+        result = SourceRow.quarantined(
+            row=original,
+            error="score must be int",
+            destination="bad_data",
+        )
+        # Original value preserved for audit/debugging
+        assert result.row["score"] == "not-a-number"
+
+    def test_is_dataclass(self) -> None:
+        """SourceRow is a dataclass."""
+        from dataclasses import is_dataclass
+
+        from elspeth.plugins.results import SourceRow
+
+        assert is_dataclass(SourceRow)
+
+    def test_importable_from_contracts(self) -> None:
+        """SourceRow is exported from elspeth.contracts."""
+        from elspeth.contracts import SourceRow
+
+        assert SourceRow is not None
+
+
 class TestPluginsPublicAPI:
     """Public API exports from elspeth.plugins."""
 
@@ -248,6 +293,7 @@ class TestPluginsPublicAPI:
             GateResult,
             RoutingAction,
             RowOutcome,
+            SourceRow,
             TransformResult,
         )
 
@@ -255,6 +301,7 @@ class TestPluginsPublicAPI:
         assert GateResult is not None
         assert RoutingAction is not None
         assert RowOutcome is not None
+        assert SourceRow is not None
         assert TransformResult is not None
 
     def test_context_importable(self) -> None:

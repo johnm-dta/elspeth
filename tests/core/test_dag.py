@@ -109,6 +109,53 @@ class TestDAGValidation:
         # t1 must come before t2
         assert order.index("t1") < order.index("t2")
 
+    def test_validate_rejects_duplicate_outgoing_edge_labels(self) -> None:
+        """Duplicate outgoing edge labels from same node must be rejected.
+
+        The orchestrator's edge_map keys by (from_node, label), so duplicate
+        labels from the same node would cause silent overwrites during
+        registration - routing events would be recorded against the wrong
+        edge, corrupting the audit trail.
+        """
+        from elspeth.core.dag import ExecutionGraph, GraphValidationError
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("gate", node_type="gate", plugin_name="config_gate")
+        graph.add_node("sink_a", node_type="sink", plugin_name="csv")
+        graph.add_node("sink_b", node_type="sink", plugin_name="csv")
+
+        # Gate has one "continue" edge to sink_a
+        graph.add_edge("source", "gate", label="continue")
+        graph.add_edge("gate", "sink_a", label="continue")
+        # Add ANOTHER "continue" edge to a different sink - this is the collision
+        graph.add_edge("gate", "sink_b", label="continue")
+
+        with pytest.raises(GraphValidationError, match="duplicate outgoing edge label"):
+            graph.validate()
+
+    def test_validate_allows_same_label_from_different_nodes(self) -> None:
+        """Same label from different nodes is allowed (no collision).
+
+        The uniqueness constraint is per-node, not global. Multiple nodes
+        can each have a 'continue' edge because edge_map keys by (from_node, label).
+        """
+        from elspeth.core.dag import ExecutionGraph
+
+        graph = ExecutionGraph()
+        graph.add_node("source", node_type="source", plugin_name="csv")
+        graph.add_node("t1", node_type="transform", plugin_name="a")
+        graph.add_node("t2", node_type="transform", plugin_name="b")
+        graph.add_node("sink", node_type="sink", plugin_name="csv")
+
+        # Each node has ONE "continue" edge - no collisions
+        graph.add_edge("source", "t1", label="continue")
+        graph.add_edge("t1", "t2", label="continue")
+        graph.add_edge("t2", "sink", label="continue")
+
+        # Should not raise - labels are unique per source node
+        graph.validate()
+
 
 class TestSourceSinkValidation:
     """Validation of source and sink constraints."""

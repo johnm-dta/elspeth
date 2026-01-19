@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode
+from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
 from elspeth.core.config import GateSettings
 
 if TYPE_CHECKING:
@@ -163,7 +163,8 @@ class TestConfigGateIntegration:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -230,7 +231,8 @@ class TestConfigGateIntegration:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -318,7 +320,8 @@ class TestConfigGateIntegration:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -419,7 +422,8 @@ class TestConfigGateIntegration:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -511,7 +515,8 @@ class TestConfigGateIntegration:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -706,7 +711,8 @@ class TestMultipleConfigGates:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass

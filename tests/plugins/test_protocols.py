@@ -140,6 +140,7 @@ class TestTransformProtocol:
             node_id: str | None = None  # Set by orchestrator
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
+            is_batch_aware = False  # Batch support (structural aggregation)
             _on_error: str | None = None  # Error routing (WP-11.99b)
 
             def __init__(self, config: dict[str, Any]) -> None:
@@ -176,6 +177,125 @@ class TestTransformProtocol:
         result = transform.process({"value": 21}, ctx)
         assert result.status == "success"
         assert result.row == {"value": 21, "doubled": 42}
+
+
+class TestTransformBatchSupport:
+    """Tests for batch-aware transform protocol."""
+
+    def test_transform_process_single_row(self) -> None:
+        """Transform.process() accepts single row dict."""
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class AnySchema(PluginSchema):
+            value: int
+
+        class SingleTransform(BaseTransform):
+            name = "single"
+            input_schema = AnySchema
+            output_schema = AnySchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success({"processed": row["value"]})
+
+        transform = SingleTransform({})
+        ctx = PluginContext(run_id="test", config={})
+        result = transform.process({"value": 1}, ctx)
+        assert result.row == {"processed": 1}
+
+    def test_transform_process_batch_rows(self) -> None:
+        """Transform.process() accepts list of row dicts when is_batch_aware=True."""
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class AnySchema(PluginSchema):
+            pass
+
+        class BatchTransform(BaseTransform):
+            name = "batch"
+            input_schema = AnySchema
+            output_schema = AnySchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+            is_batch_aware = True  # Declares batch support
+
+            def process(
+                self, row: dict[str, Any] | list[dict[str, Any]], ctx: PluginContext
+            ) -> TransformResult:
+                # When given a list, process as batch
+                if isinstance(row, list):
+                    total = sum(r["value"] for r in row)
+                    return TransformResult.success({"total": total, "count": len(row)})
+                # Single row
+                return TransformResult.success({"value": row["value"]})
+
+        transform = BatchTransform({})
+        ctx = PluginContext(run_id="test", config={})
+
+        # Batch mode
+        result = transform.process([{"value": 1}, {"value": 2}, {"value": 3}], ctx)
+        assert result.row == {"total": 6, "count": 3}
+
+    def test_transform_is_batch_aware_default_false(self) -> None:
+        """Transforms have is_batch_aware=False by default."""
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class AnySchema(PluginSchema):
+            value: int
+
+        class RegularTransform(BaseTransform):
+            name = "regular"
+            input_schema = AnySchema
+            output_schema = AnySchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success(row)
+
+        regular = RegularTransform({})
+        assert regular.is_batch_aware is False
+
+    def test_transform_is_batch_aware_can_be_set_true(self) -> None:
+        """Transforms can declare is_batch_aware=True for batch support."""
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class AnySchema(PluginSchema):
+            pass
+
+        class BatchAwareTransform(BaseTransform):
+            name = "batch_aware"
+            is_batch_aware = True  # Declares batch support
+            input_schema = AnySchema
+            output_schema = AnySchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+
+            def process(
+                self, row: dict[str, Any] | list[dict[str, Any]], ctx: PluginContext
+            ) -> TransformResult:
+                if isinstance(row, list):
+                    return TransformResult.success({"count": len(row)})
+                return TransformResult.success(row)
+
+        batch = BatchAwareTransform({})
+        assert batch.is_batch_aware is True
 
 
 class TestAggregationProtocol:

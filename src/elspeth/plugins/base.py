@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from typing import Any
 
-from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema, SourceRow
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import (
     AcceptResult,
@@ -26,6 +26,10 @@ class BaseTransform(ABC):
     """Base class for stateless row transforms.
 
     Subclass and implement process() to create a transform.
+
+    For batch-aware transforms (used in aggregation nodes):
+    - Set is_batch_aware = True
+    - process() will receive list[dict] when used in aggregation
 
     Example:
         class MyTransform(BaseTransform):
@@ -45,6 +49,10 @@ class BaseTransform(ABC):
     # Metadata for Phase 3 audit/reproducibility
     determinism: Determinism = Determinism.DETERMINISTIC
     plugin_version: str = "0.0.0"
+
+    # Batch support - override to True for batch-aware transforms
+    # When True, engine may pass list[dict] instead of single dict to process()
+    is_batch_aware: bool = False
 
     # Error routing configuration (WP-11.99b)
     # Transforms extending TransformDataConfig override this from config.
@@ -317,10 +325,11 @@ class BaseSource(ABC):
             name = "csv"
             output_schema = RowSchema
 
-            def load(self, ctx: PluginContext) -> Iterator[dict]:
+            def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
                 with open(self.config["path"]) as f:
                     reader = csv.DictReader(f)
-                    yield from reader
+                    for row in reader:
+                        yield SourceRow.valid(row)
 
             def close(self) -> None:
                 pass  # File already closed by context manager
@@ -339,14 +348,15 @@ class BaseSource(ABC):
         self.config = config
 
     @abstractmethod
-    def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
+    def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
         """Load and yield rows from the source.
 
         Args:
             ctx: Plugin context
 
         Yields:
-            Row dicts matching output_schema
+            SourceRow for each row - either SourceRow.valid() for rows that
+            passed validation, or SourceRow.quarantined() for invalid rows.
         """
         ...
 

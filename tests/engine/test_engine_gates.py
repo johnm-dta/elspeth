@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode
+from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
 from elspeth.core.config import GateSettings
 
 if TYPE_CHECKING:
@@ -178,7 +178,8 @@ class TestCompositeConditions:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -258,7 +259,8 @@ class TestCompositeConditions:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -332,7 +334,8 @@ class TestCompositeConditions:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -409,7 +412,8 @@ class TestCompositeConditions:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -547,7 +551,8 @@ class TestRouteLabelResolution:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -734,7 +739,8 @@ class TestForkCreatesChildTokens:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -836,7 +842,8 @@ class TestForkCreatesChildTokens:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -942,7 +949,8 @@ class TestForkCreatesChildTokens:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -1149,7 +1157,7 @@ class TestEndToEndPipeline:
 
     def test_source_transform_gate_sink_pipeline(self) -> None:
         """End-to-end: Source -> Transform -> Config Gate -> Sink."""
-        from elspeth.contracts import TransformResult
+        from elspeth.contracts import SourceRow, TransformResult
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -1172,7 +1180,8 @@ class TestEndToEndPipeline:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -1302,7 +1311,8 @@ class TestEndToEndPipeline:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -1393,7 +1403,8 @@ class TestEndToEndPipeline:
                 self._data = data
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass

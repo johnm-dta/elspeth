@@ -227,3 +227,67 @@ class ArtifactDescriptor:
             size_bytes=request_size,
             metadata={"response_code": response_code},
         )
+
+
+@dataclass
+class SourceRow:
+    """Result from source loading - either valid data or quarantined invalid data.
+
+    ALL rows from sources MUST be wrapped in SourceRow:
+    - Valid rows: SourceRow.valid(row_dict)
+    - Invalid rows: SourceRow.quarantined(row_dict, error, destination)
+
+    This makes source outcomes first-class engine concepts:
+    - All rows get proper token_id for lineage
+    - Metrics include both valid and quarantine counts
+    - Audit trail shows complete source output
+    - Quarantine sinks receive invalid data for investigation
+
+    Example usage in a source:
+        try:
+            validated = schema.model_validate(row)
+            yield SourceRow.valid(validated.to_row())
+        except ValidationError as e:
+            if on_validation_failure != "discard":
+                yield SourceRow.quarantined(
+                    row=row,
+                    error=str(e),
+                    destination=on_validation_failure,
+                )
+            # else: don't yield, row is intentionally discarded
+    """
+
+    row: dict[str, Any]
+    is_quarantined: bool
+    quarantine_error: str | None = None
+    quarantine_destination: str | None = None
+
+    @classmethod
+    def valid(cls, row: dict[str, Any]) -> "SourceRow":
+        """Create a valid row result.
+
+        Args:
+            row: The validated row data to pass to the engine.
+        """
+        return cls(row=row, is_quarantined=False)
+
+    @classmethod
+    def quarantined(
+        cls,
+        row: dict[str, Any],
+        error: str,
+        destination: str,
+    ) -> "SourceRow":
+        """Create a quarantined row result.
+
+        Args:
+            row: The original row data (before validation)
+            error: The validation error message
+            destination: The sink name to route this row to
+        """
+        return cls(
+            row=row,
+            is_quarantined=True,
+            quarantine_error=error,
+            quarantine_destination=destination,
+        )

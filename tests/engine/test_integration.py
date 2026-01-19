@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode
+from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
 from elspeth.core.config import GateSettings
 from elspeth.plugins.base import BaseTransform
 
@@ -222,7 +222,8 @@ class TestEngineIntegration:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -339,7 +340,8 @@ class TestEngineIntegration:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -489,7 +491,8 @@ class TestEngineIntegration:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -627,7 +630,8 @@ class TestNoSilentAuditLoss:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -725,7 +729,8 @@ class TestNoSilentAuditLoss:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -809,7 +814,8 @@ class TestNoSilentAuditLoss:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -974,7 +980,8 @@ class TestAuditTrailCompleteness:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -4988,7 +4995,8 @@ class TestComplexDAGIntegration:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -5243,7 +5251,8 @@ class TestRetryIntegration:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -5414,7 +5423,8 @@ class TestRetryIntegration:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -6081,7 +6091,8 @@ class TestErrorRecovery:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -6216,7 +6227,8 @@ class TestErrorRecovery:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass

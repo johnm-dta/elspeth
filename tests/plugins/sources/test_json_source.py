@@ -72,8 +72,10 @@ class TestJSONSource:
         rows = list(source.load(ctx))
 
         assert len(rows) == 2
-        assert rows[0] == {"id": 1, "name": "alice"}
-        assert rows[1]["name"] == "bob"
+        # All rows are SourceRow objects - access .row for data
+        assert rows[0].row == {"id": 1, "name": "alice"}
+        assert rows[0].is_quarantined is False
+        assert rows[1].row["name"] == "bob"
 
     def test_load_jsonl(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Load rows from JSONL file."""
@@ -97,7 +99,7 @@ class TestJSONSource:
         rows = list(source.load(ctx))
 
         assert len(rows) == 3
-        assert rows[2]["name"] == "carol"
+        assert rows[2].row["name"] == "carol"
 
     def test_auto_detect_jsonl_by_extension(
         self, tmp_path: Path, ctx: PluginContext
@@ -143,7 +145,7 @@ class TestJSONSource:
         rows = list(source.load(ctx))
 
         assert len(rows) == 2
-        assert rows[0] == {"id": 1}
+        assert rows[0].row == {"id": 1}
 
     def test_empty_lines_ignored_in_jsonl(
         self, tmp_path: Path, ctx: PluginContext
@@ -275,3 +277,130 @@ class TestJSONSourceConfigValidation:
 
         with pytest.raises(PluginConfigError, match="on_validation_failure"):
             JSONSource({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA})
+
+
+class TestJSONSourceQuarantineYielding:
+    """Tests for JSON source yielding SourceRow.quarantined() for invalid rows."""
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        """Create a minimal plugin context."""
+        return PluginContext(run_id="test-run", config={})
+
+    def test_invalid_row_yields_quarantined_source_row(
+        self, tmp_path: Path, ctx: PluginContext
+    ) -> None:
+        """Invalid row yields SourceRow.quarantined() with error info."""
+        import json
+
+        from elspeth.contracts import SourceRow
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        # JSON with invalid row (score is not an int)
+        json_file = tmp_path / "data.json"
+        data = [
+            {"id": 1, "name": "alice", "score": 95},
+            {"id": 2, "name": "bob", "score": "bad"},  # Invalid
+            {"id": 3, "name": "carol", "score": 92},
+        ]
+        json_file.write_text(json.dumps(data))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "on_validation_failure": "quarantine",
+                "schema": {
+                    "mode": "strict",
+                    "fields": ["id: int", "name: str", "score: int"],
+                },
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        # 2 valid rows + 1 quarantined - all are SourceRow
+        assert len(results) == 3
+        assert all(isinstance(r, SourceRow) for r in results)
+
+        # First and third are valid SourceRows
+        assert results[0].is_quarantined is False
+        assert results[0].row["name"] == "alice"
+        assert results[2].is_quarantined is False
+        assert results[2].row["name"] == "carol"
+
+        # Second is a quarantined SourceRow
+        quarantined = results[1]
+        assert quarantined.is_quarantined is True
+        assert quarantined.row["name"] == "bob"
+        assert quarantined.row["score"] == "bad"  # Original value preserved
+        assert quarantined.quarantine_destination == "quarantine"
+        assert "score" in quarantined.quarantine_error  # Error mentions the field
+
+    def test_discard_mode_does_not_yield_invalid_rows(
+        self, tmp_path: Path, ctx: PluginContext
+    ) -> None:
+        """When on_validation_failure='discard', invalid rows are not yielded."""
+        import json
+
+        from elspeth.contracts import SourceRow
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        data = [
+            {"id": 1, "name": "alice", "score": 95},
+            {"id": 2, "name": "bob", "score": "bad"},  # Invalid
+            {"id": 3, "name": "carol", "score": 92},
+        ]
+        json_file.write_text(json.dumps(data))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "on_validation_failure": "discard",
+                "schema": {
+                    "mode": "strict",
+                    "fields": ["id: int", "name: str", "score: int"],
+                },
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        # Only 2 valid rows - invalid row discarded
+        assert len(results) == 2
+        assert all(isinstance(r, SourceRow) and not r.is_quarantined for r in results)
+        assert {r.row["name"] for r in results} == {"alice", "carol"}
+
+    def test_jsonl_invalid_row_yields_quarantined(
+        self, tmp_path: Path, ctx: PluginContext
+    ) -> None:
+        """JSONL format also yields SourceRow.quarantined() for invalid rows."""
+        from elspeth.contracts import SourceRow
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        # JSONL with invalid row
+        jsonl_file = tmp_path / "data.jsonl"
+        jsonl_file.write_text(
+            '{"id": 1, "name": "alice", "score": 95}\n'
+            '{"id": 2, "name": "bob", "score": "bad"}\n'
+            '{"id": 3, "name": "carol", "score": 92}\n'
+        )
+
+        source = JSONSource(
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "on_validation_failure": "quarantine",
+                "schema": {
+                    "mode": "strict",
+                    "fields": ["id: int", "name: str", "score: int"],
+                },
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        assert len(results) == 3
+        assert isinstance(results[1], SourceRow)
+        assert results[1].is_quarantined is True
+        assert results[1].row["name"] == "bob"

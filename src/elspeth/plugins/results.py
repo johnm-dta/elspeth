@@ -12,6 +12,7 @@ from elspeth.contracts import (
     GateResult,
     RoutingAction,
     RowOutcome,
+    SourceRow,
     TransformResult,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "GateResult",
     "RoutingAction",
     "RowOutcome",
+    "SourceRow",
     "TransformResult",
 ]

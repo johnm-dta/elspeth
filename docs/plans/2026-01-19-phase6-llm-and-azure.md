@@ -681,7 +681,7 @@ transforms:
       template: |
         Analyze: {{ text }}
       batch_size: 100              # Rows per batch
-      poll_interval_seconds: 60    # How often to check batch status
+      poll_interval_seconds: 300   # How often to check batch status (5 min default)
       max_wait_hours: 24           # Maximum wait time
 ```
 

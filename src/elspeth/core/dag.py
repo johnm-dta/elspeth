@@ -150,6 +150,22 @@ class ExecutionGraph:
         if len(sinks) < 1:
             raise GraphValidationError("Graph must have at least one sink")
 
+        # Check outgoing edge labels are unique per node.
+        # The orchestrator's edge_map keys by (from_node, label), so duplicate
+        # labels from the same node would cause silent overwrites, leading to
+        # routing events recorded against the wrong edge (audit corruption).
+        for node_id in self._graph.nodes():
+            labels_seen: set[str] = set()
+            # out_edges returns (from, to, key) for MultiDiGraph
+            for _, _, edge_key in self._graph.out_edges(node_id, keys=True):
+                if edge_key in labels_seen:
+                    raise GraphValidationError(
+                        f"Node '{node_id}' has duplicate outgoing edge label '{edge_key}'. "
+                        "Edge labels must be unique per source node to ensure correct "
+                        "routing event recording."
+                    )
+                labels_seen.add(edge_key)
+
     def topological_order(self) -> list[str]:
         """Return nodes in topological order.
 

@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 from pydantic import ValidationError
 
-from elspeth.contracts import PluginSchema
+from elspeth.contracts import PluginSchema, SourceRow
 from elspeth.plugins.base import BaseSource
 from elspeth.plugins.config_base import SourceDataConfig
 from elspeth.plugins.context import PluginContext
@@ -78,15 +78,15 @@ class CSVSource(BaseSource):
         # Set output_schema for protocol compliance
         self.output_schema = self._schema_class
 
-    def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
+    def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
         """Load rows from CSV file.
 
         Each row is validated against the configured schema:
-        - Valid rows are yielded for processing
-        - Invalid rows are quarantined (recorded but not yielded)
+        - Valid rows are yielded as SourceRow.valid()
+        - Invalid rows are yielded as SourceRow.quarantined()
 
         Yields:
-            Dict for each valid row with column names as keys.
+            SourceRow for each row (valid or quarantined).
 
         Raises:
             FileNotFoundError: If CSV file does not exist.
@@ -110,9 +110,9 @@ class CSVSource(BaseSource):
             try:
                 # Validate and potentially coerce row data
                 validated = self._schema_class.model_validate(row)
-                yield validated.to_row()
+                yield SourceRow.valid(validated.to_row())
             except ValidationError as e:
-                # Record validation failure - row quarantined
+                # Record validation failure in audit trail
                 # This is a trust boundary: external data may be invalid
                 ctx.record_validation_error(
                     row=row,
@@ -121,15 +121,14 @@ class CSVSource(BaseSource):
                     destination=self._on_validation_failure,
                 )
 
-                # Route to quarantine sink if not discarding
+                # Yield quarantined row for routing to configured sink
+                # If "discard", don't yield - row is intentionally dropped
                 if self._on_validation_failure != "discard":
-                    ctx.route_to_sink(
-                        sink_name=self._on_validation_failure,
+                    yield SourceRow.quarantined(
                         row=row,
-                        metadata={"validation_error": str(e)},
+                        error=str(e),
+                        destination=self._on_validation_failure,
                     )
-                # Skip invalid row - don't yield
-                continue
 
     def close(self) -> None:
         """Release resources."""

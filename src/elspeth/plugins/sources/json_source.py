@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from elspeth.contracts import PluginSchema
+from elspeth.contracts import PluginSchema, SourceRow
 from elspeth.plugins.base import BaseSource
 from elspeth.plugins.config_base import SourceDataConfig
 from elspeth.plugins.context import PluginContext
@@ -82,7 +82,7 @@ class JSONSource(BaseSource):
         # Set output_schema for protocol compliance
         self.output_schema = self._schema_class
 
-    def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
+    def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
         """Load rows from JSON file.
 
         Each row is validated against the configured schema:
@@ -104,7 +104,7 @@ class JSONSource(BaseSource):
         else:
             yield from self._load_json_array(ctx)
 
-    def _load_jsonl(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
+    def _load_jsonl(self, ctx: PluginContext) -> Iterator[SourceRow]:
         """Load from JSONL format (one JSON object per line)."""
         with open(self._path, encoding=self._encoding) as f:
             for line in f:
@@ -113,7 +113,7 @@ class JSONSource(BaseSource):
                     row = json.loads(line)
                     yield from self._validate_and_yield(row, ctx)
 
-    def _load_json_array(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
+    def _load_json_array(self, ctx: PluginContext) -> Iterator[SourceRow]:
         """Load from JSON array format."""
         with open(self._path, encoding=self._encoding) as f:
             data = json.load(f)
@@ -130,7 +130,7 @@ class JSONSource(BaseSource):
 
     def _validate_and_yield(
         self, row: dict[str, Any], ctx: PluginContext
-    ) -> Iterator[dict[str, Any]]:
+    ) -> Iterator[SourceRow]:
         """Validate a row and yield if valid, otherwise quarantine.
 
         Args:
@@ -138,14 +138,14 @@ class JSONSource(BaseSource):
             ctx: Plugin context for recording validation errors
 
         Yields:
-            Validated row dict if valid, nothing if quarantined
+            SourceRow.valid() if valid, SourceRow.quarantined() if invalid
         """
         try:
             # Validate and potentially coerce row data
             validated = self._schema_class.model_validate(row)
-            yield validated.to_row()
+            yield SourceRow.valid(validated.to_row())
         except ValidationError as e:
-            # Record validation failure - row quarantined
+            # Record validation failure in audit trail
             # This is a trust boundary: external data may be invalid
             ctx.record_validation_error(
                 row=row,
@@ -154,14 +154,14 @@ class JSONSource(BaseSource):
                 destination=self._on_validation_failure,
             )
 
-            # Route to quarantine sink if not discarding
+            # Yield quarantined row for routing to configured sink
+            # If "discard", don't yield - row is intentionally dropped
             if self._on_validation_failure != "discard":
-                ctx.route_to_sink(
-                    sink_name=self._on_validation_failure,
+                yield SourceRow.quarantined(
                     row=row,
-                    metadata={"validation_error": str(e)},
+                    error=str(e),
+                    destination=self._on_validation_failure,
                 )
-            # Skip invalid row - don't yield
 
     def close(self) -> None:
         """Release resources (no-op for JSON source)."""

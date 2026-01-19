@@ -73,9 +73,11 @@ class TestCSVSource:
         rows = list(source.load(ctx))
 
         assert len(rows) == 3
-        assert rows[0] == {"id": "1", "name": "alice", "value": "100"}
-        assert rows[1]["name"] == "bob"
-        assert rows[2]["value"] == "300"
+        # All rows are SourceRow objects - access .row for data
+        assert rows[0].row == {"id": "1", "name": "alice", "value": "100"}
+        assert rows[0].is_quarantined is False
+        assert rows[1].row["name"] == "bob"
+        assert rows[2].row["value"] == "300"
 
     def test_load_with_delimiter(self, tmp_path: Path, ctx: PluginContext) -> None:
         """CSV with custom delimiter."""
@@ -95,7 +97,7 @@ class TestCSVSource:
         rows = list(source.load(ctx))
 
         assert len(rows) == 1
-        assert rows[0]["name"] == "alice"
+        assert rows[0].row["name"] == "alice"
 
     def test_load_with_encoding(self, tmp_path: Path, ctx: PluginContext) -> None:
         """CSV with non-UTF8 encoding."""
@@ -114,7 +116,7 @@ class TestCSVSource:
         )
         rows = list(source.load(ctx))
 
-        assert rows[0]["name"] == "caf\xe9"
+        assert rows[0].row["name"] == "café"
 
     def test_close_is_idempotent(self, sample_csv: Path, ctx: PluginContext) -> None:
         """close() can be called multiple times."""
@@ -205,3 +207,82 @@ class TestCSVSourceConfigValidation:
 
         with pytest.raises(PluginConfigError, match="on_validation_failure"):
             CSVSource({"path": "/tmp/test.csv", "schema": DYNAMIC_SCHEMA})
+
+
+class TestCSVSourceQuarantineYielding:
+    """Tests for CSV source yielding SourceRow.quarantined() for invalid rows."""
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        """Create a minimal plugin context."""
+        return PluginContext(run_id="test-run", config={})
+
+    def test_invalid_row_yields_quarantined_source_row(
+        self, tmp_path: Path, ctx: PluginContext
+    ) -> None:
+        """Invalid row yields SourceRow.quarantined() with error info."""
+        from elspeth.contracts import SourceRow
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        # CSV with invalid row (score is not an int)
+        csv_file = tmp_path / "data.csv"
+        csv_file.write_text("id,name,score\n1,alice,95\n2,bob,bad\n3,carol,92\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "on_validation_failure": "quarantine",
+                "schema": {
+                    "mode": "strict",
+                    "fields": ["id: int", "name: str", "score: int"],
+                },
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        # 2 valid rows + 1 quarantined - all are SourceRow
+        assert len(results) == 3
+        assert all(isinstance(r, SourceRow) for r in results)
+
+        # First and third are valid SourceRows
+        assert results[0].is_quarantined is False
+        assert results[0].row["name"] == "alice"
+        assert results[2].is_quarantined is False
+        assert results[2].row["name"] == "carol"
+
+        # Second is a quarantined SourceRow
+        quarantined = results[1]
+        assert quarantined.is_quarantined is True
+        assert quarantined.row["name"] == "bob"
+        assert quarantined.row["score"] == "bad"  # Original value preserved
+        assert quarantined.quarantine_destination == "quarantine"
+        assert "score" in quarantined.quarantine_error  # Error mentions the field
+
+    def test_discard_mode_does_not_yield_invalid_rows(
+        self, tmp_path: Path, ctx: PluginContext
+    ) -> None:
+        """When on_validation_failure='discard', invalid rows are not yielded."""
+        from elspeth.contracts import SourceRow
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "data.csv"
+        csv_file.write_text("id,name,score\n1,alice,95\n2,bob,bad\n3,carol,92\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "on_validation_failure": "discard",
+                "schema": {
+                    "mode": "strict",
+                    "fields": ["id: int", "name: str", "score: int"],
+                },
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        # Only 2 valid rows - invalid row discarded
+        assert len(results) == 2
+        assert all(isinstance(r, SourceRow) and not r.is_quarantined for r in results)
+        assert {r.row["name"] for r in results} == {"alice", "carol"}

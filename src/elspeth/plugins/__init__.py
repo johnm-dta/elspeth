@@ -73,6 +73,7 @@ from elspeth.plugins.results import (
     GateResult,
     RoutingAction,
     RowOutcome,
+    SourceRow,
     TransformResult,
 )
 
@@ -82,6 +83,7 @@ __all__ = [  # Grouped by category for readability
     "GateResult",
     "RoutingAction",
     "RowOutcome",
+    "SourceRow",
     "TransformResult",
     # Context
     "PluginContext",

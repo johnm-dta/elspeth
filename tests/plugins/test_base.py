@@ -233,7 +233,7 @@ class TestBaseSource:
     def test_base_source_implementation(self) -> None:
         from collections.abc import Iterator
 
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.plugins.base import BaseSource
         from elspeth.plugins.context import PluginContext
 
@@ -248,8 +248,9 @@ class TestBaseSource:
                 super().__init__(config)
                 self._data = config["data"]
 
-            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
-                yield from self._data
+            def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -259,7 +260,9 @@ class TestBaseSource:
 
         rows = list(source.load(ctx))
         assert len(rows) == 2
-        assert rows[0] == {"value": 1}
+        # All rows are SourceRow objects now
+        assert rows[0].row == {"value": 1}
+        assert rows[0].is_quarantined is False
 
     def test_base_source_has_metadata_attributes(self) -> None:
         from elspeth.contracts import Determinism

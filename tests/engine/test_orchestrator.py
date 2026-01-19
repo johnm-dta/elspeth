@@ -7,11 +7,12 @@ because the processor uses isinstance() for type-safe plugin detection.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode
+from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
 from elspeth.plugins.base import BaseGate, BaseTransform
 
 if TYPE_CHECKING:
@@ -252,7 +253,7 @@ class TestOrchestrator:
     """Full run orchestration."""
 
     def test_run_simple_pipeline(self) -> None:
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -278,7 +279,8 @@ class TestOrchestrator:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -339,7 +341,7 @@ class TestOrchestrator:
         assert sink.results[0] == {"value": 1, "doubled": 2}
 
     def test_run_with_gate_routing(self) -> None:
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
@@ -361,7 +363,8 @@ class TestOrchestrator:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -419,7 +422,7 @@ class TestOrchestratorAuditTrail:
 
     def test_run_records_landscape_entries(self) -> None:
         """Verify that run creates proper audit trail."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -441,7 +444,8 @@ class TestOrchestratorAuditTrail:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -515,7 +519,7 @@ class TestOrchestratorErrorHandling:
 
     def test_run_marks_failed_on_transform_exception(self) -> None:
         """If a transform raises, run status should be failed in Landscape."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -536,7 +540,8 @@ class TestOrchestratorErrorHandling:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -608,7 +613,7 @@ class TestOrchestratorMultipleTransforms:
 
     def test_run_multiple_transforms_in_sequence(self) -> None:
         """Test that multiple transforms execute in order."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -630,7 +635,8 @@ class TestOrchestratorMultipleTransforms:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -703,7 +709,7 @@ class TestOrchestratorEmptyPipeline:
 
     def test_run_no_transforms(self) -> None:
         """Test pipeline with source directly to sink."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -724,7 +730,8 @@ class TestOrchestratorEmptyPipeline:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -848,7 +855,7 @@ class TestOrchestratorInvalidRouting:
 
     def test_gate_routing_to_unknown_sink_raises_error(self) -> None:
         """Gate routing to non-existent sink must fail loudly, not silently."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
@@ -874,7 +881,8 @@ class TestOrchestratorInvalidRouting:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -1089,7 +1097,9 @@ class TestOrchestratorOutputSinkRouting:
         mock_source.name = "csv"
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
-        mock_source.load.return_value = iter([{"id": 1, "value": "test"}])
+        mock_source.load.return_value = iter(
+            [SourceRow.valid({"id": 1, "value": "test"})]
+        )
 
         # Mock sinks - track what gets written
         mock_results_sink = MagicMock()
@@ -1154,7 +1164,7 @@ class TestOrchestratorGateRouting:
         mock_source.name = "csv"
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
-        mock_source.load.return_value = iter([{"id": 1, "score": 0.2}])
+        mock_source.load.return_value = iter([SourceRow.valid({"id": 1, "score": 0.2})])
 
         # Config-driven gate: always routes to "flagged" sink
         routing_gate = GateSettings(
@@ -1216,7 +1226,7 @@ class TestLifecycleHooks:
 
         call_order: list[str] = []
 
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
 
         class TestSchema(PluginSchema):
             model_config = {"extra": "allow"}  # noqa: RUF012
@@ -1243,7 +1253,7 @@ class TestLifecycleHooks:
         mock_source.name = "csv"
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
-        mock_source.load.return_value = iter([{"id": 1}])
+        mock_source.load.return_value = iter([SourceRow.valid({"id": 1})])
 
         transform = TrackedTransform()
         mock_sink = MagicMock()
@@ -1282,7 +1292,7 @@ class TestLifecycleHooks:
         """on_complete() called after all rows processed."""
         from unittest.mock import MagicMock
 
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
@@ -1319,7 +1329,9 @@ class TestLifecycleHooks:
         mock_source.name = "csv"
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
-        mock_source.load.return_value = iter([{"id": 1}, {"id": 2}])
+        mock_source.load.return_value = iter(
+            [SourceRow.valid({"id": 1}), SourceRow.valid({"id": 2})]
+        )
 
         transform = TrackedTransform()
         mock_sink = MagicMock()
@@ -1363,7 +1375,7 @@ class TestLifecycleHooks:
 
         import pytest
 
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -1397,7 +1409,7 @@ class TestLifecycleHooks:
         mock_source.name = "csv"
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
-        mock_source.load.return_value = iter([{"id": 1}])
+        mock_source.load.return_value = iter([SourceRow.valid({"id": 1})])
 
         transform = FailingTransform()
         mock_sink = MagicMock()
@@ -1435,7 +1447,7 @@ class TestOrchestratorLandscapeExport:
 
     def test_orchestrator_exports_landscape_when_configured(self) -> None:
         """Orchestrator should export audit trail after run completes."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import (
             DatasourceSettings,
             ElspethSettings,
@@ -1462,7 +1474,8 @@ class TestOrchestratorLandscapeExport:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -1555,7 +1568,7 @@ class TestOrchestratorLandscapeExport:
         import os
         from unittest.mock import patch
 
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import (
             DatasourceSettings,
             ElspethSettings,
@@ -1582,7 +1595,8 @@ class TestOrchestratorLandscapeExport:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -1671,7 +1685,7 @@ class TestOrchestratorLandscapeExport:
         import os
         from unittest.mock import patch
 
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import (
             DatasourceSettings,
             ElspethSettings,
@@ -1698,7 +1712,8 @@ class TestOrchestratorLandscapeExport:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -1775,7 +1790,7 @@ class TestOrchestratorLandscapeExport:
 
     def test_orchestrator_no_export_when_disabled(self) -> None:
         """Should not export when export.enabled is False."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import (
             DatasourceSettings,
             ElspethSettings,
@@ -1801,7 +1816,8 @@ class TestOrchestratorLandscapeExport:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -1893,9 +1909,9 @@ class TestSourceLifecycleHooks:
             def on_start(self, ctx: Any) -> None:
                 call_order.append("source_on_start")
 
-            def load(self, ctx: Any) -> Any:
+            def load(self, ctx: Any) -> Iterator[SourceRow]:
                 call_order.append("source_load")
-                yield {"value": 1}
+                yield SourceRow.valid({"value": 1})
 
             def on_complete(self, ctx: Any) -> None:
                 call_order.append("source_on_complete")
@@ -1987,7 +2003,7 @@ class TestSinkLifecycleHooks:
         mock_source.name = "csv"
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
-        mock_source.load.return_value = iter([{"value": 1}])
+        mock_source.load.return_value = iter([SourceRow.valid({"value": 1})])
 
         sink = TrackedSink()
 
@@ -2026,7 +2042,7 @@ class TestSinkLifecycleHooks:
 
         import pytest
 
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
@@ -2078,7 +2094,7 @@ class TestSinkLifecycleHooks:
         mock_source.name = "csv"
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
-        mock_source.load.return_value = iter([{"value": 1}])
+        mock_source.load.return_value = iter([SourceRow.valid({"value": 1})])
 
         transform = FailingTransform()
         sink = TrackedSink()
@@ -2141,7 +2157,7 @@ class TestOrchestratorCheckpointing:
 
     def test_maybe_checkpoint_creates_on_every_row(self) -> None:
         """_maybe_checkpoint creates checkpoint when frequency=every_row."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.checkpoint import CheckpointManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape import LandscapeDB
@@ -2167,7 +2183,8 @@ class TestOrchestratorCheckpointing:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -2231,7 +2248,7 @@ class TestOrchestratorCheckpointing:
 
     def test_maybe_checkpoint_respects_interval(self) -> None:
         """_maybe_checkpoint only creates checkpoint every N rows."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.checkpoint import CheckpointManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape import LandscapeDB
@@ -2260,7 +2277,8 @@ class TestOrchestratorCheckpointing:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -2320,7 +2338,7 @@ class TestOrchestratorCheckpointing:
 
     def test_checkpoint_deleted_on_successful_completion(self) -> None:
         """Checkpoints are deleted when run completes successfully."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.checkpoint import CheckpointManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape import LandscapeDB
@@ -2346,7 +2364,8 @@ class TestOrchestratorCheckpointing:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -2408,7 +2427,7 @@ class TestOrchestratorCheckpointing:
 
     def test_checkpoint_preserved_on_failure(self) -> None:
         """Checkpoints are preserved when run fails for recovery."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.checkpoint import CheckpointManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape import LandscapeDB
@@ -2434,7 +2453,8 @@ class TestOrchestratorCheckpointing:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -2510,7 +2530,7 @@ class TestOrchestratorCheckpointing:
 
     def test_checkpoint_disabled_skips_checkpoint_creation(self) -> None:
         """No checkpoints created when checkpointing is disabled."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.checkpoint import CheckpointManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape import LandscapeDB
@@ -2536,7 +2556,8 @@ class TestOrchestratorCheckpointing:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -2598,7 +2619,7 @@ class TestOrchestratorCheckpointing:
 
     def test_no_checkpoint_manager_skips_checkpointing(self) -> None:
         """Orchestrator works fine without checkpoint manager."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
@@ -2622,7 +2643,8 @@ class TestOrchestratorCheckpointing:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -2687,7 +2709,7 @@ class TestOrchestratorConfigRecording:
         """Run should record the full resolved configuration in Landscape."""
         import json
 
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -2709,7 +2731,8 @@ class TestOrchestratorConfigRecording:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -2782,7 +2805,7 @@ class TestOrchestratorConfigRecording:
         """Run with no config passed should record empty dict (current behavior)."""
         import json
 
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -2803,7 +2826,8 @@ class TestOrchestratorConfigRecording:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -2867,7 +2891,7 @@ class TestNodeMetadataFromPlugin:
         Verifies that the node's plugin_version in Landscape matches
         the plugin class's plugin_version attribute.
         """
-        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.contracts import Determinism, PluginSchema, SourceRow
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.artifacts import ArtifactDescriptor
@@ -2891,7 +2915,8 @@ class TestNodeMetadataFromPlugin:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -2989,7 +3014,7 @@ class TestNodeMetadataFromPlugin:
         Verifies that nondeterministic plugins are recorded correctly
         in the Landscape for reproducibility tracking.
         """
-        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.contracts import Determinism, PluginSchema, SourceRow
         from elspeth.core.dag import ExecutionGraph
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.artifacts import ArtifactDescriptor
@@ -3013,7 +3038,8 @@ class TestNodeMetadataFromPlugin:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -3104,7 +3130,7 @@ class TestRouteValidation:
 
     def test_valid_routes_pass_validation(self) -> None:
         """Valid route configurations should pass validation without error."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
@@ -3126,7 +3152,8 @@ class TestRouteValidation:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -3180,7 +3207,7 @@ class TestRouteValidation:
 
     def test_invalid_route_destination_fails_at_init(self) -> None:
         """Route to non-existent sink should fail before processing any rows."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
@@ -3208,7 +3235,8 @@ class TestRouteValidation:
 
             def load(self, ctx: Any) -> Any:
                 self.load_called = True
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -3272,7 +3300,7 @@ class TestRouteValidation:
 
     def test_error_message_includes_route_label(self) -> None:
         """Error message should include the route label for debugging."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
@@ -3298,7 +3326,8 @@ class TestRouteValidation:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -3357,7 +3386,7 @@ class TestRouteValidation:
 
     def test_continue_routes_are_not_validated_as_sinks(self) -> None:
         """Routes that resolve to 'continue' should not be validated as sinks."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
@@ -3379,7 +3408,8 @@ class TestRouteValidation:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -3467,10 +3497,10 @@ class TestOrchestratorForkExecution:
             def on_complete(self, ctx: Any) -> None:
                 pass
 
-            def load(self, ctx: Any) -> Any:
-                yield {"value": 1}
-                yield {"value": 2}
-                yield {"value": 3}
+            def load(self, ctx: Any) -> Iterator[SourceRow]:
+                yield SourceRow.valid({"value": 1})
+                yield SourceRow.valid({"value": 2})
+                yield SourceRow.valid({"value": 3})
 
             def close(self) -> None:
                 pass
@@ -3545,7 +3575,7 @@ class TestOrchestratorQuarantineMetrics:
         when it returns TransformResult.error(). These should be counted
         as quarantined, not failed.
         """
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.landscape import LandscapeDB
         from elspeth.engine.artifacts import ArtifactDescriptor
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -3568,7 +3598,8 @@ class TestOrchestratorQuarantineMetrics:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -3654,7 +3685,7 @@ class TestOrchestratorRetry:
 
     def test_orchestrator_creates_retry_manager_from_settings(self) -> None:
         """Orchestrator creates RetryManager when settings.retry is configured."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import (
             DatasourceSettings,
             ElspethSettings,
@@ -3682,7 +3713,8 @@ class TestOrchestratorRetry:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass
@@ -3766,7 +3798,7 @@ class TestOrchestratorRetry:
 
     def test_orchestrator_retry_exhausted_marks_row_failed(self) -> None:
         """When all retry attempts fail, row should be marked FAILED."""
-        from elspeth.contracts import PluginSchema
+        from elspeth.contracts import PluginSchema, SourceRow
         from elspeth.core.config import (
             DatasourceSettings,
             ElspethSettings,
@@ -3793,7 +3825,8 @@ class TestOrchestratorRetry:
                 pass
 
             def load(self, ctx: Any) -> Any:
-                yield from self._data
+                for _row in self._data:
+                    yield SourceRow.valid(_row)
 
             def close(self) -> None:
                 pass

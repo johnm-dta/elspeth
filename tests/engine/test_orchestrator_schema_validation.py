@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Iterator
+import contextlib
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode
+from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -47,8 +49,8 @@ class _TestSourceBase:
     node_id: str | None = None
     output_schema: type[PluginSchema] | None = None
 
-    def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
-        yield {"name": "test", "value": 42}
+    def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
+        yield SourceRow.valid({"name": "test", "value": 42})
 
     def on_start(self, ctx: PluginContext) -> None:
         pass
@@ -94,8 +96,8 @@ def _build_minimal_graph(source_name: str, sink_name: str) -> ExecutionGraph:
     graph.add_node("source", node_type="source", plugin_name=source_name)
     graph.add_node("sink_output", node_type="sink", plugin_name=sink_name)
     graph.add_edge("source", "sink_output", label="continue", mode=RoutingMode.MOVE)
-    graph._sink_id_map = {"output": "sink_output"}  # noqa: SLF001
-    graph._output_sink = "output"  # noqa: SLF001
+    graph._sink_id_map = {"output": "sink_output"}
+    graph._output_sink = "output"
     return graph
 
 
@@ -135,10 +137,8 @@ class TestOrchestratorSchemaValidation:
 
             # This will fail for other reasons (mock DB), but we want to verify
             # validate_pipeline_schemas was called
-            try:
+            with contextlib.suppress(Exception):
                 orchestrator.run(config, graph=graph)
-            except Exception:
-                pass  # Expected to fail - we're testing the call
 
             # Verify schema validation was called
             mock_validate.assert_called_once()
@@ -206,10 +206,8 @@ class TestOrchestratorSchemaValidation:
             graph = _build_minimal_graph("test_source", "test_sink")
 
             # Run will fail for other reasons, but validation should be called
-            try:
+            with contextlib.suppress(Exception):
                 orchestrator.run(config, graph=graph)
-            except Exception:
-                pass
 
             # Verify schema validation was called with None values
             mock_validate.assert_called_once()

@@ -26,9 +26,10 @@ _VALID_NAME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*$")
 # Track original thread excepthook
 _original_excepthook = threading.excepthook
 
-# Count of suppressions pending for each thread name
-# We use a count because multiple threads may have the same name
-_suppressed_threads: dict[str, int] = {}
+# Thread idents registered for exception suppression during cleanup.
+# We track by thread ident (not name) to avoid accidental suppression of
+# unrelated threads that happen to share a name.
+_suppressed_thread_idents: set[int] = set()
 _suppressed_lock = threading.Lock()
 
 
@@ -38,17 +39,38 @@ def _custom_excepthook(args: threading.ExceptHookArgs) -> None:
     pyrate-limiter's Leaker thread has a race condition where it can raise
     AssertionError when all buckets are disposed. This is benign (the thread
     is exiting anyway) but produces noisy warnings in tests.
+
+    Suppression is narrowly scoped:
+    - Only for threads registered by RateLimiter.close()
+    - Only for AssertionError (the known benign exception from pyrate-limiter)
+    - Logs when suppression occurs for observability
     """
-    thread_name = args.thread.name if args.thread else None
+    import structlog
+
+    logger = structlog.get_logger()
+
+    thread_ident = args.thread.ident if args.thread else None
+
+    # Only suppress if:
+    # 1. Thread is registered for suppression
+    # 2. Exception is AssertionError (the known benign cleanup race)
     with _suppressed_lock:
-        if thread_name and thread_name in _suppressed_threads:
-            # Decrement the suppression count
-            _suppressed_threads[thread_name] -= 1
-            if _suppressed_threads[thread_name] <= 0:
-                del _suppressed_threads[thread_name]
+        if (
+            thread_ident is not None
+            and thread_ident in _suppressed_thread_idents
+            and args.exc_type is AssertionError
+        ):
+            # Remove from suppression set (one-time suppression per thread)
+            _suppressed_thread_idents.discard(thread_ident)
+            logger.debug(
+                "Suppressed expected pyrate-limiter cleanup exception",
+                thread_ident=thread_ident,
+                thread_name=args.thread.name if args.thread else None,
+                exc_type=args.exc_type.__name__ if args.exc_type else None,
+            )
             return
 
-    # Not a suppressed thread, use original handler
+    # Not a suppressed scenario, use original handler
     _original_excepthook(args)
 
 
@@ -245,16 +267,15 @@ class RateLimiter:
         leakers = []
         for limiter in self._limiters:
             leaker = limiter.bucket_factory._leaker
-            if leaker is not None and leaker.is_alive():
+            if leaker is not None and leaker.is_alive() and leaker.ident is not None:
                 leakers.append(leaker)
-                # Register thread for exception suppression
+                # Register thread ident for exception suppression.
                 # pyrate-limiter has a race condition that causes AssertionError
-                # during cleanup - this is benign but noisy
+                # during cleanup - this is benign but noisy. We register by
+                # ident (not name) to avoid accidentally suppressing unrelated
+                # threads that share a name.
                 with _suppressed_lock:
-                    # Initialize to 0 if not present, then increment
-                    if leaker.name not in _suppressed_threads:
-                        _suppressed_threads[leaker.name] = 0
-                    _suppressed_threads[leaker.name] += 1
+                    _suppressed_thread_idents.add(leaker.ident)
 
         # Dispose all buckets from their limiters
         # This deregisters them from the leaker thread

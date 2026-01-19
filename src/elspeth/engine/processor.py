@@ -135,6 +135,11 @@ class RowProcessor:
             for node_id, state in restored_aggregation_state.items():
                 self._aggregation_executor.restore_state(node_id, state)
 
+    @property
+    def token_manager(self) -> TokenManager:
+        """Expose token manager for orchestrator to create tokens for quarantined rows."""
+        return self._token_manager
+
     def _execute_transform_with_retry(
         self,
         transform: Any,

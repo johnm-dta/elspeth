@@ -219,7 +219,9 @@ class AzureBlobSink(BaseSink):
             return self._serialize_json(rows)
         elif self._format == "jsonl":
             return self._serialize_jsonl(rows)
-        # No else - format is validated by Pydantic Literal type
+        else:
+            # Unreachable due to Pydantic Literal validation, but satisfies static analysis
+            raise AssertionError(f"Unsupported format: {self._format}")
 
     def _serialize_csv(self, rows: list[dict[str, Any]]) -> bytes:
         """Serialize rows to CSV bytes."""
@@ -269,12 +271,12 @@ class AzureBlobSink(BaseSink):
             azure.core.exceptions.*: On Azure SDK errors.
         """
         if not rows:
-            # Empty batch - return descriptor for empty content
-            empty_hash = hashlib.sha256(b"").hexdigest()
+            # Still render the path for consistent audit trail
+            rendered_path = self._render_blob_path(ctx)
             return ArtifactDescriptor(
                 artifact_type="file",
-                path_or_uri=f"azure://{self._container}/{self._blob_path_template}",
-                content_hash=empty_hash,
+                path_or_uri=f"azure://{self._container}/{rendered_path}",
+                content_hash=hashlib.sha256(b"").hexdigest(),
                 size_bytes=0,
             )
 

@@ -39,6 +39,7 @@ class TestCheckpointRecoveryIntegration:
             "checkpoint_manager": checkpoint_mgr,
             "recovery_manager": recovery_mgr,
             "checkpoint_settings": checkpoint_settings,
+            "tmp_path": tmp_path,
         }
 
     def test_full_checkpoint_recovery_cycle(self, test_env: dict[str, Any]) -> None:
@@ -276,3 +277,214 @@ class TestCheckpointRecoveryIntegration:
         )
 
         return run_id
+
+    def test_full_resume_processes_remaining_rows(
+        self, test_env: dict[str, Any]
+    ) -> None:
+        """Complete cycle: run -> crash simulation -> resume -> all rows processed."""
+        import json
+
+        from elspeth.contracts import RunStatus
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape.schema import (
+            edges_table,
+            nodes_table,
+            rows_table,
+            runs_table,
+            tokens_table,
+        )
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+        from elspeth.plugins.sources.null_source import NullSource
+        from elspeth.plugins.transforms.passthrough import PassThrough
+
+        db = test_env["db"]
+        checkpoint_mgr = test_env["checkpoint_manager"]
+        recovery_mgr = test_env["recovery_manager"]
+        payload_store = test_env["payload_store"]
+        checkpoint_settings = test_env["checkpoint_settings"]
+        tmp_path = test_env["tmp_path"]
+
+        # 1. Set up failed run with 5 rows, checkpoint at row 2
+        run_id = "integration-resume-test"
+        output_path = tmp_path / "resume_output.csv"
+        now = datetime.now(UTC)
+
+        with db.engine.connect() as conn:
+            # Create run
+            conn.execute(
+                runs_table.insert().values(
+                    run_id=run_id,
+                    started_at=now,
+                    config_hash="x",
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status="failed",
+                )
+            )
+
+            # Create nodes
+            conn.execute(
+                nodes_table.insert().values(
+                    node_id="src",
+                    run_id=run_id,
+                    plugin_name="null",
+                    node_type="source",
+                    plugin_version="1.0.0",
+                    determinism="deterministic",
+                    config_hash="x",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+            conn.execute(
+                nodes_table.insert().values(
+                    node_id="xform",
+                    run_id=run_id,
+                    plugin_name="passthrough",
+                    node_type="transform",
+                    plugin_version="1.0.0",
+                    determinism="deterministic",
+                    config_hash="x",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+            conn.execute(
+                nodes_table.insert().values(
+                    node_id="sink",
+                    run_id=run_id,
+                    plugin_name="csv",
+                    node_type="sink",
+                    plugin_version="1.0.0",
+                    determinism="io_write",
+                    config_hash="x",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+
+            # Create edges
+            conn.execute(
+                edges_table.insert().values(
+                    edge_id="e1",
+                    run_id=run_id,
+                    from_node_id="src",
+                    to_node_id="xform",
+                    label="continue",
+                    default_mode="move",
+                    created_at=now,
+                )
+            )
+            conn.execute(
+                edges_table.insert().values(
+                    edge_id="e2",
+                    run_id=run_id,
+                    from_node_id="xform",
+                    to_node_id="sink",
+                    label="continue",
+                    default_mode="move",
+                    created_at=now,
+                )
+            )
+
+            # Create 5 rows with payloads
+            for i in range(5):
+                row_data = {"id": i, "name": f"row-{i}"}
+                ref = payload_store.store(json.dumps(row_data).encode())
+                conn.execute(
+                    rows_table.insert().values(
+                        row_id=f"r{i}",
+                        run_id=run_id,
+                        source_node_id="src",
+                        row_index=i,
+                        source_data_hash=f"h{i}",
+                        source_data_ref=ref,
+                        created_at=now,
+                    )
+                )
+                conn.execute(
+                    tokens_table.insert().values(
+                        token_id=f"t{i}",
+                        row_id=f"r{i}",
+                        created_at=now,
+                    )
+                )
+            conn.commit()
+
+        # Simulate partial output (rows 0-2 already written)
+        with open(output_path, "w") as f:
+            f.write("id,name\n")
+            f.write("0,row-0\n")
+            f.write("1,row-1\n")
+            f.write("2,row-2\n")
+
+        # Create checkpoint at row 2
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id="t2",
+            node_id="xform",
+            sequence_number=2,
+        )
+
+        # 2. Verify can resume
+        assert recovery_mgr.can_resume(run_id).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id)
+        assert resume_point is not None
+
+        # 3. Resume
+        orchestrator = Orchestrator(
+            db,
+            checkpoint_manager=checkpoint_mgr,
+            checkpoint_settings=checkpoint_settings,
+        )
+
+        config = PipelineConfig(
+            source=NullSource({}),
+            transforms=[
+                PassThrough({"schema": {"fields": "dynamic"}}),
+            ],
+            sinks={
+                "default": CSVSink(
+                    {
+                        "path": str(output_path),
+                        "schema": {"fields": "dynamic"},
+                        "mode": "append",
+                    }
+                )
+            },
+        )
+
+        # Build graph using add_node() API
+        graph = ExecutionGraph()
+        graph.add_node("src", node_type="source", plugin_name="null", config={})
+        graph.add_node(
+            "xform", node_type="transform", plugin_name="passthrough", config={}
+        )
+        graph.add_node("sink", node_type="sink", plugin_name="csv", config={})
+        graph.add_edge("src", "xform", label="continue")
+        graph.add_edge("xform", "sink", label="continue")
+
+        # Manually set the sink_id_map and transform_id_map since we're building
+        # the graph manually (not from config)
+        graph._sink_id_map = {"default": "sink"}
+        graph._transform_id_map = {0: "xform"}
+        graph._output_sink = "default"
+
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        # 4. Verify
+        assert result.rows_processed == 2
+        assert result.rows_succeeded == 2
+        assert result.status == RunStatus.COMPLETED
+
+        # Check output file has all 5 rows
+        lines = output_path.read_text().strip().split("\n")
+        assert len(lines) == 6  # header + 5 rows
+        assert "0,row-0" in lines[1]
+        assert "4,row-4" in lines[5]

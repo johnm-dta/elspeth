@@ -18,7 +18,7 @@ from elspeth.contracts import RowOutcome, RowResult, TokenInfo, TransformResult
 if TYPE_CHECKING:
     from elspeth.engine.coalesce_executor import CoalesceExecutor
 
-from elspeth.contracts.enums import RoutingKind
+from elspeth.contracts.enums import RoutingKind, TriggerType
 from elspeth.contracts.results import FailureInfo
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape import LandscapeRecorder
@@ -187,16 +187,19 @@ class RowProcessor:
 
         # Check if we should flush
         if self._aggregation_executor.should_flush(node_id):
-            # Get buffered rows and tokens, then flush
-            buffered_rows, buffered_tokens = self._aggregation_executor.flush_buffer(
-                node_id
-            )
+            # Determine trigger type
+            trigger_type = self._aggregation_executor.get_trigger_type(node_id)
+            if trigger_type is None:
+                trigger_type = TriggerType.COUNT  # Default if no evaluator
 
-            # Call transform with batch
-            # Type ignore: batch-aware transforms accept list[dict] at runtime
-            # but the protocol signature is dict[str, Any]. The transform's
-            # is_batch_aware=True flag indicates it handles lists.
-            result = transform.process(buffered_rows, ctx)  # type: ignore[arg-type]
+            # Execute flush with full audit recording
+            result, buffered_tokens = self._aggregation_executor.execute_flush(
+                node_id=node_id,
+                transform=transform,
+                ctx=ctx,
+                step_in_pipeline=step,
+                trigger_type=trigger_type,
+            )
 
             if result.status != "success":
                 return (

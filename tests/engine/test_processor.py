@@ -1653,6 +1653,11 @@ class TestRowProcessorCoalesce:
             coalesce_node_ids={"merger": coalesce_node.node_id},
             config_gates=[fork_gate_config],
             config_gate_id_map={"splitter": fork_gate.node_id},
+            branch_to_coalesce={
+                "path_a": "merger",
+                "path_b": "merger",
+            },
+            coalesce_step_map={"merger": 3},  # transforms(2) + gate(1)
         )
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -1670,8 +1675,6 @@ class TestRowProcessorCoalesce:
                 EnrichB(transform_b.node_id),
             ],
             ctx=ctx,
-            coalesce_at_step=3,  # After config gate (step 3 = transforms(2) + gate(1))
-            coalesce_name="merger",
         )
 
         # Verify outcomes
@@ -1838,6 +1841,11 @@ class TestRowProcessorCoalesce:
             coalesce_node_ids={"merger": coalesce_node.node_id},
             config_gates=[fork_gate_config],
             config_gate_id_map={"splitter": fork_gate.node_id},
+            branch_to_coalesce={
+                "path_a": "merger",
+                "path_b": "merger",
+            },
+            coalesce_step_map={"merger": 3},  # transforms(2) + gate(1)
         )
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -1851,8 +1859,6 @@ class TestRowProcessorCoalesce:
                 EnrichB(transform_b.node_id),
             ],
             ctx=ctx,
-            coalesce_at_step=3,  # After config gate (step 3 = transforms(2) + gate(1))
-            coalesce_name="merger",
         )
 
         # === Verify outcomes ===
@@ -3942,3 +3948,39 @@ class TestProcessorTransformMode:
         counts = {r.final_data["category"]: r.final_data["count"] for r in completed}
         assert counts["A"] == 4  # 2 * 2
         assert counts["B"] == 2  # 1 * 2
+
+
+class TestCoalesceLinkage:
+    """Test fork -> coalesce linkage."""
+
+    def test_processor_accepts_coalesce_mapping_params(self) -> None:
+        """RowProcessor should accept branch_to_coalesce and coalesce_step_map."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Should not raise - params are accepted
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            branch_to_coalesce={"path_a": "merge_point"},
+            coalesce_step_map={"merge_point": 3},
+        )
+
+        assert processor._branch_to_coalesce == {"path_a": "merge_point"}
+        assert processor._coalesce_step_map == {"merge_point": 3}

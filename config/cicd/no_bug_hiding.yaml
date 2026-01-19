@@ -479,3 +479,24 @@ allow_hits:
   # Aggregation is now engine-controlled via batch-aware transforms.
   # Stale allowlist entries removed by Task 7.
   # ============================================================
+
+  # ============================================================
+  # COALESCE STEP MAPPING (Permanent)
+  # ============================================================
+  # Fork children look up their coalesce info from _branch_to_coalesce
+  # and _coalesce_step_map. The coalesce_name comes from our mapping,
+  # but the step map might not have an entry if the step wasn't computed
+  # yet (forward-compatibility for incremental integration).
+  # ============================================================
+
+  - key: "engine/processor.py:R1:RowProcessor:_process_single_token:line=590"
+    owner: "architecture"
+    reason: "Forward-compatibility: step map may not be fully populated during integration"
+    safety: "None is valid - means coalesce step not yet computed, child skips coalesce"
+    expires: null  # Permanent - intentional design
+
+  - key: "engine/processor.py:R1:RowProcessor:_process_single_token:line=781"
+    owner: "architecture"
+    reason: "Forward-compatibility: step map may not be fully populated during integration"
+    safety: "None is valid - means coalesce step not yet computed, child skips coalesce"
+    expires: null  # Permanent - intentional design

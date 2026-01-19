@@ -93,6 +93,7 @@ class RowProcessor:
         coalesce_executor: "CoalesceExecutor | None" = None,
         coalesce_node_ids: dict[str, str] | None = None,
         branch_to_coalesce: dict[str, str] | None = None,
+        coalesce_step_map: dict[str, int] | None = None,
         restored_aggregation_state: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """Initialize processor.
@@ -111,6 +112,7 @@ class RowProcessor:
             coalesce_executor: Optional coalesce executor for fork/join operations
             coalesce_node_ids: Map of coalesce_name -> node_id for coalesce points
             branch_to_coalesce: Map of branch_name -> coalesce_name for fork/join routing
+            coalesce_step_map: Map of coalesce_name -> step position in pipeline
             restored_aggregation_state: Map of node_id -> state dict for crash recovery
         """
         self._recorder = recorder
@@ -123,6 +125,7 @@ class RowProcessor:
         self._coalesce_executor = coalesce_executor
         self._coalesce_node_ids = coalesce_node_ids or {}
         self._branch_to_coalesce = branch_to_coalesce or {}
+        self._coalesce_step_map = coalesce_step_map or {}
         self._aggregation_settings = aggregation_settings or {}
 
         self._token_manager = TokenManager(recorder)
@@ -577,12 +580,23 @@ class RowProcessor:
                     # Parent becomes FORKED, children continue from NEXT step
                     next_step = start_step + step_offset + 1
                     for child_token in outcome.child_tokens:
+                        # Look up coalesce info for this branch
+                        branch_name = child_token.branch_name
+                        child_coalesce_name: str | None = None
+                        child_coalesce_step: int | None = None
+
+                        if branch_name and branch_name in self._branch_to_coalesce:
+                            child_coalesce_name = self._branch_to_coalesce[branch_name]
+                            child_coalesce_step = self._coalesce_step_map.get(
+                                child_coalesce_name
+                            )
+
                         child_items.append(
                             _WorkItem(
                                 token=child_token,
                                 start_step=next_step,
-                                coalesce_at_step=coalesce_at_step,
-                                coalesce_name=coalesce_name,
+                                coalesce_at_step=child_coalesce_step,
+                                coalesce_name=child_coalesce_name,
                             )
                         )
 
@@ -757,13 +771,24 @@ class RowProcessor:
                 # Config gate fork - children continue from next config gate
                 next_config_step = gate_idx + 1
                 for child_token in outcome.child_tokens:
+                    # Look up coalesce info for this branch
+                    cfg_branch_name = child_token.branch_name
+                    cfg_coalesce_name: str | None = None
+                    cfg_coalesce_step: int | None = None
+
+                    if cfg_branch_name and cfg_branch_name in self._branch_to_coalesce:
+                        cfg_coalesce_name = self._branch_to_coalesce[cfg_branch_name]
+                        cfg_coalesce_step = self._coalesce_step_map.get(
+                            cfg_coalesce_name
+                        )
+
                     # Children start after ALL transforms, at next config gate
                     child_items.append(
                         _WorkItem(
                             token=child_token,
                             start_step=len(transforms) + next_config_step,
-                            coalesce_at_step=coalesce_at_step,
-                            coalesce_name=coalesce_name,
+                            coalesce_at_step=cfg_coalesce_step,
+                            coalesce_name=cfg_coalesce_name,
                         )
                     )
 

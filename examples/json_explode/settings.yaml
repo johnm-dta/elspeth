@@ -1,0 +1,44 @@
+# JSON Explode example: Explode array fields into individual rows
+#
+# This demonstrates the json_explode row transform which expands one row
+# containing an array field into multiple rows, one for each array element.
+#
+# Note: This is different from deaggregation (see examples/deaggregation).
+# json_explode operates on pre-existing arrays in source data.
+# Deaggregation operates on batches that were previously aggregated.
+#
+# Run with:
+#   uv run elspeth run -s examples/json_explode/settings.yaml --execute
+
+datasource:
+  plugin: json
+  options:
+    path: examples/json_explode/input.json
+    schema:
+      mode: strict
+      fields:
+        - "order_id: int"
+        - "items: any"
+    on_validation_failure: discard
+
+row_plugins:
+  - plugin: json_explode
+    options:
+      array_field: items
+      output_field: item
+      include_index: true
+      schema:
+        fields: dynamic
+
+sinks:
+  output:
+    plugin: json
+    options:
+      path: examples/json_explode/output/order_items.json
+      schema:
+        fields: dynamic
+
+output_sink: output
+
+landscape:
+  url: sqlite:///examples/json_explode/runs/audit.db

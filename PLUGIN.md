@@ -1,29 +1,41 @@
 # ELSPETH Plugin Development Guide
 
-This document describes how to develop plugins for ELSPETH and how to verify they honor their protocol contracts.
+This document describes how to create plugins for ELSPETH, from initial setup through registration and testing.
 
-## Plugin Types
+> **Related Documentation:**
+> - `docs/contracts/plugin-protocol.md` - Authoritative protocol specification
+> - `CLAUDE.md` - Project overview and Three-Tier Trust Model
 
-ELSPETH has three core plugin types that form the Sense/Decide/Act pipeline:
+## Table of Contents
 
-| Plugin Type | Protocol | Purpose |
-|-------------|----------|---------|
-| **Source** | `SourceProtocol` | Load data into the system (exactly 1 per run) |
-| **Transform** | `TransformProtocol` | Process/classify rows (0+ per run) |
-| **Sink** | `SinkProtocol` | Output results (1+ per run) |
+1. [Plugin Types Overview](#plugin-types-overview)
+2. [Creating a Transform Plugin](#creating-a-transform-plugin)
+3. [Creating a Source Plugin](#creating-a-source-plugin)
+4. [Creating a Sink Plugin](#creating-a-sink-plugin)
+5. [Plugin Registration](#plugin-registration)
+6. [Schema Configuration](#schema-configuration)
+7. [Contract Testing](#contract-testing)
+
+---
+
+## Plugin Types Overview
+
+ELSPETH follows the Sense/Decide/Act (SDA) model:
 
 ```
-SENSE (Source) → DECIDE (Transform/Gate) → ACT (Sink)
+SOURCE (Sense) → TRANSFORM/GATE (Decide) → SINK (Act)
 ```
 
-## The Trust Model and Plugins
+| Plugin Type | Purpose | Base Class | Key Methods |
+|-------------|---------|------------|-------------|
+| **Source** | Load data from external systems | `BaseSource` | `load()`, `close()` |
+| **Transform** | Process/classify rows | `BaseTransform` | `process()`, `close()` |
+| **Gate** | Route rows to destinations | `BaseGate` | `evaluate()`, `close()` |
+| **Sink** | Output data to destinations | `BaseSink` | `write()`, `flush()`, `close()` |
 
-**CRITICAL**: All plugins are **system-owned code**, not user-provided extensions. This means:
+### The Trust Model
 
-- Plugin bugs are **system bugs** that crash immediately (not silently handled)
-- Plugins follow the Three-Tier Trust Model:
-  - **Sources** receive external data (Tier 3 - Zero Trust) and may coerce types
-  - **Transforms/Sinks** receive pipeline data (Tier 2 - Elevated Trust) and must NOT coerce
+All plugins are **system-owned code**, not user-provided extensions. This means:
 
 | Plugin Type | Coercion Allowed? | Why |
 |-------------|-------------------|-----|
@@ -31,43 +43,626 @@ SENSE (Source) → DECIDE (Transform/Gate) → ACT (Sink)
 | **Transform** | ❌ No | Wrong types = upstream bug → crash |
 | **Sink** | ❌ No | Wrong types = upstream bug → crash |
 
-## Contract Testing for Plugins
+---
+
+## Creating a Transform Plugin
+
+Transforms are the most common plugin type. Here's the complete process.
+
+### Step 1: Create the Configuration Class
+
+Configuration classes validate plugin settings using Pydantic:
+
+```python
+# src/elspeth/plugins/transforms/my_transform.py
+"""My custom transform plugin."""
+
+from typing import Any
+
+from pydantic import Field
+
+from elspeth.plugins.base import BaseTransform
+from elspeth.plugins.config_base import TransformDataConfig
+from elspeth.plugins.context import PluginContext
+from elspeth.plugins.results import TransformResult
+from elspeth.plugins.schema_factory import create_schema_from_config
+
+
+class MyTransformConfig(TransformDataConfig):
+    """Configuration for my transform.
+
+    Inherits from TransformDataConfig which:
+    - Requires 'schema' configuration
+    - Provides optional 'on_error' for error routing
+    """
+
+    # Add your custom config fields here
+    multiplier: float = Field(
+        default=1.0,
+        description="Factor to multiply values by",
+    )
+    target_field: str = Field(
+        default="value",
+        description="Name of the field to transform",
+    )
+```
+
+### Step 2: Create the Transform Class
+
+```python
+class MyTransform(BaseTransform):
+    """Multiply a field value by a configured factor.
+
+    Config options:
+        schema: Required. Schema for input/output validation
+        multiplier: Factor to multiply by (default: 1.0)
+        target_field: Field name to transform (default: "value")
+        on_error: Sink for rows that fail processing (optional)
+
+    Example YAML:
+        row_plugins:
+          - plugin: my_transform
+            options:
+              schema:
+                fields: dynamic
+              multiplier: 2.5
+              target_field: amount
+    """
+
+    # Required: unique plugin identifier
+    name = "my_transform"
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+
+        # Parse and validate configuration
+        cfg = MyTransformConfig.from_dict(config)
+        self._multiplier = cfg.multiplier
+        self._target_field = cfg.target_field
+        self._on_error = cfg.on_error  # Required for error routing
+
+        # TransformDataConfig guarantees schema_config is not None
+        assert cfg.schema_config is not None
+        self._schema_config = cfg.schema_config
+
+        # Create schema from config
+        # CRITICAL: allow_coercion=False - wrong types are upstream bugs
+        schema = create_schema_from_config(
+            self._schema_config,
+            "MyTransformSchema",
+            allow_coercion=False,
+        )
+        self.input_schema = schema
+        self.output_schema = schema
+
+    def process(
+        self, row: dict[str, Any], ctx: PluginContext
+    ) -> TransformResult:
+        """Process a single row.
+
+        Args:
+            row: Input row data (types already validated by source)
+            ctx: Plugin context with run_id, config, landscape access
+
+        Returns:
+            TransformResult.success(row) or TransformResult.error(reason)
+        """
+        # Check if target field exists
+        if self._target_field not in row:
+            # This is a processing error, not a bug
+            return TransformResult.error({
+                "reason": "missing_field",
+                "field": self._target_field,
+            })
+
+        # Wrap operations on THEIR DATA values
+        try:
+            original = row[self._target_field]
+            result = float(original) * self._multiplier
+        except (TypeError, ValueError) as e:
+            # Their data caused the error - return error result
+            return TransformResult.error({
+                "reason": "conversion_failed",
+                "field": self._target_field,
+                "original_value": str(row[self._target_field]),
+                "error": str(e),
+            })
+
+        # Return transformed row
+        output = dict(row)
+        output[self._target_field] = result
+        return TransformResult.success(output)
+
+    def close(self) -> None:
+        """Release resources (called after all rows processed)."""
+        pass  # Nothing to release for this transform
+```
+
+### Transform Variants
+
+#### Batch-Aware Transform
+
+For transforms that process multiple rows together (aggregation):
+
+```python
+class BatchStatsTransform(BaseTransform):
+    name = "batch_stats"
+    is_batch_aware = True  # CRITICAL: receive list[dict] at aggregation nodes
+
+    def process(  # type: ignore[override]
+        self, rows: list[dict[str, Any]], ctx: PluginContext
+    ) -> TransformResult:
+        """Process a batch of rows.
+
+        Args:
+            rows: List of input rows (batch-aware receives list)
+            ctx: Plugin context
+        """
+        if not rows:
+            return TransformResult.success({"count": 0, "sum": 0})
+
+        total = sum(r.get("value", 0) for r in rows)
+        return TransformResult.success({
+            "count": len(rows),
+            "sum": total,
+            "mean": total / len(rows),
+        })
+```
+
+**Usage in pipeline:**
+```yaml
+aggregations:
+  - name: compute_stats
+    plugin: batch_stats
+    trigger:
+      count: 100  # Process every 100 rows
+    output_mode: single  # N inputs → 1 output
+    options:
+      schema:
+        fields: dynamic
+```
+
+#### Deaggregation Transform
+
+For transforms that expand one row into multiple rows:
+
+```python
+class ExpandItemsTransform(BaseTransform):
+    name = "expand_items"
+    creates_tokens = True  # CRITICAL: engine creates new tokens for outputs
+
+    def process(
+        self, row: dict[str, Any], ctx: PluginContext
+    ) -> TransformResult:
+        """Expand array field into multiple rows."""
+        items = row["items"]  # Trust: source validated this is a list
+
+        output_rows = [
+            {**row, "item": item, "item_index": i}
+            for i, item in enumerate(items)
+        ]
+
+        # Return multiple rows - engine creates new tokens for each
+        return TransformResult.success_multi(output_rows)
+```
+
+**Token creation semantics:**
+- `creates_tokens=True` + `success_multi()` → New tokens created per output row
+- `creates_tokens=False` + `success_multi()` → RuntimeError (except in aggregation passthrough)
+
+---
+
+## Creating a Source Plugin
+
+Sources load data from external systems and are the **only** place where type coercion is allowed.
+
+### Step 1: Create the Configuration Class
+
+```python
+# src/elspeth/plugins/sources/my_source.py
+"""My custom source plugin."""
+
+from collections.abc import Iterator
+from typing import Any
+
+from pydantic import Field
+
+from elspeth.contracts import PluginSchema, SourceRow
+from elspeth.plugins.base import BaseSource
+from elspeth.plugins.config_base import SourceDataConfig
+from elspeth.plugins.context import PluginContext
+from elspeth.plugins.schema_factory import create_schema_from_config
+
+
+class MySourceConfig(SourceDataConfig):
+    """Configuration for my source.
+
+    Inherits from SourceDataConfig which requires:
+    - path: File path (from PathConfig)
+    - schema: Schema configuration (from DataPluginConfig)
+    - on_validation_failure: Where invalid rows go (REQUIRED)
+    """
+
+    # Add custom config fields
+    skip_header: bool = Field(
+        default=True,
+        description="Whether to skip the first line",
+    )
+```
+
+### Step 2: Create the Source Class
+
+```python
+class MySource(BaseSource):
+    """Load data from my custom format.
+
+    Config options:
+        path: Path to data file (required)
+        schema: Schema configuration (required)
+        on_validation_failure: Sink name or 'discard' (required)
+        skip_header: Whether to skip header line (default: True)
+    """
+
+    name = "my_source"
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+
+        cfg = MySourceConfig.from_dict(config)
+        self._path = cfg.resolved_path()
+        self._skip_header = cfg.skip_header
+        self._on_validation_failure = cfg.on_validation_failure
+
+        # Store schema config for audit trail
+        assert cfg.schema_config is not None
+        self._schema_config = cfg.schema_config
+
+        # CRITICAL: allow_coercion=True for sources (external data boundary)
+        self._schema_class: type[PluginSchema] = create_schema_from_config(
+            self._schema_config,
+            "MySourceRowSchema",
+            allow_coercion=True,  # Sources MAY coerce external data
+        )
+
+        # Set output_schema for protocol compliance
+        self.output_schema = self._schema_class
+
+    def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
+        """Load rows from the data file.
+
+        Yields:
+            SourceRow.valid() for rows that pass validation
+            SourceRow.quarantined() for rows that fail (unless 'discard')
+        """
+        from pydantic import ValidationError
+
+        if not self._path.exists():
+            raise FileNotFoundError(f"File not found: {self._path}")
+
+        with open(self._path) as f:
+            lines = f.readlines()
+
+        if self._skip_header and lines:
+            lines = lines[1:]
+
+        for line_num, line in enumerate(lines, start=1):
+            # Parse line into row dict (your format-specific logic)
+            row = self._parse_line(line)
+
+            try:
+                # Validate and coerce row data
+                validated = self._schema_class.model_validate(row)
+                yield SourceRow.valid(validated.to_row())
+
+            except ValidationError as e:
+                # Record validation failure in audit trail
+                ctx.record_validation_error(
+                    row=row,
+                    error=str(e),
+                    schema_mode=self._schema_config.mode or "dynamic",
+                    destination=self._on_validation_failure,
+                )
+
+                # Route to configured sink (or drop if 'discard')
+                if self._on_validation_failure != "discard":
+                    yield SourceRow.quarantined(
+                        row=row,
+                        error=str(e),
+                        destination=self._on_validation_failure,
+                    )
+
+    def _parse_line(self, line: str) -> dict[str, Any]:
+        """Parse a line into a row dict."""
+        # Your format-specific parsing logic here
+        parts = line.strip().split(",")
+        return {"id": parts[0], "value": parts[1]} if len(parts) >= 2 else {}
+
+    def close(self) -> None:
+        """Release resources."""
+        pass
+```
+
+---
+
+## Creating a Sink Plugin
+
+Sinks output data and **must** return audit-relevant information including content hashes.
+
+```python
+# src/elspeth/plugins/sinks/my_sink.py
+"""My custom sink plugin."""
+
+import hashlib
+from pathlib import Path
+from typing import Any
+
+from pydantic import Field
+
+from elspeth.contracts import ArtifactDescriptor
+from elspeth.plugins.base import BaseSink
+from elspeth.plugins.config_base import PathConfig
+from elspeth.plugins.context import PluginContext
+from elspeth.plugins.schema_factory import create_schema_from_config
+
+
+class MySinkConfig(PathConfig):
+    """Configuration for my sink."""
+
+    append: bool = Field(
+        default=False,
+        description="Append to existing file instead of overwrite",
+    )
+
+
+class MySink(BaseSink):
+    """Write data to my custom format.
+
+    Config options:
+        path: Output file path (required)
+        schema: Schema configuration (required)
+        append: Append mode (default: False)
+    """
+
+    name = "my_sink"
+    idempotent = False  # Appends are not idempotent
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+
+        cfg = MySinkConfig.from_dict(config)
+        self._path = Path(cfg.path)
+        self._append = cfg.append
+
+        assert cfg.schema_config is not None
+        schema = create_schema_from_config(
+            cfg.schema_config,
+            "MySinkSchema",
+            allow_coercion=False,  # Sinks do NOT coerce
+        )
+        self.input_schema = schema
+
+        self._file = None
+        self._bytes_written = 0
+        self._hasher = hashlib.sha256()
+
+    def on_start(self, ctx: PluginContext) -> None:
+        """Open output file."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "a" if self._append else "w"
+        self._file = open(self._path, mode)
+        self._bytes_written = 0
+        self._hasher = hashlib.sha256()
+
+    def write(
+        self, rows: list[dict[str, Any]], ctx: PluginContext
+    ) -> ArtifactDescriptor:
+        """Write rows to file.
+
+        Returns:
+            ArtifactDescriptor with content_hash (REQUIRED for audit)
+        """
+        for row in rows:
+            line = self._format_row(row)
+            self._file.write(line)
+            self._hasher.update(line.encode())
+            self._bytes_written += len(line.encode())
+
+        return ArtifactDescriptor.for_file(
+            path=str(self._path),
+            content_hash=self._hasher.hexdigest(),
+            size_bytes=self._bytes_written,
+        )
+
+    def _format_row(self, row: dict[str, Any]) -> str:
+        """Format row for output."""
+        return ",".join(str(v) for v in row.values()) + "\n"
+
+    def flush(self) -> None:
+        """Flush buffered data."""
+        if self._file:
+            self._file.flush()
+
+    def close(self) -> None:
+        """Close file handle."""
+        if self._file:
+            self._file.close()
+            self._file = None
+```
+
+---
+
+## Plugin Registration
+
+Plugins must be registered in two places:
+
+### 1. Hook Implementation (pluggy)
+
+Add your plugin to the appropriate `hookimpl.py`:
+
+```python
+# src/elspeth/plugins/transforms/hookimpl.py
+
+class ElspethBuiltinTransforms:
+    """Hook implementer for built-in transform plugins."""
+
+    @hookimpl
+    def elspeth_get_transforms(self) -> list[type[Any]]:
+        """Return built-in transform plugin classes."""
+        from elspeth.plugins.transforms.my_transform import MyTransform
+        # ... other imports ...
+
+        return [PassThrough, FieldMapper, MyTransform]  # Add yours here
+```
+
+### 2. CLI Registration
+
+Add your plugin to the CLI registries in `src/elspeth/cli.py`:
+
+```python
+# In _execute_pipeline() and _resume_run() functions:
+
+from elspeth.plugins.transforms.my_transform import MyTransform
+
+TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
+    "passthrough": PassThrough,
+    "field_mapper": FieldMapper,
+    "my_transform": MyTransform,  # Add yours here
+}
+```
+
+### File Organization
+
+Place your plugin in the appropriate directory:
+
+```
+src/elspeth/plugins/
+├── sources/
+│   ├── __init__.py
+│   ├── hookimpl.py          # Register sources here
+│   ├── csv_source.py
+│   └── my_source.py         # Your new source
+├── transforms/
+│   ├── __init__.py
+│   ├── hookimpl.py          # Register transforms here
+│   ├── passthrough.py
+│   └── my_transform.py      # Your new transform
+└── sinks/
+    ├── __init__.py
+    ├── hookimpl.py          # Register sinks here
+    ├── csv_sink.py
+    └── my_sink.py           # Your new sink
+```
+
+---
+
+## Schema Configuration
+
+Schemas control how data is validated. All data-processing plugins require schema configuration.
+
+### Schema Modes
+
+| Mode | Behavior | Extra Fields |
+|------|----------|--------------|
+| `dynamic` | Accept any fields | Allowed |
+| `strict` | Only declared fields allowed | Rejected |
+| `free` | Declared fields required, extras allowed | Allowed |
+
+### YAML Configuration
+
+```yaml
+# Dynamic - accept anything
+schema:
+  fields: dynamic
+
+# Strict - only these fields
+schema:
+  mode: strict
+  fields:
+    - "id: int"
+    - "name: str"
+    - "active: bool"
+
+# Free - at least these, allow more
+schema:
+  mode: free
+  fields:
+    - "id: int"
+    - "value: float"
+```
+
+### Supported Types
+
+| Type | Python Type | Notes |
+|------|-------------|-------|
+| `str` | `str` | Text |
+| `int` | `int` | Integer |
+| `float` | `float` | Decimal |
+| `bool` | `bool` | True/False |
+| `any` | `Any` | No type checking |
+
+### Schema Factory
+
+Use `create_schema_from_config()` to create runtime schemas:
+
+```python
+from elspeth.plugins.schema_factory import create_schema_from_config
+
+# For sources - coercion allowed
+schema = create_schema_from_config(
+    schema_config,
+    "MySourceSchema",
+    allow_coercion=True,
+)
+
+# For transforms/sinks - no coercion
+schema = create_schema_from_config(
+    schema_config,
+    "MyTransformSchema",
+    allow_coercion=False,
+)
+```
+
+---
+
+## Contract Testing
 
 Every plugin MUST pass its protocol contract tests. The contract test framework verifies interface guarantees automatically.
 
 ### Quick Start: Testing a New Plugin
 
 ```python
-# tests/contracts/source_contracts/test_my_source_contract.py
-from pathlib import Path
+# tests/contracts/transform_contracts/test_my_transform_contract.py
+from typing import TYPE_CHECKING
+
 import pytest
-from .test_source_protocol import SourceContractPropertyTestBase
-from elspeth.plugins.sources.my_source import MySource
 
-class TestMySourceContract(SourceContractPropertyTestBase):
-    """Contract tests for MySource plugin."""
+from elspeth.plugins.transforms.my_transform import MyTransform
+
+from .test_transform_protocol import TransformContractPropertyTestBase
+
+if TYPE_CHECKING:
+    from elspeth.plugins.protocols import TransformProtocol
+
+
+class TestMyTransformContract(TransformContractPropertyTestBase):
+    """Contract tests for MyTransform plugin."""
 
     @pytest.fixture
-    def source_data(self, tmp_path: Path) -> Path:
-        """Create test data for the source."""
-        data_file = tmp_path / "test_data.json"
-        data_file.write_text('{"id": 1, "name": "test"}')
-        return data_file
-
-    @pytest.fixture
-    def source(self, source_data: Path):
-        """Create a configured source instance."""
-        return MySource({
-            "path": str(source_data),
+    def transform(self) -> "TransformProtocol":
+        """REQUIRED: Return a configured transform instance."""
+        return MyTransform({
             "schema": {"fields": "dynamic"},
-            "on_validation_failure": "discard",
+            "multiplier": 2.0,
+            "target_field": "value",
         })
 
-    # All protocol contract tests are inherited automatically!
-    # Add plugin-specific tests below if needed.
-```
+    @pytest.fixture
+    def valid_input(self) -> dict:
+        """REQUIRED: Return input that should process successfully."""
+        return {"id": 1, "value": 10.0}
 
-That's it. Your plugin now has **14+ contract tests** inherited from the base class.
+    # All 15+ protocol contract tests are inherited automatically!
+```
 
 ### Contract Test Base Classes
 
@@ -91,9 +686,6 @@ class TestMySourceContract(SourceContractPropertyTestBase):
     def source(self) -> SourceProtocol:
         """REQUIRED: Return a configured source instance."""
         return MySource({...})
-
-    # Optional: ctx fixture is provided by base class
-    # Override if you need custom context
 ```
 
 #### Transform Plugins
@@ -110,8 +702,6 @@ class TestMyTransformContract(TransformContractPropertyTestBase):
     def valid_input(self) -> dict:
         """REQUIRED: Return input that should process successfully."""
         return {"id": 1, "name": "test"}
-
-    # Optional: ctx fixture is provided by base class
 ```
 
 #### Sink Plugins
@@ -124,22 +714,33 @@ class TestMySinkContract(SinkDeterminismContractTestBase):
         """REQUIRED: Return a configured sink instance."""
         return MySink({
             "path": str(tmp_path / "output.csv"),
-            ...
+            "schema": {"fields": "dynamic"},
         })
 
     @pytest.fixture
     def sample_rows(self) -> list[dict]:
         """REQUIRED: Return sample rows to write."""
         return [{"id": 1}, {"id": 2}]
-
-    # Optional: ctx fixture is provided by base class
 ```
 
-## Protocol Contracts
+### Running Contract Tests
+
+```bash
+# Run all contract tests
+.venv/bin/python -m pytest tests/contracts/ -v
+
+# Run tests for a specific plugin
+.venv/bin/python -m pytest tests/contracts/transform_contracts/test_my_transform_contract.py -v
+
+# Run with Hypothesis nightly profile (more examples)
+HYPOTHESIS_PROFILE=nightly .venv/bin/python -m pytest tests/contracts/ -v
+```
+
+---
+
+## Protocol Contracts Reference
 
 ### Source Protocol Contracts
-
-A valid source implementation MUST:
 
 | Contract | Verified By |
 |----------|-------------|
@@ -151,168 +752,46 @@ A valid source implementation MUST:
 | `load()` yields `SourceRow` objects only | `test_load_yields_source_rows` |
 | Valid `SourceRow` has non-None `.row` dict | `test_valid_rows_have_data` |
 | Quarantined `SourceRow` has `.quarantine_error` | `test_quarantined_rows_have_error` |
-| Quarantined `SourceRow` has `.quarantine_destination` | `test_quarantined_rows_have_destination` |
-| `close()` is idempotent (safe to call multiple times) | `test_close_is_idempotent` |
-| `on_start()` does not raise | `test_on_start_does_not_raise` |
-| `on_complete()` does not raise | `test_on_complete_does_not_raise` |
-
-**Common Mistakes**:
-```python
-# WRONG - yielding raw dict
-def load(self, ctx):
-    for row in data:
-        yield row  # ❌ Must be SourceRow!
-
-# CORRECT - wrapping in SourceRow
-def load(self, ctx):
-    for row in data:
-        yield SourceRow.valid(row)  # ✅
-```
+| `close()` is idempotent | `test_close_is_idempotent` |
 
 ### Transform Protocol Contracts
-
-A valid transform implementation MUST:
 
 | Contract | Verified By |
 |----------|-------------|
 | Have `name` attribute | `test_transform_has_name` |
 | Have `input_schema` attribute | `test_transform_has_input_schema` |
 | Have `output_schema` attribute | `test_transform_has_output_schema` |
-| Have `determinism` attribute | `test_transform_has_determinism` |
-| Have `plugin_version` attribute | `test_transform_has_plugin_version` |
 | Have `is_batch_aware` attribute (bool) | `test_transform_has_batch_awareness_flag` |
 | Have `creates_tokens` attribute (bool) | `test_transform_has_creates_tokens_flag` |
 | `process()` returns `TransformResult` | `test_process_returns_transform_result` |
-| `TransformResult` has `.status` ("success" or "error") | `test_success_result_has_status` |
-| Success result has output data (`.row` or `.rows`) | `test_success_result_has_output_data` |
-| Success `.row` is a dict | `test_success_single_row_is_dict` |
-| Success `.rows` is a list of dicts | `test_success_multi_row_is_list` |
+| Success result has output data | `test_success_result_has_output_data` |
 | `close()` is idempotent | `test_close_is_idempotent` |
 
-**Common Mistakes**:
-```python
-# WRONG - returning raw dict
-def process(self, row, ctx):
-    return {"result": row["value"] * 2}  # ❌ Must be TransformResult!
-
-# CORRECT - using factory method
-def process(self, row, ctx):
-    return TransformResult.success({"result": row["value"] * 2})  # ✅
-```
-
 ### Sink Protocol Contracts
-
-A valid sink implementation MUST:
 
 | Contract | Verified By |
 |----------|-------------|
 | Have `name` attribute | `test_sink_has_name` |
 | Have `input_schema` attribute | `test_sink_has_input_schema` |
-| Have `determinism` attribute | `test_sink_has_determinism` |
-| Have `plugin_version` attribute | `test_sink_has_plugin_version` |
 | Have `idempotent` attribute (bool) | `test_sink_has_idempotent_flag` |
 | `write()` returns `ArtifactDescriptor` | `test_write_returns_artifact_descriptor` |
-| `ArtifactDescriptor.content_hash` is not None | `test_artifact_has_content_hash` |
-| `content_hash` is valid SHA-256 (64 hex chars) | `test_content_hash_is_sha256_hex` |
+| `ArtifactDescriptor.content_hash` is valid SHA-256 | `test_content_hash_is_sha256_hex` |
 | `ArtifactDescriptor.size_bytes` is not None | `test_artifact_has_size_bytes` |
-| `ArtifactDescriptor.artifact_type` is valid | `test_artifact_has_artifact_type` |
-| `ArtifactDescriptor.path_or_uri` is not empty | `test_artifact_has_path_or_uri` |
-| `write([])` returns valid descriptor | `test_write_empty_batch_returns_descriptor` |
+| Same data produces same `content_hash` | `test_same_data_same_hash` |
 | `flush()` is idempotent | `test_flush_is_idempotent` |
 | `close()` is idempotent | `test_close_is_idempotent` |
-| Same data produces same `content_hash` | `test_same_data_same_hash` |
 
-**Critical for Audit Integrity**: The `content_hash` contract is non-negotiable. If the same data produces different hashes, the audit trail cannot be verified.
-
-```python
-# WRONG - no content hash
-def write(self, rows, ctx):
-    self._write_rows(rows)
-    return ArtifactDescriptor(...)  # ❌ Missing content_hash!
-
-# CORRECT - always compute content hash
-def write(self, rows, ctx):
-    self._write_rows(rows)
-    content_hash = self._compute_sha256()
-    return ArtifactDescriptor.for_file(
-        path=str(self._path),
-        content_hash=content_hash,  # ✅ REQUIRED
-        size_bytes=self._path.stat().st_size,
-    )
-```
-
-## Running Contract Tests
-
-```bash
-# Run all contract tests
-.venv/bin/python -m pytest tests/contracts/source_contracts/ \
-    tests/contracts/transform_contracts/ \
-    tests/contracts/sink_contracts/ -v
-
-# Run tests for a specific plugin
-.venv/bin/python -m pytest tests/contracts/source_contracts/test_csv_source_contract.py -v
-
-# Run with Hypothesis nightly profile (more examples)
-HYPOTHESIS_PROFILE=nightly .venv/bin/python -m pytest tests/contracts/ -v
-```
-
-## Adding Plugin-Specific Tests
-
-After inheriting the base contract tests, add tests for behavior specific to your plugin:
-
-```python
-class TestMySourceContract(SourceContractPropertyTestBase):
-    # ... fixtures ...
-
-    # Plugin-specific tests
-    def test_my_source_handles_encoding(self, tmp_path):
-        """MySource MUST handle UTF-8 encoding correctly."""
-        # Create test file with special characters
-        data_file = tmp_path / "unicode.csv"
-        data_file.write_text("name\n日本語\némoji 🎉\n", encoding="utf-8")
-
-        source = MySource({"path": str(data_file), ...})
-        ctx = PluginContext(run_id="test", config={})
-
-        rows = list(source.load(ctx))
-        assert len(rows) == 2
-        assert rows[0].row["name"] == "日本語"
-
-    def test_my_source_respects_config_option(self, source, ctx):
-        """MySource MUST respect the 'skip_rows' config option."""
-        # Test plugin-specific configuration
-        ...
-```
-
-## Property-Based Contract Tests
-
-Some contract tests use Hypothesis for property-based verification:
-
-```python
-class TestMyTransformContract(TransformContractPropertyTestBase):
-    # ... fixtures ...
-
-    @given(
-        data=st.dictionaries(
-            keys=st.text(min_size=1, max_size=20),
-            values=st.integers(),
-            min_size=1,
-        )
-    )
-    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
-    def test_my_transform_handles_any_dict(self, transform, ctx, data):
-        """Property: MyTransform handles any valid dict input."""
-        result = transform.process(data, ctx)
-        assert isinstance(result, TransformResult)
-```
-
-**Note**: When using `@given` with pytest fixtures, add `suppress_health_check=[HealthCheck.function_scoped_fixture]` to the `@settings` decorator.
+---
 
 ## Checklist for New Plugins
 
 Before submitting a new plugin:
 
 - [ ] Plugin has all required protocol attributes (`name`, `*_schema`, `determinism`, `plugin_version`)
+- [ ] Configuration class extends appropriate base (`TransformDataConfig`, `SourceDataConfig`, `PathConfig`)
+- [ ] Schema created with correct `allow_coercion` setting (True for sources, False otherwise)
+- [ ] Registered in `hookimpl.py` for the plugin type
+- [ ] Registered in `cli.py` plugin registry
 - [ ] Contract test class created inheriting appropriate base class
 - [ ] All inherited contract tests pass
 - [ ] Plugin-specific behavior has additional tests
@@ -320,74 +799,14 @@ Before submitting a new plugin:
 - [ ] Transforms return `TransformResult.success()` or `TransformResult.error()`
 - [ ] Sinks return `ArtifactDescriptor` with valid `content_hash`
 - [ ] `close()` method is idempotent
-- [ ] No type coercion in transforms/sinks (sources only)
+- [ ] No type coercion in transforms/sinks
 
-## Example: Complete Plugin Test File
-
-```python
-# tests/contracts/source_contracts/test_json_source_contract.py
-"""Contract tests for JSONSource plugin."""
-
-from __future__ import annotations
-
-from pathlib import Path
-from typing import TYPE_CHECKING
-
-import pytest
-
-from elspeth.plugins.sources.json_source import JSONSource
-
-from .test_source_protocol import SourceContractPropertyTestBase
-
-if TYPE_CHECKING:
-    from elspeth.plugins.protocols import SourceProtocol
-
-
-class TestJSONSourceContract(SourceContractPropertyTestBase):
-    """Contract tests for JSONSource."""
-
-    @pytest.fixture
-    def source_data(self, tmp_path: Path) -> Path:
-        """Create a test JSON file."""
-        json_file = tmp_path / "test_data.json"
-        json_file.write_text('[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]')
-        return json_file
-
-    @pytest.fixture
-    def source(self, source_data: Path) -> "SourceProtocol":
-        """Create a JSONSource instance."""
-        return JSONSource({
-            "path": str(source_data),
-            "schema": {"fields": "dynamic"},
-            "on_validation_failure": "discard",
-        })
-
-    # Inherits 14+ contract tests from SourceContractPropertyTestBase
-
-    # Plugin-specific tests
-    def test_json_source_handles_nested_objects(self, tmp_path: Path) -> None:
-        """JSONSource MUST handle nested JSON objects."""
-        from elspeth.plugins.context import PluginContext
-
-        nested_file = tmp_path / "nested.json"
-        nested_file.write_text('[{"id": 1, "meta": {"created": "2024-01-01"}}]')
-
-        source = JSONSource({
-            "path": str(nested_file),
-            "schema": {"fields": "dynamic"},
-            "on_validation_failure": "discard",
-        })
-        ctx = PluginContext(run_id="test", config={})
-
-        rows = list(source.load(ctx))
-        assert len(rows) == 1
-        assert rows[0].row["meta"]["created"] == "2024-01-01"
-```
+---
 
 ## Further Reading
 
+- `docs/contracts/plugin-protocol.md` - Complete protocol specification
 - `TEST_SYSTEM.md` - Complete test system documentation
 - `CLAUDE.md` - Project overview and Three-Tier Trust Model
-- `docs/plans/2026-01-20-world-class-test-regime.md` - Test regime proposal
 - `src/elspeth/plugins/protocols.py` - Protocol definitions
 - `src/elspeth/contracts/results.py` - Result type definitions

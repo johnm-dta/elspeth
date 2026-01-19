@@ -1,34 +1,55 @@
-# Deaggregation example: Explode order items into individual rows
-# THREE-TIER TRUST MODEL:
-# - Source validates that 'items' exists (strict schema with 'any' type)
-# - Invalid rows quarantined BEFORE entering pipeline
-# - JSONExplode trusts the field exists and is a list
+# ELSPETH Deaggregation Example
+#
+# Demonstrates the full deaggregation cycle using output_mode: transform.
+#
+# Flow:
+#   1. Individual rows enter the pipeline (6 rows with copies=1,2,3...)
+#   2. Aggregation buffers rows (trigger: count=3)
+#   3. Batch transform (batch_replicate) produces N output rows per input
+#      where N is the "copies" field value
+#   4. Engine creates NEW tokens for each output row (deaggregation)
+#
+# Input: 6 rows with copies totaling 11 (2+1+3+2+1+2)
+# Output: 11 rows (each original row replicated by its copies value)
+#
+# This is different from json_explode (see examples/json_explode) which
+# operates on pre-existing arrays. Deaggregation operates on batches that
+# were aggregated, producing new tokens for lineage tracking.
+#
+# Run with:
+#   uv run elspeth run -s examples/deaggregation/settings.yaml --execute
 
 datasource:
-  plugin: json
+  plugin: csv
   options:
-    path: examples/deaggregation/input.json
+    path: examples/deaggregation/input.csv
     schema:
-      mode: strict
+      mode: free
       fields:
-        - "order_id: int"
-        - "items: any"
+        - "id: int"
+        - "copies: int"
     on_validation_failure: discard
 
-row_plugins:
-  - plugin: json_explode
+# Aggregation with output_mode: transform creates new tokens for outputs
+# This is the key to deaggregation: N inputs -> M outputs with NEW tokens
+aggregations:
+  - name: replicate_batch
+    plugin: batch_replicate
+    trigger:
+      count: 3  # Process every 3 rows
+    output_mode: transform  # CRITICAL: Creates new tokens for each output row
     options:
-      array_field: items
-      output_field: item
-      include_index: true
       schema:
         fields: dynamic
+      copies_field: copies
+      default_copies: 1
+      include_copy_index: true
 
 sinks:
   output:
-    plugin: json
+    plugin: csv
     options:
-      path: examples/deaggregation/output/order_items.json
+      path: examples/deaggregation/output/replicated.csv
       schema:
         fields: dynamic
 

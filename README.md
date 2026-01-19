@@ -280,25 +280,38 @@ llm:
 ## Architecture
 
 ```
-ELSPETH/
-├── src/elspeth_rapid/
+elspeth-rapid/
+├── src/elspeth/
 │   ├── core/
-│   │   ├── landscape/      # Audit trail storage
+│   │   ├── landscape/      # Audit trail storage and export
+│   │   ├── checkpoint/     # Run checkpointing for recovery
+│   │   ├── retention/      # Data retention policies
+│   │   ├── security/       # Secret fingerprinting
+│   │   ├── rate_limit/     # API rate limiting
 │   │   ├── config.py       # Configuration loading
-│   │   └── canonical.py    # Deterministic hashing
+│   │   ├── canonical.py    # Deterministic JSON hashing
+│   │   └── dag.py          # Execution graph
 │   ├── engine/
-│   │   ├── runner.py       # SDA pipeline execution
-│   │   ├── row_processor.py
-│   │   └── artifact_pipeline.py
+│   │   ├── orchestrator.py # Pipeline orchestration
+│   │   ├── processor.py    # Row processing loop
+│   │   ├── executors.py    # Transform/Gate/Aggregation executors
+│   │   ├── coalesce_executor.py  # Fork/join merge logic
+│   │   └── triggers.py     # Aggregation trigger evaluation
 │   ├── plugins/
-│   │   ├── sources/        # Data input plugins
+│   │   ├── sources/        # Data input plugins (CSV, JSON)
 │   │   ├── transforms/     # Processing plugins
-│   │   └── sinks/          # Output plugins
-│   └── cli.py
+│   │   ├── sinks/          # Output plugins (CSV, JSON, DB)
+│   │   └── protocols.py    # Plugin interface contracts
+│   ├── contracts/          # Type contracts, results, enums
+│   ├── tui/                # Terminal UI for explain/status
+│   └── cli.py              # Command-line interface
 ├── tests/
 └── docs/
+    ├── contracts/
+    │   └── plugin-protocol.md  # Plugin interface specification
+    ├── runbooks/               # Operational guides
     └── design/
-        └── architecture.md  # Detailed design document
+        └── architecture.md     # System design document
 ```
 
 ## The Audit Promise

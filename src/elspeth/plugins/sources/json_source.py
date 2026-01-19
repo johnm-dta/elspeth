@@ -86,11 +86,11 @@ class JSONSource(BaseSource):
         """Load rows from JSON file.
 
         Each row is validated against the configured schema:
-        - Valid rows are yielded for processing
-        - Invalid rows are quarantined (recorded but not yielded)
+        - Valid rows are yielded as SourceRow.valid()
+        - Invalid rows are yielded as SourceRow.quarantined()
 
         Yields:
-            Dict for each valid row.
+            SourceRow for each row (valid or quarantined).
 
         Raises:
             FileNotFoundError: If file does not exist.

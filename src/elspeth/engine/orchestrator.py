@@ -11,6 +11,7 @@ Coordinates:
 """
 
 import os
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -125,16 +126,18 @@ class Orchestrator:
     def _maybe_checkpoint(self, run_id: str, token_id: str, node_id: str) -> None:
         """Create checkpoint if configured.
 
-        Called after each row is processed. Creates a checkpoint based on
-        the configured frequency:
-        - every_row: Always checkpoint
-        - every_n: Checkpoint at intervals (e.g., every 10 rows)
-        - aggregation_only: No per-row checkpoints (handled separately)
+        Called after a token has been durably written to its terminal sink.
+        The checkpoint represents a durable progress marker - recovery can
+        safely skip any row whose token has a checkpoint with a sink node_id.
+
+        IMPORTANT: Checkpoints are created AFTER sink writes, not during
+        the main processing loop. This ensures the checkpoint represents
+        actual durable output, not just processing completion.
 
         Args:
             run_id: Current run ID
-            token_id: Token that was just processed
-            node_id: Node that processed it (last in chain before sink)
+            token_id: Token that was just written to sink
+            node_id: Sink node that received the token
         """
         if not self._checkpoint_settings or not self._checkpoint_settings.enabled:
             return
@@ -730,24 +733,13 @@ class Orchestrator:
                     )
 
                     # Handle all results from this source row (includes fork children)
+                    #
+                    # Note: Counters track processing outcomes (how many rows reached each state).
+                    # Sink durability is tracked separately via checkpoints, which are created
+                    # AFTER successful sink writes. A crash before sink write means:
+                    # - Counters may be inflated (row counted but not persisted)
+                    # - But recovery will correctly identify the unwritten rows
                     for result in results:
-                        # Determine the last node that processed this token
-                        # (used for checkpoint to know where to resume from)
-                        # For config gates, the last node is the last config gate if any
-                        last_node_id: str
-                        if config.gates:
-                            # Get the last config gate's node ID
-                            last_gate_name = config.gates[-1].name
-                            last_node_id = config_gate_id_map[last_gate_name]
-                        elif config.transforms:
-                            # node_id is guaranteed set - we assigned it above
-                            transform_node_id = config.transforms[-1].node_id
-                            assert transform_node_id is not None
-                            last_node_id = transform_node_id
-                        else:
-                            # source_id is guaranteed set - validated above
-                            last_node_id = source_id
-
                         if result.outcome == RowOutcome.COMPLETED:
                             rows_succeeded += 1
                             # Fork children route to branch-named sink if it exists
@@ -758,23 +750,11 @@ class Orchestrator:
                             ):
                                 sink_name = result.token.branch_name
                             pending_tokens[sink_name].append(result.token)
-                            # Checkpoint after successful row processing
-                            self._maybe_checkpoint(
-                                run_id=run_id,
-                                token_id=result.token.token_id,
-                                node_id=last_node_id,
-                            )
                         elif result.outcome == RowOutcome.ROUTED:
                             rows_routed += 1
                             # GateExecutor contract: ROUTED outcome always has sink_name set
                             assert result.sink_name is not None
                             pending_tokens[result.sink_name].append(result.token)
-                            # Checkpoint after successful routing
-                            self._maybe_checkpoint(
-                                run_id=run_id,
-                                token_id=result.token.token_id,
-                                node_id=last_node_id,
-                            )
                         elif result.outcome == RowOutcome.FAILED:
                             rows_failed += 1
                         elif result.outcome == RowOutcome.QUARANTINED:
@@ -791,15 +771,6 @@ class Orchestrator:
                             rows_coalesced += 1
                             pending_tokens[output_sink_name].append(result.token)
 
-                            # Checkpoint after successful coalesce
-                            # Note: Using last_node_id for now; coalesce node tracking
-                            # would require adding coalesce_name to RowResult
-                            self._maybe_checkpoint(
-                                run_id=run_id,
-                                token_id=result.token.token_id,
-                                node_id=last_node_id,
-                            )
-
             # ─────────────────────────────────────────────────────────────────
             # CRITICAL: Flush remaining aggregation buffers at end-of-source
             # ─────────────────────────────────────────────────────────────────
@@ -812,7 +783,7 @@ class Orchestrator:
                     pending_tokens=pending_tokens,
                     output_sink_name=output_sink_name,
                     run_id=run_id,
-                    checkpoint=True,
+                    checkpoint=False,  # Checkpointing now happens after sink write
                     last_node_id=default_last_node_id,
                 )
                 rows_succeeded += agg_succeeded
@@ -830,14 +801,6 @@ class Orchestrator:
                         # Successful merge - route to output sink
                         rows_coalesced += 1
                         pending_tokens[output_sink_name].append(outcome.merged_token)
-
-                        # Checkpoint the flushed merged token
-                        # Use default_last_node_id since we're outside the row loop
-                        self._maybe_checkpoint(
-                            run_id=run_id,
-                            token_id=outcome.merged_token.token_id,
-                            node_id=default_last_node_id,
-                        )
                     elif outcome.failure_reason:
                         # Coalesce failed (timeout, missing branches, etc.)
                         # Failure is recorded in audit trail by executor.
@@ -850,14 +813,28 @@ class Orchestrator:
             # Step = transforms + config gates + 1 (for sink)
             step = len(config.transforms) + len(config.gates) + 1
 
+            # Create checkpoint callback for post-sink checkpointing
+            def checkpoint_after_sink(sink_node_id: str) -> Callable[[TokenInfo], None]:
+                def callback(token: TokenInfo) -> None:
+                    self._maybe_checkpoint(
+                        run_id=run_id,
+                        token_id=token.token_id,
+                        node_id=sink_node_id,
+                    )
+
+                return callback
+
             for sink_name, tokens in pending_tokens.items():
                 if tokens and sink_name in config.sinks:
                     sink = config.sinks[sink_name]
+                    sink_node_id = sink_id_map[sink_name]
+
                     sink_executor.write(
                         sink=sink,
                         tokens=tokens,
                         ctx=ctx,
                         step_in_pipeline=step,
+                        on_token_written=checkpoint_after_sink(sink_node_id),
                     )
 
         finally:

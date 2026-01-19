@@ -9,6 +9,7 @@ Each executor handles a specific plugin type:
 """
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -1212,6 +1213,8 @@ class SinkExecutor:
         tokens: list[TokenInfo],
         ctx: PluginContext,
         step_in_pipeline: int,
+        *,
+        on_token_written: Callable[[TokenInfo], None] | None = None,
     ) -> Artifact | None:
         """Write tokens to sink with artifact recording.
 
@@ -1224,6 +1227,8 @@ class SinkExecutor:
             tokens: Tokens to write (may be empty)
             ctx: Plugin context
             step_in_pipeline: Current position in DAG (Orchestrator is authority)
+            on_token_written: Optional callback called for each token after successful write.
+                             Used for post-sink checkpointing.
 
         Returns:
             Artifact if tokens were written, None if empty
@@ -1300,5 +1305,10 @@ class SinkExecutor:
             content_hash=artifact_info.content_hash,
             size_bytes=artifact_info.size_bytes,
         )
+
+        # Call checkpoint callback for each token after successful write
+        if on_token_written is not None:
+            for token in tokens:
+                on_token_written(token)
 
         return artifact

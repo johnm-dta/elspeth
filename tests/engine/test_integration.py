@@ -1263,7 +1263,7 @@ class TestAggregationIntegrationDeleted:
     OLD: TestAggregationIntegration tested full pipeline with BaseAggregation
          plugins using accept()/flush() interface.
     NEW: Aggregation is engine-controlled via batch-aware transforms
-         (is_batch_aware=True) using buffer_row()/flush_buffer().
+         (is_batch_aware=True) using buffer_row()/execute_flush().
 
     Integration tests for new batch-aware transforms should be added to
     a new TestBatchAwareTransformIntegration class when ready.

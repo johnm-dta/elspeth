@@ -811,32 +811,24 @@ class AggregationExecutor:
         """
         return list(self._buffer_tokens.get(node_id, []))
 
-    def flush_buffer(
+    def _get_buffered_data(
         self, node_id: str
     ) -> tuple[list[dict[str, Any]], list[TokenInfo]]:
-        """Get buffered rows and tokens, then clear the buffer.
+        """Internal: Get buffered rows and tokens without clearing.
+
+        IMPORTANT: This method does NOT record audit trail. Production code
+        should use execute_flush() instead. This method is exposed for:
+        - Testing buffer contents without triggering flush
+        - Internal use by execute_flush()
 
         Args:
             node_id: Aggregation node ID
 
         Returns:
-            Tuple of (rows, tokens) - both lists in buffer order
+            Tuple of (buffered_rows, buffered_tokens)
         """
         rows = list(self._buffers.get(node_id, []))
         tokens = list(self._buffer_tokens.get(node_id, []))
-
-        # Clear buffers
-        self._buffers[node_id] = []
-        self._buffer_tokens[node_id] = []
-
-        # Reset trigger evaluator for next batch
-        evaluator = self._trigger_evaluators.get(node_id)
-        if evaluator is not None:
-            evaluator.reset()
-
-        # Clear batch ID for next batch
-        self._batch_ids[node_id] = None
-
         return rows, tokens
 
     def execute_flush(
@@ -1170,8 +1162,8 @@ class AggregationExecutor:
     # Aggregation is now fully structural:
     # - Use buffer_row() to buffer rows
     # - Use should_flush() to check trigger
-    # - Use flush_buffer() to get rows when trigger fires
-    # - Call Transform.process(rows) for batch processing
+    # - Use execute_flush() to flush with full audit recording
+    # - _get_buffered_data() is internal-only (for testing)
 
 
 class SinkExecutor:

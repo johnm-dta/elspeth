@@ -20,7 +20,7 @@ allowed_dict_patterns:
   - "src/elspeth/engine/executors.py:TransformLike.process:row"
   - "src/elspeth/engine/executors.py:GateLike.evaluate:row"
   # NOTE: AggregationLike and old AggregationExecutor.flush entries DELETED
-  # in aggregation structural cleanup - engine now uses buffer_row/flush_buffer
+  # in aggregation structural cleanup - engine now uses buffer_row/execute_flush
   - "src/elspeth/engine/tokens.py:TokenManager.create_initial_token:row_data"
   - "src/elspeth/engine/tokens.py:TokenManager.fork_token:row_data"
   - "src/elspeth/engine/tokens.py:TokenManager.coalesce_tokens:merged_data"

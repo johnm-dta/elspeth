@@ -1744,7 +1744,7 @@ class TestAggregationExecutorOldInterfaceDeleted:
 
     OLD: TestAggregationExecutor tested executor.accept() and executor.flush()
          with plugin-level aggregation interface.
-    NEW: Aggregation is engine-controlled via buffer_row()/flush_buffer()
+    NEW: Aggregation is engine-controlled via buffer_row()/execute_flush()
          with batch-aware transforms (is_batch_aware=True).
          See TestAggregationExecutorBuffering for new tests.
     """
@@ -1786,12 +1786,16 @@ class TestAggregationExecutorOldInterfaceDeleted:
             run_id=run.run_id,
         )
 
-        # Old flush() method should be deleted (flush_buffer() is the new method)
+        # Old flush() method should be deleted (execute_flush() is the production method)
         # Note: flush() was the old method that called plugin.flush()
-        # flush_buffer() is the new method that returns buffered rows
+        # execute_flush() is the production method with full audit recording
+        # _get_buffered_data() is internal-only for testing
         assert hasattr(
-            executor, "flush_buffer"
-        ), "flush_buffer() should exist for getting buffered rows"
+            executor, "execute_flush"
+        ), "execute_flush() should exist for production flush with audit"
+        assert hasattr(
+            executor, "_get_buffered_data"
+        ), "_get_buffered_data() should exist for testing buffer contents"
 
 
 class TestAggregationExecutorTriggersDeleted:
@@ -2366,8 +2370,8 @@ class TestAggregationExecutorBuffering:
         assert len(buffered) == 3
         assert [r["value"] for r in buffered] == [0, 1, 2]
 
-    def test_executor_clears_buffer_after_flush(self) -> None:
-        """Executor clears buffer after flush."""
+    def test_get_buffered_data_does_not_clear_buffer(self) -> None:
+        """_get_buffered_data() returns data without clearing (internal method)."""
         from elspeth.contracts import TokenInfo
         from elspeth.core.config import AggregationSettings, TriggerConfig
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
@@ -2416,14 +2420,14 @@ class TestAggregationExecutorBuffering:
             recorder.create_token(row_id=row.row_id, token_id=token.token_id)
             executor.buffer_row(agg_node.node_id, token)
 
-        # Get buffered rows and tokens (this also clears the buffer)
-        buffered_rows, buffered_tokens = executor.flush_buffer(agg_node.node_id)
+        # _get_buffered_data() returns data WITHOUT clearing (internal method)
+        buffered_rows, buffered_tokens = executor._get_buffered_data(agg_node.node_id)
         assert len(buffered_rows) == 2
         assert len(buffered_tokens) == 2
 
-        # Buffer should be empty
-        assert executor.get_buffered_rows(agg_node.node_id) == []
-        assert executor.get_buffered_tokens(agg_node.node_id) == []
+        # Buffer should still contain data (not cleared by _get_buffered_data)
+        assert executor.get_buffered_rows(agg_node.node_id) == buffered_rows
+        assert executor.get_buffered_tokens(agg_node.node_id) == buffered_tokens
 
     def test_buffered_tokens_are_tracked(self) -> None:
         """Executor tracks TokenInfo objects alongside buffered rows."""
@@ -2612,8 +2616,8 @@ class TestAggregationExecutorBuffering:
 
         assert executor.should_flush(agg_node.node_id) is True
 
-    def test_flush_buffer_returns_both_rows_and_tokens(self) -> None:
-        """flush_buffer() returns tuple of (rows, tokens) for passthrough mode."""
+    def test_get_buffered_data_returns_both_rows_and_tokens(self) -> None:
+        """_get_buffered_data() returns tuple of (rows, tokens) for passthrough mode."""
         from elspeth.contracts import TokenInfo
         from elspeth.core.config import AggregationSettings, TriggerConfig
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
@@ -2668,8 +2672,8 @@ class TestAggregationExecutorBuffering:
             recorder.create_token(row_id=row.row_id, token_id=token.token_id)
             executor.buffer_row(agg_node.node_id, token)
 
-        # flush_buffer should return tuple of (rows, tokens)
-        rows, tokens = executor.flush_buffer(agg_node.node_id)
+        # _get_buffered_data() returns tuple of (rows, tokens) without clearing
+        rows, tokens = executor._get_buffered_data(agg_node.node_id)
 
         # Verify rows
         assert len(rows) == 2
@@ -2681,9 +2685,9 @@ class TestAggregationExecutorBuffering:
         assert tokens[0].token_id == "token-1"
         assert tokens[1].token_id == "token-2"
 
-        # Buffer should be cleared
-        assert executor.get_buffered_rows(agg_node.node_id) == []
-        assert executor.get_buffered_tokens(agg_node.node_id) == []
+        # Buffer should NOT be cleared (_get_buffered_data is internal, doesn't clear)
+        assert executor.get_buffered_rows(agg_node.node_id) == rows
+        assert executor.get_buffered_tokens(agg_node.node_id) == tokens
 
 
 class TestAggregationExecutorCheckpoint:

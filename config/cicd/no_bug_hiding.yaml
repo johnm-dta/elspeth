@@ -301,22 +301,16 @@ allow_hits:
     safety: "Empty list is safe default - no tokens buffered yet"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:flush_buffer:line=825"
+  - key: "engine/executors.py:R1:AggregationExecutor:_get_buffered_data:line=830"
     owner: "architecture"
     reason: "Intentional Optional API: returns empty list for unknown node_id"
-    safety: "Empty list is safe default - no rows to flush"
+    safety: "Empty list is safe default - no rows buffered"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:flush_buffer:line=826"
+  - key: "engine/executors.py:R1:AggregationExecutor:_get_buffered_data:line=831"
     owner: "architecture"
     reason: "Intentional Optional API: returns empty list for unknown node_id"
-    safety: "Empty list is safe default - no tokens to flush"
-    expires: null  # Permanent - intentional design
-
-  - key: "engine/executors.py:R1:AggregationExecutor:flush_buffer:line=833"
-    owner: "architecture"
-    reason: "Optional trigger evaluator lookup - not all aggregations have config"
-    safety: "None means 'no trigger config' - correctly skipped"
+    safety: "Empty list is safe default - no tokens buffered"
     expires: null  # Permanent - intentional design
 
   # ============================================================
@@ -326,43 +320,43 @@ allow_hits:
   # buffer state for crash recovery. These use .get() for intentional reasons.
   # ============================================================
 
-  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=1003"
+  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=995"
     owner: "architecture"
     reason: "Optional trigger evaluator lookup - not all aggregations have trigger config"
     safety: "None means 'no trigger config' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:_reset_batch_state:line=1015"
+  - key: "engine/executors.py:R1:AggregationExecutor:_reset_batch_state:line=1007"
     owner: "architecture"
     reason: "Idempotent cleanup: batch_id may not exist if already reset"
     safety: "None means 'already cleaned up or never existed' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_buffer_count:line=1030"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_buffer_count:line=1022"
     owner: "architecture"
     reason: "Intentional Optional API: returns 0 for unknown node_id"
     safety: "0 is safe default - no rows buffered"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_checkpoint_state:line=1048"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_checkpoint_state:line=1040"
     owner: "architecture"
     reason: "Intentional Optional: batch_id may not exist yet"
     safety: "None is valid for checkpoint state - no batch started yet"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:restore_from_checkpoint:line=1062"
+  - key: "engine/executors.py:R1:AggregationExecutor:restore_from_checkpoint:line=1054"
     owner: "architecture"
     reason: "Trust boundary: checkpoint state from previous run may be malformed"
     safety: "Default empty list for missing rows - graceful recovery"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:restore_from_checkpoint:line=1063"
+  - key: "engine/executors.py:R1:AggregationExecutor:restore_from_checkpoint:line=1055"
     owner: "architecture"
     reason: "Trust boundary: checkpoint state from previous run may be malformed"
     safety: "None batch_id means no batch to restore - graceful recovery"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:restore_from_checkpoint:line=1074"
+  - key: "engine/executors.py:R1:AggregationExecutor:restore_from_checkpoint:line=1066"
     owner: "architecture"
     reason: "Optional trigger evaluator lookup - node may not have trigger config"
     safety: "None means 'no trigger config' - correctly skipped"
@@ -376,25 +370,25 @@ allow_hits:
   # are valid (no batch yet) or raise ValueError with clear diagnostics.
   # ============================================================
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_batch_id:line=1089"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_batch_id:line=1081"
     owner: "architecture"
     reason: "Intentional Optional API: returns None if no batch exists for node_id"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:should_flush:line=1100"
+  - key: "engine/executors.py:R1:AggregationExecutor:should_flush:line=1092"
     owner: "architecture"
     reason: "Intentional Optional API: returns False if no evaluator exists for node_id"
     safety: "No evaluator means no trigger config - return False is correct behavior"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_trigger_type:line=1114"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_trigger_type:line=1106"
     owner: "architecture"
     reason: "Intentional Optional API: returns None if no evaluator exists for node_id"
     safety: "No evaluator means no trigger config - return None is correct behavior"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_restored_state:line=1143"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_restored_state:line=1135"
     owner: "architecture"
     reason: "Intentional Optional API: returns None if no state was restored for node_id"
     safety: "Callers check return value - None means 'not restored, use default state'"
@@ -407,19 +401,19 @@ allow_hits:
   # Missing entries cause explicit RuntimeError with clear diagnostics.
   # ============================================================
 
-  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=873"
+  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=865"
     owner: "architecture"
     reason: "Explicit existence check: raises RuntimeError if batch_id is None"
     safety: "Raises immediately with node_id for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=878"
+  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=870"
     owner: "architecture"
     reason: "Existence check paired with explicit RuntimeError if empty"
     safety: "Raises immediately if buffer is empty"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=879"
+  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=871"
     owner: "architecture"
     reason: "Token buffer lookup matches row buffer lookup pattern"
     safety: "Empty list default paired with row buffer check"

@@ -819,7 +819,6 @@ class AggregationExecutor:
         IMPORTANT: This method does NOT record audit trail. Production code
         should use execute_flush() instead. This method is exposed for:
         - Testing buffer contents without triggering flush
-        - Internal use by execute_flush()
 
         Args:
             node_id: Aggregation node ID

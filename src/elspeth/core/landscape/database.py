@@ -15,6 +15,19 @@ from sqlalchemy.engine import Engine
 from elspeth.core.landscape.schema import metadata
 
 
+class SchemaCompatibilityError(Exception):
+    """Raised when the Landscape database schema is incompatible with current code."""
+
+    pass
+
+
+# Required columns that have been added since initial schema.
+# Used by _validate_schema() to detect outdated SQLite databases.
+_REQUIRED_COLUMNS: list[tuple[str, str]] = [
+    ("tokens", "expand_group_id"),
+]
+
+
 class LandscapeDB:
     """Landscape database connection manager."""
 
@@ -29,6 +42,7 @@ class LandscapeDB:
         self.connection_string = connection_string
         self._engine: Engine | None = None
         self._setup_engine()
+        self._validate_schema()  # Check BEFORE create_tables
         self._create_tables()
 
     def _setup_engine(self) -> None:
@@ -68,6 +82,47 @@ class LandscapeDB:
     def _create_tables(self) -> None:
         """Create all tables if they don't exist."""
         metadata.create_all(self.engine)
+
+    def _validate_schema(self) -> None:
+        """Validate that existing database has all required columns.
+
+        Only validates SQLite databases. PostgreSQL deployments are expected
+        to use Alembic migrations which handle schema evolution properly.
+        This check catches developers using stale local audit.db files.
+
+        Raises:
+            SchemaCompatibilityError: If database is missing required columns
+        """
+        if not self.connection_string.startswith("sqlite"):
+            return
+
+        from sqlalchemy import inspect
+
+        inspector = inspect(self.engine)
+
+        missing_columns: list[tuple[str, str]] = []
+
+        for table_name, column_name in _REQUIRED_COLUMNS:
+            # Check if table exists
+            if table_name not in inspector.get_table_names():
+                # Table will be created by create_all, skip
+                continue
+
+            # Check if column exists
+            columns = {c["name"] for c in inspector.get_columns(table_name)}
+            if column_name not in columns:
+                missing_columns.append((table_name, column_name))
+
+        if missing_columns:
+            missing_str = ", ".join(f"{t}.{c}" for t, c in missing_columns)
+            raise SchemaCompatibilityError(
+                f"Landscape database schema is outdated. "
+                f"Missing columns: {missing_str}\n\n"
+                f"To fix this, either:\n"
+                f"  1. Delete the database file and let ELSPETH recreate it, or\n"
+                f"  2. Run: elspeth landscape migrate (when available)\n\n"
+                f"Database: {self.connection_string}"
+            )
 
     @property
     def engine(self) -> Engine:
@@ -126,11 +181,18 @@ class LandscapeDB:
         # SQLite-specific configuration
         if url.startswith("sqlite"):
             cls._configure_sqlite(engine)
-        if create_tables:
-            metadata.create_all(engine)
+
+        # Create instance first - _validate_schema needs self.connection_string and self.engine
         instance = cls.__new__(cls)
         instance.connection_string = url
         instance._engine = engine
+
+        # Validate BEFORE create_all - catches old schema with missing columns
+        # before we try to use it. For fresh DBs, validation passes (no tables yet).
+        instance._validate_schema()
+
+        if create_tables:
+            metadata.create_all(engine)
         return instance
 
     @contextmanager

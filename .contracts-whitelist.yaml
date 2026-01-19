@@ -19,9 +19,8 @@ allowed_dict_patterns:
   # Engine - row data handling
   - "src/elspeth/engine/executors.py:TransformLike.process:row"
   - "src/elspeth/engine/executors.py:GateLike.evaluate:row"
-  - "src/elspeth/engine/executors.py:AggregationLike.accept:row"
-  - "src/elspeth/engine/executors.py:AggregationLike.flush:return (list)"
-  - "src/elspeth/engine/executors.py:AggregationExecutor.flush:return (list)"
+  # NOTE: AggregationLike and old AggregationExecutor.flush entries DELETED
+  # in aggregation structural cleanup - engine now uses buffer_row/flush_buffer
   - "src/elspeth/engine/tokens.py:TokenManager.create_initial_token:row_data"
   - "src/elspeth/engine/tokens.py:TokenManager.fork_token:row_data"
   - "src/elspeth/engine/tokens.py:TokenManager.coalesce_tokens:merged_data"
@@ -31,15 +30,14 @@ allowed_dict_patterns:
   # Protocols - row data in plugin interface
   - "src/elspeth/plugins/protocols.py:TransformProtocol.process:row"
   - "src/elspeth/plugins/protocols.py:GateProtocol.evaluate:row"
-  - "src/elspeth/plugins/protocols.py:AggregationProtocol.accept:row"
-  - "src/elspeth/plugins/protocols.py:AggregationProtocol.flush:return (list)"
+  # NOTE: AggregationProtocol entries DELETED in aggregation structural cleanup
   - "src/elspeth/plugins/protocols.py:CoalesceProtocol.merge:return"
   - "src/elspeth/plugins/protocols.py:SinkProtocol.write:row"
 
   # Base classes - row data in plugin implementations
   - "src/elspeth/plugins/base.py:BaseTransform.process:row"
   - "src/elspeth/plugins/base.py:BaseGate.evaluate:row"
-  - "src/elspeth/plugins/base.py:BaseAggregation.accept:row"
+  # NOTE: BaseAggregation.accept entry DELETED in aggregation structural cleanup
 
   # Gate plugins - row evaluation
   - "src/elspeth/plugins/gates/field_match_gate.py:FieldMatchGate.evaluate:row"
@@ -62,11 +60,9 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/transforms/field_mapper.py:FieldMapper._get_nested:data"
 
   # Additional protocol/base flush and write patterns
-  - "src/elspeth/plugins/protocols.py:AggregationProtocol.flush:return (list)"
-  - "src/elspeth/plugins/base.py:BaseAggregation.flush:return (list)"
+  # NOTE: AggregationProtocol.flush, BaseAggregation.flush, AggregationLike.flush,
+  # and old AggregationExecutor.flush entries DELETED in aggregation structural cleanup
   - "src/elspeth/plugins/base.py:BaseSink.write:row"
-  - "src/elspeth/engine/executors.py:AggregationLike.flush:return (list)"
-  - "src/elspeth/engine/executors.py:AggregationExecutor.flush:return (list)"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # PLUGIN CONFIG (TRUST BOUNDARY)
@@ -79,14 +75,14 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/protocols.py:SourceProtocol.__init__:config"
   - "src/elspeth/plugins/protocols.py:TransformProtocol.__init__:config"
   - "src/elspeth/plugins/protocols.py:GateProtocol.__init__:config"
-  - "src/elspeth/plugins/protocols.py:AggregationProtocol.__init__:config"
+  # NOTE: AggregationProtocol.__init__ entry DELETED in aggregation structural cleanup
   - "src/elspeth/plugins/protocols.py:CoalesceProtocol.__init__:config"
   - "src/elspeth/plugins/protocols.py:SinkProtocol.__init__:config"
 
   # Base classes - config input
   - "src/elspeth/plugins/base.py:BaseTransform.__init__:config"
   - "src/elspeth/plugins/base.py:BaseGate.__init__:config"
-  - "src/elspeth/plugins/base.py:BaseAggregation.__init__:config"
+  # NOTE: BaseAggregation.__init__ entry DELETED in aggregation structural cleanup
 
   # Plugin implementations - config input
   - "src/elspeth/plugins/gates/field_match_gate.py:FieldMatchGate.__init__:config"

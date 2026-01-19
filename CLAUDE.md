@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ELSPETH is a **domain-agnostic framework for auditable Sense/Decide/Act (SDA) pipelines**. It provides scaffolding for data processing workflows where every decision must be traceable to its source, regardless of whether the "decide" step is an LLM, ML model, rules engine, or threshold check.
 
-**Current Status:** Design phase - architecture fully specified, implementation pending.
+**Current Status:** Approaching RC-1. Core architecture and audit trail are complete. LLM integration is in Phase 6 of 7.
 
 ## Auditability Standard
 
@@ -56,6 +56,7 @@ ELSPETH has three fundamentally different trust tiers with distinct handling rul
 **Why:** Plugins have contractual obligations. If a transform's `output_schema` says `int` and it outputs `str`, that's a bug we fix by fixing the plugin, not by coercing downstream.
 
 **Critical nuance:** Type-safe doesn't mean operation-safe:
+
 ```python
 # Data is type-valid (int), but operation fails
 row = {"divisor": 0}  # Passed source validation ✓
@@ -120,6 +121,7 @@ EXTERNAL DATA              PIPELINE DATA              AUDIT TRAIL
 | `external_api.call(row["id"])` | ✅ Yes | External system, anything can happen |
 
 **Rule of thumb:**
+
 - Reading from Landscape tables? Crash on any anomaly.
 - Operating on row field values? Wrap, return error result, quarantine row.
 - Accessing internal state? Let it crash - that's a bug to fix.
@@ -175,6 +177,7 @@ A defective plugin that silently produces wrong results is **worse than a crash*
 2. **Silent wrong result:** Data flows through, gets recorded as "correct," auditors see garbage, trust is destroyed
 
 **Example of the problem:**
+
 ```python
 # WRONG - hides plugin bugs, destroys audit integrity
 try:

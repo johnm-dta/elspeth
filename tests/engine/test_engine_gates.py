@@ -503,8 +503,8 @@ class TestRouteLabelResolution:
                     name="quality_router",
                     condition="row['confidence'] >= 0.85",
                     routes={
-                        "high_conf": "continue",  # Goes to main_output
-                        "low_conf": "review_queue",
+                        "true": "continue",  # Goes to main_output
+                        "false": "review_queue",
                     },
                 ),
             ],
@@ -518,10 +518,10 @@ class TestRouteLabelResolution:
         gate_id = config_gate_map["quality_router"]
 
         # Check route resolution
-        assert (gate_id, "high_conf") in route_map
-        assert route_map[(gate_id, "high_conf")] == "continue"
-        assert (gate_id, "low_conf") in route_map
-        assert route_map[(gate_id, "low_conf")] == "review_queue"
+        assert (gate_id, "true") in route_map
+        assert route_map[(gate_id, "true")] == "continue"
+        assert (gate_id, "false") in route_map
+        assert route_map[(gate_id, "false")] == "review_queue"
 
     def test_ternary_expression_returns_string_routes(self) -> None:
         """Verify ternary expressions can return different route labels."""
@@ -638,12 +638,12 @@ class TestForkCreatesChildTokens:
         gate = GateSettings(
             name="fork_gate",
             condition="True",
-            routes={"all": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["path_a", "path_b", "path_c"],
         )
 
         assert gate.fork_to == ["path_a", "path_b", "path_c"]
-        assert gate.routes["all"] == "fork"
+        assert gate.routes["true"] == "fork"
 
     def test_fork_config_requires_fork_to(self) -> None:
         """Verify fork route requires fork_to list."""
@@ -653,7 +653,7 @@ class TestForkCreatesChildTokens:
             GateSettings(
                 name="bad_fork",
                 condition="True",
-                routes={"all": "fork"},
+                routes={"true": "fork", "false": "continue"},
                 # Missing fork_to
             )
 
@@ -689,7 +689,7 @@ class TestForkCreatesChildTokens:
                 GateSettingsConfig(
                     name="parallel_processor",
                     condition="True",
-                    routes={"all": "fork"},
+                    routes={"true": "fork", "false": "continue"},
                     fork_to=["analysis_a", "analysis_b"],
                 ),
             ],
@@ -703,7 +703,7 @@ class TestForkCreatesChildTokens:
         node_info = graph.get_node_info(gate_id)
 
         assert node_info.config["fork_to"] == ["analysis_a", "analysis_b"]
-        assert node_info.config["routes"]["all"] == "fork"
+        assert node_info.config["routes"]["true"] == "fork"
 
     def test_fork_children_route_to_branch_named_sinks(self) -> None:
         """Fork children with branch_name route to matching sinks.
@@ -776,7 +776,7 @@ class TestForkCreatesChildTokens:
                 GateSettingsConfig(
                     name="forking_gate",
                     condition="True",
-                    routes={"true": "fork"},
+                    routes={"true": "fork", "false": "continue"},
                     fork_to=["path_a", "path_b"],
                 ),
             ],
@@ -880,7 +880,7 @@ class TestForkCreatesChildTokens:
                 GateSettingsConfig(
                     name="forking_gate",
                     condition="True",
-                    routes={"true": "fork"},
+                    routes={"true": "fork", "false": "continue"},
                     fork_to=["stats", "alerts"],  # "stats" is NOT a sink
                 ),
             ],
@@ -986,7 +986,7 @@ class TestForkCreatesChildTokens:
                 GateSettingsConfig(
                     name="parallel_fork",
                     condition="True",
-                    routes={"true": "fork"},
+                    routes={"true": "fork", "false": "continue"},
                     fork_to=["analysis", "archive"],
                 ),
             ],

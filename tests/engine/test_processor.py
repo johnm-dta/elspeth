@@ -502,7 +502,7 @@ class TestRowProcessorGates:
         pass_gate = GateSettings(
             name="pass_gate",
             condition="True",
-            routes={"true": "continue"},
+            routes={"true": "continue", "false": "continue"},
         )
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -675,7 +675,7 @@ class TestRowProcessorGates:
         splitter_gate = GateSettings(
             name="splitter",
             condition="True",
-            routes={"true": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["path_a", "path_b"],
         )
 
@@ -1021,13 +1021,13 @@ class TestRowProcessorNestedForks:
         gate1_config = GateSettings(
             name="fork_gate_1",
             condition="True",
-            routes={"true": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["left", "right"],
         )
         gate2_config = GateSettings(
             name="fork_gate_2",
             condition="True",
-            routes={"true": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["left", "right"],
         )
 
@@ -1200,7 +1200,7 @@ class TestRowProcessorWorkQueue:
         splitter_gate = GateSettings(
             name="splitter",
             condition="True",
-            routes={"true": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["path_a", "path_b"],
         )
 
@@ -1636,7 +1636,7 @@ class TestRowProcessorCoalesce:
         fork_gate_config = GateSettings(
             name="splitter",
             condition="True",
-            routes={"true": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["path_a", "path_b"],
         )
 
@@ -1821,7 +1821,7 @@ class TestRowProcessorCoalesce:
         fork_gate_config = GateSettings(
             name="splitter",
             condition="True",
-            routes={"true": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["path_a", "path_b"],
         )
 

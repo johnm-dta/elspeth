@@ -1,0 +1,16 @@
+id,date,category,amount,region
+1,2024-01-01,electronics,250,north
+2,2024-01-01,electronics,175,south
+3,2024-01-01,electronics,320,north
+4,2024-01-01,electronics,89,east
+5,2024-01-01,electronics,445,west
+6,2024-01-02,clothing,45,north
+7,2024-01-02,clothing,78,south
+8,2024-01-02,clothing,52,east
+9,2024-01-02,clothing,99,west
+10,2024-01-02,clothing,33,north
+11,2024-01-03,groceries,125,south
+12,2024-01-03,groceries,87,east
+13,2024-01-03,groceries,156,west
+14,2024-01-03,groceries,42,north
+15,2024-01-03,groceries,198,south

@@ -408,6 +408,54 @@ class ExpressionParser:
         """Return the original expression string."""
         return self._expression
 
+    def is_boolean_expression(self) -> bool:
+        """Check if the expression statically returns a boolean.
+
+        Returns True if the expression is guaranteed to return a boolean value:
+        - Comparison expressions (==, !=, <, >, <=, >=, in, not in, is, is not)
+        - Boolean operators (and, or)
+        - Unary not
+        - Boolean literals (True, False)
+        - Ternary expressions where both branches are boolean expressions
+
+        This is used for config validation: boolean expressions must have
+        routes labeled "true"/"false", not arbitrary labels like "above"/"below".
+        """
+        return self._is_boolean_node(self._ast.body)
+
+    def _is_boolean_node(self, node: ast.expr) -> bool:
+        """Recursively check if an AST node returns a boolean."""
+        # Comparisons always return bool
+        if isinstance(node, ast.Compare):
+            return True
+
+        # Boolean operators (and, or) always return truthy/falsy value
+        # Note: In Python, `x and y` returns y if x is truthy, not necessarily bool
+        # But for gate routing purposes, we treat this as boolean-ish
+        if isinstance(node, ast.BoolOp):
+            return True
+
+        # Unary not always returns bool
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return True
+
+        # Boolean literals
+        if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+            return True
+
+        # Name references to True/False
+        if isinstance(node, ast.Name) and node.id in ("True", "False"):
+            return True
+
+        # Ternary: boolean if both branches are boolean
+        if isinstance(node, ast.IfExp):
+            return self._is_boolean_node(node.body) and self._is_boolean_node(
+                node.orelse
+            )
+
+        # Everything else (field access, arithmetic, etc.) is not guaranteed boolean
+        return False
+
     def evaluate(self, row: dict[str, Any]) -> Any:
         """Evaluate expression against row data.
 

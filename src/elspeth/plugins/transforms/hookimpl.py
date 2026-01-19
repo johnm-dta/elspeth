@@ -11,10 +11,11 @@ class ElspethBuiltinTransforms:
     @hookimpl
     def elspeth_get_transforms(self) -> list[type[Any]]:
         """Return built-in transform plugin classes."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
         from elspeth.plugins.transforms.field_mapper import FieldMapper
         from elspeth.plugins.transforms.passthrough import PassThrough
 
-        return [PassThrough, FieldMapper]
+        return [PassThrough, FieldMapper, BatchStats]
 
 
 # Singleton instance for registration

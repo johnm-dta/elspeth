@@ -229,11 +229,13 @@ def _execute_pipeline(
     from elspeth.plugins.sources.csv_source import CSVSource
     from elspeth.plugins.sources.json_source import JSONSource
     from elspeth.plugins.transforms import FieldMapper, PassThrough
+    from elspeth.plugins.transforms.batch_stats import BatchStats
 
     # Plugin registries
     TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
         "passthrough": PassThrough,
         "field_mapper": FieldMapper,
+        "batch_stats": BatchStats,
     }
 
     # Instantiate source from new schema
@@ -281,6 +283,35 @@ def _execute_pipeline(
         transform_class = TRANSFORM_PLUGINS[plugin_name]
         transforms.append(transform_class(plugin_options))
 
+    # Build execution graph from config (needed before PipelineConfig for aggregation node IDs)
+    graph = ExecutionGraph.from_config(config)
+
+    # Build aggregation_settings dict (node_id -> AggregationSettings)
+    # Also instantiate aggregation transforms and add to transforms list
+    from elspeth.core.config import AggregationSettings
+
+    aggregation_settings: dict[str, AggregationSettings] = {}
+    agg_id_map = graph.get_aggregation_id_map()
+    for agg_config in config.aggregations:
+        node_id = agg_id_map[agg_config.name]
+        aggregation_settings[node_id] = agg_config
+
+        # Instantiate the aggregation transform plugin
+        plugin_name = agg_config.plugin
+        if plugin_name not in TRANSFORM_PLUGINS:
+            raise typer.BadParameter(f"Unknown aggregation plugin: {plugin_name}")
+        transform_class = TRANSFORM_PLUGINS[plugin_name]
+
+        # Merge aggregation options with schema from config
+        agg_options = dict(agg_config.options)
+        transform = transform_class(agg_options)
+
+        # Set node_id so processor can identify this as an aggregation node
+        transform.node_id = node_id
+
+        # Add to transforms list (after row_plugins transforms)
+        transforms.append(transform)
+
     # Build PipelineConfig with resolved configuration for audit
     # NOTE: Type ignores needed because:
     # - Source plugins implement SourceProtocol structurally but mypy doesn't recognize it
@@ -291,10 +322,9 @@ def _execute_pipeline(
         transforms=transforms,  # type: ignore[arg-type]
         sinks=sinks,  # type: ignore[arg-type]
         config=resolve_config(config),
+        gates=list(config.gates),  # Config-driven gates
+        aggregation_settings=aggregation_settings,  # Aggregation configurations
     )
-
-    # Build execution graph from config
-    graph = ExecutionGraph.from_config(config)
 
     if verbose:
         typer.echo("Starting pipeline execution...")

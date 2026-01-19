@@ -50,6 +50,7 @@ class ExecutionGraph:
         self._sink_id_map: dict[str, str] = {}
         self._transform_id_map: dict[int, str] = {}
         self._config_gate_id_map: dict[str, str] = {}  # gate_name -> node_id
+        self._aggregation_id_map: dict[str, str] = {}  # agg_name -> node_id
         self._output_sink: str = ""
         self._route_label_map: dict[
             tuple[str, str], str
@@ -288,19 +289,19 @@ class ExecutionGraph:
         graph._sink_id_map = dict(sink_ids)
 
         # Build transform chain
+        # Note: Gate routing is now config-driven only (see gates section below).
+        # Plugin-based gates were removed - row_plugins are all transforms now.
         transform_ids: dict[int, str] = {}
         prev_node_id = source_id
         for i, plugin_config in enumerate(config.row_plugins):
-            is_gate = plugin_config.type == "gate"
-            ntype = "gate" if is_gate else "transform"
-            tid = node_id(ntype, plugin_config.plugin)
+            tid = node_id("transform", plugin_config.plugin)
 
             # Track sequence -> node_id
             transform_ids[i] = tid
 
             graph.add_node(
                 tid,
-                node_type=ntype,
+                node_type="transform",
                 plugin_name=plugin_config.plugin,
                 config=plugin_config.options,
             )
@@ -308,37 +309,42 @@ class ExecutionGraph:
             # Edge from previous node
             graph.add_edge(prev_node_id, tid, label="continue", mode=RoutingMode.MOVE)
 
-            # Gate routes to sinks
-            # Edge labels ARE route labels (not sink names)
-            # Example: route "suspicious" -> sink "flagged"
-            # Creates edge: gate_node -> flagged_node with label="suspicious"
-            if is_gate and plugin_config.routes:
-                for route_label, target in plugin_config.routes.items():
-                    # Store route resolution: (gate_node, route_label) -> target
-                    # target is either "continue" or a sink name
-                    graph._route_resolution_map[(tid, route_label)] = target
-
-                    if target == "continue":
-                        continue  # Not a sink route - no edge to create
-                    if target not in sink_ids:
-                        raise GraphValidationError(
-                            f"Gate '{plugin_config.plugin}' routes '{route_label}' "
-                            f"to unknown sink '{target}'. "
-                            f"Available sinks: {list(sink_ids.keys())}"
-                        )
-                    # Edge label = route_label (e.g., "suspicious")
-                    graph.add_edge(
-                        tid, sink_ids[target], label=route_label, mode=RoutingMode.MOVE
-                    )
-                    # Store reverse mapping: (gate_node, sink_name) -> route_label
-                    graph._route_label_map[(tid, target)] = route_label
-
             prev_node_id = tid
 
         # Store explicit mapping for get_transform_id_map()
         graph._transform_id_map = transform_ids
 
-        # Build config-driven gates (processed AFTER transforms, BEFORE output sink)
+        # Build aggregation transform nodes (processed AFTER row_plugins, BEFORE gates)
+        # Aggregation uses batch-aware transforms. The engine buffers rows and calls
+        # transform.process(rows: list[dict]) when the trigger fires.
+        aggregation_ids: dict[str, str] = {}
+        for agg_config in config.aggregations:
+            aid = node_id("aggregation", agg_config.name)
+            aggregation_ids[agg_config.name] = aid
+
+            # Store trigger config in node for audit trail
+            agg_node_config = {
+                "trigger": agg_config.trigger.model_dump(),
+                "output_mode": agg_config.output_mode,
+                "options": dict(agg_config.options),
+            }
+
+            graph.add_node(
+                aid,
+                node_type="aggregation",
+                plugin_name=agg_config.plugin,
+                config=agg_node_config,
+            )
+
+            # Edge from previous node (last transform, or source if no transforms)
+            graph.add_edge(prev_node_id, aid, label="continue", mode=RoutingMode.MOVE)
+
+            prev_node_id = aid
+
+        # Store explicit mapping for get_aggregation_id_map()
+        graph._aggregation_id_map = aggregation_ids
+
+        # Build config-driven gates (processed AFTER transforms and aggregations, BEFORE output sink)
         config_gate_ids: dict[str, str] = {}
         for gate_config in config.gates:
             gid = node_id("config_gate", gate_config.name)
@@ -452,6 +458,14 @@ class ExecutionGraph:
             Dict mapping gate name to its graph node ID.
         """
         return dict(self._config_gate_id_map)
+
+    def get_aggregation_id_map(self) -> dict[str, str]:
+        """Get explicit agg_name -> node_id mapping for aggregations.
+
+        Returns:
+            Dict mapping aggregation name to its graph node ID.
+        """
+        return dict(self._aggregation_id_map)
 
     def get_output_sink(self) -> str:
         """Get the output sink name."""

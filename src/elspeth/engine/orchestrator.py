@@ -276,7 +276,12 @@ class Orchestrator:
         source.node_id = source_id
 
         # Set node_id on transforms
+        # Note: Aggregation transforms already have node_id set by CLI (mapped from
+        # aggregation_id_map), so only assign for transforms without node_id.
         for seq, transform in enumerate(transforms):
+            if transform.node_id is not None:
+                # Already has node_id (e.g., aggregation transform) - skip
+                continue
             if seq not in transform_id_map:
                 raise ValueError(
                     f"Transform at sequence {seq} not found in graph. "
@@ -420,8 +425,9 @@ class Orchestrator:
         transform_id_map = graph.get_transform_id_map()
         sink_id_map = graph.get_sink_id_map()
         config_gate_id_map = graph.get_config_gate_id_map()
+        aggregation_id_map = graph.get_aggregation_id_map()
 
-        # Map plugin instances (not config gates - they don't have instances)
+        # Map plugin instances (not config gates or aggregations - they don't have instances)
         node_to_plugin: dict[str, Any] = {}
         if source_id is not None:
             node_to_plugin[source_id] = config.source
@@ -432,8 +438,9 @@ class Orchestrator:
             if sink_name in sink_id_map:
                 node_to_plugin[sink_id_map[sink_name]] = sink
 
-        # Config gates are identified by their node IDs (no plugin instances)
+        # Config gates and aggregations are identified by their node IDs (no plugin instances)
         config_gate_node_ids = set(config_gate_id_map.values())
+        aggregation_node_ids = set(aggregation_id_map.values())
 
         # Register nodes with Landscape using graph's node IDs and actual plugin metadata
         from elspeth.contracts import Determinism
@@ -442,9 +449,14 @@ class Orchestrator:
         for node_id in execution_order:
             node_info = graph.get_node_info(node_id)
 
-            # Config gates have metadata in graph node, not plugin instances
+            # Config gates and aggregations have metadata in graph node, not plugin instances
             if node_id in config_gate_node_ids:
                 # Config gates are deterministic (expression evaluation is deterministic)
+                plugin_version = "1.0.0"
+                determinism = Determinism.DETERMINISTIC
+            elif node_id in aggregation_node_ids:
+                # Aggregations use batch-aware transforms - determinism depends on the transform
+                # Default to deterministic (statistical operations are typically deterministic)
                 plugin_version = "1.0.0"
                 determinism = Determinism.DETERMINISTIC
             else:

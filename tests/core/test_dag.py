@@ -377,11 +377,11 @@ class TestExecutionGraphFromConfig:
         assert transform_a_idx < transform_b_idx
 
     def test_from_config_with_gate_routes(self) -> None:
-        """Build graph with gate routing to multiple sinks."""
+        """Build graph with config-driven gate routing to multiple sinks."""
         from elspeth.core.config import (
             DatasourceSettings,
             ElspethSettings,
-            RowPluginSettings,
+            GateSettings,
             SinkSettings,
         )
         from elspeth.core.dag import ExecutionGraph
@@ -392,11 +392,11 @@ class TestExecutionGraphFromConfig:
                 "results": SinkSettings(plugin="csv"),
                 "flagged": SinkSettings(plugin="csv"),
             },
-            row_plugins=[
-                RowPluginSettings(
-                    plugin="safety_gate",
-                    type="gate",
-                    routes={"suspicious": "flagged", "clean": "continue"},
+            gates=[
+                GateSettings(
+                    name="safety_gate",
+                    condition="row['suspicious'] == True",
+                    routes={"true": "flagged", "false": "continue"},
                 ),
             ],
             output_sink="results",
@@ -405,18 +405,18 @@ class TestExecutionGraphFromConfig:
         graph = ExecutionGraph.from_config(config)
 
         # Should have:
-        #   source -> safety_gate -> results (via "continue"/"clean")
+        #   source -> safety_gate -> results (via "continue")
         #                         -> flagged (via "suspicious")
-        assert graph.node_count == 4  # source, gate, results, flagged
+        assert graph.node_count == 4  # source, config_gate, results, flagged
         # Edges: source->gate, gate->results (continue), gate->flagged (route)
         assert graph.edge_count == 3
 
     def test_from_config_validates_route_targets(self) -> None:
-        """Gate routes must reference existing sinks."""
+        """Config gate routes must reference existing sinks."""
         from elspeth.core.config import (
             DatasourceSettings,
             ElspethSettings,
-            RowPluginSettings,
+            GateSettings,
             SinkSettings,
         )
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
@@ -424,11 +424,11 @@ class TestExecutionGraphFromConfig:
         config = ElspethSettings(
             datasource=DatasourceSettings(plugin="csv"),
             sinks={"output": SinkSettings(plugin="csv")},
-            row_plugins=[
-                RowPluginSettings(
-                    plugin="gate",
-                    type="gate",
-                    routes={"bad": "nonexistent_sink"},
+            gates=[
+                GateSettings(
+                    name="bad_gate",
+                    condition="True",
+                    routes={"true": "nonexistent_sink", "false": "continue"},
                 ),
             ],
             output_sink="output",
@@ -520,11 +520,11 @@ class TestExecutionGraphRouteMapping:
     """Test route label <-> sink name mapping for edge lookup."""
 
     def test_get_route_label_for_sink(self) -> None:
-        """Get route label that leads to a sink from a gate."""
+        """Get route label that leads to a sink from a config gate."""
         from elspeth.core.config import (
             DatasourceSettings,
             ElspethSettings,
-            RowPluginSettings,
+            GateSettings,
             SinkSettings,
         )
         from elspeth.core.dag import ExecutionGraph
@@ -535,11 +535,11 @@ class TestExecutionGraphRouteMapping:
                 "results": SinkSettings(plugin="csv"),
                 "flagged": SinkSettings(plugin="csv"),
             },
-            row_plugins=[
-                RowPluginSettings(
-                    plugin="classifier",
-                    type="gate",
-                    routes={"suspicious": "flagged", "clean": "continue"},
+            gates=[
+                GateSettings(
+                    name="classifier",
+                    condition="row['suspicious'] == True",
+                    routes={"true": "flagged", "false": "continue"},
                 ),
             ],
             output_sink="results",
@@ -547,21 +547,20 @@ class TestExecutionGraphRouteMapping:
 
         graph = ExecutionGraph.from_config(config)
 
-        # Get the gate's node_id
-        transform_map = graph.get_transform_id_map()
-        gate_node_id = transform_map[0]
+        # Get the config gate's node_id
+        gate_node_id = graph.get_config_gate_id_map()["classifier"]
 
         # Given gate node and sink name, get the route label
         route_label = graph.get_route_label(gate_node_id, "flagged")
 
-        assert route_label == "suspicious"
+        assert route_label == "true"
 
     def test_get_route_label_for_continue(self) -> None:
         """Continue routes return 'continue' as label."""
         from elspeth.core.config import (
             DatasourceSettings,
             ElspethSettings,
-            RowPluginSettings,
+            GateSettings,
             SinkSettings,
         )
         from elspeth.core.dag import ExecutionGraph
@@ -569,21 +568,20 @@ class TestExecutionGraphRouteMapping:
         config = ElspethSettings(
             datasource=DatasourceSettings(plugin="csv"),
             sinks={"results": SinkSettings(plugin="csv")},
-            row_plugins=[
-                RowPluginSettings(
-                    plugin="gate",
-                    type="gate",
-                    routes={"pass": "continue"},
+            gates=[
+                GateSettings(
+                    name="gate",
+                    condition="True",
+                    routes={"true": "continue", "false": "continue"},
                 ),
             ],
             output_sink="results",
         )
 
         graph = ExecutionGraph.from_config(config)
-        transform_map = graph.get_transform_id_map()
-        gate_node_id = transform_map[0]
+        gate_node_id = graph.get_config_gate_id_map()["gate"]
 
-        # The edge to output sink uses "continue" label
+        # The edge to output sink uses "continue" label (both routes resolve to continue)
         route_label = graph.get_route_label(gate_node_id, "results")
         assert route_label == "continue"
 
@@ -696,7 +694,7 @@ class TestMultiEdgeScenarios:
                 GateSettings(
                     name="fork_gate",
                     condition="True",  # Always forks
-                    routes={"path_a": "fork", "path_b": "fork"},
+                    routes={"true": "fork", "false": "continue"},
                     fork_to=["path_a", "path_b"],
                 ),
             ],

@@ -1,5 +1,5 @@
-id,name,amount,category
-2,Bob,1500,wholesale
-4,Diana,3000,wholesale
-6,Frank,2000,corporate
-8,Henry,5000,corporate
+id,amount,name,category
+2,1500,Bob,wholesale
+4,3000,Diana,wholesale
+6,2000,Frank,corporate
+8,5000,Henry,corporate

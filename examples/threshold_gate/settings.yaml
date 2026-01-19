@@ -10,28 +10,36 @@ datasource:
   plugin: csv
   options:
     path: examples/threshold_gate/input.csv
+    schema:
+      mode: free  # Require these fields, allow others
+      fields:
+        - "id: int"
+        - "amount: int"  # Coerce to int for numeric comparisons
+    on_validation_failure: discard  # or a sink name for quarantine
 
-row_plugins:
-  # Route transactions over $1000 to high_values sink
-  - plugin: threshold_gate
-    type: gate
-    options:
-      field: amount
-      threshold: 1000
-      comparison: ">"
+# Config-driven gate: route based on amount threshold
+# Note: CSV source coerces numeric fields, so row['amount'] is already a number
+# Route labels must be "true"/"false" for boolean conditions
+gates:
+  - name: amount_threshold
+    condition: "row['amount'] > 1000"
     routes:
-      above: high_values   # amount > 1000 -> high_values sink
-      below: continue      # amount <= 1000 -> continue to output_sink
+      "true": high_values   # condition true -> high_values sink
+      "false": continue     # condition false -> continue to output_sink
 
 sinks:
   output:
     plugin: csv
     options:
       path: examples/threshold_gate/output/normal.csv
+      schema:
+        fields: dynamic
   high_values:
     plugin: csv
     options:
       path: examples/threshold_gate/output/high_values.csv
+      schema:
+        fields: dynamic
 
 output_sink: output
 

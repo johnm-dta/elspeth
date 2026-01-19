@@ -20,36 +20,41 @@ datasource:
   plugin: csv
   options:
     path: examples/audit_export/input.csv
+    schema:
+      fields: dynamic  # Accept any fields from CSV
+    on_validation_failure: discard  # or a sink name for quarantine
 
-row_plugins:
-  # Gate: Route corporate submissions to a dedicated sink.
-  - plugin: field_match_gate
-    type: gate
-    options:
-      field: category
-      matches:
-        "corporate": corporate_label
-      default_label: non_corporate_label
+# Config-driven gate: Route corporate submissions to a dedicated sink.
+# Route labels must be "true"/"false" for boolean conditions
+gates:
+  - name: category_router
+    condition: "row['category'] == 'corporate'"
     routes:
-      corporate_label: corporate
-      non_corporate_label: continue
+      "true": corporate     # condition true -> corporate sink
+      "false": continue     # condition false -> continue to non_corporate (output_sink)
 
 sinks:
   non_corporate:
     plugin: csv
     options:
       path: examples/audit_export/output/non_corporate.csv
+      schema:
+        fields: dynamic
 
   corporate:
     plugin: csv
     options:
       path: examples/audit_export/output/corporate.csv
+      schema:
+        fields: dynamic
 
   # Export sink for compliance audit trail (uses JSON for heterogeneous records)
   audit_export:
     plugin: json
     options:
       path: examples/audit_export/output/audit_trail.json
+      schema:
+        fields: dynamic
 
 output_sink: non_corporate
 

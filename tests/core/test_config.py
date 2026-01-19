@@ -216,35 +216,31 @@ class TestRowPluginSettings:
     """RowPluginSettings matches architecture specification."""
 
     def test_row_plugin_settings_structure(self) -> None:
-        """RowPluginSettings has plugin, type, options, routes."""
+        """RowPluginSettings has plugin and options (transforms only)."""
         from elspeth.core.config import RowPluginSettings
 
+        # RowPluginSettings is now transform-only (gates are config-driven)
         rp = RowPluginSettings(
-            plugin="threshold_gate",
-            type="gate",
+            plugin="field_mapper",
             options={"field": "confidence", "min": 0.8},
-            routes={"pass": "continue", "fail": "quarantine"},
         )
-        assert rp.plugin == "threshold_gate"
-        assert rp.type == "gate"
+        assert rp.plugin == "field_mapper"
         assert rp.options == {"field": "confidence", "min": 0.8}
-        assert rp.routes == {"pass": "continue", "fail": "quarantine"}
 
     def test_row_plugin_settings_defaults(self) -> None:
-        """RowPluginSettings defaults: type=transform, no routes."""
+        """RowPluginSettings defaults: options is empty dict."""
         from elspeth.core.config import RowPluginSettings
 
-        rp = RowPluginSettings(plugin="field_mapper")
-        assert rp.type == "transform"
+        rp = RowPluginSettings(plugin="passthrough")
+        assert rp.plugin == "passthrough"
         assert rp.options == {}
-        assert rp.routes is None
 
-    def test_row_plugin_settings_type_validation(self) -> None:
-        """Type must be 'transform' or 'gate'."""
+    def test_row_plugin_settings_requires_plugin(self) -> None:
+        """Plugin name is required."""
         from elspeth.core.config import RowPluginSettings
 
         with pytest.raises(ValidationError):
-            RowPluginSettings(plugin="test", type="invalid")
+            RowPluginSettings(options={})
 
 
 class TestSinkSettings:
@@ -382,7 +378,7 @@ class TestLoadSettingsArchitecture:
     """load_settings() parses architecture-compliant YAML."""
 
     def test_load_readme_example(self, tmp_path: Path) -> None:
-        """Load the exact example from README.md."""
+        """Load config with config-driven gates."""
         from elspeth.core.config import load_settings
 
         config_file = tmp_path / "settings.yaml"
@@ -402,16 +398,12 @@ sinks:
     options:
       path: output/flagged_for_review.csv
 
-row_plugins:
-  - plugin: pattern_gate
-    type: gate
-    options:
-      patterns:
-        - "ignore previous"
-        - "disregard instructions"
+gates:
+  - name: safety_check
+    condition: "row['suspicious'] == True"
     routes:
-      suspicious: flagged
-      clean: continue
+      "true": flagged
+      "false": continue
 
 output_sink: results
 
@@ -426,8 +418,8 @@ landscape:
         assert settings.datasource.plugin == "csv_local"
         assert settings.datasource.options["path"] == "data/submissions.csv"
         assert len(settings.sinks) == 2
-        assert len(settings.row_plugins) == 1
-        assert settings.row_plugins[0].type == "gate"
+        assert len(settings.gates) == 1
+        assert settings.gates[0].name == "safety_check"
         assert settings.output_sink == "results"
         assert settings.landscape.backend == "sqlite"
 
@@ -902,11 +894,11 @@ class TestGateSettings:
         gate = GateSettings(
             name="quality_check",
             condition="row['confidence'] >= 0.85",
-            routes={"pass": "continue", "fail": "review_sink"},
+            routes={"true": "continue", "false": "review_sink"},
         )
         assert gate.name == "quality_check"
         assert gate.condition == "row['confidence'] >= 0.85"
-        assert gate.routes == {"pass": "continue", "fail": "review_sink"}
+        assert gate.routes == {"true": "continue", "false": "review_sink"}
         assert gate.fork_to is None
 
     def test_gate_settings_with_fork(self) -> None:
@@ -916,11 +908,11 @@ class TestGateSettings:
         gate = GateSettings(
             name="parallel_analysis",
             condition="True",
-            routes={"all": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["path_a", "path_b"],
         )
         assert gate.name == "parallel_analysis"
-        assert gate.routes == {"all": "fork"}
+        assert gate.routes == {"true": "fork", "false": "continue"}
         assert gate.fork_to == ["path_a", "path_b"]
 
     def test_gate_settings_frozen(self) -> None:
@@ -930,7 +922,7 @@ class TestGateSettings:
         gate = GateSettings(
             name="test_gate",
             condition="row['x'] > 0",
-            routes={"yes": "continue"},
+            routes={"true": "continue", "false": "reject_sink"},
         )
         with pytest.raises(ValidationError):
             gate.name = "other"  # type: ignore[misc]
@@ -1038,9 +1030,10 @@ class TestGateSettings:
         """Valid identifier sink names are accepted."""
         from elspeth.core.config import GateSettings
 
+        # Non-boolean condition allows custom route labels
         gate = GateSettings(
             name="multi_route",
-            condition="row['category'] in ['a', 'b', 'c']",
+            condition="row['category']",  # Returns string, not boolean
             routes={
                 "a": "sink_a",
                 "b": "Sink_B",
@@ -1057,7 +1050,7 @@ class TestGateSettings:
         gate = GateSettings(
             name="complex_gate",
             condition="row['confidence'] >= 0.85 and row.get('category', 'unknown') != 'spam'",
-            routes={"pass": "continue", "fail": "quarantine"},
+            routes={"true": "continue", "false": "quarantine"},
         )
         assert "and" in gate.condition
 
@@ -1115,6 +1108,50 @@ class TestGateSettings:
         )
         assert gate.routes["pass"] == "continue"
 
+    def test_gate_settings_boolean_condition_requires_true_false_routes(self) -> None:
+        """Boolean conditions must use 'true'/'false' route labels.
+
+        A condition like `row['amount'] > 1000` evaluates to True or False,
+        not 'above' or 'below'. Using arbitrary labels is a config error.
+        """
+        from elspeth.core.config import GateSettings
+
+        # This should fail - using 'above'/'below' for a boolean condition
+        with pytest.raises(ValidationError) as exc_info:
+            GateSettings(
+                name="threshold_gate",
+                condition="row['amount'] > 1000",
+                routes={"above": "high_sink", "below": "continue"},
+            )
+        error_msg = str(exc_info.value)
+        assert "boolean condition" in error_msg
+        assert "true" in error_msg.lower()
+        assert "false" in error_msg.lower()
+
+    def test_gate_settings_non_boolean_allows_custom_routes(self) -> None:
+        """Non-boolean conditions (field access, ternary) allow custom labels.
+
+        A condition like `row['category']` returns the field value directly,
+        so routes can be labeled with expected values like 'high'/'low'.
+        """
+        from elspeth.core.config import GateSettings
+
+        # Field access returns string, not boolean
+        gate = GateSettings(
+            name="category_router",
+            condition="row['priority']",
+            routes={"high": "urgent_sink", "medium": "continue", "low": "archive_sink"},
+        )
+        assert len(gate.routes) == 3
+
+        # Ternary returns the branch value, not boolean
+        gate2 = GateSettings(
+            name="ternary_router",
+            condition="'high' if row['score'] > 0.8 else 'low'",
+            routes={"high": "priority_sink", "low": "continue"},
+        )
+        assert gate2.condition.startswith("'high'")
+
 
 class TestElspethSettingsWithGates:
     """Tests for ElspethSettings with engine-level gates."""
@@ -1142,7 +1179,7 @@ class TestElspethSettingsWithGates:
                 {
                     "name": "quality_check",
                     "condition": "row['confidence'] >= 0.85",
-                    "routes": {"pass": "continue", "fail": "review"},
+                    "routes": {"true": "continue", "false": "review"},
                 },
             ],
         )
@@ -1161,12 +1198,12 @@ class TestElspethSettingsWithGates:
                 {
                     "name": "gate_1",
                     "condition": "row['x'] > 0",
-                    "routes": {"yes": "continue"},
+                    "routes": {"true": "continue", "false": "continue"},
                 },
                 {
                     "name": "gate_2",
                     "condition": "row['y'] < 100",
-                    "routes": {"yes": "continue"},
+                    "routes": {"true": "continue", "false": "continue"},
                 },
             ],
         )
@@ -1186,7 +1223,7 @@ class TestElspethSettingsWithGates:
                 {
                     "name": "quality_check",
                     "condition": "row['confidence'] >= 0.85",
-                    "routes": {"pass": "continue", "fail": "output"},
+                    "routes": {"true": "continue", "false": "output"},
                 },
             ],
         )
@@ -1223,15 +1260,15 @@ gates:
   - name: quality_check
     condition: "row['confidence'] >= 0.85"
     routes:
-      pass: continue
-      fail: review
+      "true": continue
+      "false": review
 """)
         settings = load_settings(config_file)
 
         assert len(settings.gates) == 1
         assert settings.gates[0].name == "quality_check"
         assert settings.gates[0].condition == "row['confidence'] >= 0.85"
-        assert settings.gates[0].routes == {"pass": "continue", "fail": "review"}
+        assert settings.gates[0].routes == {"true": "continue", "false": "review"}
 
     def test_load_settings_with_fork_gate(self, tmp_path: Path) -> None:
         """Load YAML with fork gate."""
@@ -1252,7 +1289,8 @@ gates:
   - name: parallel_analysis
     condition: "True"
     routes:
-      all: fork
+      "true": fork
+      "false": continue
     fork_to:
       - path_a
       - path_b
@@ -1261,7 +1299,7 @@ gates:
 
         assert len(settings.gates) == 1
         assert settings.gates[0].name == "parallel_analysis"
-        assert settings.gates[0].routes == {"all": "fork"}
+        assert settings.gates[0].routes == {"true": "fork", "false": "continue"}
         assert settings.gates[0].fork_to == ["path_a", "path_b"]
 
 

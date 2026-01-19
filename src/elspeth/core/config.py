@@ -150,11 +150,10 @@ class AggregationSettings(BaseModel):
 
 
 class GateSettings(BaseModel):
-    """Engine-level gate configuration for config-driven routing.
+    """Gate configuration for config-driven routing.
 
-    Engine-level gates are defined in YAML and evaluated by the engine using
-    ExpressionParser. This is distinct from plugin-based gates which use
-    RowPluginSettings with type="gate".
+    Gates are defined in YAML and evaluated by the engine using ExpressionParser.
+    The condition expression determines routing; route labels map to destinations.
 
     Example YAML:
         gates:
@@ -259,6 +258,48 @@ class GateSettings(BaseModel):
             raise ValueError("fork_to is required when any route destination is 'fork'")
         if self.fork_to and not has_fork_route:
             raise ValueError("fork_to is only valid when a route destination is 'fork'")
+        return self
+
+    @model_validator(mode="after")
+    def validate_boolean_routes(self) -> "GateSettings":
+        """Validate route labels match the condition's return type.
+
+        Boolean expressions (comparisons, and/or, not) must use "true"/"false"
+        as route labels. Using labels like "above"/"below" for a condition like
+        `row['amount'] > 1000` is a config error - the expression evaluates to
+        True/False, not "above"/"below".
+        """
+        from elspeth.engine.expression_parser import ExpressionParser
+
+        parser = ExpressionParser(self.condition)
+        if parser.is_boolean_expression():
+            route_labels = set(self.routes.keys())
+            expected_labels = {"true", "false"}
+
+            # Check for common mistakes
+            if route_labels != expected_labels:
+                missing = expected_labels - route_labels
+                extra = route_labels - expected_labels
+
+                # Build helpful error message
+                msg_parts = [
+                    f"Gate '{self.name}' has a boolean condition "
+                    f"({self.condition!r}) but route labels don't match."
+                ]
+
+                if extra:
+                    msg_parts.append(
+                        f"Found labels {sorted(extra)!r} but boolean expressions "
+                        "evaluate to True/False, not these values."
+                    )
+                if missing:
+                    msg_parts.append(f"Missing required labels: {sorted(missing)!r}.")
+                msg_parts.append(
+                    'Use routes: {"true": <destination>, "false": <destination>}'
+                )
+
+                raise ValueError(" ".join(msg_parts))
+
         return self
 
 
@@ -368,22 +409,18 @@ class DatasourceSettings(BaseModel):
 
 
 class RowPluginSettings(BaseModel):
-    """Transform or gate plugin configuration per architecture."""
+    """Transform plugin configuration per architecture.
+
+    Note: Gate routing is now config-driven only (see GateSettings).
+    Plugin-based gates were removed - use the gates: section instead.
+    """
 
     model_config = {"frozen": True}
 
     plugin: str = Field(description="Plugin name")
-    type: Literal["transform", "gate"] = Field(
-        default="transform",
-        description="Plugin type: transform (pass-through) or gate (routing)",
-    )
     options: dict[str, Any] = Field(
         default_factory=dict,
         description="Plugin-specific configuration options",
-    )
-    routes: dict[str, str] | None = Field(
-        default=None,
-        description="Gate routing map: result -> sink_name or 'continue'",
     )
 
 

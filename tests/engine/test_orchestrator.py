@@ -912,7 +912,10 @@ class TestOrchestratorInvalidRouting:
         misrouting_gate = GateSettings(
             name="misrouting_gate",
             condition="True",  # Always routes
-            routes={"true": "nonexistent_sink"},  # Invalid sink for error test
+            routes={
+                "true": "nonexistent_sink",
+                "false": "continue",
+            },  # Invalid sink for error test
         )
 
         source = ListSource([{"value": 42}])
@@ -1170,7 +1173,7 @@ class TestOrchestratorGateRouting:
         routing_gate = GateSettings(
             name="test_gate",
             condition="True",  # Always routes
-            routes={"true": "flagged"},
+            routes={"true": "flagged", "false": "continue"},
         )
 
         # Mock sinks - must return proper artifact info from write()
@@ -3336,7 +3339,7 @@ class TestRouteValidation:
         threshold_gate = GateSettings(
             name="threshold_gate",
             condition="True",  # Always routes
-            routes={"true": "high_scores"},  # Non-existent sink
+            routes={"true": "high_scores", "false": "continue"},  # Non-existent sink
         )
 
         class CollectSink(_TestSinkBase):
@@ -3418,7 +3421,10 @@ class TestRouteValidation:
         filter_gate = GateSettings(
             name="filter_gate",
             condition="True",  # Always evaluates to true
-            routes={"true": "continue"},  # "continue" is not a sink
+            routes={
+                "true": "continue",
+                "false": "continue",
+            },  # "continue" is not a sink
         )
 
         class CollectSink(_TestSinkBase):

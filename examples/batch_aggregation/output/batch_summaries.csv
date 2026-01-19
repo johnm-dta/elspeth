@@ -1,0 +1,4 @@
+count,sum,batch_size,mean,category
+5,1279.0,5,255.8,electronics
+5,307.0,5,61.4,clothing
+5,608.0,5,121.6,groceries

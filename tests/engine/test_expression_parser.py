@@ -959,3 +959,99 @@ class TestExpressionParserFuzz:
         ]
         for expr in test_cases:
             self._assert_safe_parse(expr)
+
+
+class TestIsBooleanExpression:
+    """Tests for is_boolean_expression() static type detection."""
+
+    def test_comparison_is_boolean(self) -> None:
+        """Comparison operators return boolean."""
+        comparisons = [
+            "row['x'] == 1",
+            "row['x'] != 1",
+            "row['x'] < 1",
+            "row['x'] > 1",
+            "row['x'] <= 1",
+            "row['x'] >= 1",
+            "row['x'] in [1, 2, 3]",
+            "row['x'] not in [1, 2, 3]",
+            "row['x'] is None",
+            "row['x'] is not None",
+        ]
+        for expr in comparisons:
+            parser = ExpressionParser(expr)
+            assert parser.is_boolean_expression(), f"{expr} should be boolean"
+
+    def test_boolean_operators_are_boolean(self) -> None:
+        """Boolean operators (and, or) return boolean."""
+        expressions = [
+            "row['x'] > 0 and row['y'] > 0",
+            "row['x'] == 1 or row['y'] == 2",
+            "row['a'] > 0 and row['b'] > 0 or row['c'] > 0",
+        ]
+        for expr in expressions:
+            parser = ExpressionParser(expr)
+            assert parser.is_boolean_expression(), f"{expr} should be boolean"
+
+    def test_unary_not_is_boolean(self) -> None:
+        """Unary not always returns boolean."""
+        expressions = [
+            "not row['flag']",
+            "not row['x'] == 1",
+            "not (row['x'] > 0 and row['y'] > 0)",
+        ]
+        for expr in expressions:
+            parser = ExpressionParser(expr)
+            assert parser.is_boolean_expression(), f"{expr} should be boolean"
+
+    def test_boolean_literals_are_boolean(self) -> None:
+        """True and False literals are boolean."""
+        assert ExpressionParser("True").is_boolean_expression()
+        assert ExpressionParser("False").is_boolean_expression()
+
+    def test_field_access_is_not_boolean(self) -> None:
+        """Field access returns the field value, not guaranteed boolean."""
+        non_boolean = [
+            "row['category']",
+            "row['status']",
+            "row.get('category', 'default')",
+        ]
+        for expr in non_boolean:
+            parser = ExpressionParser(expr)
+            assert not parser.is_boolean_expression(), f"{expr} should not be boolean"
+
+    def test_arithmetic_is_not_boolean(self) -> None:
+        """Arithmetic expressions return numeric values."""
+        expressions = [
+            "row['x'] + row['y']",
+            "row['x'] * 2",
+            "row['x'] / row['y']",
+        ]
+        for expr in expressions:
+            parser = ExpressionParser(expr)
+            assert not parser.is_boolean_expression(), f"{expr} should not be boolean"
+
+    def test_ternary_with_boolean_branches_is_boolean(self) -> None:
+        """Ternary with boolean branches is boolean."""
+        parser = ExpressionParser("True if row['x'] > 0 else False")
+        assert parser.is_boolean_expression()
+
+    def test_ternary_with_non_boolean_branches_is_not_boolean(self) -> None:
+        """Ternary with non-boolean branches is not boolean."""
+        expressions = [
+            "'high' if row['x'] > 0 else 'low'",
+            "row['a'] if row['x'] > 0 else row['b']",
+            "1 if row['x'] > 0 else 0",
+        ]
+        for expr in expressions:
+            parser = ExpressionParser(expr)
+            assert not parser.is_boolean_expression(), f"{expr} should not be boolean"
+
+    def test_numeric_literal_is_not_boolean(self) -> None:
+        """Numeric literals are not boolean."""
+        assert not ExpressionParser("42").is_boolean_expression()
+        assert not ExpressionParser("3.14").is_boolean_expression()
+
+    def test_string_literal_is_not_boolean(self) -> None:
+        """String literals are not boolean."""
+        assert not ExpressionParser("'hello'").is_boolean_expression()

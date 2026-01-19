@@ -9,29 +9,33 @@ datasource:
   plugin: csv
   options:
     path: examples/boolean_routing/input.csv
+    schema:
+      fields: dynamic  # Accept any fields from CSV
+    on_validation_failure: discard  # or a sink name for quarantine
 
-row_plugins:
-  # Route based on approved field
-  - plugin: field_match_gate
-    type: gate
-    options:
-      field: approved
-      matches:
-        "true": approved_label    # value -> label mapping
-      default_label: rejected_label
+# Config-driven gate: route based on approved field
+# Note: Check for exact string match 'true' (case-sensitive)
+# Route labels must be "true"/"false" for boolean conditions
+gates:
+  - name: approval_check
+    condition: "row['approved'] == 'true'"
     routes:
-      approved_label: approved    # label -> sink mapping
-      rejected_label: continue    # non-matches continue to output_sink
+      "true": approved      # condition true -> approved sink
+      "false": continue     # condition false -> continue to rejected (output_sink)
 
 sinks:
   approved:
     plugin: csv
     options:
       path: examples/boolean_routing/output/approved.csv
+      schema:
+        fields: dynamic
   rejected:
     plugin: csv
     options:
       path: examples/boolean_routing/output/rejected.csv
+      schema:
+        fields: dynamic
 
 output_sink: rejected
 

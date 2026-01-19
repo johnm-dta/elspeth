@@ -130,11 +130,12 @@ sinks:
   output:
     plugin: csv
 
-row_plugins:
-  - plugin: my_gate
-    type: gate
+gates:
+  - name: my_gate
+    condition: "True"
     routes:
-      bad_route: nonexistent_sink
+      "true": nonexistent_sink
+      "false": continue
 
 output_sink: output
 """)
@@ -158,12 +159,12 @@ sinks:
   flagged:
     plugin: csv
 
-row_plugins:
-  - plugin: classifier
-    type: gate
+gates:
+  - name: classifier
+    condition: "row['suspicious'] == True"
     routes:
-      suspicious: flagged
-      clean: continue
+      "true": flagged
+      "false": continue
 
 output_sink: results
 """)

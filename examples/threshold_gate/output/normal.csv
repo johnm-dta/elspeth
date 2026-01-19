@@ -1,5 +1,5 @@
-id,name,amount,category
-1,Alice,500,retail
-3,Charlie,250,retail
-5,Eve,750,retail
-7,Grace,100,retail
+id,amount,name,category
+1,500,Alice,retail
+3,250,Charlie,retail
+5,750,Eve,retail
+7,100,Grace,retail

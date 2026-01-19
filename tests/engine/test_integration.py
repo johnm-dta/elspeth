@@ -661,7 +661,10 @@ class TestNoSilentAuditLoss:
         misrouting_gate = GateSettings(
             name="misrouting_gate",
             condition="True",  # Always routes
-            routes={"true": "phantom"},  # Route to nonexistent sink
+            routes={
+                "true": "phantom",
+                "false": "continue",
+            },  # Route to nonexistent sink
         )
 
         source = ListSource([{"value": 42}])
@@ -1164,7 +1167,7 @@ class TestForkIntegration:
         fork_gate = GateSettings(
             name="fork_gate",
             condition="True",  # Always fork
-            routes={"true": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["path_a", "path_b"],
         )
 
@@ -1418,7 +1421,7 @@ class TestForkCoalescePipelineIntegration:
         fork_gate_config = GateSettings(
             name="fork_gate",
             condition="True",  # Always fork
-            routes={"true": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["sentiment", "entities"],
         )
 
@@ -1749,7 +1752,7 @@ class TestForkCoalescePipelineIntegration:
         fork_gate_config = GateSettings(
             name="fork_gate",
             condition="True",  # Always fork
-            routes={"true": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["path_a", "path_b"],
         )
 
@@ -2023,7 +2026,7 @@ class TestComplexDAGIntegration:
         fork_gate = GateSettings(
             name="fork_gate",
             condition="True",  # Always fork
-            routes={"true": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["sentiment_path", "entity_path"],
         )
 

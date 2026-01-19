@@ -192,7 +192,7 @@ class TestConfigGateIntegration:
         gate = GateSettings(
             name="always_pass",
             condition="True",  # Always true
-            routes={"true": "continue"},
+            routes={"true": "continue", "false": "continue"},
         )
 
         config = PipelineConfig(
@@ -543,7 +543,7 @@ class TestConfigGateIntegration:
         gate = GateSettings(
             name="my_gate",
             condition="True",
-            routes={"true": "continue"},
+            routes={"true": "continue", "false": "continue"},
         )
 
         config = PipelineConfig(
@@ -639,7 +639,7 @@ class TestConfigGateFromSettings:
                 GateSettings(
                     name="bad_gate",
                     condition="True",
-                    routes={"true": "nonexistent_sink"},
+                    routes={"true": "nonexistent_sink", "false": "continue"},
                 ),
             ],
         )
@@ -671,7 +671,7 @@ class TestConfigGateFromSettings:
                 GateSettings(
                     name="final_gate",
                     condition="True",
-                    routes={"true": "continue"},
+                    routes={"true": "continue", "false": "continue"},
                 ),
             ],
         )

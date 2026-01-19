@@ -1397,7 +1397,7 @@ class TestConfigGateExecutor:
         gate_config = GateSettings(
             name="parallel_analysis",
             condition="True",  # Always fork
-            routes={"true": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["path_a", "path_b"],
         )
 
@@ -1471,7 +1471,7 @@ class TestConfigGateExecutor:
         gate_config = GateSettings(
             name="fork_gate",
             condition="True",
-            routes={"true": "fork"},
+            routes={"true": "fork", "false": "continue"},
             fork_to=["path_a", "path_b"],
         )
 

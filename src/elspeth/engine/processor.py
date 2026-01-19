@@ -52,13 +52,13 @@ class RowProcessor:
 
     Handles:
     1. Creating initial tokens from source rows
-    2. Executing transforms in sequence (including plugin gates)
+    2. Executing transforms in sequence
     3. Executing config-driven gates (after transforms)
     4. Accepting rows into aggregations
     5. Recording final outcomes
 
     Pipeline order:
-    - Plugin transforms/gates (from config.transforms)
+    - Transforms (from config.row_plugins)
     - Config-driven gates (from config.gates)
     - Output sink
 
@@ -184,9 +184,16 @@ class RowProcessor:
             if result.status == "success":
                 # result.row should always be set for success, but provide fallback
                 final_data = result.row if result.row is not None else {}
+                # Create updated token with aggregated data (like TransformExecutor does)
+                updated_token = TokenInfo(
+                    row_id=current_token.row_id,
+                    token_id=current_token.token_id,
+                    row_data=final_data,
+                    branch_name=current_token.branch_name,
+                )
                 return (
                     RowResult(
-                        token=current_token,
+                        token=updated_token,
                         final_data=final_data,
                         outcome=RowOutcome.COMPLETED,
                     ),
@@ -542,7 +549,7 @@ class RowProcessor:
                 # Config gate fork - children continue from next config gate
                 next_config_step = gate_idx + 1
                 for child_token in outcome.child_tokens:
-                    # Children start after ALL plugin transforms, at next config gate
+                    # Children start after ALL transforms, at next config gate
                     child_items.append(
                         _WorkItem(
                             token=child_token,

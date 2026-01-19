@@ -3989,3 +3989,116 @@ class TestCoalesceWiring:
             assert call_kwargs["coalesce_node_ids"] is not None
             # Verify the coalesce_node_ids contains our registered coalesce
             assert "merge_results" in call_kwargs["coalesce_node_ids"]
+
+    def test_orchestrator_handles_coalesced_outcome(self) -> None:
+        """COALESCED outcome should route merged token to output sink."""
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.contracts import RowOutcome, TokenInfo
+        from elspeth.contracts.results import RowResult
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter(
+            [MagicMock(is_quarantined=False, row={"value": 1})]
+        )
+        mock_source.plugin_version = "1.0.0"
+        mock_source.determinism = "deterministic"
+        mock_source.output_schema = _TestSchema
+
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+        mock_sink.plugin_version = "1.0.0"
+        mock_sink.determinism = "deterministic"
+        mock_sink.input_schema = _TestSchema
+        mock_sink.write.return_value = ArtifactDescriptor.for_file(
+            path="memory", size_bytes=0, content_hash="abc123"
+        )
+
+        # Settings with coalesce (needed to enable coalesce path in orchestrator)
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv", options={"path": "test.csv"}),
+            sinks={"output": SinkSettings(plugin="csv", options={"path": "out.csv"})},
+            output_sink="output",
+            gates=[
+                GateSettings(
+                    name="forker",
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches=["path_a", "path_b"],
+                    policy="require_all",
+                    merge="union",
+                ),
+            ],
+        )
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[],
+            sinks={"output": mock_sink},
+            gates=settings.gates,
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+
+        orchestrator = Orchestrator(db=db)
+
+        # Mock RowProcessor to return COALESCED outcome
+        merged_token = TokenInfo(
+            row_id="row_1",
+            token_id="merged_token_1",
+            row_data={"merged": True},
+            branch_name=None,
+        )
+        coalesced_result = RowResult(
+            token=merged_token,
+            final_data={"merged": True},
+            outcome=RowOutcome.COALESCED,
+        )
+
+        with (
+            patch("elspeth.engine.orchestrator.RowProcessor") as mock_processor_cls,
+            patch("elspeth.engine.executors.SinkExecutor") as mock_sink_executor_cls,
+        ):
+            mock_processor = MagicMock()
+            mock_processor.process_row.return_value = [coalesced_result]
+            mock_processor.token_manager.create_initial_token.return_value = MagicMock(
+                row_id="row_1", token_id="t1", row_data={"value": 1}
+            )
+            mock_processor_cls.return_value = mock_processor
+
+            # Mock SinkExecutor to avoid foreign key constraint errors
+            mock_sink_executor = MagicMock()
+            mock_sink_executor_cls.return_value = mock_sink_executor
+
+            result = orchestrator.run(config, graph=graph, settings=settings)
+
+            # COALESCED should count toward rows_coalesced
+            assert result.rows_coalesced == 1
+
+            # Verify the merged token was added to pending_tokens and passed to sink
+            # SinkExecutor.write should have been called with the merged token
+            assert mock_sink_executor.write.called
+            write_call = mock_sink_executor.write.call_args
+            tokens_written = write_call.kwargs.get("tokens") or write_call.args[1]
+            assert len(tokens_written) == 1
+            assert tokens_written[0].token_id == "merged_token_1"

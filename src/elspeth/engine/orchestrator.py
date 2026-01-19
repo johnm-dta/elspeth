@@ -75,6 +75,7 @@ class RunResult:
     rows_routed: int
     rows_quarantined: int = 0
     rows_forked: int = 0
+    rows_coalesced: int = 0
 
 
 class RouteValidationError(Exception):
@@ -613,6 +614,7 @@ class Orchestrator:
         rows_routed = 0
         rows_quarantined = 0
         rows_forked = 0
+        rows_coalesced = 0
         pending_tokens: dict[str, list[TokenInfo]] = {name: [] for name in config.sinks}
 
         try:
@@ -706,6 +708,19 @@ class Orchestrator:
                         elif result.outcome == RowOutcome.CONSUMED_IN_BATCH:
                             # Aggregated - will be counted when batch flushes
                             pass
+                        elif result.outcome == RowOutcome.COALESCED:
+                            # Merged token from coalesce - route to output sink
+                            rows_coalesced += 1
+                            pending_tokens[output_sink_name].append(result.token)
+
+                            # Checkpoint after successful coalesce
+                            # Note: Using last_node_id for now; coalesce node tracking
+                            # would require adding coalesce_name to RowResult
+                            self._maybe_checkpoint(
+                                run_id=run_id,
+                                token_id=result.token.token_id,
+                                node_id=last_node_id,
+                            )
 
             # Write to sinks using SinkExecutor
             sink_executor = SinkExecutor(recorder, self._span_factory, run_id)
@@ -750,6 +765,7 @@ class Orchestrator:
             rows_routed=rows_routed,
             rows_quarantined=rows_quarantined,
             rows_forked=rows_forked,
+            rows_coalesced=rows_coalesced,
         )
 
     def _export_landscape(

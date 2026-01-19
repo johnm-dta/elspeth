@@ -68,13 +68,9 @@ validate_path_not_empty  # type: ignore
 register_sources  # type: ignore
 register_transforms  # type: ignore
 register_sinks  # type: ignore
-register_aggregations  # type: ignore
-register_coalesces  # type: ignore
 builtin_sources  # type: ignore
 builtin_transforms  # type: ignore
 builtin_sinks  # type: ignore
-builtin_aggregations  # type: ignore
-builtin_coalesces  # type: ignore
 
 # Protocol/ABC method stubs (parameters unused in abstract body)
 branch_outputs  # type: ignore

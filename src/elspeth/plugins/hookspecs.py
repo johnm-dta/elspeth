@@ -22,8 +22,6 @@ import pluggy
 
 if TYPE_CHECKING:
     from elspeth.plugins.protocols import (
-        AggregationProtocol,
-        CoalesceProtocol,
         GateProtocol,
         SinkProtocol,
         SourceProtocol,
@@ -69,22 +67,6 @@ class ElspethTransformSpec:
 
         Returns:
             List of Gate plugin classes
-        """
-
-    @hookspec
-    def elspeth_get_aggregations(self) -> list[type["AggregationProtocol"]]:  # type: ignore[empty-body]
-        """Return aggregation plugin classes.
-
-        Returns:
-            List of Aggregation plugin classes
-        """
-
-    @hookspec
-    def elspeth_get_coalesces(self) -> list[type["CoalesceProtocol"]]:  # type: ignore[empty-body]
-        """Return coalesce plugin classes.
-
-        Returns:
-            List of Coalesce plugin classes
         """
 
 

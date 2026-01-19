@@ -26,8 +26,6 @@ class TestHookspecs:
 
         assert hasattr(ElspethTransformSpec, "elspeth_get_transforms")
         assert hasattr(ElspethTransformSpec, "elspeth_get_gates")
-        assert hasattr(ElspethTransformSpec, "elspeth_get_aggregations")
-        assert hasattr(ElspethTransformSpec, "elspeth_get_coalesces")
 
     def test_sink_hooks_defined(self) -> None:
         from elspeth.plugins.hookspecs import ElspethSinkSpec

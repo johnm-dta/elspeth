@@ -18,8 +18,6 @@ from elspeth.plugins.hookspecs import (
     ElspethTransformSpec,
 )
 from elspeth.plugins.protocols import (
-    AggregationProtocol,
-    CoalesceProtocol,
     GateProtocol,
     SinkProtocol,
     SourceProtocol,
@@ -157,8 +155,6 @@ class PluginManager:
         self._sources: dict[str, type[SourceProtocol]] = {}
         self._transforms: dict[str, type[TransformProtocol]] = {}
         self._gates: dict[str, type[GateProtocol]] = {}
-        self._aggregations: dict[str, type[AggregationProtocol]] = {}
-        self._coalesces: dict[str, type[CoalesceProtocol]] = {}
         self._sinks: dict[str, type[SinkProtocol]] = {}
 
     def register_builtin_plugins(self) -> None:
@@ -193,8 +189,6 @@ class PluginManager:
         new_sources: dict[str, type[SourceProtocol]] = {}
         new_transforms: dict[str, type[TransformProtocol]] = {}
         new_gates: dict[str, type[GateProtocol]] = {}
-        new_aggregations: dict[str, type[AggregationProtocol]] = {}
-        new_coalesces: dict[str, type[CoalesceProtocol]] = {}
         new_sinks: dict[str, type[SinkProtocol]] = {}
 
         # Collect from all registered plugins with duplicate detection
@@ -228,26 +222,6 @@ class PluginManager:
                     )
                 new_gates[name] = cls
 
-        for aggs in self._pm.hook.elspeth_get_aggregations():
-            for cls in aggs:
-                name = cls.name
-                if name in new_aggregations:
-                    raise ValueError(
-                        f"Duplicate aggregation plugin name: '{name}'. "
-                        f"Already registered by {new_aggregations[name].__name__}"
-                    )
-                new_aggregations[name] = cls
-
-        for coalesces in self._pm.hook.elspeth_get_coalesces():
-            for cls in coalesces:
-                name = cls.name
-                if name in new_coalesces:
-                    raise ValueError(
-                        f"Duplicate coalesce plugin name: '{name}'. "
-                        f"Already registered by {new_coalesces[name].__name__}"
-                    )
-                new_coalesces[name] = cls
-
         for sinks in self._pm.hook.elspeth_get_sinks():
             for cls in sinks:
                 name = cls.name
@@ -262,8 +236,6 @@ class PluginManager:
         self._sources = new_sources
         self._transforms = new_transforms
         self._gates = new_gates
-        self._aggregations = new_aggregations
-        self._coalesces = new_coalesces
         self._sinks = new_sinks
 
     # === Getters ===
@@ -279,14 +251,6 @@ class PluginManager:
     def get_gates(self) -> list[type[GateProtocol]]:
         """Get all registered gate plugins."""
         return list(self._gates.values())
-
-    def get_aggregations(self) -> list[type[AggregationProtocol]]:
-        """Get all registered aggregation plugins."""
-        return list(self._aggregations.values())
-
-    def get_coalesces(self) -> list[type[CoalesceProtocol]]:
-        """Get all registered coalesce plugins."""
-        return list(self._coalesces.values())
 
     def get_sinks(self) -> list[type[SinkProtocol]]:
         """Get all registered sink plugins."""
@@ -305,14 +269,6 @@ class PluginManager:
     def get_gate_by_name(self, name: str) -> type[GateProtocol] | None:
         """Get gate plugin by name."""
         return self._gates.get(name)
-
-    def get_aggregation_by_name(self, name: str) -> type[AggregationProtocol] | None:
-        """Get aggregation plugin by name."""
-        return self._aggregations.get(name)
-
-    def get_coalesce_by_name(self, name: str) -> type[CoalesceProtocol] | None:
-        """Get coalesce plugin by name."""
-        return self._coalesces.get(name)
 
     def get_sink_by_name(self, name: str) -> type[SinkProtocol] | None:
         """Get sink plugin by name."""

@@ -79,10 +79,9 @@ def record_call(
     response_ref: str | None = None,
 ) -> Call:
     """Record an external call for a node state."""
-    from elspeth.core.canonical import canonical_json, stable_hash
-
-    call_id = self._generate_id()
-    now = datetime.now(timezone.utc)
+    # Note: canonical_json and stable_hash are already imported at module level
+    call_id = _generate_id()  # Module-level function, not a method
+    now = _now()              # Use the existing helper for UTC timestamps
 
     # Hash request (always required)
     request_hash = stable_hash(request_data)
@@ -129,10 +128,17 @@ def record_call(
 
 ### Step 2: Add imports to recorder.py
 
-**Add to imports section:**
+**Add to the existing `from elspeth.contracts import (...)` block (around line 20-47):**
 ```python
-from elspeth.contracts.enums import CallType, CallStatus
+from elspeth.contracts import (
+    # ... existing imports ...
+    CallStatus,
+    CallType,
+    # ... rest of existing imports ...
+)
 ```
+
+**Note:** Import from `elspeth.contracts`, NOT from `elspeth.contracts.enums`. This follows the established pattern in the codebase where all public contracts are re-exported from the package root.
 
 ### Step 3: Export from landscape package
 
@@ -148,12 +154,11 @@ Add `CallType` and `CallStatus` to exports if not already present (for convenien
 """Tests for external call recording API."""
 
 import pytest
-from datetime import datetime, timezone
 
-from elspeth.contracts.enums import CallType, CallStatus
+from elspeth.contracts import CallStatus, CallType
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.recorder import LandscapeRecorder
-from elspeth.contracts.schema import SchemaConfig
 
 
 class TestRecordCall:
@@ -272,17 +277,61 @@ class TestRecordCall:
 
         assert call.request_ref == "sha256:abc123..."
         assert call.response_ref == "sha256:def456..."
+
+    def test_duplicate_call_index_raises_integrity_error(
+        self, recorder: LandscapeRecorder, state_id: str
+    ):
+        """Test that duplicate (state_id, call_index) raises IntegrityError."""
+        from sqlalchemy.exc import IntegrityError
+
+        # First call succeeds
+        recorder.record_call(
+            state_id=state_id,
+            call_index=0,
+            call_type=CallType.LLM,
+            status=CallStatus.SUCCESS,
+            request_data={"prompt": "First"},
+            response_data={"response": "First"},
+        )
+
+        # Duplicate call_index fails
+        with pytest.raises(IntegrityError):
+            recorder.record_call(
+                state_id=state_id,
+                call_index=0,  # Same index!
+                call_type=CallType.LLM,
+                status=CallStatus.SUCCESS,
+                request_data={"prompt": "Second"},
+                response_data={"response": "Second"},
+            )
+
+    def test_invalid_state_id_raises_integrity_error(self, recorder: LandscapeRecorder):
+        """Test that invalid state_id raises IntegrityError (FK constraint)."""
+        from sqlalchemy.exc import IntegrityError
+
+        with pytest.raises(IntegrityError):
+            recorder.record_call(
+                state_id="nonexistent_state_id",
+                call_index=0,
+                call_type=CallType.LLM,
+                status=CallStatus.SUCCESS,
+                request_data={"prompt": "Test"},
+                response_data={"response": "Test"},
+            )
 ```
 
-### Step 5: Update PluginContext (optional but recommended)
+### Step 5: Update PluginContext (DEFERRED - not this PR)
 
 **File:** `src/elspeth/plugins/context.py`
 
-Add a convenience method so plugins can easily record calls:
+> **Note:** This step is deferred to a follow-up PR. The `record_call()` method on LandscapeRecorder is sufficient for Phase 6 initial integration. The engine/executor can call it directly with explicit `state_id` and `call_index` tracking.
+
+A future PR could add a convenience method to PluginContext:
 
 ```python
 def record_external_call(
     self,
+    state_id: str,  # Must be passed explicitly
     call_type: CallType,
     request_data: dict[str, Any],
     response_data: dict[str, Any] | None = None,
@@ -291,23 +340,28 @@ def record_external_call(
 ) -> Call:
     """Record an external call for the current node state.
 
-    Automatically manages call_index based on how many calls
-    have been recorded for this state.
+    Requires state_id to be passed explicitly since PluginContext
+    doesn't inherently track which node state is currently active.
+    The call_index would need to be tracked per-state.
     """
-    # Implementation tracks call count per state
     ...
 ```
+
+**Challenges:**
+- PluginContext doesn't currently track `state_id` (it only has `node_id`)
+- `call_index` management requires per-state tracking
+- Better handled at the executor level where state lifecycle is managed
 
 ## Testing Checklist
 
 - [ ] `record_call()` inserts row into `calls` table
 - [ ] `get_calls()` returns the recorded call with correct fields
 - [ ] Request/response data is hashed correctly
-- [ ] Error JSON is serialized correctly
-- [ ] Enum values are stored as strings
-- [ ] Duplicate `(state_id, call_index)` raises appropriate error
-- [ ] Invalid `state_id` raises appropriate error
-- [ ] `LandscapeExporter` includes the new call records
+- [ ] Error JSON is serialized correctly via `canonical_json()`
+- [ ] Enum values are stored as strings (`.value`)
+- [ ] Duplicate `(state_id, call_index)` raises `IntegrityError` (DB constraint)
+- [ ] Invalid `state_id` raises `IntegrityError` (foreign key constraint)
+- [ ] `LandscapeExporter` already handles calls via existing `get_calls()` - verify no changes needed
 
 ## Run Tests
 
@@ -329,3 +383,4 @@ def record_external_call(
 - Integrate with LLM transform executor (Phase 6)
 - Add call recording to HTTP client wrapper
 - Add payload store integration for large request/response bodies
+- Add `record_external_call()` convenience method to PluginContext (see deferred Step 5)

@@ -2,14 +2,14 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-> ⚠️ **Implementation Note:** This plan depends on features from Plugin Protocol v1.5 (`TransformResult.success_multi()`, `is_batch_aware`, aggregation `output_mode`). These are implemented - see `docs/plans/completed/2026-01-19-multi-row-output.md`. The `PluginContext.record_external_call()` method is **not yet implemented** and is delivered as Task C5 in this plan.
+> ⚠️ **Implementation Note:** This plan depends on features from Plugin Protocol v1.5 (`TransformResult.success_multi()`, `is_batch_aware`, aggregation `output_mode`). These are implemented - see `docs/plans/completed/2026-01-19-multi-row-output.md`. External call recording uses the **Audited Client** pattern (Task C5) where infrastructure-level clients automatically record to the audit trail.
 
 **Goal:** Add LLM transform plugins (OpenRouter single, Azure single, Azure batch) with Jinja2 templating, Azure blob storage sources/sinks, and supporting infrastructure for external call recording.
 
 **Architecture:** Three-part implementation:
 - **Part A:** LLM transform plugins with Jinja2 prompt templating
 - **Part B:** Azure Blob Storage source and sink plugins
-- **Part C:** External call recording, replay, and verification infrastructure
+- **Part C:** External call recording via Audited Clients, replay, and verification infrastructure
 
 **Tech Stack:**
 - Jinja2 (prompt templating)
@@ -17,6 +17,59 @@
 - azure-storage-blob (Azure Blob Storage)
 - azure-identity (Azure authentication)
 - openai (Azure OpenAI SDK)
+
+---
+
+## Architectural Decision: Audited Clients
+
+> **Key Design Decision:** External calls are recorded via **infrastructure-wrapped clients**, not via plugin-level `ctx.record_external_call()`. This ensures audit is **guaranteed by construction** - plugins physically cannot make unrecorded calls.
+
+### Why Audited Clients?
+
+| Approach | Audit Guarantee | Plugin Complexity | Risk |
+|----------|-----------------|-------------------|------|
+| Plugin calls `ctx.record_external_call()` | ❌ Plugin can forget | High - must remember to record | Audit gaps |
+| Transform returns call metadata | ⚠️ Plugin can omit | Medium - extra return fields | Audit gaps |
+| **Audited Client wrappers** | ✅ Automatic | Low - just use the client | **None** |
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        AUDITED CLIENT ARCHITECTURE                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  EXECUTOR (owns state lifecycle)                                            │
+│  ├── Creates node_state in audit trail                                      │
+│  ├── Creates AuditedLLMClient with state_id                                 │
+│  ├── Passes client to transform via PluginContext                           │
+│  └── Closes state after transform completes                                 │
+│                                                                              │
+│  PluginContext                                                              │
+│  ├── llm_client: AuditedLLMClient    ← Pre-configured with state_id        │
+│  └── http_client: AuditedHTTPClient  ← Pre-configured with state_id        │
+│                                                                              │
+│  LLM TRANSFORM (uses provided client)                                       │
+│  └── response = ctx.llm_client.chat(messages)  ← Recording is AUTOMATIC    │
+│                                                                              │
+│  AuditedLLMClient (infrastructure)                                          │
+│  ├── Wraps underlying LLM SDK (openai, httpx)                              │
+│  ├── Records request BEFORE call                                            │
+│  ├── Records response/error AFTER call                                      │
+│  └── Manages call_index per state                                           │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Benefits
+
+1. **Audit is guaranteed** - Plugins physically cannot make unrecorded calls
+2. **Single responsibility** - Plugins do business logic, infrastructure does audit
+3. **Correct by construction** - No "remember to record" cognitive load
+4. **Consistent format** - All LLM calls recorded identically
+5. **State tracking handled** - `state_id` and `call_index` managed by infrastructure
+
+This follows ELSPETH's principle: **"Audit is non-negotiable"**
 
 ---
 
@@ -320,6 +373,11 @@ EOF
 - Create: `src/elspeth/plugins/llm/base.py`
 - Test: `tests/plugins/llm/test_base.py`
 
+> **Best Practice Applied:** This implementation uses:
+> 1. `TransformDataConfig` base class for proper schema/on_error support
+> 2. Audited clients (recording handled by infrastructure, not plugin)
+> 3. Proper error handling following Three-Tier Trust Model
+
 **Step 1: Write the failing test**
 
 ```python
@@ -328,45 +386,75 @@ EOF
 
 import pytest
 from pydantic import ValidationError
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import Mock
 
-from elspeth.plugins.llm.base import BaseLLMTransform, LLMConfig, LLMResponse
+from elspeth.plugins.llm.base import BaseLLMTransform, LLMConfig
+from elspeth.plugins.clients.llm import LLMResponse
 
 
-class TestBaseLLMTransform:
-    """Tests for BaseLLMTransform abstract base class."""
+class TestLLMConfig:
+    """Tests for LLMConfig validation."""
 
     def test_config_requires_template(self):
-        """LLMConfig requires a prompt template (Pydantic required field)."""
+        """LLMConfig requires a prompt template."""
         with pytest.raises(ValidationError):
-            LLMConfig(model="gpt-4")  # Missing required 'template' field
+            LLMConfig.from_dict({
+                "model": "gpt-4",
+                "schema": {"fields": "dynamic"},
+            })  # Missing 'template'
 
-    def test_config_accepts_template_string(self):
-        """LLMConfig can take template as string."""
-        config = LLMConfig(
-            model="gpt-4",
-            template="Analyze: {{ text }}",
-        )
-        assert config.template is not None
-
-    def test_config_validates_model(self):
-        """LLMConfig requires model name (Pydantic required field)."""
+    def test_config_requires_model(self):
+        """LLMConfig requires model name."""
         with pytest.raises(ValidationError):
-            LLMConfig(template="Hello")  # Missing required 'model' field
+            LLMConfig.from_dict({
+                "template": "Analyze: {{ text }}",
+                "schema": {"fields": "dynamic"},
+            })  # Missing 'model'
 
-    def test_llm_response_has_required_fields(self):
-        """LLMResponse has content and metadata."""
-        response = LLMResponse(
-            content="Analysis result",
-            model="gpt-4",
-            usage={"prompt_tokens": 10, "completion_tokens": 20},
-            latency_ms=150.5,
-        )
-        assert response.content == "Analysis result"
-        assert response.total_tokens == 30
+    def test_config_requires_schema(self):
+        """LLMConfig requires schema (from TransformDataConfig)."""
+        with pytest.raises(ValidationError):
+            LLMConfig.from_dict({
+                "model": "gpt-4",
+                "template": "Analyze: {{ text }}",
+            })  # Missing 'schema'
+
+    def test_valid_config(self):
+        """Valid config passes validation."""
+        config = LLMConfig.from_dict({
+            "model": "gpt-4",
+            "template": "Analyze: {{ text }}",
+            "schema": {"fields": "dynamic"},
+        })
+        assert config.model == "gpt-4"
+        assert config.template == "Analyze: {{ text }}"
+
+
+class TestBaseLLMTransformProcess:
+    """Tests for transform processing."""
+
+    def test_template_rendering_error_returns_transform_error(self):
+        """Template rendering failure returns TransformResult.error()."""
+        # Create mock transform that uses strict template
+        from elspeth.plugins.llm.templates import PromptTemplate
+
+        template = PromptTemplate("Hello, {{ required_field }}!")
+        ctx = Mock()
+        ctx.llm_client = Mock()
+
+        # Missing required_field should return error, not crash
+        # (This tests the error handling in process())
+
+    def test_llm_client_error_returns_transform_error(self):
+        """LLM client failure returns TransformResult.error()."""
+        # Test that LLMClientError is caught and converted to TransformResult.error()
+
+    def test_rate_limit_error_is_retryable(self):
+        """Rate limit errors marked retryable=True."""
+        # Test TransformResult.error(retryable=True) for rate limits
 ```
 
-**Step 2: Implement BaseLLMTransform**
+**Step 2: Implement LLMConfig (extends TransformDataConfig)**
 
 ```python
 # src/elspeth/plugins/llm/base.py
@@ -374,132 +462,153 @@ class TestBaseLLMTransform:
 
 from __future__ import annotations
 
-import hashlib
 from abc import abstractmethod
-from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, field_validator
 
 from elspeth.contracts import TransformResult
 from elspeth.plugins.base import BaseTransform
+from elspeth.plugins.config_base import TransformDataConfig
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.llm.templates import PromptTemplate
+from elspeth.plugins.schema_factory import create_schema_from_config
+from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
+from elspeth.plugins.clients.llm import LLMClientError, RateLimitError
 
 
-def _sha256(content: str) -> str:
-    """Compute SHA-256 hash of string content."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+class LLMConfig(TransformDataConfig):
+    """Configuration for LLM transforms.
 
-
-class LLMConfig(BaseModel):
-    """Configuration for LLM transforms."""
-
-    model_config = {"frozen": True}
+    Extends TransformDataConfig to get:
+    - schema: Input/output schema configuration (REQUIRED)
+    - on_error: Sink for failed rows (optional)
+    """
 
     model: str = Field(..., description="Model identifier (e.g., 'gpt-4', 'claude-3-opus')")
     template: str = Field(..., description="Jinja2 prompt template")
     system_prompt: str | None = Field(None, description="Optional system prompt")
     temperature: float = Field(0.0, ge=0.0, le=2.0, description="Sampling temperature")
     max_tokens: int | None = Field(None, gt=0, description="Maximum tokens in response")
-
-    # Response parsing
     response_field: str = Field("llm_response", description="Field name for LLM response in output")
 
     @field_validator("template")
     @classmethod
     def validate_template(cls, v: str) -> str:
-        """Validate template is non-empty."""
+        """Validate template is non-empty and syntactically valid."""
         if not v or not v.strip():
             raise ValueError("template cannot be empty")
+        # Validate template syntax at config time
+        try:
+            PromptTemplate(v)
+        except TemplateError as e:
+            raise ValueError(f"Invalid Jinja2 template: {e}") from e
         return v
-
-
-@dataclass
-class LLMResponse:
-    """Response from an LLM call."""
-    content: str
-    model: str
-    usage: dict[str, int] = field(default_factory=dict)
-    latency_ms: float = 0.0
-    raw_response: dict[str, Any] | None = None
-
-    @property
-    def total_tokens(self) -> int:
-        """Total tokens used (prompt + completion)."""
-        return self.usage.get("prompt_tokens", 0) + self.usage.get("completion_tokens", 0)
 
 
 class BaseLLMTransform(BaseTransform):
     """Abstract base class for LLM transforms.
 
-    Subclasses implement _call_llm() for specific providers.
-    Base class handles:
-    - Template rendering
-    - Audit trail recording
-    - Response parsing
+    Uses audited clients for external calls - recording is automatic.
+
+    Error handling follows Three-Tier Trust Model:
+    - Template rendering with row data → wrap, return error (THEIR DATA)
+    - LLM API calls → wrap, return error (EXTERNAL SYSTEM)
+    - Internal logic → let crash (OUR CODE)
     """
 
-    def __init__(self, config: LLMConfig) -> None:
-        self._config = config
-        self._template = PromptTemplate(config.template)
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+
+        cfg = LLMConfig.from_dict(config)
+        self._model = cfg.model
+        self._template = PromptTemplate(cfg.template)
+        self._system_prompt = cfg.system_prompt
+        self._temperature = cfg.temperature
+        self._max_tokens = cfg.max_tokens
+        self._response_field = cfg.response_field
+        self._on_error = cfg.on_error
+
+        # Schema from config
+        assert cfg.schema_config is not None
+        schema = create_schema_from_config(
+            cfg.schema_config,
+            f"{self.name}Schema",
+            allow_coercion=False,  # Transforms do NOT coerce
+        )
+        self.input_schema = schema
+        self.output_schema = schema
 
     @property
-    def name(self) -> str:
-        return f"llm:{self._config.model}"
-
     @abstractmethod
-    def _call_llm(
-        self,
-        prompt: str,
-        system_prompt: str | None,
-        ctx: PluginContext,
-    ) -> LLMResponse:
-        """Make the actual LLM call. Implemented by subclasses."""
+    def name(self) -> str:
+        """Plugin identifier - implemented by subclasses."""
         ...
 
     def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
         """Process a row through the LLM.
 
-        1. Render prompt template with row data
-        2. Call LLM provider
-        3. Record call in audit trail
-        4. Return transformed row
+        Error handling:
+        1. Template rendering (THEIR DATA) → catch TemplateError, return error
+        2. LLM call (EXTERNAL) → catch LLMClientError, return error
+        3. Internal logic (OUR CODE) → let it crash
         """
-        # Render template
-        rendered = self._template.render_with_metadata(**row)
+        # 1. Render template with row data
+        # This operates on THEIR DATA - wrap in try/catch
+        try:
+            rendered = self._template.render_with_metadata(**row)
+        except TemplateError as e:
+            return TransformResult.error({
+                "reason": "template_rendering_failed",
+                "error": str(e),
+                "template_hash": self._template.template_hash,
+            })
 
-        # Call LLM (implemented by subclass)
-        response = self._call_llm(
-            prompt=rendered.prompt,
-            system_prompt=self._config.system_prompt,
-            ctx=ctx,
-        )
+        # 2. Build messages
+        messages = []
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": rendered.prompt})
 
-        # Record in audit trail
-        ctx.record_external_call(
-            call_type="llm",
-            request={
-                "model": self._config.model,
-                "template_hash": rendered.template_hash,
-                "variables_hash": rendered.variables_hash,
-                "rendered_hash": rendered.rendered_hash,
-                "temperature": self._config.temperature,
-            },
-            response={
-                "content_hash": _sha256(response.content),
-                "model": response.model,
-                "usage": response.usage,
-            },
-            latency_ms=response.latency_ms,
-        )
+        # 3. Call LLM via audited client
+        # This is an EXTERNAL SYSTEM - wrap in try/catch
+        if ctx.llm_client is None:
+            # This is OUR BUG - executor should have provided client
+            raise RuntimeError("LLM client not available in PluginContext")
 
-        # Build output row
+        try:
+            response = ctx.llm_client.chat_completion(
+                model=self._model,
+                messages=messages,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
+        except RateLimitError as e:
+            # Rate limit - retryable
+            return TransformResult.error(
+                {"reason": "rate_limited", "error": str(e)},
+                retryable=True,
+            )
+        except LLMClientError as e:
+            # Other LLM error - check if retryable
+            return TransformResult.error(
+                {"reason": "llm_call_failed", "error": str(e)},
+                retryable=e.retryable,
+            )
+
+        # 4. Build output row (OUR CODE - let exceptions crash)
         output = dict(row)
-        output[self._config.response_field] = response.content
-        output[f"{self._config.response_field}_usage"] = response.usage
+        output[self._response_field] = response.content
+        output[f"{self._response_field}_usage"] = response.usage
+
+        # 5. Add audit metadata for template traceability
+        output[f"{self._response_field}_template_hash"] = rendered.template_hash
+        output[f"{self._response_field}_variables_hash"] = rendered.variables_hash
 
         return TransformResult.success(output)
+
+    def close(self) -> None:
+        """Release resources."""
+        pass
 ```
 
 **Step 3: Run tests and commit**
@@ -511,6 +620,8 @@ class BaseLLMTransform(BaseTransform):
 **Files:**
 - Create: `src/elspeth/plugins/llm/openrouter.py`
 - Test: `tests/plugins/llm/test_openrouter.py`
+
+> **Note:** OpenRouter uses a custom HTTP endpoint, not the OpenAI SDK. We use the audited HTTP client with custom response parsing.
 
 **Configuration:**
 ```yaml
@@ -527,76 +638,138 @@ transforms:
       api_key: "${OPENROUTER_API_KEY}"  # Env var interpolation
       temperature: 0.0
       response_field: "analysis"
+      schema:
+        fields: dynamic
 ```
 
-**Implementation highlights:**
+**Implementation (uses audited HTTP client):**
 ```python
 # src/elspeth/plugins/llm/openrouter.py
 """OpenRouter LLM transform - access 100+ models via single API."""
 
-import time
-import httpx
+from __future__ import annotations
 
+from typing import Any
+
+from pydantic import Field
+
+from elspeth.contracts import TransformResult
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.llm.base import BaseLLMTransform, LLMConfig, LLMResponse
+from elspeth.plugins.llm.base import LLMConfig, BaseLLMTransform
+from elspeth.plugins.llm.templates import TemplateError
 
 
 class OpenRouterConfig(LLMConfig):
     """OpenRouter-specific configuration."""
-    api_key: str
-    base_url: str = "https://openrouter.ai/api/v1"
-    timeout_seconds: float = 60.0
+    api_key: str = Field(..., description="OpenRouter API key")
+    base_url: str = Field(
+        default="https://openrouter.ai/api/v1",
+        description="OpenRouter API base URL",
+    )
+    timeout_seconds: float = Field(default=60.0, description="Request timeout")
 
 
 class OpenRouterLLMTransform(BaseLLMTransform):
-    """LLM transform using OpenRouter API."""
+    """LLM transform using OpenRouter API.
 
-    def __init__(self, config: OpenRouterConfig) -> None:
-        super().__init__(config)
-        self._api_key = config.api_key
-        self._base_url = config.base_url
-        self._timeout = config.timeout_seconds
+    OpenRouter provides access to 100+ models via a unified API.
+    Uses audited HTTP client for call recording.
+    """
 
-    def _call_llm(
-        self,
-        prompt: str,
-        system_prompt: str | None,
-        ctx: PluginContext,
-    ) -> LLMResponse:
-        """Call OpenRouter API."""
+    name = "openrouter_llm"
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        # Don't call super().__init__ - we override process() entirely
+        from elspeth.plugins.base import BaseTransform
+        BaseTransform.__init__(self, config)
+
+        cfg = OpenRouterConfig.from_dict(config)
+        self._model = cfg.model
+        self._template_str = cfg.template
+        self._system_prompt = cfg.system_prompt
+        self._temperature = cfg.temperature
+        self._max_tokens = cfg.max_tokens
+        self._response_field = cfg.response_field
+        self._api_key = cfg.api_key
+        self._base_url = cfg.base_url
+        self._timeout = cfg.timeout_seconds
+
+        from elspeth.plugins.llm.templates import PromptTemplate
+        self._template = PromptTemplate(cfg.template)
+
+        # Schema
+        from elspeth.plugins.schema_factory import create_schema_from_config
+        assert cfg.schema_config is not None
+        schema = create_schema_from_config(
+            cfg.schema_config,
+            "OpenRouterSchema",
+            allow_coercion=False,
+        )
+        self.input_schema = schema
+        self.output_schema = schema
+
+    def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+        """Process row via OpenRouter API using audited HTTP client."""
+
+        # 1. Render template (THEIR DATA - wrap)
+        try:
+            rendered = self._template.render_with_metadata(**row)
+        except TemplateError as e:
+            return TransformResult.error({
+                "reason": "template_rendering_failed",
+                "error": str(e),
+            })
+
+        # 2. Build request
         messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": rendered.prompt})
 
-        start = time.perf_counter()
+        request_body = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": self._temperature,
+        }
+        if self._max_tokens:
+            request_body["max_tokens"] = self._max_tokens
 
-        with httpx.Client(timeout=self._timeout) as client:
-            response = client.post(
+        # 3. Call via audited HTTP client (EXTERNAL - wrap)
+        if ctx.http_client is None:
+            raise RuntimeError("HTTP client not available in PluginContext")
+
+        try:
+            response = ctx.http_client.post(
                 f"{self._base_url}/chat/completions",
+                json=request_body,
                 headers={
                     "Authorization": f"Bearer {self._api_key}",
                     "Content-Type": "application/json",
-                },
-                json={
-                    "model": self._config.model,
-                    "messages": messages,
-                    "temperature": self._config.temperature,
-                    "max_tokens": self._config.max_tokens,
                 },
             )
             response.raise_for_status()
             data = response.json()
 
-        latency_ms = (time.perf_counter() - start) * 1000
+        except Exception as e:
+            is_rate_limit = "429" in str(e) or "rate" in str(e).lower()
+            return TransformResult.error(
+                {"reason": "api_call_failed", "error": str(e)},
+                retryable=is_rate_limit,
+            )
 
-        return LLMResponse(
-            content=data["choices"][0]["message"]["content"],
-            model=data.get("model", self._config.model),
-            usage=data.get("usage", {}),
-            latency_ms=latency_ms,
-            raw_response=data,
-        )
+        # 4. Build output (OUR CODE - let crash)
+        content = data["choices"][0]["message"]["content"]
+        usage = data.get("usage", {})
+
+        output = dict(row)
+        output[self._response_field] = content
+        output[f"{self._response_field}_usage"] = usage
+        output[f"{self._response_field}_template_hash"] = rendered.template_hash
+
+        return TransformResult.success(output)
+
+    def close(self) -> None:
+        pass
 ```
 
 ---
@@ -606,6 +779,8 @@ class OpenRouterLLMTransform(BaseLLMTransform):
 **Files:**
 - Create: `src/elspeth/plugins/llm/azure.py`
 - Test: `tests/plugins/llm/test_azure.py`
+
+> **Note:** Azure OpenAI uses the same SDK as OpenAI. The audited LLM client wraps this SDK, so the transform simply uses `ctx.llm_client` (which is configured with Azure credentials by the executor).
 
 **Configuration:**
 ```yaml
@@ -621,52 +796,85 @@ transforms:
         {{ instruction }}
 
         Input: {{ input_text }}
+      schema:
+        fields: dynamic
 ```
 
-**Implementation uses Azure OpenAI SDK:**
+**Implementation (inherits from BaseLLMTransform):**
 ```python
 # src/elspeth/plugins/llm/azure.py
 """Azure OpenAI LLM transform - single call per row."""
 
-from openai import AzureOpenAI
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import Field
+
+from elspeth.plugins.llm.base import LLMConfig, BaseLLMTransform
+
+
+class AzureOpenAIConfig(LLMConfig):
+    """Azure OpenAI-specific configuration."""
+    deployment_name: str = Field(..., description="Azure deployment name")
+    endpoint: str = Field(..., description="Azure OpenAI endpoint URL")
+    api_key: str = Field(..., description="Azure OpenAI API key")
+    api_version: str = Field(default="2024-10-21", description="API version")
+
 
 class AzureLLMTransform(BaseLLMTransform):
-    """LLM transform using Azure OpenAI."""
+    """LLM transform using Azure OpenAI.
 
-    def __init__(self, config: AzureOpenAIConfig) -> None:
-        super().__init__(config)
-        self._client = AzureOpenAI(
-            azure_endpoint=config.endpoint,
-            api_key=config.api_key,
-            api_version=config.api_version,
-        )
-        self._deployment = config.deployment_name
+    Inherits from BaseLLMTransform - uses ctx.llm_client for calls.
+    The executor configures the audited client with Azure credentials.
+    """
 
-    def _call_llm(self, prompt: str, system_prompt: str | None, ctx: PluginContext) -> LLMResponse:
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+    name = "azure_llm"
 
-        start = time.perf_counter()
-        response = self._client.chat.completions.create(
-            model=self._deployment,
-            messages=messages,
-            temperature=self._config.temperature,
-            max_tokens=self._config.max_tokens,
-        )
-        latency_ms = (time.perf_counter() - start) * 1000
+    def __init__(self, config: dict[str, Any]) -> None:
+        # Parse Azure-specific config to validate, but don't store client
+        # (client is provided by executor via ctx.llm_client)
+        cfg = AzureOpenAIConfig.from_dict(config)
 
-        return LLMResponse(
-            content=response.choices[0].message.content,
-            model=response.model,
-            usage={
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-            },
-            latency_ms=latency_ms,
-        )
+        # Store deployment name for model parameter
+        # (Azure uses deployment_name, not model, but we pass it as model to the client)
+        config_with_model = dict(config)
+        config_with_model["model"] = cfg.deployment_name
+
+        super().__init__(config_with_model)
+
+        # Store Azure-specific config for executor to use
+        self._azure_endpoint = cfg.endpoint
+        self._azure_api_key = cfg.api_key
+        self._azure_api_version = cfg.api_version
+        self._deployment_name = cfg.deployment_name
+
+    @property
+    def azure_config(self) -> dict[str, Any]:
+        """Azure configuration for executor to create audited client."""
+        return {
+            "endpoint": self._azure_endpoint,
+            "api_key": self._azure_api_key,
+            "api_version": self._azure_api_version,
+            "provider": "azure",
+        }
 ```
+
+> **Executor Integration:** When the executor sees an `AzureLLMTransform`, it reads `transform.azure_config` to create the audited client with Azure credentials:
+>
+> ```python
+> # In executor, when setting up PluginContext for Azure transforms
+> if hasattr(transform, 'azure_config'):
+>     from openai import AzureOpenAI
+>     underlying = AzureOpenAI(
+>         azure_endpoint=transform.azure_config["endpoint"],
+>         api_key=transform.azure_config["api_key"],
+>         api_version=transform.azure_config["api_version"],
+>     )
+>     ctx.llm_client = AuditedLLMClient(
+>         recorder, state_id, underlying, provider="azure"
+>     )
+> ```
 
 ---
 
@@ -674,7 +882,15 @@ class AzureLLMTransform(BaseLLMTransform):
 
 **Files:**
 - Create: `src/elspeth/plugins/llm/azure_batch.py`
+- Create: `src/elspeth/engine/batch_scheduler.py` (new - for batch lifecycle)
 - Test: `tests/plugins/llm/test_azure_batch.py`
+- Test: `tests/engine/test_batch_scheduler.py`
+
+> **Best Practice Applied:** Two-phase checkpoint approach for long-running operations:
+> 1. **Submit Phase:** Submit batch, checkpoint batch_id immediately, yield control
+> 2. **Complete Phase:** Check batch status, download results if complete
+>
+> This enables crash recovery and prevents resource blocking.
 
 **Configuration:**
 ```yaml
@@ -698,99 +914,195 @@ transforms:
         Analyze: {{ text }}
       poll_interval_seconds: 300   # How often to check batch status (5 min default)
       max_wait_hours: 24           # Maximum wait time
+      schema:
+        fields: dynamic
 ```
 
-**Output Mode Note:** Use `output_mode: passthrough` because this transform returns `success_multi()` with the same number of rows as input (each enriched with its LLM response). Use `output_mode: single` if you want classic N→1 aggregation (e.g., summarizing all rows into one).
-
-**Architecture:**
+**Architecture (Two-Phase with Checkpoint):**
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    AzureBatchLLMTransform                       │
-│                    (BaseTransform with is_batch_aware=True)      │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ENGINE handles buffering:                                       │
-│  ├── Buffers rows until trigger fires (count=100 or timeout)    │
-│  ├── Calls process(rows: list[dict], ctx) with batch            │
-│  └── Manages checkpoint/recovery of buffered rows               │
-│                                                                  │
-│  process(rows: list[dict], ctx) -> TransformResult              │
-│  ├── Render templates for all rows                               │
-│  ├── Build JSONL from rendered prompts                           │
-│  ├── Upload to Azure Blob Storage                                │
-│  ├── Submit batch job to Azure OpenAI                            │
-│  ├── Poll until complete (or timeout)                            │
-│  ├── Download results                                            │
-│  ├── Map results back to input rows                              │
-│  └── Return TransformResult.success() with aggregated output     │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    TWO-PHASE BATCH PROCESSING                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  PHASE 1: SUBMIT                                                            │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ process(rows, ctx) called by engine                                  │   │
+│  │   ├── Check checkpoint: batch_id exists?                             │   │
+│  │   │     └── No: Fresh batch                                          │   │
+│  │   │           ├── Render all templates                               │   │
+│  │   │           ├── Build JSONL                                        │   │
+│  │   │           ├── Upload to Azure                                    │   │
+│  │   │           ├── Submit batch job                                   │   │
+│  │   │           ├── CHECKPOINT: Save batch_id immediately              │   │
+│  │   │           └── Raise BatchPendingError("submitted")               │   │
+│  │   │                                                                  │   │
+│  └───│──────────────────────────────────────────────────────────────────┘   │
+│      │                                                                       │
+│      │  Engine catches BatchPendingError                                    │
+│      │    └── Schedules batch check after poll_interval                     │
+│      │                                                                       │
+│  PHASE 2: CHECK/COMPLETE (called by scheduler)                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ process(rows, ctx) called again with same checkpoint                 │   │
+│  │   ├── Check checkpoint: batch_id exists?                             │   │
+│  │   │     └── Yes: Resume batch                                        │   │
+│  │   │           ├── Check Azure batch status                           │   │
+│  │   │           │     ├── "completed" → Download results, return       │   │
+│  │   │           │     ├── "failed" → Return TransformResult.error()    │   │
+│  │   │           │     └── "in_progress" → Raise BatchPendingError      │   │
+│  │   │           │                         (schedule another check)     │   │
+│  └───│──────────────────────────────────────────────────────────────────┘   │
+│      │                                                                       │
+│      └── Eventually completes or fails                                      │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Key implementation:**
+**Why Two-Phase?**
+1. **Crash recovery** - Batch ID is checkpointed immediately after submission
+2. **Resource efficiency** - Process doesn't block for hours
+3. **Visibility** - Audit trail shows batch status transitions
+4. **Idempotency** - Re-running process() after crash safely resumes
+
+**Step 1: Create BatchPendingError**
+
+```python
+# src/elspeth/plugins/llm/batch_errors.py
+"""Batch processing control flow errors."""
+
+from __future__ import annotations
+
+
+class BatchPendingError(Exception):
+    """Raised when batch is submitted but not yet complete.
+
+    This is NOT an error condition - it's a control flow signal
+    telling the engine to schedule a retry check later.
+    """
+
+    def __init__(
+        self,
+        batch_id: str,
+        status: str,
+        *,
+        check_after_seconds: int = 300,
+    ) -> None:
+        self.batch_id = batch_id
+        self.status = status
+        self.check_after_seconds = check_after_seconds
+        super().__init__(f"Batch {batch_id} is {status}, check after {check_after_seconds}s")
+```
+
+**Step 2: Implement AzureBatchLLMTransform with checkpoints**
 
 ```python
 # src/elspeth/plugins/llm/azure_batch.py
 """Azure OpenAI Batch API transform - 50% cost savings for high volume."""
 
-import hashlib
+from __future__ import annotations
+
 import json
-import time
+from datetime import datetime, timezone
 from typing import Any
 
-from openai import AzureOpenAI
+from pydantic import Field
 
 from elspeth.contracts import TransformResult
 from elspeth.plugins.base import BaseTransform
+from elspeth.plugins.config_base import TransformDataConfig
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.llm.templates import PromptTemplate
+from elspeth.plugins.schema_factory import create_schema_from_config
+from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
+from elspeth.plugins.llm.batch_errors import BatchPendingError
 
 
-def _sha256(content: str) -> str:
-    """Compute SHA-256 hash of string content."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+class AzureBatchConfig(TransformDataConfig):
+    """Azure Batch-specific configuration."""
+    deployment_name: str = Field(..., description="Azure deployment name")
+    endpoint: str = Field(..., description="Azure OpenAI endpoint URL")
+    api_key: str = Field(..., description="Azure OpenAI API key")
+    api_version: str = Field(default="2024-10-21", description="API version")
+    template: str = Field(..., description="Jinja2 prompt template")
+    system_prompt: str | None = Field(None, description="Optional system prompt")
+    temperature: float = Field(0.0, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(None, gt=0)
+    response_field: str = Field("llm_response", description="Output field name")
+    poll_interval_seconds: int = Field(300, description="Batch status check interval")
+    max_wait_hours: int = Field(24, description="Maximum batch wait time")
 
 
 class AzureBatchLLMTransform(BaseTransform):
     """Batch LLM transform using Azure OpenAI Batch API.
 
-    This is a batch-aware transform - when configured at an aggregation node,
-    the engine buffers rows and calls process(rows: list[dict]) when trigger fires.
+    Uses two-phase checkpoint approach:
+    1. Submit batch → checkpoint batch_id → raise BatchPendingError
+    2. Check status → complete or raise BatchPendingError again
 
     Benefits:
     - 50% cost reduction vs real-time API
-    - Separate, higher rate limits
-    - Up to 24-hour turnaround
-    - Engine handles buffering and crash recovery
+    - Crash recovery via checkpointed batch_id
+    - Resource efficiency (no blocking waits)
     """
 
-    # Declare batch awareness - engine will pass list[dict] at aggregation nodes
-    is_batch_aware = True
+    name = "azure_batch_llm"
+    is_batch_aware = True  # Engine passes list[dict] at aggregation nodes
 
-    def __init__(self, config: AzureBatchConfig) -> None:
-        self._config = config
-        self._template = PromptTemplate(config.template)
-        self._client = AzureOpenAI(
-            azure_endpoint=config.endpoint,
-            api_key=config.api_key,
-            api_version=config.api_version,
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+
+        cfg = AzureBatchConfig.from_dict(config)
+        self._deployment_name = cfg.deployment_name
+        self._endpoint = cfg.endpoint
+        self._api_key = cfg.api_key
+        self._api_version = cfg.api_version
+        self._template = PromptTemplate(cfg.template)
+        self._system_prompt = cfg.system_prompt
+        self._temperature = cfg.temperature
+        self._max_tokens = cfg.max_tokens
+        self._response_field = cfg.response_field
+        self._poll_interval = cfg.poll_interval_seconds
+        self._max_wait_hours = cfg.max_wait_hours
+
+        # Schema
+        assert cfg.schema_config is not None
+        schema = create_schema_from_config(
+            cfg.schema_config,
+            "AzureBatchSchema",
+            allow_coercion=False,
         )
+        self.input_schema = schema
+        self.output_schema = schema
+
+        # Azure client (lazy init)
+        self._client = None
+
+    def _get_client(self):
+        """Lazy-initialize Azure client."""
+        if self._client is None:
+            from openai import AzureOpenAI
+            self._client = AzureOpenAI(
+                azure_endpoint=self._endpoint,
+                api_key=self._api_key,
+                api_version=self._api_version,
+            )
+        return self._client
 
     def process(
         self,
         row: dict[str, Any] | list[dict[str, Any]],
         ctx: PluginContext,
     ) -> TransformResult:
-        """Process row(s) through Azure Batch API.
+        """Process batch with checkpoint-based recovery.
 
-        When used at an aggregation node, row will be list[dict].
-        When used standalone, row will be single dict (falls back to single-call API).
+        May be called multiple times for the same batch:
+        - First call: submits batch, checkpoints, raises BatchPendingError
+        - Subsequent calls: checks status, completes or raises again
         """
         if isinstance(row, list):
             return self._process_batch(row, ctx)
         else:
-            # Single row - use regular Azure API instead
+            # Single row fallback - use audited LLM client
             return self._process_single(row, ctx)
 
     def _process_batch(
@@ -798,177 +1110,220 @@ class AzureBatchLLMTransform(BaseTransform):
         rows: list[dict[str, Any]],
         ctx: PluginContext,
     ) -> TransformResult:
-        """Submit batch to Azure and wait for results."""
+        """Process batch with two-phase checkpoint approach."""
         if not rows:
-            return TransformResult.success({"results": [], "count": 0})
+            return TransformResult.success_multi([])
 
-        # 1. Render templates for all rows
+        # Check if we're resuming an in-flight batch
+        checkpoint = ctx.get_checkpoint() if hasattr(ctx, 'get_checkpoint') else None
+
+        if checkpoint and checkpoint.get("batch_id"):
+            # PHASE 2: Resume - check status of existing batch
+            return self._check_batch_status(
+                batch_id=checkpoint["batch_id"],
+                rows=rows,
+                rendered_prompts=checkpoint.get("rendered_prompts", []),
+                ctx=ctx,
+            )
+        else:
+            # PHASE 1: Fresh batch - submit and checkpoint
+            return self._submit_batch(rows, ctx)
+
+    def _submit_batch(
+        self,
+        rows: list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Submit batch to Azure, checkpoint, and yield control."""
+
+        # 1. Render templates for all rows (THEIR DATA - wrap)
         rendered_prompts = []
         for i, row in enumerate(rows):
-            rendered = self._template.render_with_metadata(**row)
-            rendered_prompts.append({
-                "custom_id": f"row_{i}",
-                "prompt": rendered.prompt,
-                "row_data": row,
-            })
+            try:
+                rendered = self._template.render_with_metadata(**row)
+                rendered_prompts.append({
+                    "custom_id": f"row_{i}",
+                    "prompt": rendered.prompt,
+                    "template_hash": rendered.template_hash,
+                })
+            except TemplateError as e:
+                # Template error for one row - mark it failed, continue others
+                rendered_prompts.append({
+                    "custom_id": f"row_{i}",
+                    "error": str(e),
+                })
 
-        # 2. Build JSONL content
+        # 2. Build JSONL for successful renders only
         jsonl_lines = []
-        for req in rendered_prompts:
+        for i, req in enumerate(rendered_prompts):
+            if "error" in req:
+                continue  # Skip failed renders
             jsonl_lines.append(json.dumps({
                 "custom_id": req["custom_id"],
                 "method": "POST",
                 "url": "/chat/completions",
                 "body": {
-                    "model": self._config.deployment_name,
+                    "model": self._deployment_name,
                     "messages": [
-                        {"role": "system", "content": self._config.system_prompt or ""},
+                        {"role": "system", "content": self._system_prompt or ""},
                         {"role": "user", "content": req["prompt"]},
                     ],
-                    "temperature": self._config.temperature,
-                    "max_tokens": self._config.max_tokens,
+                    "temperature": self._temperature,
+                    "max_tokens": self._max_tokens,
                 },
             }))
 
+        if not jsonl_lines:
+            # All rows failed template rendering
+            return TransformResult.error({
+                "reason": "all_rows_failed_template_rendering",
+                "row_count": len(rows),
+            })
+
         jsonl_content = "\n".join(jsonl_lines)
 
-        # 3. Upload file to Azure
-        file_response = self._client.files.create(
-            file=("batch_input.jsonl", jsonl_content.encode()),
-            purpose="batch",
-        )
+        # 3. Upload and submit to Azure (EXTERNAL - wrap)
+        try:
+            client = self._get_client()
 
-        # 4. Submit batch job
-        batch_response = self._client.batches.create(
-            input_file_id=file_response.id,
-            endpoint="/chat/completions",
-            completion_window="24h",
-        )
+            file_response = client.files.create(
+                file=("batch_input.jsonl", jsonl_content.encode()),
+                purpose="batch",
+            )
 
-        batch_id = batch_response.id
+            batch_response = client.batches.create(
+                input_file_id=file_response.id,
+                endpoint="/chat/completions",
+                completion_window="24h",
+            )
 
-        # Record batch submission in audit trail
-        ctx.record_external_call(
-            call_type="llm_batch",
-            request={
+            batch_id = batch_response.id
+
+        except Exception as e:
+            return TransformResult.error({
+                "reason": "batch_submission_failed",
+                "error": str(e),
+            })
+
+        # 4. CHECKPOINT IMMEDIATELY after successful submission
+        if hasattr(ctx, 'update_checkpoint'):
+            ctx.update_checkpoint({
                 "batch_id": batch_id,
                 "file_id": file_response.id,
+                "status": "submitted",
                 "row_count": len(rows),
-                "model": self._config.deployment_name,
-            },
-            response={"status": "submitted"},
-            latency_ms=0,
+                "submitted_at": datetime.now(timezone.utc).isoformat(),
+                "rendered_prompts": rendered_prompts,  # For result mapping
+            })
+
+        # 5. Raise to signal "come back later"
+        raise BatchPendingError(
+            batch_id=batch_id,
+            status="submitted",
+            check_after_seconds=self._poll_interval,
         )
 
-        # 5. Poll until complete
-        results = self._poll_until_complete(batch_id, ctx)
-
-        # 6. Map results back to input rows (passthrough: N in → N out)
-        output_results = []
-        for i, req in enumerate(rendered_prompts):
-            custom_id = req["custom_id"]
-            output_row = dict(req["row_data"])
-
-            if custom_id in results:
-                result_content = results[custom_id]
-                output_row[self._config.response_field] = result_content
-            else:
-                # Missing result - record error in row (still include in output)
-                output_row[self._config.response_field] = None
-                output_row[f"{self._config.response_field}_error"] = "No response in batch"
-
-            # Add batch metadata for audit trail correlation
-            output_row[f"{self._config.response_field}_batch_id"] = batch_id
-            output_results.append(output_row)
-
-        # Return N enriched rows (use with aggregation output_mode: passthrough)
-        # Each original row comes out with its LLM response attached
-        return TransformResult.success_multi(output_results)
-
-    def _process_single(
-        self,
-        row: dict[str, Any],
-        ctx: PluginContext,
-    ) -> TransformResult:
-        """Fallback for single row - use regular Azure API (not batch).
-
-        This allows the transform to work outside aggregation nodes,
-        though at full price (no 50% batch discount).
-        """
-        import time
-
-        rendered = self._template.render_with_metadata(**row)
-
-        messages = []
-        if self._config.system_prompt:
-            messages.append({"role": "system", "content": self._config.system_prompt})
-        messages.append({"role": "user", "content": rendered.prompt})
-
-        start = time.perf_counter()
-        response = self._client.chat.completions.create(
-            model=self._config.deployment_name,
-            messages=messages,
-            temperature=self._config.temperature,
-            max_tokens=self._config.max_tokens,
-        )
-        latency_ms = (time.perf_counter() - start) * 1000
-
-        # Record in audit trail (single call, not batch)
-        ctx.record_external_call(
-            call_type="llm",
-            request={
-                "model": self._config.deployment_name,
-                "template_hash": rendered.template_hash,
-                "variables_hash": rendered.variables_hash,
-                "rendered_hash": rendered.rendered_hash,
-                "temperature": self._config.temperature,
-                "note": "single_row_fallback",  # Flag that this wasn't batched
-            },
-            response={
-                "content_hash": _sha256(response.choices[0].message.content),
-                "model": response.model,
-                "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                },
-            },
-            latency_ms=latency_ms,
-        )
-
-        output = dict(row)
-        output[self._config.response_field] = response.choices[0].message.content
-        output[f"{self._config.response_field}_usage"] = {
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
-        }
-
-        return TransformResult.success(output)
-
-    def _poll_until_complete(
+    def _check_batch_status(
         self,
         batch_id: str,
+        rows: list[dict[str, Any]],
+        rendered_prompts: list[dict],
         ctx: PluginContext,
-    ) -> dict[str, str]:
-        """Poll Azure until batch completes, return results by custom_id."""
-        max_wait = self._config.max_wait_hours * 3600
-        poll_interval = self._config.poll_interval_seconds
-        waited = 0
+    ) -> TransformResult:
+        """Check batch status and complete if ready."""
 
-        while waited < max_wait:
-            batch = self._client.batches.retrieve(batch_id)
+        try:
+            client = self._get_client()
+            batch = client.batches.retrieve(batch_id)
 
-            if batch.status == "completed":
-                # Download results
-                output_file = self._client.files.content(batch.output_file_id)
-                return self._parse_batch_results(output_file.text)
+        except Exception as e:
+            return TransformResult.error({
+                "reason": "batch_status_check_failed",
+                "batch_id": batch_id,
+                "error": str(e),
+            })
 
-            if batch.status in ("failed", "expired", "cancelled"):
-                raise RuntimeError(f"Batch {batch_id} failed with status: {batch.status}")
+        if batch.status == "completed":
+            # SUCCESS - download and return results
+            return self._download_and_return_results(
+                batch_id=batch_id,
+                output_file_id=batch.output_file_id,
+                rows=rows,
+                rendered_prompts=rendered_prompts,
+                ctx=ctx,
+            )
 
-            time.sleep(poll_interval)
-            waited += poll_interval
+        elif batch.status in ("failed", "expired", "cancelled"):
+            # FAILED - return error
+            return TransformResult.error({
+                "reason": "batch_failed",
+                "batch_id": batch_id,
+                "status": batch.status,
+            })
 
-        raise RuntimeError(f"Batch {batch_id} timed out after {max_wait}s")
+        else:
+            # STILL IN PROGRESS - update checkpoint and yield
+            if hasattr(ctx, 'update_checkpoint'):
+                ctx.update_checkpoint({
+                    "batch_id": batch_id,
+                    "status": batch.status,
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                    "rendered_prompts": rendered_prompts,
+                })
+
+            raise BatchPendingError(
+                batch_id=batch_id,
+                status=batch.status,
+                check_after_seconds=self._poll_interval,
+            )
+
+    def _download_and_return_results(
+        self,
+        batch_id: str,
+        output_file_id: str,
+        rows: list[dict[str, Any]],
+        rendered_prompts: list[dict],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Download batch results and map back to input rows."""
+
+        try:
+            client = self._get_client()
+            output_file = client.files.content(output_file_id)
+            results = self._parse_batch_results(output_file.text)
+
+        except Exception as e:
+            return TransformResult.error({
+                "reason": "batch_result_download_failed",
+                "batch_id": batch_id,
+                "error": str(e),
+            })
+
+        # Map results back to input rows (passthrough: N in → N out)
+        output_results = []
+        for i, row in enumerate(rows):
+            custom_id = f"row_{i}"
+            output_row = dict(row)
+
+            # Check if this row had a template error
+            if i < len(rendered_prompts) and "error" in rendered_prompts[i]:
+                output_row[self._response_field] = None
+                output_row[f"{self._response_field}_error"] = rendered_prompts[i]["error"]
+            elif custom_id in results:
+                output_row[self._response_field] = results[custom_id]
+            else:
+                output_row[self._response_field] = None
+                output_row[f"{self._response_field}_error"] = "No response in batch"
+
+            # Add batch metadata for audit trail correlation
+            output_row[f"{self._response_field}_batch_id"] = batch_id
+            output_results.append(output_row)
+
+        # Clear checkpoint on success
+        if hasattr(ctx, 'clear_checkpoint'):
+            ctx.clear_checkpoint()
+
+        return TransformResult.success_multi(output_results)
 
     def _parse_batch_results(self, jsonl_content: str) -> dict[str, str]:
         """Parse JSONL results file into custom_id -> content map."""
@@ -981,6 +1336,135 @@ class AzureBatchLLMTransform(BaseTransform):
             content = data["response"]["body"]["choices"][0]["message"]["content"]
             results[custom_id] = content
         return results
+
+    def _process_single(
+        self,
+        row: dict[str, Any],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Fallback for single row - use audited LLM client."""
+
+        # Render template (THEIR DATA - wrap)
+        try:
+            rendered = self._template.render_with_metadata(**row)
+        except TemplateError as e:
+            return TransformResult.error({
+                "reason": "template_rendering_failed",
+                "error": str(e),
+            })
+
+        # Build messages
+        messages = []
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": rendered.prompt})
+
+        # Call via audited client (EXTERNAL - wrap)
+        if ctx.llm_client is None:
+            raise RuntimeError("LLM client not available in PluginContext")
+
+        from elspeth.plugins.clients.llm import LLMClientError, RateLimitError
+
+        try:
+            response = ctx.llm_client.chat_completion(
+                model=self._deployment_name,
+                messages=messages,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
+        except RateLimitError as e:
+            return TransformResult.error(
+                {"reason": "rate_limited", "error": str(e)},
+                retryable=True,
+            )
+        except LLMClientError as e:
+            return TransformResult.error(
+                {"reason": "llm_call_failed", "error": str(e)},
+                retryable=e.retryable,
+            )
+
+        # Build output
+        output = dict(row)
+        output[self._response_field] = response.content
+        output[f"{self._response_field}_usage"] = response.usage
+        output[f"{self._response_field}_note"] = "single_row_fallback"
+
+        return TransformResult.success(output)
+
+    def close(self) -> None:
+        """Release resources."""
+        self._client = None
+```
+
+**Step 3: Engine support for BatchPendingError**
+
+The engine must catch `BatchPendingError` and schedule retries:
+
+```python
+# In src/elspeth/engine/processor.py (modification)
+
+from elspeth.plugins.llm.batch_errors import BatchPendingError
+
+def _process_aggregation_batch(self, ...):
+    """Process aggregation batch."""
+    try:
+        result = transform.process(rows, ctx)
+        # Normal completion
+        return result
+
+    except BatchPendingError as e:
+        # Batch submitted but not complete - schedule retry
+        self._scheduler.schedule_batch_check(
+            node_id=transform.node_id,
+            batch_id=e.batch_id,
+            check_after=timedelta(seconds=e.check_after_seconds),
+        )
+        # Don't mark as failed - batch is in progress
+        return None  # Or a special "pending" result
+```
+
+**Step 4: Tests**
+
+```python
+# tests/plugins/llm/test_azure_batch.py
+
+class TestAzureBatchCheckpointRecovery:
+    """Tests for checkpoint-based crash recovery."""
+
+    def test_fresh_batch_submits_and_raises_pending(self):
+        """Fresh batch submits to Azure and raises BatchPendingError."""
+        transform = AzureBatchLLMTransform({...})
+        ctx = MockPluginContext()
+
+        with pytest.raises(BatchPendingError) as exc_info:
+            transform.process([{"text": "hello"}], ctx)
+
+        assert exc_info.value.status == "submitted"
+        assert ctx.checkpoint["batch_id"] is not None
+
+    def test_resume_with_checkpoint_checks_status(self):
+        """Resume with checkpoint checks Azure batch status."""
+        transform = AzureBatchLLMTransform({...})
+        ctx = MockPluginContext()
+        ctx.checkpoint = {"batch_id": "batch_123", "status": "in_progress"}
+
+        # Mock Azure to return "in_progress"
+        with pytest.raises(BatchPendingError) as exc_info:
+            transform.process([{"text": "hello"}], ctx)
+
+        assert exc_info.value.batch_id == "batch_123"
+
+    def test_completed_batch_returns_results(self):
+        """Completed batch downloads and returns results."""
+        transform = AzureBatchLLMTransform({...})
+        ctx = MockPluginContext()
+        ctx.checkpoint = {"batch_id": "batch_123", "rendered_prompts": [...]}
+
+        # Mock Azure to return "completed" with results
+        result = transform.process([{"text": "hello"}], ctx)
+
+        assert result.status == "success"
+        assert result.rows[0]["llm_response"] is not None
 ```
 
 ---
@@ -1173,9 +1657,541 @@ Behavior:
 
 ---
 
-### Task C5: PluginContext.record_external_call()
+### Task C5: Audited Client Infrastructure
 
-Wire the `ctx.record_external_call()` method used by LLM transforms to CallRecorder.
+**Files:**
+- Create: `src/elspeth/plugins/clients/__init__.py`
+- Create: `src/elspeth/plugins/clients/base.py`
+- Create: `src/elspeth/plugins/clients/llm.py`
+- Create: `src/elspeth/plugins/clients/http.py`
+- Create: `tests/plugins/clients/test_audited_llm_client.py`
+- Modify: `src/elspeth/plugins/context.py` (add client fields)
+- Modify: `src/elspeth/engine/processor.py` (create clients with state_id)
+
+**Step 1: Create base audited client**
+
+```python
+# src/elspeth/plugins/clients/base.py
+"""Base class for audited clients."""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from elspeth.core.landscape.recorder import LandscapeRecorder
+
+
+class AuditedClientBase(ABC):
+    """Base class for clients that automatically record to audit trail.
+
+    Subclasses wrap specific client types (LLM, HTTP, etc.) and ensure
+    all calls are recorded with proper state linkage.
+    """
+
+    def __init__(
+        self,
+        recorder: LandscapeRecorder,
+        state_id: str,
+    ) -> None:
+        """Initialize audited client.
+
+        Args:
+            recorder: Landscape recorder for audit trail
+            state_id: The node_state this client is attached to
+        """
+        self._recorder = recorder
+        self._state_id = state_id
+        self._call_index = 0
+
+    def _next_call_index(self) -> int:
+        """Get and increment call index."""
+        idx = self._call_index
+        self._call_index += 1
+        return idx
+```
+
+**Step 2: Create AuditedLLMClient**
+
+```python
+# src/elspeth/plugins/clients/llm.py
+"""Audited LLM client with automatic call recording."""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any, TYPE_CHECKING
+
+from elspeth.contracts import CallStatus, CallType
+from elspeth.plugins.clients.base import AuditedClientBase
+
+if TYPE_CHECKING:
+    from elspeth.core.landscape.recorder import LandscapeRecorder
+
+
+@dataclass
+class LLMResponse:
+    """Response from an LLM call."""
+    content: str
+    model: str
+    usage: dict[str, int] = field(default_factory=dict)
+    latency_ms: float = 0.0
+    raw_response: dict[str, Any] | None = None
+
+    @property
+    def total_tokens(self) -> int:
+        """Total tokens used (prompt + completion)."""
+        return self.usage.get("prompt_tokens", 0) + self.usage.get("completion_tokens", 0)
+
+
+class LLMClientError(Exception):
+    """Error from LLM client."""
+
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+class RateLimitError(LLMClientError):
+    """Rate limit exceeded - retryable."""
+
+    def __init__(self, message: str):
+        super().__init__(message, retryable=True)
+
+
+class AuditedLLMClient(AuditedClientBase):
+    """LLM client that automatically records all calls to audit trail.
+
+    This client wraps the underlying LLM SDK and ensures every call
+    (successful or failed) is recorded with proper state linkage.
+
+    Usage:
+        # Executor creates client with state_id
+        client = AuditedLLMClient(recorder, state_id, openai_client)
+
+        # Transform uses client - recording is automatic
+        response = client.chat_completion(
+            model="gpt-4",
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+    """
+
+    def __init__(
+        self,
+        recorder: LandscapeRecorder,
+        state_id: str,
+        underlying_client: Any,  # openai.OpenAI or openai.AzureOpenAI
+        *,
+        provider: str = "openai",
+    ) -> None:
+        super().__init__(recorder, state_id)
+        self._client = underlying_client
+        self._provider = provider
+
+    def chat_completion(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Make chat completion call with automatic audit recording.
+
+        Args:
+            model: Model identifier or deployment name
+            messages: Chat messages
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens in response
+            **kwargs: Additional provider-specific arguments
+
+        Returns:
+            LLMResponse with content and metadata
+
+        Raises:
+            LLMClientError: On API error (check .retryable)
+            RateLimitError: On rate limit (always retryable)
+        """
+        call_index = self._next_call_index()
+
+        request_data = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "provider": self._provider,
+            **kwargs,
+        }
+
+        start = time.perf_counter()
+
+        try:
+            response = self._client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+            latency_ms = (time.perf_counter() - start) * 1000
+
+            # Extract response data
+            content = response.choices[0].message.content or ""
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+            }
+
+            # Record successful call
+            self._recorder.record_call(
+                state_id=self._state_id,
+                call_index=call_index,
+                call_type=CallType.LLM,
+                status=CallStatus.SUCCESS,
+                request_data=request_data,
+                response_data={
+                    "content": content,
+                    "model": response.model,
+                    "usage": usage,
+                },
+                latency_ms=latency_ms,
+            )
+
+            return LLMResponse(
+                content=content,
+                model=response.model,
+                usage=usage,
+                latency_ms=latency_ms,
+                raw_response=response.model_dump() if hasattr(response, 'model_dump') else None,
+            )
+
+        except Exception as e:
+            latency_ms = (time.perf_counter() - start) * 1000
+
+            # Determine if retryable
+            error_type = type(e).__name__
+            is_rate_limit = "rate" in str(e).lower() or "429" in str(e)
+
+            # Record failed call
+            self._recorder.record_call(
+                state_id=self._state_id,
+                call_index=call_index,
+                call_type=CallType.LLM,
+                status=CallStatus.ERROR,
+                request_data=request_data,
+                error={
+                    "type": error_type,
+                    "message": str(e),
+                    "retryable": is_rate_limit,
+                },
+                latency_ms=latency_ms,
+            )
+
+            if is_rate_limit:
+                raise RateLimitError(str(e)) from e
+            raise LLMClientError(str(e), retryable=False) from e
+```
+
+**Step 3: Create AuditedHTTPClient**
+
+```python
+# src/elspeth/plugins/clients/http.py
+"""Audited HTTP client with automatic call recording."""
+
+from __future__ import annotations
+
+import time
+from typing import Any, TYPE_CHECKING
+
+import httpx
+
+from elspeth.contracts import CallStatus, CallType
+from elspeth.plugins.clients.base import AuditedClientBase
+
+if TYPE_CHECKING:
+    from elspeth.core.landscape.recorder import LandscapeRecorder
+
+
+class AuditedHTTPClient(AuditedClientBase):
+    """HTTP client that automatically records all calls to audit trail.
+
+    Wraps httpx and records request/response for every call.
+    """
+
+    def __init__(
+        self,
+        recorder: LandscapeRecorder,
+        state_id: str,
+        *,
+        timeout: float = 30.0,
+        base_url: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(recorder, state_id)
+        self._timeout = timeout
+        self._base_url = base_url
+        self._default_headers = headers or {}
+
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        """Make POST request with automatic audit recording."""
+        call_index = self._next_call_index()
+
+        full_url = f"{self._base_url}{url}" if self._base_url else url
+        merged_headers = {**self._default_headers, **(headers or {})}
+
+        request_data = {
+            "method": "POST",
+            "url": full_url,
+            "json": json,
+            # Don't record auth headers
+            "headers": {k: v for k, v in merged_headers.items()
+                       if "auth" not in k.lower() and "key" not in k.lower()},
+        }
+
+        start = time.perf_counter()
+
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(
+                    full_url,
+                    json=json,
+                    headers=merged_headers,
+                )
+
+            latency_ms = (time.perf_counter() - start) * 1000
+
+            # Record call (success even for 4xx/5xx - those are valid HTTP responses)
+            self._recorder.record_call(
+                state_id=self._state_id,
+                call_index=call_index,
+                call_type=CallType.HTTP,
+                status=CallStatus.SUCCESS,
+                request_data=request_data,
+                response_data={
+                    "status_code": response.status_code,
+                    "headers": dict(response.headers),
+                    # Don't store full body - just size
+                    "body_size": len(response.content),
+                },
+                latency_ms=latency_ms,
+            )
+
+            return response
+
+        except Exception as e:
+            latency_ms = (time.perf_counter() - start) * 1000
+
+            self._recorder.record_call(
+                state_id=self._state_id,
+                call_index=call_index,
+                call_type=CallType.HTTP,
+                status=CallStatus.ERROR,
+                request_data=request_data,
+                error={
+                    "type": type(e).__name__,
+                    "message": str(e),
+                },
+                latency_ms=latency_ms,
+            )
+            raise
+```
+
+**Step 4: Update PluginContext**
+
+Add optional client fields to PluginContext:
+
+```python
+# In src/elspeth/plugins/context.py
+
+@dataclass
+class PluginContext:
+    """Context provided to plugins during execution."""
+
+    # ... existing fields ...
+
+    # Audited clients (set by executor when state is created)
+    llm_client: AuditedLLMClient | None = None
+    http_client: AuditedHTTPClient | None = None
+```
+
+**Step 5: Update RowProcessor to create clients**
+
+```python
+# In src/elspeth/engine/processor.py, when creating PluginContext for transforms:
+
+def _create_plugin_context(
+    self,
+    state_id: str,
+    node_id: str,
+    # ... other params ...
+) -> PluginContext:
+    """Create PluginContext with audited clients."""
+
+    # Create audited LLM client if LLM config exists
+    llm_client = None
+    if self._llm_config:
+        underlying = self._create_llm_client(self._llm_config)
+        llm_client = AuditedLLMClient(
+            recorder=self._recorder,
+            state_id=state_id,
+            underlying_client=underlying,
+            provider=self._llm_config.provider,
+        )
+
+    # Create audited HTTP client
+    http_client = AuditedHTTPClient(
+        recorder=self._recorder,
+        state_id=state_id,
+    )
+
+    return PluginContext(
+        # ... existing fields ...
+        llm_client=llm_client,
+        http_client=http_client,
+    )
+```
+
+**Step 6: Write tests**
+
+```python
+# tests/plugins/clients/test_audited_llm_client.py
+"""Tests for AuditedLLMClient."""
+
+import pytest
+from unittest.mock import Mock, MagicMock
+
+from elspeth.contracts import CallStatus, CallType
+from elspeth.plugins.clients.llm import AuditedLLMClient, LLMClientError, RateLimitError
+
+
+class TestAuditedLLMClient:
+    """Tests for automatic call recording."""
+
+    @pytest.fixture
+    def mock_recorder(self):
+        """Create mock recorder."""
+        return Mock()
+
+    @pytest.fixture
+    def mock_openai_client(self):
+        """Create mock OpenAI client."""
+        client = Mock()
+        response = Mock()
+        response.choices = [Mock(message=Mock(content="Hello!"))]
+        response.model = "gpt-4"
+        response.usage = Mock(prompt_tokens=10, completion_tokens=5)
+        response.model_dump = Mock(return_value={})
+        client.chat.completions.create.return_value = response
+        return client
+
+    def test_successful_call_records_to_audit_trail(
+        self, mock_recorder, mock_openai_client
+    ):
+        """Successful call is recorded with request and response."""
+        client = AuditedLLMClient(
+            mock_recorder,
+            state_id="state_123",
+            underlying_client=mock_openai_client,
+        )
+
+        response = client.chat_completion(
+            model="gpt-4",
+            messages=[{"role": "user", "content": "Hi"}],
+        )
+
+        assert response.content == "Hello!"
+        mock_recorder.record_call.assert_called_once()
+        call_args = mock_recorder.record_call.call_args
+        assert call_args.kwargs["state_id"] == "state_123"
+        assert call_args.kwargs["call_index"] == 0
+        assert call_args.kwargs["call_type"] == CallType.LLM
+        assert call_args.kwargs["status"] == CallStatus.SUCCESS
+
+    def test_failed_call_records_error(self, mock_recorder, mock_openai_client):
+        """Failed call is recorded with error details."""
+        mock_openai_client.chat.completions.create.side_effect = Exception("API Error")
+
+        client = AuditedLLMClient(
+            mock_recorder,
+            state_id="state_123",
+            underlying_client=mock_openai_client,
+        )
+
+        with pytest.raises(LLMClientError):
+            client.chat_completion(
+                model="gpt-4",
+                messages=[{"role": "user", "content": "Hi"}],
+            )
+
+        call_args = mock_recorder.record_call.call_args
+        assert call_args.kwargs["status"] == CallStatus.ERROR
+        assert "API Error" in call_args.kwargs["error"]["message"]
+
+    def test_rate_limit_is_retryable(self, mock_recorder, mock_openai_client):
+        """Rate limit errors are marked retryable."""
+        mock_openai_client.chat.completions.create.side_effect = Exception(
+            "Rate limit exceeded (429)"
+        )
+
+        client = AuditedLLMClient(
+            mock_recorder,
+            state_id="state_123",
+            underlying_client=mock_openai_client,
+        )
+
+        with pytest.raises(RateLimitError) as exc_info:
+            client.chat_completion(
+                model="gpt-4",
+                messages=[{"role": "user", "content": "Hi"}],
+            )
+
+        assert exc_info.value.retryable is True
+
+    def test_call_index_increments(self, mock_recorder, mock_openai_client):
+        """Each call gets unique call_index."""
+        client = AuditedLLMClient(
+            mock_recorder,
+            state_id="state_123",
+            underlying_client=mock_openai_client,
+        )
+
+        client.chat_completion(model="gpt-4", messages=[])
+        client.chat_completion(model="gpt-4", messages=[])
+        client.chat_completion(model="gpt-4", messages=[])
+
+        calls = mock_recorder.record_call.call_args_list
+        assert calls[0].kwargs["call_index"] == 0
+        assert calls[1].kwargs["call_index"] == 1
+        assert calls[2].kwargs["call_index"] == 2
+```
+
+**Step 7: Commit**
+
+```bash
+git add src/elspeth/plugins/clients/ tests/plugins/clients/
+git commit -m "$(cat <<'EOF'
+feat(plugins): add audited client infrastructure for external calls
+
+Infrastructure-wrapped clients that automatically record to audit trail:
+- AuditedLLMClient: Wraps OpenAI/Azure SDK
+- AuditedHTTPClient: Wraps httpx
+- Recording is guaranteed by construction - plugins cannot bypass
+
+This follows ELSPETH's "audit is non-negotiable" principle.
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
+EOF
+)"
+```
 
 ---
 
@@ -1185,22 +2201,66 @@ Wire the `ctx.record_external_call()` method used by LLM transforms to CallRecor
 |------|-------|--------|--------------|
 | **A: LLM Plugins** | A1-A6 | 3-4 days | Jinja2, httpx, openai SDK |
 | **B: Azure Storage** | B1-B3 | 2 days | azure-storage-blob, azure-identity |
-| **C: Call Infrastructure** | C1-C5 | 2-3 days | DeepDiff, PayloadStore |
+| **C: Call Infrastructure** | C1-C5 | 3-4 days | DeepDiff, PayloadStore |
 
-**Recommended order (UPDATED):**
+### Key Architectural Decisions
 
-> **Critical dependency:** Tasks A2-A5 call `ctx.record_external_call()`, which requires C1 + C5 to be implemented first. The order below ensures no broken dependencies.
+| Decision | Pattern | Rationale |
+|----------|---------|-----------|
+| External call recording | Audited Clients | Audit guaranteed by construction |
+| Config validation | Extend TransformDataConfig | Schema + on_error support |
+| Error handling | Three-Tier Trust Model | Wrap THEIR DATA + EXTERNAL, let OUR CODE crash |
+| Long-running batches | Two-phase checkpoint | Crash recovery + resource efficiency |
+
+### Recommended Implementation Order
+
+> **Critical dependency:** LLM transforms (A2-A5) use audited clients (C5) which require C1 (CallRecorder). The order below ensures no broken dependencies.
+
+```
+Phase 1: Foundation (can run in parallel)
+├── A1: PromptTemplate (no dependencies)
+├── C1: CallRecorder (LandscapeRecorder.record_call)
+└── B1-B2: Azure Storage (independent)
+
+Phase 2: Audited Infrastructure
+└── C5: Audited Clients (depends on C1)
+    ├── AuditedLLMClient
+    ├── AuditedHTTPClient
+    └── PluginContext integration
+
+Phase 3: LLM Transforms (sequential, each builds on previous)
+├── A2: BaseLLMTransform (depends on C5)
+├── A3: OpenRouterLLMTransform (depends on A2, uses AuditedHTTPClient)
+├── A4: AzureLLMTransform (depends on A2, uses AuditedLLMClient)
+└── A5: AzureBatchLLMTransform (depends on A2, adds checkpoint support)
+
+Phase 4: Testing & Polish
+├── A6: Integration tests
+└── C2-C4: Replay/Verify (nice-to-have)
+```
+
+**Detailed order:**
 
 1. **A1** (PromptTemplate) - no dependencies, foundation for all LLM plugins
-2. **C1** (CallRecorder) - foundation for audit trail recording
-3. **C5** (PluginContext.record_external_call) - wires recording to context ⚠️ **BEFORE A2**
-4. **A2** (BaseLLMTransform) - shared base class, now can use record_external_call
-5. **A3** (OpenRouter) - quickest to integration test
-6. **A4** (Azure Single) - validates Azure integration
-7. **B1-B2** (Azure Storage) - enables Azure-native pipelines
-8. **A5** (Azure Batch) - the big one for your workload
-9. **C2-C4** (Replay/Verify) - nice-to-have for testing
+2. **C1** (CallRecorder) - `LandscapeRecorder.record_call()` method
+3. **B1-B2** (Azure Storage) - can run in parallel with C1
+4. **C5** (Audited Clients) - `AuditedLLMClient` + `AuditedHTTPClient` ⚠️ **BEFORE A2**
+5. **A2** (BaseLLMTransform) - shared base class with audited client usage
+6. **A3** (OpenRouter) - quickest to integration test (uses HTTP client)
+7. **A4** (Azure Single) - validates Azure integration (uses LLM client)
+8. **A5** (Azure Batch) - two-phase checkpoint for long-running batches
+9. **C2-C4** (Replay/Verify) - optional, for deterministic testing
 10. **A6** (Integration tests) - validates full flow
+
+### Best Practices Applied
+
+| Issue | Solution | Where Applied |
+|-------|----------|---------------|
+| Audit gaps from forgotten recording | Audited Clients | C5 → A2-A5 |
+| Missing schema validation | TransformDataConfig | A2 config |
+| Silent errors | Three-Tier Trust error handling | A2-A5 process() |
+| Crash loss of batch progress | Two-phase checkpoint | A5 |
+| Blocking waits on batches | BatchPendingError control flow | A5 |
 
 ---
 

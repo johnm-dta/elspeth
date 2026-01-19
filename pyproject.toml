@@ -140,6 +140,7 @@ known-first-party = ["elspeth"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["T20"]  # Allow print in tests
+"scripts/**/*.py" = ["T20"]  # Allow print in CLI scripts
 "alembic/**/*.py" = ["E402"]  # Alembic env.py has imports after config setup
 "vulture_whitelist.py" = ["B018", "F821"]  # Vulture whitelist uses bare names
 

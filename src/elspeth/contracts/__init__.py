@@ -52,6 +52,8 @@ from elspeth.contracts.audit import (
     Run,
     Token,
     TokenParent,
+    TransformErrorRecord,
+    ValidationErrorRecord,
 )
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.results import (
@@ -113,6 +115,8 @@ __all__ = [
     "Run",
     "Token",
     "TokenParent",
+    "TransformErrorRecord",
+    "ValidationErrorRecord",
     # config
     "CheckpointSettings",
     "ConcurrencySettings",

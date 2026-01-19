@@ -5,7 +5,7 @@ Provides the explain() function to compose query results into
 complete lineage for a token or row.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from elspeth.contracts import (
@@ -14,6 +14,8 @@ from elspeth.contracts import (
     RoutingEvent,
     RowLineage,
     Token,
+    TransformErrorRecord,
+    ValidationErrorRecord,
 )
 
 if TYPE_CHECKING:
@@ -25,7 +27,8 @@ class LineageResult:
     """Complete lineage for a token.
 
     Contains all information needed to explain how a row
-    was processed through the pipeline.
+    was processed through the pipeline, including any errors
+    encountered during validation or transformation.
     """
 
     token: Token
@@ -45,6 +48,12 @@ class LineageResult:
 
     parent_tokens: list[Token]
     """Parent tokens (for tokens created by fork/coalesce)."""
+
+    validation_errors: list[ValidationErrorRecord] = field(default_factory=list)
+    """Validation errors for this row (from source validation)."""
+
+    transform_errors: list[TransformErrorRecord] = field(default_factory=list)
+    """Transform errors for this token (from transform processing)."""
 
 
 def explain(
@@ -114,6 +123,14 @@ def explain(
         if parent_token is not None:
             parent_tokens.append(parent_token)
 
+    # Get validation errors for this row (by hash)
+    validation_errors = recorder.get_validation_errors_for_row(
+        run_id, source_row.source_data_hash
+    )
+
+    # Get transform errors for this token
+    transform_errors = recorder.get_transform_errors_for_token(token_id)
+
     return LineageResult(
         token=token,
         source_row=source_row,
@@ -121,4 +138,6 @@ def explain(
         routing_events=routing_events,
         calls=calls,
         parent_tokens=parent_tokens,
+        validation_errors=validation_errors,
+        transform_errors=transform_errors,
     )

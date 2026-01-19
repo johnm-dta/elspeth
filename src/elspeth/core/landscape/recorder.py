@@ -42,6 +42,8 @@ from elspeth.contracts import (
     RunStatus,
     Token,
     TokenParent,
+    TransformErrorRecord,
+    ValidationErrorRecord,
 )
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.landscape.database import LandscapeDB
@@ -1985,3 +1987,146 @@ class LandscapeRecorder:
             )
 
         return error_id
+
+    # === Error Query Methods ===
+
+    def get_validation_errors_for_row(
+        self, run_id: str, row_hash: str
+    ) -> list[ValidationErrorRecord]:
+        """Get validation errors for a row by its hash.
+
+        Validation errors are keyed by row_hash since quarantined rows
+        never get row_ids (they're rejected before entering the pipeline).
+
+        Args:
+            run_id: Run ID to query
+            row_hash: Hash of the row data
+
+        Returns:
+            List of ValidationErrorRecord models
+        """
+        query = select(validation_errors_table).where(
+            validation_errors_table.c.run_id == run_id,
+            validation_errors_table.c.row_hash == row_hash,
+        )
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            rows = result.fetchall()
+
+        return [
+            ValidationErrorRecord(
+                error_id=r.error_id,
+                run_id=r.run_id,
+                node_id=r.node_id,
+                row_hash=r.row_hash,
+                error=r.error,
+                schema_mode=r.schema_mode,
+                destination=r.destination,
+                created_at=r.created_at,
+                row_data_json=r.row_data_json,
+            )
+            for r in rows
+        ]
+
+    def get_validation_errors_for_run(self, run_id: str) -> list[ValidationErrorRecord]:
+        """Get all validation errors for a run.
+
+        Args:
+            run_id: Run ID to query
+
+        Returns:
+            List of ValidationErrorRecord models, ordered by created_at
+        """
+        query = (
+            select(validation_errors_table)
+            .where(validation_errors_table.c.run_id == run_id)
+            .order_by(validation_errors_table.c.created_at)
+        )
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            rows = result.fetchall()
+
+        return [
+            ValidationErrorRecord(
+                error_id=r.error_id,
+                run_id=r.run_id,
+                node_id=r.node_id,
+                row_hash=r.row_hash,
+                error=r.error,
+                schema_mode=r.schema_mode,
+                destination=r.destination,
+                created_at=r.created_at,
+                row_data_json=r.row_data_json,
+            )
+            for r in rows
+        ]
+
+    def get_transform_errors_for_token(
+        self, token_id: str
+    ) -> list[TransformErrorRecord]:
+        """Get transform errors for a specific token.
+
+        Args:
+            token_id: Token ID to query
+
+        Returns:
+            List of TransformErrorRecord models
+        """
+        query = select(transform_errors_table).where(
+            transform_errors_table.c.token_id == token_id,
+        )
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            rows = result.fetchall()
+
+        return [
+            TransformErrorRecord(
+                error_id=r.error_id,
+                run_id=r.run_id,
+                token_id=r.token_id,
+                transform_id=r.transform_id,
+                row_hash=r.row_hash,
+                destination=r.destination,
+                created_at=r.created_at,
+                row_data_json=r.row_data_json,
+                error_details_json=r.error_details_json,
+            )
+            for r in rows
+        ]
+
+    def get_transform_errors_for_run(self, run_id: str) -> list[TransformErrorRecord]:
+        """Get all transform errors for a run.
+
+        Args:
+            run_id: Run ID to query
+
+        Returns:
+            List of TransformErrorRecord models, ordered by created_at
+        """
+        query = (
+            select(transform_errors_table)
+            .where(transform_errors_table.c.run_id == run_id)
+            .order_by(transform_errors_table.c.created_at)
+        )
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            rows = result.fetchall()
+
+        return [
+            TransformErrorRecord(
+                error_id=r.error_id,
+                run_id=r.run_id,
+                token_id=r.token_id,
+                transform_id=r.transform_id,
+                row_hash=r.row_hash,
+                destination=r.destination,
+                created_at=r.created_at,
+                row_data_json=r.row_data_json,
+                error_details_json=r.error_details_json,
+            )
+            for r in rows
+        ]

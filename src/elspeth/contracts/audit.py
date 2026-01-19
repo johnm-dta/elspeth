@@ -353,3 +353,41 @@ class BatchStatusUpdate(TypedDict, total=False):
     completed_at: datetime
     trigger_reason: str
     aggregation_state_id: str
+
+
+@dataclass
+class ValidationErrorRecord:
+    """A validation error recorded in the audit trail.
+
+    Created when a source row fails schema validation.
+    These are operational errors (bad user data), not system bugs.
+    """
+
+    error_id: str
+    run_id: str
+    node_id: str | None
+    row_hash: str
+    error: str
+    schema_mode: str
+    destination: str
+    created_at: datetime
+    row_data_json: str | None = None
+
+
+@dataclass
+class TransformErrorRecord:
+    """A transform processing error recorded in the audit trail.
+
+    Created when a transform returns TransformResult.error().
+    These are operational errors (bad data values), not transform bugs.
+    """
+
+    error_id: str
+    run_id: str
+    token_id: str
+    transform_id: str
+    row_hash: str
+    destination: str
+    created_at: datetime
+    row_data_json: str | None = None
+    error_details_json: str | None = None

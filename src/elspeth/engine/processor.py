@@ -505,6 +505,53 @@ class RowProcessor:
                             child_items,
                         )
 
+                # Handle multi-row output (deaggregation)
+                # NOTE: This is ONLY for non-aggregation transforms. Aggregation
+                # transforms route through _process_batch_aggregation_node() above.
+                if result.is_multi_row:
+                    # Validate transform is allowed to create tokens
+                    if not transform.creates_tokens:
+                        raise RuntimeError(
+                            f"Transform '{transform.name}' returned multi-row result "
+                            f"but has creates_tokens=False. Either set creates_tokens=True "
+                            f"or return single row via TransformResult.success(row). "
+                            f"(Multi-row is allowed in aggregation passthrough mode.)"
+                        )
+
+                    # Deaggregation: create child tokens for each output row
+                    # result.rows is guaranteed non-None when is_multi_row is True
+                    child_tokens = self._token_manager.expand_token(
+                        parent_token=current_token,
+                        expanded_rows=result.rows,  # type: ignore[arg-type]
+                        step_in_pipeline=step,
+                    )
+
+                    # Queue each child for continued processing
+                    # Children start at next step (step_offset + 1 gives 0-indexed next)
+                    next_step = start_step + step_offset + 1
+                    for child_token in child_tokens:
+                        child_items.append(
+                            _WorkItem(
+                                token=child_token,
+                                start_step=next_step,
+                                coalesce_at_step=coalesce_at_step,
+                                coalesce_name=coalesce_name,
+                            )
+                        )
+
+                    # Parent token is EXPANDED (terminal for parent)
+                    return (
+                        RowResult(
+                            token=current_token,
+                            final_data=current_token.row_data,
+                            outcome=RowOutcome.EXPANDED,
+                        ),
+                        child_items,
+                    )
+
+                # Single row output (existing logic - current_token already updated
+                # by _execute_transform_with_retry, continues to next transform)
+
             else:
                 raise TypeError(
                     f"Unknown transform type: {type(transform).__name__}. "

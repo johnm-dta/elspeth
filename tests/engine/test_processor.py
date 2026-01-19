@@ -3027,3 +3027,157 @@ class TestProcessorBatchTransforms:
         result = result_list[0]
         assert result.outcome == RowOutcome.COMPLETED
         assert result.final_data == {"total": 6}  # 1 + 2 + 3
+
+
+class TestProcessorDeaggregation:
+    """Tests for deaggregation / multi-row output handling."""
+
+    def test_processor_handles_expanding_transform(self) -> None:
+        """Processor creates multiple RowResults for expanding transform."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+
+        class ExpanderTransform(BaseTransform):
+            name = "expander"
+            creates_tokens = True  # This is a deaggregation transform
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                # Expand each row into 2 rows
+                return TransformResult.success_multi(
+                    [
+                        {**row, "copy": 1},
+                        {**row, "copy": 2},
+                    ]
+                )
+
+        # Setup real recorder
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="1.0")
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv",
+            node_type="source",
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="expander",
+            node_type="transform",
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        transform = ExpanderTransform(transform_node.node_id)
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+        )
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Process a row through the expanding transform
+        results = processor.process_row(
+            row_index=0,
+            row_data={"value": 42},
+            transforms=[transform],
+            ctx=ctx,
+        )
+
+        # Should get 3 results: 1 EXPANDED parent + 2 COMPLETED children
+        assert len(results) == 3
+
+        # Find the parent (EXPANDED) and children (COMPLETED)
+        expanded = [r for r in results if r.outcome == RowOutcome.EXPANDED]
+        completed = [r for r in results if r.outcome == RowOutcome.COMPLETED]
+
+        assert len(expanded) == 1
+        assert len(completed) == 2
+
+        # Children should have different token_ids but same row_id
+        assert completed[0].token_id != completed[1].token_id
+        assert completed[0].row_id == completed[1].row_id
+
+        # Children should have the expanded data
+        child_copies = {r.final_data["copy"] for r in completed}
+        assert child_copies == {1, 2}
+
+    def test_processor_rejects_multi_row_without_creates_tokens(self) -> None:
+        """Processor raises error if transform returns multi-row but creates_tokens=False."""
+        import pytest
+
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.processor import RowProcessor
+        from elspeth.engine.spans import SpanFactory
+
+        class BadTransform(BaseTransform):
+            name = "bad"
+            creates_tokens = False  # NOT allowed to create new tokens
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+
+            def __init__(self, node_id: str) -> None:
+                super().__init__({})
+                self.node_id = node_id
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success_multi([row, row])  # But returns multi!
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="1.0")
+        source_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv",
+            node_type="source",
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        transform_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="bad",
+            node_type="transform",
+            plugin_version="1.0.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        transform = BadTransform(transform_node.node_id)
+
+        processor = RowProcessor(
+            recorder=recorder,
+            span_factory=SpanFactory(),
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+        )
+
+        ctx = PluginContext(run_id=run.run_id, config={})
+
+        # Should raise because creates_tokens=False but returns multi-row
+        with pytest.raises(RuntimeError, match="creates_tokens=False"):
+            processor.process_row(
+                row_index=0,
+                row_data={"value": 1},
+                transforms=[transform],
+                ctx=ctx,
+            )

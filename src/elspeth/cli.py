@@ -230,12 +230,14 @@ def _execute_pipeline(
     from elspeth.plugins.sources.json_source import JSONSource
     from elspeth.plugins.transforms import FieldMapper, PassThrough
     from elspeth.plugins.transforms.batch_stats import BatchStats
+    from elspeth.plugins.transforms.json_explode import JSONExplode
 
     # Plugin registries
     TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
         "passthrough": PassThrough,
         "field_mapper": FieldMapper,
         "batch_stats": BatchStats,
+        "json_explode": JSONExplode,
     }
 
     # Instantiate source from new schema
@@ -409,6 +411,9 @@ PLUGIN_REGISTRY: dict[str, list[PluginInfo]] = {
         PluginInfo(name="passthrough", description="Pass rows through unchanged"),
         PluginInfo(
             name="field_mapper", description="Rename, select, and reorganize fields"
+        ),
+        PluginInfo(
+            name="json_explode", description="Explode array field into multiple rows"
         ),
     ],
     "sink": [

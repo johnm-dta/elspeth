@@ -1,0 +1,38 @@
+# Deaggregation example: Explode order items into individual rows
+# THREE-TIER TRUST MODEL:
+# - Source validates that 'items' exists (strict schema with 'any' type)
+# - Invalid rows quarantined BEFORE entering pipeline
+# - JSONExplode trusts the field exists and is a list
+
+datasource:
+  plugin: json
+  options:
+    path: examples/deaggregation/input.json
+    schema:
+      mode: strict
+      fields:
+        - "order_id: int"
+        - "items: any"
+    on_validation_failure: discard
+
+row_plugins:
+  - plugin: json_explode
+    options:
+      array_field: items
+      output_field: item
+      include_index: true
+      schema:
+        fields: dynamic
+
+sinks:
+  output:
+    plugin: json
+    options:
+      path: examples/deaggregation/output/order_items.json
+      schema:
+        fields: dynamic
+
+output_sink: output
+
+landscape:
+  url: sqlite:///examples/deaggregation/runs/audit.db

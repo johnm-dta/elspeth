@@ -4,8 +4,11 @@
 Entry point for the elspeth CLI tool.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from pydantic import ValidationError
@@ -14,6 +17,10 @@ from elspeth import __version__
 from elspeth.contracts import ExecutionResult
 from elspeth.core.config import ElspethSettings, load_settings, resolve_config
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
+
+if TYPE_CHECKING:
+    from elspeth.core.landscape import LandscapeDB
+    from elspeth.engine import PipelineConfig
 
 app = typer.Typer(
     name="elspeth",
@@ -597,6 +604,148 @@ def purge(
         db.close()
 
 
+def _build_resume_pipeline_config(
+    settings: ElspethSettings,
+) -> PipelineConfig:
+    """Build PipelineConfig for resume from settings.
+
+    For resume, source is NullSource (data comes from payloads).
+    Transforms and sinks are rebuilt from settings.
+
+    Args:
+        settings: Full ElspethSettings configuration.
+
+    Returns:
+        PipelineConfig ready for resume.
+    """
+    from elspeth.engine import PipelineConfig
+    from elspeth.plugins.base import BaseSink, BaseTransform
+    from elspeth.plugins.sinks.csv_sink import CSVSink
+    from elspeth.plugins.sinks.database_sink import DatabaseSink
+    from elspeth.plugins.sinks.json_sink import JSONSink
+    from elspeth.plugins.sources.null_source import NullSource
+    from elspeth.plugins.transforms import FieldMapper, PassThrough
+    from elspeth.plugins.transforms.batch_stats import BatchStats
+    from elspeth.plugins.transforms.json_explode import JSONExplode
+
+    # Plugin registries (same as _execute_pipeline)
+    TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
+        "passthrough": PassThrough,
+        "field_mapper": FieldMapper,
+        "batch_stats": BatchStats,
+        "json_explode": JSONExplode,
+    }
+
+    # Source is NullSource for resume - data comes from payloads
+    source = NullSource({})
+
+    # Build transforms from settings (same logic as _execute_pipeline)
+    transforms: list[BaseTransform] = []
+    for plugin_config in settings.row_plugins:
+        plugin_name = plugin_config.plugin
+        plugin_options = dict(plugin_config.options)
+
+        if plugin_name not in TRANSFORM_PLUGINS:
+            raise ValueError(f"Unknown transform plugin: {plugin_name}")
+        transform_class = TRANSFORM_PLUGINS[plugin_name]
+        transforms.append(transform_class(plugin_options))
+
+    # Build aggregation transforms (same logic as _execute_pipeline)
+    # Need the graph to get aggregation node IDs
+    graph = ExecutionGraph.from_config(settings)
+    agg_id_map = graph.get_aggregation_id_map()
+
+    from elspeth.core.config import AggregationSettings
+
+    aggregation_settings: dict[str, AggregationSettings] = {}
+    for agg_config in settings.aggregations:
+        node_id = agg_id_map[agg_config.name]
+        aggregation_settings[node_id] = agg_config
+
+        plugin_name = agg_config.plugin
+        if plugin_name not in TRANSFORM_PLUGINS:
+            raise ValueError(f"Unknown aggregation plugin: {plugin_name}")
+        transform_class = TRANSFORM_PLUGINS[plugin_name]
+
+        agg_options = dict(agg_config.options)
+        transform = transform_class(agg_options)
+        transform.node_id = node_id
+        transforms.append(transform)
+
+    # Build sinks from settings
+    # CRITICAL: Resume must append to existing output, not overwrite
+    sinks: dict[str, BaseSink] = {}
+    for sink_name, sink_settings in settings.sinks.items():
+        sink_plugin = sink_settings.plugin
+        sink_options = dict(sink_settings.options)
+        sink_options["mode"] = "append"  # Resume appends to existing files
+
+        sink: BaseSink
+        if sink_plugin == "csv":
+            sink = CSVSink(sink_options)
+        elif sink_plugin == "json":
+            sink = JSONSink(sink_options)
+        elif sink_plugin == "database":
+            sink = DatabaseSink(sink_options)
+        else:
+            raise ValueError(f"Unknown sink plugin: {sink_plugin}")
+
+        sinks[sink_name] = sink
+
+    return PipelineConfig(
+        source=source,  # type: ignore[arg-type]
+        transforms=transforms,  # type: ignore[arg-type]
+        sinks=sinks,  # type: ignore[arg-type]
+        config=resolve_config(settings),
+        gates=list(settings.gates),
+        aggregation_settings=aggregation_settings,
+    )
+
+
+def _build_resume_graph_from_db(
+    db: LandscapeDB,
+    run_id: str,
+) -> ExecutionGraph:
+    """Reconstruct ExecutionGraph from nodes/edges registered in database.
+
+    Args:
+        db: LandscapeDB connection.
+        run_id: Run ID to reconstruct graph for.
+
+    Returns:
+        ExecutionGraph reconstructed from database.
+    """
+    import json
+
+    from sqlalchemy import select
+
+    from elspeth.core.landscape import edges_table, nodes_table
+
+    graph = ExecutionGraph()
+
+    with db.engine.connect() as conn:
+        nodes = conn.execute(
+            select(nodes_table).where(nodes_table.c.run_id == run_id)
+        ).fetchall()
+
+        edges = conn.execute(
+            select(edges_table).where(edges_table.c.run_id == run_id)
+        ).fetchall()
+
+    for node in nodes:
+        graph.add_node(
+            node.node_id,
+            node_type=node.node_type,
+            plugin_name=node.plugin_name,
+            config=json.loads(node.config_json) if node.config_json else {},
+        )
+
+    for edge in edges:
+        graph.add_edge(edge.from_node_id, edge.to_node_id, label=edge.label)
+
+    return graph
+
+
 @app.command()
 def resume(
     run_id: str = typer.Argument(..., help="Run ID to resume"),
@@ -606,25 +755,53 @@ def resume(
         "-d",
         help="Path to Landscape database file (SQLite).",
     ),
+    settings_file: str | None = typer.Option(
+        None,
+        "--settings",
+        "-s",
+        help="Path to settings YAML file (default: settings.yaml).",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        "-x",
+        help="Actually execute the resume (default is dry-run).",
+    ),
 ) -> None:
     """Resume a failed run from its last checkpoint.
 
-    Continues processing from where the run left off.
-    Only works for runs that failed and have checkpoints.
-
-    Note: Full execution is not yet implemented - this command validates
-    and reports what WOULD happen when resume execution is added.
+    By default, shows what WOULD happen (dry run). Use --execute to
+    actually resume processing.
 
     Examples:
 
-        # Resume a specific run
+        # Dry run - show resume info
         elspeth resume run-abc123
 
+        # Actually resume processing
+        elspeth resume run-abc123 --execute
+
         # Resume with explicit database path
-        elspeth resume run-abc123 --database ./landscape.db
+        elspeth resume run-abc123 --database ./landscape.db --execute
     """
     from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
     from elspeth.core.landscape import LandscapeDB
+
+    # Try to load settings - needed for execute mode and optional for dry-run
+    settings_config: ElspethSettings | None = None
+    settings_path = Path(settings_file) if settings_file else Path("settings.yaml")
+    if settings_path.exists():
+        try:
+            settings_config = load_settings(settings_path)
+        except Exception as e:
+            if execute:
+                typer.echo(f"Error loading {settings_path}: {e}", err=True)
+                typer.echo(
+                    "Settings are required for --execute mode to rebuild pipeline.",
+                    err=True,
+                )
+                raise typer.Exit(1) from None
+            # For dry-run, settings are optional - continue without
 
     # Resolve database URL
     db_url: str | None = None
@@ -632,26 +809,17 @@ def resume(
     if database:
         db_path = Path(database)
         db_url = f"sqlite:///{db_path.resolve()}"
+    elif settings_config is not None:
+        db_url = settings_config.landscape.url
+        typer.echo(f"Using database from settings.yaml: {db_url}")
     else:
-        # Try loading from settings.yaml
-        settings_path = Path("settings.yaml")
-        if settings_path.exists():
-            try:
-                config = load_settings(settings_path)
-                db_url = config.landscape.url
-                typer.echo(f"Using database from settings.yaml: {db_url}")
-            except Exception as e:
-                typer.echo(f"Error loading settings.yaml: {e}", err=True)
-                typer.echo("Specify --database to provide path directly.", err=True)
-                raise typer.Exit(1) from None
-        else:
-            typer.echo(
-                "Error: No settings.yaml found and --database not provided.", err=True
-            )
-            typer.echo(
-                "Specify --database to provide path to Landscape database.", err=True
-            )
-            raise typer.Exit(1) from None
+        typer.echo(
+            "Error: No settings.yaml found and --database not provided.", err=True
+        )
+        typer.echo(
+            "Specify --database to provide path to Landscape database.", err=True
+        )
+        raise typer.Exit(1)
 
     # Initialize database and recovery manager
     try:
@@ -677,6 +845,9 @@ def resume(
             typer.echo(f"Error: Could not get resume point for run {run_id}", err=True)
             raise typer.Exit(1)
 
+        # Get count of unprocessed rows
+        unprocessed_row_ids = recovery_manager.get_unprocessed_rows(run_id)
+
         # Display resume point information
         typer.echo(f"Run {run_id} can be resumed.")
         typer.echo("\nResume point:")
@@ -687,11 +858,55 @@ def resume(
             typer.echo("  Has aggregation state: Yes")
         else:
             typer.echo("  Has aggregation state: No")
+        typer.echo(f"  Unprocessed rows: {len(unprocessed_row_ids)}")
 
-        typer.echo("\nNote: Full resume execution is not yet implemented (Phase 6).")
-        typer.echo(
-            "This command validates that the run CAN be resumed from the checkpoint above."
-        )
+        if not execute:
+            typer.echo("\nDry run - use --execute to actually resume processing.")
+            return
+
+        # Execute resume
+        if settings_config is None:
+            typer.echo("Error: settings.yaml required for --execute mode.", err=True)
+            raise typer.Exit(1)
+
+        typer.echo(f"\nResuming run {run_id}...")
+
+        # Get payload store from settings
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        payload_path = settings_config.payload_store.base_path
+        if not payload_path.exists():
+            typer.echo(f"Error: Payload directory not found: {payload_path}", err=True)
+            raise typer.Exit(1)
+
+        payload_store = FilesystemPayloadStore(payload_path)
+
+        # Build pipeline config and graph for resume
+        pipeline_config = _build_resume_pipeline_config(settings_config)
+        graph = _build_resume_graph_from_db(db, run_id)
+
+        # Create orchestrator with checkpoint manager and resume
+        from elspeth.engine import Orchestrator
+
+        orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_manager)
+
+        try:
+            result = orchestrator.resume(
+                resume_point=resume_point,
+                config=pipeline_config,
+                graph=graph,
+                payload_store=payload_store,
+                settings=settings_config,
+            )
+        except Exception as e:
+            typer.echo(f"Error during resume: {e}", err=True)
+            raise typer.Exit(1) from None
+
+        typer.echo("\nResume complete:")
+        typer.echo(f"  Rows processed: {result.rows_processed}")
+        typer.echo(f"  Rows succeeded: {result.rows_succeeded}")
+        typer.echo(f"  Rows failed: {result.rows_failed}")
+        typer.echo(f"  Status: {result.status.value}")
 
     finally:
         db.close()

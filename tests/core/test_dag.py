@@ -740,3 +740,367 @@ class TestMultiEdgeScenarios:
 
         labels = {e.label for e in alert_edges}
         assert labels == {"high", "medium", "low"}
+
+
+class TestCoalesceNodes:
+    """Test coalesce node creation in DAG."""
+
+    def test_from_config_creates_coalesce_node(self) -> None:
+        """Coalesce config should create a coalesce node in the graph."""
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv", options={"path": "test.csv"}),
+            sinks={
+                "output": SinkSettings(plugin="csv", options={"path": "out.csv"}),
+            },
+            output_sink="output",
+            gates=[
+                GateSettings(
+                    name="forker",
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches=["path_a", "path_b"],
+                    policy="require_all",
+                    merge="union",
+                ),
+            ],
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+
+        # Use proper accessor, not string matching
+        coalesce_map = graph.get_coalesce_id_map()
+        assert "merge_results" in coalesce_map
+
+        # Verify node type
+        node_id = coalesce_map["merge_results"]
+        node_info = graph.get_node_info(node_id)
+        assert node_info.node_type == "coalesce"
+        assert node_info.plugin_name == "coalesce:merge_results"
+
+    def test_from_config_coalesce_edges_from_fork_branches(self) -> None:
+        """Coalesce node should have edges from fork gate (via branches)."""
+        from elspeth.contracts import RoutingMode
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "output": SinkSettings(plugin="csv"),
+            },
+            output_sink="output",
+            gates=[
+                GateSettings(
+                    name="forker",
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches=["path_a", "path_b"],
+                    policy="require_all",
+                    merge="union",
+                ),
+            ],
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+
+        # Get node IDs
+        gate_id = graph.get_config_gate_id_map()["forker"]
+        coalesce_id = graph.get_coalesce_id_map()["merge_results"]
+
+        # Verify edges from fork gate to coalesce node
+        edges = graph.get_edges()
+        gate_to_coalesce_edges = [
+            e for e in edges if e.from_node == gate_id and e.to_node == coalesce_id
+        ]
+
+        # Should have two edges (path_a and path_b) with COPY mode
+        assert len(gate_to_coalesce_edges) == 2
+        labels = {e.label for e in gate_to_coalesce_edges}
+        assert labels == {"path_a", "path_b"}
+        assert all(e.mode == RoutingMode.COPY for e in gate_to_coalesce_edges)
+
+    def test_partial_branch_coverage_branches_not_in_coalesce_route_to_sink(
+        self,
+    ) -> None:
+        """Fork branches not in any coalesce should still route to output sink."""
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "output": SinkSettings(plugin="csv"),
+            },
+            output_sink="output",
+            gates=[
+                GateSettings(
+                    name="forker",
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b", "path_c"],  # 3 branches
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches=["path_a", "path_b"],  # Only 2 branches in coalesce
+                    policy="require_all",
+                    merge="union",
+                ),
+            ],
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+
+        # Get node IDs
+        gate_id = graph.get_config_gate_id_map()["forker"]
+        coalesce_id = graph.get_coalesce_id_map()["merge_results"]
+        output_sink_id = graph.get_sink_id_map()["output"]
+
+        # Verify path_c goes to output sink, not coalesce
+        edges = graph.get_edges()
+        path_c_edges = [
+            e for e in edges if e.from_node == gate_id and e.label == "path_c"
+        ]
+
+        assert len(path_c_edges) == 1
+        assert path_c_edges[0].to_node == output_sink_id
+
+        # Verify path_a and path_b go to coalesce
+        coalesce_edges = [
+            e for e in edges if e.from_node == gate_id and e.to_node == coalesce_id
+        ]
+        coalesce_labels = {e.label for e in coalesce_edges}
+        assert coalesce_labels == {"path_a", "path_b"}
+
+    def test_get_coalesce_id_map_returns_mapping(self) -> None:
+        """get_coalesce_id_map should return coalesce_name -> node_id."""
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "output": SinkSettings(plugin="csv"),
+            },
+            output_sink="output",
+            gates=[
+                GateSettings(
+                    name="forker",
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b", "path_c", "path_d"],
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_ab",
+                    branches=["path_a", "path_b"],
+                    policy="require_all",
+                    merge="union",
+                ),
+                CoalesceSettings(
+                    name="merge_cd",
+                    branches=["path_c", "path_d"],
+                    policy="require_all",
+                    merge="nested",
+                ),
+            ],
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+        coalesce_map = graph.get_coalesce_id_map()
+
+        # Should have both coalesce nodes
+        assert "merge_ab" in coalesce_map
+        assert "merge_cd" in coalesce_map
+
+        # Node IDs should be unique
+        assert coalesce_map["merge_ab"] != coalesce_map["merge_cd"]
+
+        # Verify both nodes exist in the graph
+        assert graph.has_node(coalesce_map["merge_ab"])
+        assert graph.has_node(coalesce_map["merge_cd"])
+
+    def test_get_branch_to_coalesce_map_returns_mapping(self) -> None:
+        """get_branch_to_coalesce_map should return branch_name -> coalesce_name."""
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "output": SinkSettings(plugin="csv"),
+            },
+            output_sink="output",
+            gates=[
+                GateSettings(
+                    name="forker",
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches=["path_a", "path_b"],
+                    policy="require_all",
+                    merge="union",
+                ),
+            ],
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+        branch_map = graph.get_branch_to_coalesce_map()
+
+        # Should map branches to coalesce name
+        assert branch_map["path_a"] == "merge_results"
+        assert branch_map["path_b"] == "merge_results"
+
+    def test_coalesce_node_has_edge_to_output_sink(self) -> None:
+        """Coalesce node should have an edge to the output sink."""
+        from elspeth.contracts import RoutingMode
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "output": SinkSettings(plugin="csv"),
+            },
+            output_sink="output",
+            gates=[
+                GateSettings(
+                    name="forker",
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches=["path_a", "path_b"],
+                    policy="require_all",
+                    merge="union",
+                ),
+            ],
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+
+        coalesce_id = graph.get_coalesce_id_map()["merge_results"]
+        output_sink_id = graph.get_sink_id_map()["output"]
+
+        # Verify edge from coalesce to output sink
+        edges = graph.get_edges()
+        coalesce_to_sink_edges = [
+            e
+            for e in edges
+            if e.from_node == coalesce_id and e.to_node == output_sink_id
+        ]
+
+        assert len(coalesce_to_sink_edges) == 1
+        assert coalesce_to_sink_edges[0].label == "continue"
+        assert coalesce_to_sink_edges[0].mode == RoutingMode.MOVE
+
+    def test_coalesce_node_stores_config(self) -> None:
+        """Coalesce node should store configuration for audit trail."""
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "output": SinkSettings(plugin="csv"),
+            },
+            output_sink="output",
+            gates=[
+                GateSettings(
+                    name="forker",
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches=["path_a", "path_b"],
+                    policy="quorum",
+                    quorum_count=1,
+                    merge="nested",
+                    timeout_seconds=30.0,
+                ),
+            ],
+        )
+
+        graph = ExecutionGraph.from_config(settings)
+
+        coalesce_id = graph.get_coalesce_id_map()["merge_results"]
+        node_info = graph.get_node_info(coalesce_id)
+
+        # Verify config is stored
+        assert node_info.config["branches"] == ["path_a", "path_b"]
+        assert node_info.config["policy"] == "quorum"
+        assert node_info.config["merge"] == "nested"
+        assert node_info.config["timeout_seconds"] == 30.0
+        assert node_info.config["quorum_count"] == 1

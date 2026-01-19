@@ -51,6 +51,8 @@ class ExecutionGraph:
         self._transform_id_map: dict[int, str] = {}
         self._config_gate_id_map: dict[str, str] = {}  # gate_name -> node_id
         self._aggregation_id_map: dict[str, str] = {}  # agg_name -> node_id
+        self._coalesce_id_map: dict[str, str] = {}  # coalesce_name -> node_id
+        self._branch_to_coalesce: dict[str, str] = {}  # branch_name -> coalesce_name
         self._output_sink: str = ""
         self._route_label_map: dict[
             tuple[str, str], str
@@ -418,12 +420,74 @@ class ExecutionGraph:
         # Store explicit mapping for get_config_gate_id_map()
         graph._config_gate_id_map = config_gate_ids
 
+        # Build coalesce nodes (processed AFTER config gates)
+        # These merge tokens from parallel fork paths back into a single token.
+        coalesce_ids: dict[str, str] = {}
+        branch_to_coalesce: dict[str, str] = {}
+
+        for coalesce_config in config.coalesce:
+            cid = node_id("coalesce", coalesce_config.name)
+            coalesce_ids[coalesce_config.name] = cid
+
+            for branch in coalesce_config.branches:
+                branch_to_coalesce[branch] = coalesce_config.name
+
+            coalesce_node_config = {
+                "branches": list(coalesce_config.branches),
+                "policy": coalesce_config.policy,
+                "merge": coalesce_config.merge,
+                "timeout_seconds": coalesce_config.timeout_seconds,
+                "quorum_count": coalesce_config.quorum_count,
+                "select_branch": coalesce_config.select_branch,
+            }
+
+            graph.add_node(
+                cid,
+                node_type="coalesce",
+                plugin_name=f"coalesce:{coalesce_config.name}",
+                config=coalesce_node_config,
+            )
+
+        graph._coalesce_id_map = coalesce_ids
+        graph._branch_to_coalesce = branch_to_coalesce
+
         # Store output_sink for reference
         graph._output_sink = config.output_sink
+        output_sink_node = sink_ids[config.output_sink]
+
+        # Create edges from fork gates to coalesce nodes (for branches in coalesce)
+        # This overwrites the fallback edges created during gate processing
+        for gate_config in config.gates:
+            if gate_config.fork_to:
+                gate_id = config_gate_ids[gate_config.name]
+                for branch in gate_config.fork_to:
+                    if branch in branch_to_coalesce:
+                        coalesce_name = branch_to_coalesce[branch]
+                        coalesce_id = coalesce_ids[coalesce_name]
+                        # Remove any existing edge with this label (fallback to output_sink)
+                        if graph._graph.has_edge(gate_id, output_sink_node, key=branch):
+                            graph._graph.remove_edge(
+                                gate_id, output_sink_node, key=branch
+                            )
+                        # Add edge to coalesce node
+                        graph.add_edge(
+                            gate_id,
+                            coalesce_id,
+                            label=branch,
+                            mode=RoutingMode.COPY,
+                        )
+
+        # Create edges from coalesce nodes to output sink
+        for _coalesce_name, cid in coalesce_ids.items():
+            graph.add_edge(
+                cid,
+                output_sink_node,
+                label="continue",
+                mode=RoutingMode.MOVE,
+            )
 
         # Edge from last node (transform or config gate or source) to output sink
         # Only add if no edge already exists to this sink (gate routes may have created one)
-        output_sink_node = sink_ids[config.output_sink]
         if not graph._graph.has_edge(prev_node_id, output_sink_node, key="continue"):
             graph.add_edge(
                 prev_node_id,
@@ -466,6 +530,23 @@ class ExecutionGraph:
             Dict mapping aggregation name to its graph node ID.
         """
         return dict(self._aggregation_id_map)
+
+    def get_coalesce_id_map(self) -> dict[str, str]:
+        """Get explicit coalesce_name -> node_id mapping.
+
+        Returns:
+            Dict mapping coalesce name to its graph node ID.
+        """
+        return dict(self._coalesce_id_map)
+
+    def get_branch_to_coalesce_map(self) -> dict[str, str]:
+        """Get branch_name -> coalesce_name mapping.
+
+        Returns:
+            Dict mapping fork branch names to their coalesce destination.
+            Branches not in this map route to the output sink.
+        """
+        return dict(self._branch_to_coalesce)
 
     def get_output_sink(self) -> str:
         """Get the output sink name."""

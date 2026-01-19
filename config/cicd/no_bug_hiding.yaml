@@ -500,3 +500,16 @@ allow_hits:
     reason: "Forward-compatibility: step map may not be fully populated during integration"
     safety: "None is valid - means coalesce step not yet computed, child skips coalesce"
     expires: null  # Permanent - intentional design
+
+  # ============================================================
+  # CONFIG SECRET FINGERPRINTING (Permanent)
+  # ============================================================
+  # Optional environment variable for development mode override.
+  # ELSPETH_ALLOW_RAW_SECRETS is not required - absence means "production mode".
+  # ============================================================
+
+  - key: "core/config.py:R1:_fingerprint_config_options:line=931"
+    owner: "architecture"
+    reason: "Optional env var: ELSPETH_ALLOW_RAW_SECRETS is not required in production"
+    safety: "Missing env var = empty string = False = production mode (fail-closed)"
+    expires: null  # Permanent - intentional design

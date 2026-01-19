@@ -22,6 +22,18 @@ _IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 _RESERVED_EDGE_LABELS = frozenset({"continue"})
 
 
+class SecretFingerprintError(Exception):
+    """Raised when secrets are found but cannot be fingerprinted.
+
+    This occurs when:
+    - Secret-like field names are found in config
+    - ELSPETH_FINGERPRINT_KEY is not set
+    - ELSPETH_ALLOW_RAW_SECRETS is not set to 'true'
+    """
+
+    pass
+
+
 class TriggerConfig(BaseModel):
     """Trigger configuration for aggregation batches.
 
@@ -750,35 +762,147 @@ def _is_secret_field(field_name: str) -> bool:
     )
 
 
-def _fingerprint_secrets(options: dict[str, Any]) -> dict[str, Any]:
-    """Replace secret fields with their fingerprints.
+def _fingerprint_secrets(
+    options: dict[str, Any],
+    *,
+    fail_if_no_key: bool = True,
+) -> dict[str, Any]:
+    """Recursively replace secret fields with their fingerprints.
 
-    Fields matching secret patterns are replaced with a fingerprint and
-    the original removed. If ELSPETH_FINGERPRINT_KEY is not set, secrets
-    are preserved as-is (for development/testing convenience).
+    Walks nested dicts and lists to find and fingerprint all secret fields,
+    not just top-level ones.
 
     Args:
-        options: Plugin options dict
+        options: Plugin options dict (may contain nested structures)
+        fail_if_no_key: If True, raise if ELSPETH_FINGERPRINT_KEY not set
+                        and secrets are found. If False, redact secrets
+                        without fingerprinting (for dev mode).
 
     Returns:
-        New dict with secrets replaced by fingerprints
+        New dict with secrets replaced by fingerprints (or redacted)
+
+    Raises:
+        SecretFingerprintError: If secrets found but no fingerprint key available
+                                and fail_if_no_key is True
     """
-    from elspeth.core.security import secret_fingerprint
+    from elspeth.core.security import get_fingerprint_key, secret_fingerprint
 
-    result = dict(options)
+    # Check if we have a fingerprint key available
+    try:
+        get_fingerprint_key()
+        have_key = True
+    except ValueError:
+        have_key = False
 
-    for key, value in list(result.items()):
-        if _is_secret_field(key) and isinstance(value, str):
-            try:
+    def _process_value(key: str, value: Any) -> tuple[str, Any, bool]:
+        """Process a single value, returning (new_key, new_value, was_secret)."""
+        if isinstance(value, dict):
+            return key, _recurse(value), False
+        elif isinstance(value, list):
+            return key, [_process_value("", item)[1] for item in value], False
+        elif isinstance(value, str) and _is_secret_field(key):
+            # This is a secret field
+            if have_key:
                 fp = secret_fingerprint(value)
-                result[f"{key}_fingerprint"] = fp
-                del result[key]
-            except ValueError:
-                # No fingerprint key available (ELSPETH_FINGERPRINT_KEY not set)
-                # Keep original value - this allows development without the key
-                pass
+                return f"{key}_fingerprint", fp, True
+            elif fail_if_no_key:
+                raise SecretFingerprintError(
+                    f"Secret field '{key}' found but ELSPETH_FINGERPRINT_KEY "
+                    "is not set. Either set the environment variable or use "
+                    "ELSPETH_ALLOW_RAW_SECRETS=true for development "
+                    "(not recommended for production)."
+                )
+            else:
+                # Dev mode: redact without fingerprint
+                return f"{key}_redacted", "[REDACTED]", True
+        else:
+            return key, value, False
 
-    return result
+    def _recurse(d: dict[str, Any]) -> dict[str, Any]:
+        result = {}
+        for key, value in d.items():
+            new_key, new_value, was_secret = _process_value(key, value)
+            result[new_key] = new_value
+        return result
+
+    return _recurse(options)
+
+
+def _sanitize_dsn(
+    url: str,
+    *,
+    fail_if_no_key: bool = True,
+) -> tuple[str, str | None, bool]:
+    """Sanitize a database connection URL by removing/fingerprinting the password.
+
+    Args:
+        url: Database connection URL (SQLAlchemy format)
+        fail_if_no_key: If True, raise if password found but no fingerprint key.
+                        If False (dev mode), just remove password without fingerprint.
+
+    Returns:
+        Tuple of (sanitized_url, password_fingerprint or None, had_password)
+        The third element indicates whether the original URL had a password.
+
+    Raises:
+        SecretFingerprintError: If password found, no key available,
+                                and fail_if_no_key=True
+
+    Example:
+        >>> _sanitize_dsn("postgresql://user:secret@host/db")
+        ("postgresql://user@host/db", "abc123...", True)
+    """
+    from sqlalchemy.engine import URL
+    from sqlalchemy.engine.url import make_url
+    from sqlalchemy.exc import ArgumentError
+
+    try:
+        parsed = make_url(url)
+    except ArgumentError:
+        # Not a valid SQLAlchemy URL - return as-is (might be a path or other format)
+        return url, None, False
+
+    if parsed.password is None:
+        # No password in URL
+        return url, None, False
+
+    # Check if we have a fingerprint key
+    from elspeth.core.security import get_fingerprint_key
+
+    try:
+        get_fingerprint_key()
+        have_key = True
+    except ValueError:
+        have_key = False
+
+    # Compute fingerprint if we have a key
+    password_fingerprint = None
+    if have_key:
+        from elspeth.core.security import secret_fingerprint
+
+        password_fingerprint = secret_fingerprint(parsed.password)
+    elif fail_if_no_key:
+        raise SecretFingerprintError(
+            "Database URL contains a password but ELSPETH_FINGERPRINT_KEY "
+            "is not set. Either set the environment variable or use "
+            "ELSPETH_ALLOW_RAW_SECRETS=true for development "
+            "(not recommended for production)."
+        )
+    # else: dev mode - just remove password without fingerprint
+
+    # Reconstruct URL without password using URL.create()
+    # NOTE: Do NOT use parsed.set(password=None) - it replaces with '***' not removal
+    sanitized = URL.create(
+        drivername=parsed.drivername,
+        username=parsed.username,
+        password=None,
+        host=parsed.host,
+        port=parsed.port,
+        database=parsed.database,
+        query=parsed.query,
+    )
+
+    return str(sanitized), password_fingerprint, True
 
 
 def _fingerprint_config_options(raw_config: dict[str, Any]) -> dict[str, Any]:
@@ -789,56 +913,92 @@ def _fingerprint_config_options(raw_config: dict[str, Any]) -> dict[str, Any]:
     - sinks.*.options
     - row_plugins[*].options
     - aggregations[*].options
+    - landscape.url (DSN password)
 
     Args:
         raw_config: Raw config dict from Dynaconf
 
     Returns:
         Config with secrets fingerprinted
+
+    Raises:
+        SecretFingerprintError: If secrets found but no fingerprint key
+                                and ELSPETH_ALLOW_RAW_SECRETS is not set
     """
+    import os
+
+    # Check dev mode override
+    allow_raw = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS", "").lower() == "true"
+    fail_if_no_key = not allow_raw
+
     config = dict(raw_config)
 
-    # Datasource options
+    # === Landscape URL (DSN password) ===
+    if "landscape" in config and isinstance(config["landscape"], dict):
+        landscape = dict(config["landscape"])
+        if "url" in landscape and isinstance(landscape["url"], str):
+            # _sanitize_dsn returns (sanitized_url, fingerprint, had_password)
+            sanitized_url, password_fp, had_password = _sanitize_dsn(
+                landscape["url"],
+                fail_if_no_key=fail_if_no_key,
+            )
+            landscape["url"] = sanitized_url
+            if password_fp:
+                landscape["url_password_fingerprint"] = password_fp
+            elif had_password and not fail_if_no_key:
+                # Dev mode: password was removed but not fingerprinted
+                landscape["url_password_redacted"] = True
+        config["landscape"] = landscape
+
+    # === Datasource options ===
     if "datasource" in config and isinstance(config["datasource"], dict):
         ds = dict(config["datasource"])
         if "options" in ds and isinstance(ds["options"], dict):
-            ds["options"] = _fingerprint_secrets(ds["options"])
+            ds["options"] = _fingerprint_secrets(
+                ds["options"], fail_if_no_key=fail_if_no_key
+            )
         config["datasource"] = ds
 
-    # Sink options
+    # === Sink options ===
     if "sinks" in config and isinstance(config["sinks"], dict):
         sinks = {}
         for name, sink_config in config["sinks"].items():
             if isinstance(sink_config, dict):
                 sink = dict(sink_config)
                 if "options" in sink and isinstance(sink["options"], dict):
-                    sink["options"] = _fingerprint_secrets(sink["options"])
+                    sink["options"] = _fingerprint_secrets(
+                        sink["options"], fail_if_no_key=fail_if_no_key
+                    )
                 sinks[name] = sink
             else:
                 sinks[name] = sink_config
         config["sinks"] = sinks
 
-    # Row plugin options
+    # === Row plugin options ===
     if "row_plugins" in config and isinstance(config["row_plugins"], list):
         plugins = []
         for plugin_config in config["row_plugins"]:
             if isinstance(plugin_config, dict):
                 plugin = dict(plugin_config)
                 if "options" in plugin and isinstance(plugin["options"], dict):
-                    plugin["options"] = _fingerprint_secrets(plugin["options"])
+                    plugin["options"] = _fingerprint_secrets(
+                        plugin["options"], fail_if_no_key=fail_if_no_key
+                    )
                 plugins.append(plugin)
             else:
                 plugins.append(plugin_config)
         config["row_plugins"] = plugins
 
-    # Aggregation options
+    # === Aggregation options ===
     if "aggregations" in config and isinstance(config["aggregations"], list):
         aggs = []
         for agg_config in config["aggregations"]:
             if isinstance(agg_config, dict):
                 agg = dict(agg_config)
                 if "options" in agg and isinstance(agg["options"], dict):
-                    agg["options"] = _fingerprint_secrets(agg["options"])
+                    agg["options"] = _fingerprint_secrets(
+                        agg["options"], fail_if_no_key=fail_if_no_key
+                    )
                 aggs.append(agg)
             else:
                 aggs.append(agg_config)

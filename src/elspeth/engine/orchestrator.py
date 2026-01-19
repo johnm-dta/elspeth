@@ -33,6 +33,7 @@ RowPlugin = BaseTransform | BaseGate | BaseAggregation
 
 if TYPE_CHECKING:
     from elspeth.core.checkpoint import CheckpointManager
+    from elspeth.core.checkpoint.recovery import ResumePoint
     from elspeth.core.config import CheckpointSettings, ElspethSettings
 
 
@@ -813,3 +814,114 @@ class Orchestrator:
                 writer.writeheader()
                 for rec in flat_records:
                     writer.writerow(rec)
+
+    def resume(
+        self,
+        resume_point: "ResumePoint",
+        config: PipelineConfig,
+        graph: ExecutionGraph,
+    ) -> RunResult:
+        """Resume a failed run from a checkpoint.
+
+        STATELESS: Like run(), creates fresh recorder and processor internally.
+        This mirrors the reality that recovery happens in a new process.
+
+        Args:
+            resume_point: ResumePoint from RecoveryManager.get_resume_point()
+            config: Same PipelineConfig used for original run()
+            graph: Same ExecutionGraph used for original run()
+
+        Returns:
+            RunResult with recovery outcome
+
+        Note:
+            This is a partial implementation that handles batch recovery
+            (marking crashed batches as failed and creating retry batches).
+            Processing of unprocessed rows is not yet implemented - the
+            returned RunResult has zero counts. Future work will add actual
+            row processing with restored aggregation state.
+        """
+        run_id = resume_point.checkpoint.run_id
+
+        # Create fresh recorder (stateless, like run())
+        recorder = LandscapeRecorder(self._db)
+
+        # 1. Handle incomplete batches
+        self._handle_incomplete_batches(recorder, run_id)
+
+        # 2. Update run status to running
+        self._update_run_status(recorder, run_id, RunStatus.RUNNING)
+
+        # 3. Build restored aggregation state map
+        restored_state: dict[str, dict[str, Any]] = {}
+        if resume_point.aggregation_state is not None:
+            restored_state[resume_point.node_id] = resume_point.aggregation_state
+
+        # TODO: Continue processing unprocessed rows
+        # Future work will:
+        # 1. Query RecoveryManager.get_unprocessed_rows(run_id)
+        # 2. Feed unprocessed rows through RowProcessor with restored state
+        # 3. Update RunResult with actual processing counts
+
+        # For now, return partial result indicating recovery happened
+        return RunResult(
+            run_id=run_id,
+            status=RunStatus.RUNNING,  # Will be updated by actual processing
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed=0,
+        )
+
+    def _handle_incomplete_batches(
+        self,
+        recorder: LandscapeRecorder,
+        run_id: str,
+    ) -> None:
+        """Find and handle incomplete batches for recovery.
+
+        - EXECUTING batches: Mark as failed (crash interrupted), then retry
+        - FAILED batches: Retry with incremented attempt
+        - DRAFT batches: Leave as-is (collection continues)
+
+        Args:
+            recorder: LandscapeRecorder for database operations
+            run_id: Run being recovered
+        """
+        from elspeth.contracts.enums import BatchStatus
+
+        incomplete = recorder.get_incomplete_batches(run_id)
+
+        for batch in incomplete:
+            if batch.status == BatchStatus.EXECUTING:
+                # Crash interrupted mid-execution, mark failed then retry
+                recorder.update_batch_status(batch.batch_id, "failed")
+                recorder.retry_batch(batch.batch_id)
+            elif batch.status == BatchStatus.FAILED:
+                # Previous failure, retry
+                recorder.retry_batch(batch.batch_id)
+            # DRAFT batches continue normally (collection resumes)
+
+    def _update_run_status(
+        self,
+        recorder: LandscapeRecorder,
+        run_id: str,
+        status: RunStatus,
+    ) -> None:
+        """Update run status without completing the run.
+
+        Used during recovery to set status back to RUNNING.
+
+        Args:
+            recorder: LandscapeRecorder for database operations
+            run_id: Run to update
+            status: New status
+        """
+        from elspeth.core.landscape.schema import runs_table
+
+        with self._db.connection() as conn:
+            conn.execute(
+                runs_table.update()
+                .where(runs_table.c.run_id == run_id)
+                .values(status=status.value)
+            )

@@ -199,7 +199,7 @@ allow_hits:
   # whole cleanup process.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=180"
+  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=181"
     owner: "architecture"
     reason: "Best-effort cleanup: one plugin failure shouldn't prevent others from cleanup"
     safety: "Logged with warning, other plugins still get close() called"
@@ -212,19 +212,19 @@ allow_hits:
   # messages. These lookups are for UI/diagnostic purposes only.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=217"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=218"
     owner: "architecture"
     reason: "Building lookup for gate names - only gates (not transforms) are in map"
     safety: "None means 'not a gate at this sequence' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=224"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=225"
     owner: "architecture"
     reason: "Building lookup for config gate names"
     safety: "None means 'not a config gate at this name' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=240"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=241"
     owner: "architecture"
     reason: "Fallback for error message - use node_id if gate name not found"
     safety: "Error message still produced with node_id as fallback"
@@ -237,7 +237,7 @@ allow_hits:
   # others use dynamic. The default value is well-defined.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_execute_run:line=460"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_execute_run:line=461"
     owner: "architecture"
     reason: "Optional schema config with explicit default - not all nodes define schemas"
     safety: "Default value is well-defined: dynamic fields"
@@ -251,7 +251,7 @@ allow_hits:
   # variables. This is explicitly checked and raises if missing when required.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=714"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_export_landscape:line=715"
     owner: "architecture"
     reason: "Standard pattern: optional environment variable with explicit check"
     safety: "Raises ValueError with clear message if signing enabled but key missing"

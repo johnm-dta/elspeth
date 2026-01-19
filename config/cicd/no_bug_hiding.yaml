@@ -570,3 +570,22 @@ allow_hits:
     reason: "SDK version compatibility: older OpenAI SDK versions lack model_dump()"
     safety: "None is safe for raw_response - only used for debugging, not audit"
     expires: null  # Permanent - intentional design
+
+  # ============================================================
+  # OPENROUTER LLM TRANSFORM TRUST BOUNDARY (Permanent)
+  # ============================================================
+  # OpenRouterLLMTransform wraps the OpenRouter HTTP API.
+  # Response fields 'usage' and 'model' are optional per OpenRouter API docs.
+  # ============================================================
+
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=158"
+    owner: "architecture"
+    reason: "Trust boundary: OpenRouter API 'usage' field is optional in response"
+    safety: "Graceful default to {} - usage is metadata, not critical for processing"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=165"
+    owner: "architecture"
+    reason: "Trust boundary: OpenRouter API may return different model than requested"
+    safety: "Graceful fallback to requested model - audit still captures actual value"
+    expires: null  # Permanent - intentional design

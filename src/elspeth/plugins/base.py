@@ -53,6 +53,14 @@ class BaseTransform(ABC):
     # When True, engine may pass list[dict] instead of single dict to process()
     is_batch_aware: bool = False
 
+    # Token creation flag for deaggregation transforms
+    # When True AND process() returns success_multi(), the processor creates
+    # new token_ids for each output row with parent linkage to input token.
+    # When False AND success_multi() is returned, the processor expects
+    # passthrough mode (same number of outputs as inputs, preserve token_ids).
+    # Default: False (most transforms don't create new tokens)
+    creates_tokens: bool = False
+
     # Error routing configuration (WP-11.99b)
     # Transforms extending TransformDataConfig override this from config.
     # None means: transform doesn't return errors, OR errors are bugs.

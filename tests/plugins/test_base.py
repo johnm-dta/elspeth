@@ -9,6 +9,45 @@ import pytest
 class TestBaseTransform:
     """Base class for transforms."""
 
+    def test_base_transform_creates_tokens_default_false(self) -> None:
+        """BaseTransform.creates_tokens defaults to False."""
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class SimpleTransform(BaseTransform):
+            name = "simple"
+            input_schema = None  # Not needed for this test
+            output_schema = None
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success(row)
+
+        transform = SimpleTransform({})
+        assert transform.creates_tokens is False
+
+    def test_base_transform_creates_tokens_settable(self) -> None:
+        """BaseTransform.creates_tokens can be overridden to True."""
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class ExpandingTransform(BaseTransform):
+            name = "expander"
+            creates_tokens = True  # Deaggregation transform
+            input_schema = None
+            output_schema = None
+
+            def process(
+                self, row: dict[str, Any], ctx: PluginContext
+            ) -> TransformResult:
+                return TransformResult.success_multi([row, row])
+
+        transform = ExpandingTransform({})
+        assert transform.creates_tokens is True
+
     def test_base_transform_abstract(self) -> None:
         from elspeth.plugins.base import BaseTransform
 

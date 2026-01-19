@@ -142,6 +142,12 @@ class TransformProtocol(Protocol):
     # When True, engine may pass list[dict] instead of single dict to process()
     is_batch_aware: bool
 
+    # Token creation flag for deaggregation
+    # When True, process() may return TransformResult.success_multi(rows)
+    # and new tokens will be created for each output row.
+    # When False, success_multi() is only valid in passthrough aggregation mode.
+    creates_tokens: bool
+
     # Error routing configuration (WP-11.99b)
     # Transforms extending TransformDataConfig set this from config.
     # None means: transform doesn't return errors, OR errors are bugs.

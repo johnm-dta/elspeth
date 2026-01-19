@@ -2590,3 +2590,129 @@ class TestTransformErrorRecording:
             row = result.fetchone()
 
         assert row.destination == "discard"
+
+
+class TestBatchRecoveryQueries:
+    """Tests for batch recovery query methods."""
+
+    def test_get_incomplete_batches_returns_draft_and_executing(self) -> None:
+        """get_incomplete_batches() finds batches needing recovery."""
+        from elspeth.contracts import Determinism, NodeType
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        # Register a node so batches can reference it
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="agg_node",
+            plugin_name="test_agg",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Create batches in various states
+        draft_batch = recorder.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id="agg_node",
+        )
+        executing_batch = recorder.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id="agg_node",
+        )
+        recorder.update_batch_status(executing_batch.batch_id, "executing")
+
+        completed_batch = recorder.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id="agg_node",
+        )
+        recorder.update_batch_status(completed_batch.batch_id, "executing")
+        recorder.update_batch_status(
+            completed_batch.batch_id, "completed", trigger_reason="count"
+        )
+
+        # Act
+        incomplete = recorder.get_incomplete_batches(run.run_id)
+
+        # Assert: Only draft and executing returned
+        batch_ids = {b.batch_id for b in incomplete}
+        assert draft_batch.batch_id in batch_ids
+        assert executing_batch.batch_id in batch_ids
+        assert completed_batch.batch_id not in batch_ids
+
+    def test_get_incomplete_batches_includes_failed_for_retry(self) -> None:
+        """Failed batches are returned for potential retry."""
+        from elspeth.contracts import Determinism, NodeType
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="agg_node",
+            plugin_name="test_agg",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        failed_batch = recorder.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id="agg_node",
+        )
+        recorder.update_batch_status(failed_batch.batch_id, "executing")
+        recorder.update_batch_status(failed_batch.batch_id, "failed")
+
+        incomplete = recorder.get_incomplete_batches(run.run_id)
+
+        batch_ids = {b.batch_id for b in incomplete}
+        assert failed_batch.batch_id in batch_ids
+
+    def test_get_incomplete_batches_ordered_by_created_at(self) -> None:
+        """Batches returned in creation order for deterministic recovery."""
+        from elspeth.contracts import Determinism, NodeType
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="agg_node",
+            plugin_name="test_agg",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        batch1 = recorder.create_batch(
+            run_id=run.run_id, aggregation_node_id="agg_node"
+        )
+        batch2 = recorder.create_batch(
+            run_id=run.run_id, aggregation_node_id="agg_node"
+        )
+        batch3 = recorder.create_batch(
+            run_id=run.run_id, aggregation_node_id="agg_node"
+        )
+
+        incomplete = recorder.get_incomplete_batches(run.run_id)
+
+        assert len(incomplete) == 3
+        assert incomplete[0].batch_id == batch1.batch_id
+        assert incomplete[1].batch_id == batch2.batch_id
+        assert incomplete[2].batch_id == batch3.batch_id

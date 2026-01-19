@@ -1403,6 +1403,44 @@ class LandscapeRecorder:
             for row in rows
         ]
 
+    def get_incomplete_batches(self, run_id: str) -> list[Batch]:
+        """Get batches that need recovery (draft, executing, or failed).
+
+        Used during crash recovery to find batches that were:
+        - draft: Still collecting rows when crash occurred
+        - executing: Mid-flush when crash occurred
+        - failed: Flush failed and needs retry
+
+        Args:
+            run_id: The run to query
+
+        Returns:
+            List of Batch objects with status in (draft, executing, failed),
+            ordered by created_at ascending (oldest first for deterministic recovery)
+        """
+        with self._db.connection() as conn:
+            result = conn.execute(
+                select(batches_table)
+                .where(batches_table.c.run_id == run_id)
+                .where(batches_table.c.status.in_(["draft", "executing", "failed"]))
+                .order_by(batches_table.c.created_at.asc())
+            ).fetchall()
+
+        return [
+            Batch(
+                batch_id=row.batch_id,
+                run_id=row.run_id,
+                aggregation_node_id=row.aggregation_node_id,
+                attempt=row.attempt,
+                status=BatchStatus(row.status),
+                created_at=row.created_at,
+                aggregation_state_id=row.aggregation_state_id,
+                trigger_reason=row.trigger_reason,
+                completed_at=row.completed_at,
+            )
+            for row in result
+        ]
+
     def get_batch_members(self, batch_id: str) -> list[BatchMember]:
         """Get all members of a batch.
 

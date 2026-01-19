@@ -92,6 +92,7 @@ class RowProcessor:
         retry_manager: RetryManager | None = None,
         coalesce_executor: "CoalesceExecutor | None" = None,
         coalesce_node_ids: dict[str, str] | None = None,
+        branch_to_coalesce: dict[str, str] | None = None,
         restored_aggregation_state: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """Initialize processor.
@@ -109,6 +110,7 @@ class RowProcessor:
             retry_manager: Optional retry manager for transform execution
             coalesce_executor: Optional coalesce executor for fork/join operations
             coalesce_node_ids: Map of coalesce_name -> node_id for coalesce points
+            branch_to_coalesce: Map of branch_name -> coalesce_name for fork/join routing
             restored_aggregation_state: Map of node_id -> state dict for crash recovery
         """
         self._recorder = recorder
@@ -120,6 +122,7 @@ class RowProcessor:
         self._retry_manager = retry_manager
         self._coalesce_executor = coalesce_executor
         self._coalesce_node_ids = coalesce_node_ids or {}
+        self._branch_to_coalesce = branch_to_coalesce or {}
         self._aggregation_settings = aggregation_settings or {}
 
         self._token_manager = TokenManager(recorder)

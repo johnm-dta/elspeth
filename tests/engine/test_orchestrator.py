@@ -3903,3 +3903,89 @@ class TestOrchestratorRetry:
         assert result.rows_failed == 1
         assert result.rows_succeeded == 0
         assert len(sink.results) == 0
+
+
+class TestCoalesceWiring:
+    """Test that coalesce is wired into orchestrator."""
+
+    def test_orchestrator_creates_coalesce_executor_when_config_present(
+        self,
+    ) -> None:
+        """When settings.coalesce is non-empty, CoalesceExecutor should be created."""
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.core.config import (
+            CoalesceSettings,
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        settings = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv", options={"path": "test.csv"}),
+            sinks={"output": SinkSettings(plugin="csv", options={"path": "out.csv"})},
+            output_sink="output",
+            gates=[
+                GateSettings(
+                    name="forker",
+                    condition="True",
+                    routes={"true": "fork", "false": "continue"},
+                    fork_to=["path_a", "path_b"],
+                ),
+            ],
+            coalesce=[
+                CoalesceSettings(
+                    name="merge_results",
+                    branches=["path_a", "path_b"],
+                    policy="require_all",
+                    merge="union",
+                ),
+            ],
+        )
+
+        # Mock source/sink to avoid file access
+        mock_source = MagicMock()
+        mock_source.name = "csv"
+        mock_source.load.return_value = iter([])
+        mock_source.plugin_version = "1.0.0"
+        mock_source.determinism = "deterministic"
+        mock_source.output_schema = _TestSchema
+
+        mock_sink = MagicMock()
+        mock_sink.name = "csv"
+        mock_sink.plugin_version = "1.0.0"
+        mock_sink.determinism = "deterministic"
+        mock_sink.input_schema = _TestSchema
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[],
+            sinks={"output": mock_sink},
+            gates=settings.gates,
+        )
+
+        db = LandscapeDB.in_memory()
+        orchestrator = Orchestrator(db=db)
+
+        # Build the graph from settings (which includes coalesce)
+        graph = ExecutionGraph.from_config(settings)
+
+        # Patch RowProcessor to capture its args
+        with patch("elspeth.engine.orchestrator.RowProcessor") as mock_processor:
+            mock_processor.return_value.process_row.return_value = []
+            mock_processor.return_value.token_manager = MagicMock()
+
+            orchestrator.run(config, graph=graph, settings=settings)
+
+            # RowProcessor should have been called with coalesce_executor
+            call_kwargs = mock_processor.call_args.kwargs
+            assert "coalesce_executor" in call_kwargs
+            assert call_kwargs["coalesce_executor"] is not None
+            assert "coalesce_node_ids" in call_kwargs
+            assert call_kwargs["coalesce_node_ids"] is not None
+            # Verify the coalesce_node_ids contains our registered coalesce
+            assert "merge_results" in call_kwargs["coalesce_node_ids"]

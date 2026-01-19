@@ -438,9 +438,11 @@ class Orchestrator:
             if sink_name in sink_id_map:
                 node_to_plugin[sink_id_map[sink_name]] = sink
 
-        # Config gates and aggregations are identified by their node IDs (no plugin instances)
+        # Config gates, aggregations, and coalesce nodes are identified by their node IDs (no plugin instances)
         config_gate_node_ids = set(config_gate_id_map.values())
         aggregation_node_ids = set(aggregation_id_map.values())
+        coalesce_id_map = graph.get_coalesce_id_map()
+        coalesce_node_ids = set(coalesce_id_map.values())
 
         # Register nodes with Landscape using graph's node IDs and actual plugin metadata
         from elspeth.contracts import Determinism
@@ -449,7 +451,7 @@ class Orchestrator:
         for node_id in execution_order:
             node_info = graph.get_node_info(node_id)
 
-            # Config gates and aggregations have metadata in graph node, not plugin instances
+            # Config gates, aggregations, and coalesce nodes have metadata in graph node, not plugin instances
             if node_id in config_gate_node_ids:
                 # Config gates are deterministic (expression evaluation is deterministic)
                 plugin_version = "1.0.0"
@@ -457,6 +459,10 @@ class Orchestrator:
             elif node_id in aggregation_node_ids:
                 # Aggregations use batch-aware transforms - determinism depends on the transform
                 # Default to deterministic (statistical operations are typically deterministic)
+                plugin_version = "1.0.0"
+                determinism = Determinism.DETERMINISTIC
+            elif node_id in coalesce_node_ids:
+                # Coalesce nodes merge tokens from parallel paths - deterministic operation
                 plugin_version = "1.0.0"
                 determinism = Determinism.DETERMINISTIC
             else:
@@ -555,6 +561,31 @@ class Orchestrator:
         if settings is not None:
             retry_manager = RetryManager(RetryConfig.from_settings(settings.retry))
 
+        # Create coalesce executor if config has coalesce settings
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        coalesce_executor: CoalesceExecutor | None = None
+        branch_to_coalesce: dict[str, str] = {}
+
+        if settings is not None and settings.coalesce:
+            branch_to_coalesce = graph.get_branch_to_coalesce_map()
+            token_manager = TokenManager(recorder)
+
+            coalesce_executor = CoalesceExecutor(
+                recorder=recorder,
+                span_factory=self._span_factory,
+                token_manager=token_manager,
+                run_id=run_id,
+            )
+
+            # Register each coalesce point
+            # Direct access: graph was built from same settings, so all coalesce names
+            # must exist in map. KeyError here indicates a bug in graph construction.
+            for coalesce_settings in settings.coalesce:
+                coalesce_node_id = coalesce_id_map[coalesce_settings.name]
+                coalesce_executor.register_coalesce(coalesce_settings, coalesce_node_id)
+
         # Create processor with config gates info
         processor = RowProcessor(
             recorder=recorder,
@@ -567,6 +598,9 @@ class Orchestrator:
             config_gate_id_map=config_gate_id_map,
             aggregation_settings=config.aggregation_settings,
             retry_manager=retry_manager,
+            coalesce_executor=coalesce_executor,
+            coalesce_node_ids=coalesce_id_map,
+            branch_to_coalesce=branch_to_coalesce,
         )
 
         # Process rows - Buffer TOKENS, not dicts, to preserve identity

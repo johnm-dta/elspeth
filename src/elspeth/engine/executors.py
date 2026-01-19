@@ -839,6 +839,191 @@ class AggregationExecutor:
 
         return rows, tokens
 
+    def execute_flush(
+        self,
+        node_id: str,
+        transform: TransformProtocol,
+        ctx: PluginContext,
+        step_in_pipeline: int,
+        trigger_type: TriggerType,
+    ) -> tuple[TransformResult, list[TokenInfo]]:
+        """Execute a batch flush with full audit recording.
+
+        This method:
+        1. Transitions batch to "executing" with trigger reason
+        2. Records node_state for the flush operation
+        3. Executes the batch-aware transform
+        4. Transitions batch to "completed" or "failed"
+        5. Resets batch_id for next batch
+
+        Args:
+            node_id: Aggregation node ID
+            transform: Batch-aware transform plugin
+            ctx: Plugin context
+            step_in_pipeline: Current position in DAG
+            trigger_type: What triggered the flush (COUNT, TIMEOUT, END_OF_SOURCE, etc.)
+
+        Returns:
+            Tuple of (TransformResult with audit fields, list of consumed tokens)
+
+        Raises:
+            Exception: Re-raised from transform.process() after recording failure
+        """
+        # Get batch_id - must exist if we're flushing
+        batch_id = self._batch_ids.get(node_id)
+        if batch_id is None:
+            raise RuntimeError(f"No batch exists for node {node_id} - cannot flush")
+
+        # Get buffered data
+        buffered_rows = list(self._buffers.get(node_id, []))
+        buffered_tokens = list(self._buffer_tokens.get(node_id, []))
+
+        if not buffered_rows:
+            raise RuntimeError(f"Cannot flush empty buffer for node {node_id}")
+
+        # Compute input hash for batch (hash of all input rows)
+        input_hash = stable_hash(buffered_rows)
+
+        # Use first token for node_state (represents the batch operation)
+        representative_token = buffered_tokens[0]
+
+        # Step 1: Transition batch to "executing"
+        self._recorder.update_batch_status(
+            batch_id=batch_id,
+            status="executing",
+            trigger_reason=trigger_type.value,
+        )
+
+        # Step 2: Begin node state for flush operation
+        # Wrap batch rows in a dict for node_state recording
+        batch_input: dict[str, Any] = {"batch_rows": buffered_rows}
+        state = self._recorder.begin_node_state(
+            token_id=representative_token.token_id,
+            node_id=node_id,
+            step_index=step_in_pipeline,
+            input_data=batch_input,
+            attempt=0,
+        )
+
+        # Step 3: Execute with timing and span
+        with self._spans.transform_span(transform.name, input_hash=input_hash):
+            start = time.perf_counter()
+            try:
+                result = transform.process(buffered_rows, ctx)  # type: ignore[arg-type]
+                duration_ms = (time.perf_counter() - start) * 1000
+            except Exception as e:
+                duration_ms = (time.perf_counter() - start) * 1000
+
+                # Record failure in node_state
+                error: ExecutionError = {
+                    "exception": str(e),
+                    "type": type(e).__name__,
+                }
+                self._recorder.complete_node_state(
+                    state_id=state.state_id,
+                    status="failed",
+                    duration_ms=duration_ms,
+                    error=error,
+                )
+
+                # Transition batch to failed
+                self._recorder.complete_batch(
+                    batch_id=batch_id,
+                    status="failed",
+                    trigger_reason=trigger_type.value,
+                    state_id=state.state_id,
+                )
+
+                # Reset for next batch
+                self._reset_batch_state(node_id)
+                raise
+
+        # Step 4: Populate audit fields on result
+        result.input_hash = input_hash
+        if result.row is not None:
+            result.output_hash = stable_hash(result.row)
+        elif result.rows is not None:
+            result.output_hash = stable_hash(result.rows)
+        else:
+            result.output_hash = None
+        result.duration_ms = duration_ms
+
+        # Step 5: Complete node state
+        if result.status == "success":
+            output_data: dict[str, Any] | list[dict[str, Any]]
+            if result.row is not None:
+                output_data = result.row
+            else:
+                assert result.rows is not None
+                output_data = result.rows
+
+            self._recorder.complete_node_state(
+                state_id=state.state_id,
+                status="completed",
+                output_data=output_data,
+                duration_ms=duration_ms,
+            )
+
+            # Transition batch to completed
+            self._recorder.complete_batch(
+                batch_id=batch_id,
+                status="completed",
+                trigger_reason=trigger_type.value,
+                state_id=state.state_id,
+            )
+        else:
+            # Transform returned error status
+            error_info: ExecutionError = {
+                "exception": str(result.reason)
+                if result.reason
+                else "Transform returned error",
+                "type": "TransformError",
+            }
+            self._recorder.complete_node_state(
+                state_id=state.state_id,
+                status="failed",
+                duration_ms=duration_ms,
+                error=error_info,
+            )
+
+            # Transition batch to failed
+            self._recorder.complete_batch(
+                batch_id=batch_id,
+                status="failed",
+                trigger_reason=trigger_type.value,
+                state_id=state.state_id,
+            )
+
+        # Step 6: Reset for next batch and clear buffers
+        self._reset_batch_state(node_id)
+        self._buffers[node_id] = []
+        self._buffer_tokens[node_id] = []
+
+        return result, buffered_tokens
+
+    def _reset_batch_state(self, node_id: str) -> None:
+        """Reset batch tracking state for next batch.
+
+        Args:
+            node_id: Aggregation node ID
+        """
+        batch_id = self._batch_ids.get(node_id)
+        if batch_id is not None:
+            del self._batch_ids[node_id]
+            if batch_id in self._member_counts:
+                del self._member_counts[batch_id]
+
+    def get_buffer_count(self, node_id: str) -> int:
+        """Get the number of rows currently buffered for an aggregation.
+
+        Args:
+            node_id: Aggregation node ID
+
+        Returns:
+            Number of buffered rows, or 0 if no buffer exists
+        """
+        return len(self._buffers.get(node_id, []))
+
     def get_checkpoint_state(self) -> dict[str, Any]:
         """Get serializable state for checkpointing.
 

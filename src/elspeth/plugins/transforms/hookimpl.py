@@ -13,9 +13,10 @@ class ElspethBuiltinTransforms:
         """Return built-in transform plugin classes."""
         from elspeth.plugins.transforms.batch_stats import BatchStats
         from elspeth.plugins.transforms.field_mapper import FieldMapper
+        from elspeth.plugins.transforms.json_explode import JSONExplode
         from elspeth.plugins.transforms.passthrough import PassThrough
 
-        return [PassThrough, FieldMapper, BatchStats]
+        return [PassThrough, FieldMapper, BatchStats, JSONExplode]
 
 
 # Singleton instance for registration

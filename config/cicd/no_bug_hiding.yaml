@@ -820,3 +820,9 @@ allow_hits:
     reason: "Trust boundary: scanning arbitrary classes that may or may not have 'name' attribute"
     safety: "Classes without valid name are skipped with warning log - discovery continues"
     expires: null  # Permanent - intentional design
+
+  - key: "plugins/discovery.py:R2:get_plugin_description:line=229"
+    owner: "architecture"
+    reason: "UI display fallback: generating human-readable description for classes without 'name' attr"
+    safety: "Falls back to class __name__ for display - no control flow or audit impact"
+    expires: null  # Permanent - intentional design

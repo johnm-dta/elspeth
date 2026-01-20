@@ -204,3 +204,27 @@ def discover_all_plugins() -> dict[str, list[type]]:
         result[plugin_type] = all_discovered
 
     return result
+
+
+def get_plugin_description(plugin_cls: type) -> str:
+    """Extract description from plugin class docstring.
+
+    Returns the first non-empty line of the docstring, stripped of whitespace.
+    If no docstring exists, returns a default message using the plugin name.
+
+    Args:
+        plugin_cls: Plugin class to extract description from
+
+    Returns:
+        Description string for display
+    """
+    if plugin_cls.__doc__:
+        lines = plugin_cls.__doc__.strip().split("\n")
+        for line in lines:
+            cleaned = line.strip()
+            if cleaned:
+                return cleaned
+
+    # Fallback to name-based description
+    name = getattr(plugin_cls, "name", plugin_cls.__name__)
+    return f"{name} plugin"

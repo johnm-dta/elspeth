@@ -148,3 +148,41 @@ class TestDiscoverAllPlugins:
         assert len(discovered["sinks"]) == old_sink_count, (
             f"Sink count mismatch: discovery={len(discovered['sinks'])}, hookimpl={old_sink_count}"
         )
+
+
+class TestGetPluginDescription:
+    """Test docstring extraction for plugin descriptions."""
+
+    def test_extracts_first_line_of_docstring(self) -> None:
+        """Verify first docstring line is extracted."""
+        from elspeth.plugins.discovery import get_plugin_description
+        from elspeth.plugins.transforms.passthrough import PassThrough
+
+        description = get_plugin_description(PassThrough)
+
+        # PassThrough's class docstring starts with "Pass rows through unchanged."
+        assert description == "Pass rows through unchanged."
+
+    def test_handles_missing_docstring(self) -> None:
+        """Verify fallback for classes without docstrings."""
+        from elspeth.plugins.discovery import get_plugin_description
+
+        class NoDocPlugin:
+            name = "no_doc"
+
+        description = get_plugin_description(NoDocPlugin)
+
+        assert "no_doc" in description.lower()
+
+    def test_strips_whitespace(self) -> None:
+        """Verify whitespace is stripped from description."""
+        from elspeth.plugins.discovery import get_plugin_description
+
+        class WhitespaceDocPlugin:
+            """Lots of whitespace here."""
+
+            name = "whitespace"
+
+        description = get_plugin_description(WhitespaceDocPlugin)
+
+        assert description == "Lots of whitespace here."

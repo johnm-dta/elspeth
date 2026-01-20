@@ -526,13 +526,13 @@ allow_hits:
   # yet (forward-compatibility for incremental integration).
   # ============================================================
 
-  - key: "engine/processor.py:R1:RowProcessor:_process_single_token:line=691"
+  - key: "engine/processor.py:R1:RowProcessor:_process_single_token:line=706"
     owner: "architecture"
     reason: "Forward-compatibility: step map may not be fully populated during integration"
     safety: "None is valid - means coalesce step not yet computed, child skips coalesce"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/processor.py:R1:RowProcessor:_process_single_token:line=911"
+  - key: "engine/processor.py:R1:RowProcessor:_process_single_token:line=926"
     owner: "architecture"
     reason: "Forward-compatibility: step map may not be fully populated during integration"
     safety: "None is valid - means coalesce step not yet computed, child skips coalesce"

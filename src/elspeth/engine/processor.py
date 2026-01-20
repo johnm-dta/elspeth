@@ -231,6 +231,11 @@ class RowProcessor:
                     row_data=final_data,
                     branch_name=current_token.branch_name,
                 )
+                self._recorder.record_token_outcome(
+                    run_id=self._run_id,
+                    token_id=updated_token.token_id,
+                    outcome=RowOutcome.COMPLETED,
+                )
                 return (
                     RowResult(
                         token=updated_token,
@@ -289,6 +294,11 @@ class RowProcessor:
                             token_id=token.token_id,
                             row_data=enriched_data,
                             branch_name=token.branch_name,
+                        )
+                        self._recorder.record_token_outcome(
+                            run_id=self._run_id,
+                            token_id=updated_token.token_id,
+                            outcome=RowOutcome.COMPLETED,
                         )
                         results.append(
                             RowResult(
@@ -354,6 +364,11 @@ class RowProcessor:
                     # No more transforms - return COMPLETED for expanded tokens
                     output_results: list[RowResult] = [triggering_result]
                     for token in expanded_tokens:
+                        self._recorder.record_token_outcome(
+                            run_id=self._run_id,
+                            token_id=token.token_id,
+                            outcome=RowOutcome.COMPLETED,
+                        )
                         output_results.append(
                             RowResult(
                                 token=token,

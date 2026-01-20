@@ -116,37 +116,35 @@ class TestDiscoverAllPlugins:
             names = [cls.name for cls in plugins]
             assert len(names) == len(set(names)), f"Duplicate names in {plugin_type}: {names}"
 
-    def test_discovery_matches_hookimpl_counts(self) -> None:
-        """Verify discovery finds same plugins as static hookimpls.
+    def test_discovery_finds_expected_plugin_counts(self) -> None:
+        """Verify discovery finds the expected number of plugins.
 
-        This is a MIGRATION TEST that compares discovery to the old static hookimpls.
-        It will be CONVERTED to static count assertions in Task 9 after hookimpl
-        files are deleted.
+        These counts were verified against the old static hookimpl files during
+        migration (Task 1-8). Now hookimpl files are deleted, we assert the
+        expected counts directly.
 
-        IMPORTANT: This test imports from hookimpl files. When those files are
-        deleted in Task 9, this test MUST be updated - see Task 9 Step 4.
+        If a new plugin is added, update these counts.
         """
         from elspeth.plugins.discovery import discover_all_plugins
-        from elspeth.plugins.sinks.hookimpl import builtin_sinks
-        from elspeth.plugins.sources.hookimpl import builtin_sources
-        from elspeth.plugins.transforms.hookimpl import builtin_transforms
 
-        # Get counts from old static hookimpls
-        old_source_count = len(builtin_sources.elspeth_get_source())
-        old_transform_count = len(builtin_transforms.elspeth_get_transforms())
-        old_sink_count = len(builtin_sinks.elspeth_get_sinks())
+        # Expected counts verified during migration from hookimpl files
+        EXPECTED_SOURCE_COUNT = 4  # csv, json, null, azure_blob
+        EXPECTED_TRANSFORM_COUNT = 11  # passthrough, field_mapper, batch_stats, etc.
+        EXPECTED_SINK_COUNT = 4  # csv, json, database, azure_blob
 
-        # Get counts from new discovery
         discovered = discover_all_plugins()
 
-        assert len(discovered["sources"]) == old_source_count, (
-            f"Source count mismatch: discovery={len(discovered['sources'])}, hookimpl={old_source_count}"
+        assert len(discovered["sources"]) == EXPECTED_SOURCE_COUNT, (
+            f"Source count: expected {EXPECTED_SOURCE_COUNT}, got {len(discovered['sources'])}. "
+            f"Found: {[cls.name for cls in discovered['sources']]}"
         )
-        assert len(discovered["transforms"]) == old_transform_count, (
-            f"Transform count mismatch: discovery={len(discovered['transforms'])}, hookimpl={old_transform_count}"
+        assert len(discovered["transforms"]) == EXPECTED_TRANSFORM_COUNT, (
+            f"Transform count: expected {EXPECTED_TRANSFORM_COUNT}, got {len(discovered['transforms'])}. "
+            f"Found: {[cls.name for cls in discovered['transforms']]}"
         )
-        assert len(discovered["sinks"]) == old_sink_count, (
-            f"Sink count mismatch: discovery={len(discovered['sinks'])}, hookimpl={old_sink_count}"
+        assert len(discovered["sinks"]) == EXPECTED_SINK_COUNT, (
+            f"Sink count: expected {EXPECTED_SINK_COUNT}, got {len(discovered['sinks'])}. "
+            f"Found: {[cls.name for cls in discovered['sinks']]}"
         )
 
 

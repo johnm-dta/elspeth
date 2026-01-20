@@ -19,6 +19,7 @@ from elspeth.contracts import Determinism
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.config_base import TransformDataConfig
 from elspeth.plugins.context import PluginContext
+from elspeth.plugins.pooling import PoolConfig
 from elspeth.plugins.results import TransformResult
 from elspeth.plugins.schema_factory import create_schema_from_config
 
@@ -49,6 +50,14 @@ class AzureContentSafetyConfig(TransformDataConfig):
         thresholds: Per-category severity thresholds (0-6)
         schema: Schema configuration
 
+    Optional:
+        pool_size: Number of concurrent API calls (1=sequential, >1=pooled)
+        min_dispatch_delay_ms: Minimum AIMD dispatch delay (default 0)
+        max_dispatch_delay_ms: Maximum AIMD backoff delay (default 5000)
+        backoff_multiplier: Backoff multiplier on capacity error (default 2.0)
+        recovery_step_ms: Recovery step in milliseconds (default 50)
+        max_capacity_retry_seconds: Timeout for capacity error retries (default 3600)
+
     Example YAML:
         transforms:
           - plugin: azure_content_safety
@@ -76,6 +85,31 @@ class AzureContentSafetyConfig(TransformDataConfig):
         ...,
         description="Per-category severity thresholds (0-6)",
     )
+
+    # Pool configuration fields
+    pool_size: int = Field(1, ge=1, description="Number of concurrent API calls (1=sequential)")
+    min_dispatch_delay_ms: int = Field(0, ge=0, description="Minimum dispatch delay in milliseconds")
+    max_dispatch_delay_ms: int = Field(5000, ge=0, description="Maximum dispatch delay in milliseconds")
+    backoff_multiplier: float = Field(2.0, gt=1.0, description="Backoff multiplier on capacity error")
+    recovery_step_ms: int = Field(50, ge=0, description="Recovery step in milliseconds")
+    max_capacity_retry_seconds: int = Field(3600, gt=0, description="Max seconds to retry capacity errors")
+
+    @property
+    def pool_config(self) -> PoolConfig | None:
+        """Get pool configuration if pooling is enabled.
+
+        Returns None if pool_size <= 1 (sequential mode).
+        """
+        if self.pool_size <= 1:
+            return None
+        return PoolConfig(
+            pool_size=self.pool_size,
+            min_dispatch_delay_ms=self.min_dispatch_delay_ms,
+            max_dispatch_delay_ms=self.max_dispatch_delay_ms,
+            backoff_multiplier=self.backoff_multiplier,
+            recovery_step_ms=self.recovery_step_ms,
+            max_capacity_retry_seconds=self.max_capacity_retry_seconds,
+        )
 
 
 class AzureContentSafety(BaseTransform):

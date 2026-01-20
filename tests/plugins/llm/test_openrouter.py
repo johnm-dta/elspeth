@@ -3,6 +3,7 @@
 
 from collections.abc import Generator
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import Mock, patch
 
 import httpx
@@ -916,3 +917,27 @@ Text: {{ row.text }}""",
         assert result.reason is not None
         assert result.reason["reason"] == "template_rendering_failed"
         assert result.reason["template_source"] == "prompts/requires_field.j2"
+
+
+class TestOpenRouterBatchProcessing:
+    """Tests for batch-aware aggregation processing."""
+
+    @pytest.fixture
+    def batch_config(self) -> dict[str, Any]:
+        """Config with pooling enabled for batch processing."""
+        return {
+            "model": "anthropic/claude-3-haiku",
+            "template": "Analyze: {{ row.text }}",
+            "api_key": "test-key",
+            "pool_size": 3,
+            "schema": {"fields": "dynamic"},
+        }
+
+    @pytest.fixture
+    def batch_transform(self, batch_config: dict[str, Any]) -> OpenRouterLLMTransform:
+        """Create transform with batch config."""
+        return OpenRouterLLMTransform(batch_config)
+
+    def test_is_batch_aware_is_true(self, batch_transform: OpenRouterLLMTransform) -> None:
+        """Transform should declare batch awareness for aggregation."""
+        assert batch_transform.is_batch_aware is True

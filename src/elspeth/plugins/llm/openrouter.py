@@ -59,6 +59,7 @@ class OpenRouterLLMTransform(BaseTransform):
     """
 
     name = "openrouter_llm"
+    is_batch_aware = True  # Enable aggregation buffering
 
     # LLM transforms are non-deterministic by nature
     determinism: Determinism = Determinism.NON_DETERMINISTIC

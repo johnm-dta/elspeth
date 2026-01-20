@@ -26,6 +26,7 @@ from elspeth.engine.schema_validator import validate_pipeline_schemas
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.base import BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
+from elspeth.plugins.llm.batch_errors import BatchPendingError
 from elspeth.plugins.protocols import SinkProtocol, SourceProtocol
 
 # Type alias for row-processing plugins in the transforms pipeline
@@ -335,18 +336,14 @@ class Orchestrator:
                 continue
             if seq not in transform_id_map:
                 raise ValueError(
-                    f"Transform at sequence {seq} not found in graph. "
-                    f"Graph has mappings for sequences: {list(transform_id_map.keys())}"
+                    f"Transform at sequence {seq} not found in graph. Graph has mappings for sequences: {list(transform_id_map.keys())}"
                 )
             transform.node_id = transform_id_map[seq]
 
         # Set node_id on sinks
         for sink_name, sink in sinks.items():
             if sink_name not in sink_id_map:
-                raise ValueError(
-                    f"Sink '{sink_name}' not found in graph. "
-                    f"Available sinks: {list(sink_id_map.keys())}"
-                )
+                raise ValueError(f"Sink '{sink_name}' not found in graph. Available sinks: {list(sink_id_map.keys())}")
             sink.node_id = sink_id_map[sink_name]
 
     def run(
@@ -354,6 +351,7 @@ class Orchestrator:
         config: PipelineConfig,
         graph: ExecutionGraph | None = None,
         settings: "ElspethSettings | None" = None,
+        batch_checkpoints: dict[str, dict[str, Any]] | None = None,
     ) -> RunResult:
         """Execute a pipeline run.
 
@@ -361,15 +359,16 @@ class Orchestrator:
             config: Pipeline configuration with plugins
             graph: Pre-validated execution graph (required)
             settings: Full settings (for post-run hooks like export)
+            batch_checkpoints: Batch transform checkpoints to restore (from
+                previous BatchPendingError). Maps node_id -> checkpoint_data.
+                Used when retrying a run after a batch transform raised
+                BatchPendingError.
 
         Raises:
             ValueError: If graph is not provided
         """
         if graph is None:
-            raise ValueError(
-                "ExecutionGraph is required. "
-                "Build with ExecutionGraph.from_config(settings)"
-            )
+            raise ValueError("ExecutionGraph is required. Build with ExecutionGraph.from_config(settings)")
 
         # Validate schema compatibility
         # Schemas are required by plugin protocols - access directly
@@ -385,9 +384,7 @@ class Orchestrator:
             sink_inputs=sink_inputs,  # type: ignore[arg-type]
         )
         if schema_errors:
-            raise ValueError(
-                f"Pipeline schema incompatibility: {'; '.join(schema_errors)}"
-            )
+            raise ValueError(f"Pipeline schema incompatibility: {'; '.join(schema_errors)}")
 
         recorder = LandscapeRecorder(self._db)
 
@@ -400,9 +397,7 @@ class Orchestrator:
         run_completed = False
         try:
             with self._span_factory.run_span(run.run_id):
-                result = self._execute_run(
-                    recorder, run.run_id, config, graph, settings
-                )
+                result = self._execute_run(recorder, run.run_id, config, graph, settings, batch_checkpoints)
 
             # Complete run
             recorder.complete_run(run.run_id, status="completed")
@@ -442,6 +437,14 @@ class Orchestrator:
 
             return result
 
+        except BatchPendingError:
+            # BatchPendingError is a CONTROL-FLOW SIGNAL, not an error.
+            # A batch transform has submitted work that isn't complete yet.
+            # DO NOT mark run as failed - it's pending, not failed.
+            # Re-raise for caller to schedule retry based on check_after_seconds.
+            # The run remains in its current state (the caller should manage
+            # run status transitions for pending/retry scenarios).
+            raise
         except Exception:
             # Only mark run as failed if it didn't complete successfully
             # (export failures are tracked separately)
@@ -459,6 +462,7 @@ class Orchestrator:
         config: PipelineConfig,
         graph: ExecutionGraph,
         settings: "ElspethSettings | None" = None,
+        batch_checkpoints: dict[str, dict[str, Any]] | None = None,
     ) -> RunResult:
         """Execute the run using the execution graph.
 
@@ -466,6 +470,14 @@ class Orchestrator:
         - Node IDs and metadata via topological_order() and get_node_info()
         - Edges via get_edges()
         - Explicit ID mappings via get_sink_id_map() and get_transform_id_map()
+
+        Args:
+            recorder: LandscapeRecorder for audit trail
+            run_id: Run identifier
+            config: Pipeline configuration
+            graph: Execution graph
+            settings: Full settings (optional)
+            batch_checkpoints: Restored batch checkpoints (maps node_id -> checkpoint_data)
         """
         # Get execution order from graph
         execution_order = graph.topological_order()
@@ -600,10 +612,12 @@ class Orchestrator:
         )
 
         # Create context with the LandscapeRecorder
+        # Restore batch checkpoints if provided (from previous BatchPendingError)
         ctx = PluginContext(
             run_id=run_id,
             config=config.config,
             landscape=recorder,
+            _batch_checkpoints=batch_checkpoints or {},
         )
 
         # Call on_start for all plugins BEFORE processing
@@ -710,13 +724,11 @@ class Orchestrator:
                         quarantine_sink = source_item.quarantine_destination
                         if quarantine_sink and quarantine_sink in config.sinks:
                             # Create a token for the quarantined row
-                            quarantine_token = (
-                                processor.token_manager.create_initial_token(
-                                    run_id=run_id,
-                                    source_node_id=source_id,
-                                    row_index=row_index,
-                                    row_data=source_item.row,
-                                )
+                            quarantine_token = processor.token_manager.create_initial_token(
+                                run_id=run_id,
+                                source_node_id=source_id,
+                                row_index=row_index,
+                                row_data=source_item.row,
                             )
                             pending_tokens[quarantine_sink].append(quarantine_token)
                         # Skip normal processing - row is already handled
@@ -744,10 +756,7 @@ class Orchestrator:
                             rows_succeeded += 1
                             # Fork children route to branch-named sink if it exists
                             sink_name = output_sink_name
-                            if (
-                                result.token.branch_name is not None
-                                and result.token.branch_name in config.sinks
-                            ):
+                            if result.token.branch_name is not None and result.token.branch_name in config.sinks:
                                 sink_name = result.token.branch_name
                             pending_tokens[sink_name].append(result.token)
                         elif result.outcome == RowOutcome.ROUTED:
@@ -901,9 +910,7 @@ class Orchestrator:
             try:
                 key_str = os.environ["ELSPETH_SIGNING_KEY"]
             except KeyError:
-                raise ValueError(
-                    "ELSPETH_SIGNING_KEY environment variable required for signed export"
-                ) from None
+                raise ValueError("ELSPETH_SIGNING_KEY environment variable required for signed export") from None
             signing_key = key_str.encode("utf-8")
 
         # Create exporter
@@ -924,8 +931,7 @@ class Orchestrator:
             # the path from sink config. CSV format requires file-based sink.
             if "path" not in sink.config:
                 raise ValueError(
-                    f"CSV export requires file-based sink with 'path' in config, "
-                    f"but sink '{sink_name}' has no path configured"
+                    f"CSV export requires file-based sink with 'path' in config, but sink '{sink_name}' has no path configured"
                 )
             artifact_path: str = sink.config["path"]
             self._export_csv_multifile(
@@ -1030,10 +1036,7 @@ class Orchestrator:
             ValueError: If payload_store is not provided
         """
         if payload_store is None:
-            raise ValueError(
-                "payload_store is required for resume - row data must be retrieved "
-                "from stored payloads"
-            )
+            raise ValueError("payload_store is required for resume - row data must be retrieved from stored payloads")
 
         run_id = resume_point.checkpoint.run_id
 
@@ -1055,10 +1058,7 @@ class Orchestrator:
         from elspeth.core.checkpoint import RecoveryManager
 
         if self._checkpoint_manager is None:
-            raise ValueError(
-                "CheckpointManager is required for resume - "
-                "Orchestrator must be initialized with checkpoint_manager"
-            )
+            raise ValueError("CheckpointManager is required for resume - Orchestrator must be initialized with checkpoint_manager")
         recovery = RecoveryManager(self._db, self._checkpoint_manager)
         unprocessed_rows = recovery.get_unprocessed_row_data(run_id, payload_store)
 
@@ -1284,10 +1284,7 @@ class Orchestrator:
                     if result.outcome == RowOutcome.COMPLETED:
                         rows_succeeded += 1
                         sink_name = output_sink_name
-                        if (
-                            result.token.branch_name is not None
-                            and result.token.branch_name in config.sinks
-                        ):
+                        if result.token.branch_name is not None and result.token.branch_name in config.sinks:
                             sink_name = result.token.branch_name
                         pending_tokens[sink_name].append(result.token)
                     elif result.outcome == RowOutcome.ROUTED:
@@ -1419,11 +1416,7 @@ class Orchestrator:
         from elspeth.core.landscape.schema import runs_table
 
         with self._db.connection() as conn:
-            conn.execute(
-                runs_table.update()
-                .where(runs_table.c.run_id == run_id)
-                .values(status=status.value)
-            )
+            conn.execute(runs_table.update().where(runs_table.c.run_id == run_id).values(status=status.value))
 
     def _flush_remaining_aggregation_buffers(
         self,
@@ -1475,9 +1468,7 @@ class Orchestrator:
             agg_node_id = aggregation_id_map[agg_name]
 
             # Check if there are buffered rows
-            buffered_count = processor._aggregation_executor.get_buffer_count(
-                agg_node_id
-            )
+            buffered_count = processor._aggregation_executor.get_buffer_count(agg_node_id)
             if buffered_count == 0:
                 continue
 
@@ -1485,11 +1476,7 @@ class Orchestrator:
             # Only BaseTransform can have is_batch_aware (gates cannot)
             agg_transform: BaseTransform | None = None
             for t in config.transforms:
-                if (
-                    isinstance(t, BaseTransform)
-                    and t.node_id == agg_node_id
-                    and t.is_batch_aware
-                ):
+                if isinstance(t, BaseTransform) and t.node_id == agg_node_id and t.is_batch_aware:
                     agg_transform = t
                     break
 
@@ -1502,23 +1489,17 @@ class Orchestrator:
 
             # Compute step_in_pipeline for this aggregation
             agg_step = next(
-                (
-                    i
-                    for i, t in enumerate(config.transforms)
-                    if t.node_id == agg_node_id
-                ),
+                (i for i, t in enumerate(config.transforms) if t.node_id == agg_node_id),
                 len(config.transforms),
             )
 
             # Execute flush with END_OF_SOURCE trigger
-            flush_result, buffered_tokens = (
-                processor._aggregation_executor.execute_flush(
-                    node_id=agg_node_id,
-                    transform=agg_transform,
-                    ctx=ctx,
-                    step_in_pipeline=agg_step,
-                    trigger_type=TriggerType.END_OF_SOURCE,
-                )
+            flush_result, buffered_tokens = processor._aggregation_executor.execute_flush(
+                node_id=agg_node_id,
+                transform=agg_transform,
+                ctx=ctx,
+                step_in_pipeline=agg_step,
+                trigger_type=TriggerType.END_OF_SOURCE,
             )
 
             # Handle the flushed batch result

@@ -60,8 +60,12 @@ class AuditedHTTPClient(AuditedClientBase):
         self._base_url = base_url
         self._default_headers = headers or {}
 
-    def _filter_sensitive_headers(self, headers: dict[str, str]) -> dict[str, str]:
-        """Filter out sensitive headers from audit recording.
+    # Headers that may contain secrets - excluded from audit trail
+    _SENSITIVE_REQUEST_HEADERS = frozenset({"authorization", "x-api-key", "api-key", "x-auth-token", "proxy-authorization"})
+    _SENSITIVE_RESPONSE_HEADERS = frozenset({"set-cookie", "www-authenticate", "proxy-authenticate", "x-auth-token"})
+
+    def _filter_request_headers(self, headers: dict[str, str]) -> dict[str, str]:
+        """Filter out sensitive request headers from audit recording.
 
         Auth headers are not recorded to avoid storing secrets.
 
@@ -69,12 +73,38 @@ class AuditedHTTPClient(AuditedClientBase):
             headers: Full headers dict
 
         Returns:
-            Headers dict with auth-related headers removed
+            Headers dict with sensitive headers removed
         """
         return {
             k: v
             for k, v in headers.items()
-            if "auth" not in k.lower() and "key" not in k.lower()
+            if k.lower() not in self._SENSITIVE_REQUEST_HEADERS
+            and "auth" not in k.lower()
+            and "key" not in k.lower()
+            and "secret" not in k.lower()
+            and "token" not in k.lower()
+        }
+
+    def _filter_response_headers(self, headers: dict[str, str]) -> dict[str, str]:
+        """Filter out sensitive response headers from audit recording.
+
+        Response headers that may contain secrets (cookies, auth challenges)
+        are not recorded.
+
+        Args:
+            headers: Full headers dict
+
+        Returns:
+            Headers dict with sensitive headers removed
+        """
+        return {
+            k: v
+            for k, v in headers.items()
+            if k.lower() not in self._SENSITIVE_RESPONSE_HEADERS
+            and "auth" not in k.lower()
+            and "key" not in k.lower()
+            and "secret" not in k.lower()
+            and "token" not in k.lower()
         }
 
     def post(
@@ -83,6 +113,7 @@ class AuditedHTTPClient(AuditedClientBase):
         *,
         json: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> httpx.Response:
         """Make POST request with automatic audit recording.
 
@@ -90,6 +121,7 @@ class AuditedHTTPClient(AuditedClientBase):
             url: URL path (appended to base_url if configured)
             json: JSON body to send (optional)
             headers: Additional headers for this request
+            timeout: Request timeout in seconds (uses client default if None)
 
         Returns:
             httpx.Response object
@@ -101,19 +133,20 @@ class AuditedHTTPClient(AuditedClientBase):
 
         full_url = f"{self._base_url}{url}" if self._base_url else url
         merged_headers = {**self._default_headers, **(headers or {})}
+        effective_timeout = timeout if timeout is not None else self._timeout
 
-        # Filter auth headers from recorded request
+        # Filter sensitive headers from recorded request
         request_data = {
             "method": "POST",
             "url": full_url,
             "json": json,
-            "headers": self._filter_sensitive_headers(merged_headers),
+            "headers": self._filter_request_headers(merged_headers),
         }
 
         start = time.perf_counter()
 
         try:
-            with httpx.Client(timeout=self._timeout) as client:
+            with httpx.Client(timeout=effective_timeout) as client:
                 response = client.post(
                     full_url,
                     json=json,
@@ -122,17 +155,49 @@ class AuditedHTTPClient(AuditedClientBase):
 
             latency_ms = (time.perf_counter() - start) * 1000
 
+            # Build response data with full body for audit trail
+            # Try to decode as JSON for structured storage, fall back to text
+            response_body: Any = None
+            content_type = response.headers.get("content-type", "")
+            if "application/json" in content_type:
+                try:
+                    response_body = response.json()
+                except Exception:
+                    # If JSON decode fails, store as text
+                    response_body = response.text
+            else:
+                # For non-JSON, store text (truncated for very large responses)
+                response_body = response.text[:100_000] if len(response.text) > 100_000 else response.text
+
+            # Determine status based on HTTP response code
+            # 2xx = SUCCESS, 4xx/5xx = ERROR (audit must reflect what application sees)
+            is_success = 200 <= response.status_code < 300
+            call_status = CallStatus.SUCCESS if is_success else CallStatus.ERROR
+
+            response_data: dict[str, Any] = {
+                "status_code": response.status_code,
+                "headers": self._filter_response_headers(dict(response.headers)),
+                "body_size": len(response.content),
+                "body": response_body,
+            }
+
+            # For error responses, also include error details
+            error_data: dict[str, Any] | None = None
+            if not is_success:
+                error_data = {
+                    "type": "HTTPError",
+                    "message": f"HTTP {response.status_code}",
+                    "status_code": response.status_code,
+                }
+
             self._recorder.record_call(
                 state_id=self._state_id,
                 call_index=call_index,
                 call_type=CallType.HTTP,
-                status=CallStatus.SUCCESS,
+                status=call_status,
                 request_data=request_data,
-                response_data={
-                    "status_code": response.status_code,
-                    "headers": dict(response.headers),
-                    "body_size": len(response.content),
-                },
+                response_data=response_data,
+                error=error_data,
                 latency_ms=latency_ms,
             )
 

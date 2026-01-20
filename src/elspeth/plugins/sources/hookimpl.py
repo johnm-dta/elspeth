@@ -11,10 +11,12 @@ class ElspethBuiltinSources:
     @hookimpl
     def elspeth_get_source(self) -> list[type[Any]]:
         """Return built-in source plugin classes."""
+        from elspeth.plugins.azure.blob_source import AzureBlobSource
         from elspeth.plugins.sources.csv_source import CSVSource
         from elspeth.plugins.sources.json_source import JSONSource
+        from elspeth.plugins.sources.null_source import NullSource
 
-        return [CSVSource, JSONSource]
+        return [CSVSource, JSONSource, NullSource, AzureBlobSource]
 
 
 # Singleton instance for registration

@@ -52,9 +52,7 @@ class RunRepository:
             status=RunStatus(row.status),  # Convert HERE
             completed_at=row.completed_at,
             reproducibility_grade=row.reproducibility_grade,
-            export_status=ExportStatus(row.export_status)
-            if row.export_status
-            else None,
+            export_status=ExportStatus(row.export_status) if row.export_status else None,
             export_error=row.export_error,
             exported_at=row.exported_at,
             export_format=row.export_format,

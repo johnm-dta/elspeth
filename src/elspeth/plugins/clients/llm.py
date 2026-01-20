@@ -42,9 +42,7 @@ class LLMResponse:
     @property
     def total_tokens(self) -> int:
         """Total tokens used (prompt + completion)."""
-        return self.usage.get("prompt_tokens", 0) + self.usage.get(
-            "completion_tokens", 0
-        )
+        return self.usage.get("prompt_tokens", 0) + self.usage.get("completion_tokens", 0)
 
 
 class LLMClientError(Exception):
@@ -145,25 +143,33 @@ class AuditedLLMClient(AuditedClientBase):
         """
         call_index = self._next_call_index()
 
-        request_data = {
+        # Build request_data - only include max_tokens if explicitly set
+        # (None vs omitted changes request hash semantics and SDK behavior)
+        request_data: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
             "provider": self._provider,
             **kwargs,
         }
+        if max_tokens is not None:
+            request_data["max_tokens"] = max_tokens
+
+        # Build SDK call kwargs - omit max_tokens when None to avoid
+        # serializing as JSON null (which can trigger provider validation errors)
+        sdk_kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            **kwargs,
+        }
+        if max_tokens is not None:
+            sdk_kwargs["max_tokens"] = max_tokens
 
         start = time.perf_counter()
 
         try:
-            response = self._client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **kwargs,
-            )
+            response = self._client.chat.completions.create(**sdk_kwargs)
             latency_ms = (time.perf_counter() - start) * 1000
 
             content = response.choices[0].message.content or ""
@@ -191,9 +197,7 @@ class AuditedLLMClient(AuditedClientBase):
                 model=response.model,
                 usage=usage,
                 latency_ms=latency_ms,
-                raw_response=response.model_dump()
-                if hasattr(response, "model_dump")
-                else None,
+                raw_response=response.model_dump() if hasattr(response, "model_dump") else None,
             )
 
         except Exception as e:

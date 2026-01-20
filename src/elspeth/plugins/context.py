@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     # Using string annotations to avoid import errors in Phase 2
     from opentelemetry.trace import Span, Tracer
 
+    from elspeth.contracts import Call, CallStatus, CallType
     from elspeth.core.landscape.recorder import LandscapeRecorder
     from elspeth.core.payload_store import PayloadStore
     from elspeth.plugins.clients.http import AuditedHTTPClient
@@ -86,10 +87,74 @@ class PluginContext:
     node_id: str | None = field(default=None)
     plugin_name: str | None = field(default=None)
 
+    # === Phase 6: State & Call Recording ===
+    # Set by executor to enable transforms to record external calls
+    state_id: str | None = field(default=None)
+    _call_index: int = field(default=0)
+
     # === Phase 6: Audited Clients ===
     # Set by executor when processing LLM transforms
     llm_client: "AuditedLLMClient | None" = None
     http_client: "AuditedHTTPClient | None" = None
+
+    # === Phase 6: Checkpoint API ===
+    # Used by batch transforms (e.g., azure_batch_llm) for crash recovery.
+    # The checkpoint stores batch_id, row_mapping, etc. between invocations.
+    #
+    # Checkpoints are keyed by node_id to support multiple batch transforms.
+    # The orchestrator restores these from the BatchPendingError.checkpoint
+    # when scheduling retries.
+    _checkpoint: dict[str, Any] = field(default_factory=dict)
+
+    # Batch checkpoints restored from previous BatchPendingError
+    # Maps node_id -> checkpoint_data for each batch transform
+    _batch_checkpoints: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def get_checkpoint(self) -> dict[str, Any] | None:
+        """Get checkpoint state for batch transforms.
+
+        Used by batch transforms to recover state after crashes.
+        Returns None if no checkpoint exists (empty dict = no checkpoint).
+
+        First checks for a restored batch checkpoint (from a previous
+        BatchPendingError), then falls back to the local checkpoint.
+
+        Returns:
+            Checkpoint dict with batch state, or None if empty
+        """
+        # First check for restored batch checkpoint (keyed by node_id)
+        if self.node_id and self.node_id in self._batch_checkpoints:
+            restored = self._batch_checkpoints[self.node_id]
+            if restored:
+                return restored
+
+        # Fall back to local checkpoint
+        return self._checkpoint if self._checkpoint else None
+
+    def update_checkpoint(self, data: dict[str, Any]) -> None:
+        """Update checkpoint state with new data.
+
+        Merges the provided data into the existing checkpoint.
+        Used by batch transforms to save progress after submission.
+
+        Args:
+            data: Checkpoint data to merge (batch_id, row_mapping, etc.)
+        """
+        self._checkpoint.update(data)
+
+    def clear_checkpoint(self) -> None:
+        """Clear checkpoint state after batch completion.
+
+        Called when batch processing completes successfully
+        or when starting fresh after a failure.
+
+        Clears both the local checkpoint and any restored batch checkpoint
+        for the current node to prevent stale data on subsequent batches.
+        """
+        self._checkpoint.clear()
+        # Also clear restored batch checkpoint to prevent stale resume data
+        if self.node_id and self.node_id in self._batch_checkpoints:
+            del self._batch_checkpoints[self.node_id]
 
     def get(self, key: str, *, default: Any = None) -> Any:
         """Get a config value by dotted path.
@@ -123,9 +188,58 @@ class PluginContext:
             return nullcontext()
         return self.tracer.start_as_current_span(name)
 
+    def record_call(
+        self,
+        call_type: "CallType",
+        status: "CallStatus",
+        request_data: dict[str, Any],
+        response_data: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+        latency_ms: float | None = None,
+    ) -> "Call | None":
+        """Record an external API call to the audit trail.
+
+        Provides a convenient way for transforms to record external calls
+        without managing call indices manually. Requires state_id to be set.
+
+        Args:
+            call_type: Type of call (LLM, HTTP, SQL, FILESYSTEM)
+            status: Outcome (SUCCESS, ERROR)
+            request_data: Request payload (will be hashed)
+            response_data: Response payload (optional for errors)
+            error: Error details if status is ERROR
+            latency_ms: Call duration in milliseconds
+
+        Returns:
+            The recorded Call, or None if landscape not configured
+
+        Raises:
+            RuntimeError: If state_id is not set (transform not in execution context)
+        """
+        if self.landscape is None:
+            logger.warning("External call not recorded (no landscape)")
+            return None
+
+        if self.state_id is None:
+            raise RuntimeError("Cannot record call: state_id not set. Ensure transform is being executed through the engine.")
+
+        call_index = self._call_index
+        self._call_index += 1
+
+        return self.landscape.record_call(
+            state_id=self.state_id,
+            call_index=call_index,
+            call_type=call_type,
+            status=status,
+            request_data=request_data,
+            response_data=response_data,
+            error=error,
+            latency_ms=latency_ms,
+        )
+
     def record_validation_error(
         self,
-        row: dict[str, Any],
+        row: Any,
         error: str,
         schema_mode: str,
         destination: str,
@@ -137,7 +251,8 @@ class PluginContext:
         for complete audit coverage.
 
         Args:
-            row: The row data that failed validation
+            row: The row data that failed validation (may be non-dict for
+                 malformed external data like JSON arrays containing primitives)
             error: Description of the validation failure
             schema_mode: "strict", "free", or "dynamic"
             destination: Sink name where row is routed, or "discard"
@@ -148,7 +263,12 @@ class PluginContext:
         from elspeth.core.canonical import stable_hash
 
         # Generate row_id from content hash if not present
-        row_id = str(row["id"]) if "id" in row else stable_hash(row)[:16]
+        # External data may be non-dict (e.g., JSON array containing primitives),
+        # so we must check isinstance before accessing dict keys
+        if isinstance(row, dict) and "id" in row:
+            row_id = str(row["id"])
+        else:
+            row_id = stable_hash(row)[:16]
 
         if self.landscape is None:
             logger.warning(

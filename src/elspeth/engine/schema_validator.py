@@ -50,9 +50,7 @@ def validate_pipeline_schemas(
     if transform_inputs and transform_inputs[0] is not None:
         missing = _get_missing_required_fields(current_producer, transform_inputs[0])
         if missing:
-            errors.append(
-                f"Source output missing fields required by transform[0]: {missing}"
-            )
+            errors.append(f"Source output missing fields required by transform[0]: {missing}")
 
     # Check transform chain
     for i in range(len(transform_outputs)):
@@ -67,9 +65,7 @@ def validate_pipeline_schemas(
             if next_input is not None:
                 missing = _get_missing_required_fields(current_producer, next_input)
                 if missing:
-                    errors.append(
-                        f"Transform[{i}] output missing fields required by transform[{i + 1}]: {missing}"
-                    )
+                    errors.append(f"Transform[{i}] output missing fields required by transform[{i + 1}]: {missing}")
 
     # Check final transform -> sinks
     # If there are transforms, use last transform output; otherwise use source output
@@ -83,9 +79,7 @@ def validate_pipeline_schemas(
             continue
         missing = _get_missing_required_fields(final_producer, sink_input)
         if missing:
-            errors.append(
-                f"Final transform output missing fields required by sink[{j}]: {missing}"
-            )
+            errors.append(f"Final transform output missing fields required by sink[{j}]: {missing}")
 
     return errors
 
@@ -104,7 +98,5 @@ def _get_missing_required_fields(
         Set of field names that are required by consumer but not in producer
     """
     producer_fields = set(producer.model_fields.keys())
-    required_fields = {
-        name for name, field in consumer.model_fields.items() if field.is_required()
-    }
+    required_fields = {name for name, field in consumer.model_fields.items() if field.is_required()}
     return required_fields - producer_fields

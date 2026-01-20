@@ -62,9 +62,7 @@ class TestPluginInfo:
 
         for plugin_type, plugins in PLUGIN_REGISTRY.items():
             for plugin in plugins:
-                assert isinstance(
-                    plugin, PluginInfo
-                ), f"Plugin in {plugin_type} is not PluginInfo: {plugin}"
+                assert isinstance(plugin, PluginInfo), f"Plugin in {plugin_type} is not PluginInfo: {plugin}"
                 assert isinstance(plugin.name, str)
                 assert isinstance(plugin.description, str)
 

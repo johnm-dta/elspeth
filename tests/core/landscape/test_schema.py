@@ -161,20 +161,21 @@ class TestNodesDeterminismColumn:
     def test_node_model_has_determinism_field(self) -> None:
         from datetime import UTC, datetime
 
+        from elspeth.contracts import Determinism, NodeType
         from elspeth.core.landscape.models import Node
 
         node = Node(
             node_id="node-001",
             run_id="run-001",
             plugin_name="test_plugin",
-            node_type="transform",
+            node_type=NodeType.TRANSFORM,
             plugin_version="1.0.0",
-            determinism="deterministic",  # New field
+            determinism=Determinism.DETERMINISTIC,  # New field
             config_hash="abc123",
             config_json="{}",
             registered_at=datetime.now(UTC),
         )
-        assert node.determinism == "deterministic"
+        assert node.determinism == Determinism.DETERMINISTIC
 
     def test_determinism_values(self) -> None:
         """Verify valid determinism values match Determinism enum."""

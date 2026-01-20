@@ -39,9 +39,7 @@ class TestTransformProtocolLifecycle:
             def __init__(self, config: dict[str, Any]) -> None:
                 self.closed = False
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
             def close(self) -> None:
@@ -55,10 +53,10 @@ class TestTransformProtocolLifecycle:
 
         # Create instance and verify protocol conformance
         transform = MyTransform({})
-        assert isinstance(transform, TransformProtocol)
+        assert isinstance(transform, TransformProtocol)  # type: ignore[unreachable]
 
         # close() should be callable through protocol
-        transform_as_protocol: TransformProtocol = transform
+        transform_as_protocol: TransformProtocol = transform  # type: ignore[unreachable]
         transform_as_protocol.close()
 
         # Verify close() worked via implementation detail
@@ -103,10 +101,10 @@ class TestGateProtocolLifecycle:
 
         # Create instance and verify protocol conformance
         gate = MyGate({})
-        assert isinstance(gate, GateProtocol)
+        assert isinstance(gate, GateProtocol)  # type: ignore[unreachable]
 
         # close() should be callable through protocol
-        gate_as_protocol: GateProtocol = gate
+        gate_as_protocol: GateProtocol = gate  # type: ignore[unreachable]
         gate_as_protocol.close()
 
         # Verify close() worked via implementation detail

@@ -50,16 +50,12 @@ class TestOrchestratorResumeRowProcessing:
         return CheckpointManager(landscape_db)
 
     @pytest.fixture
-    def recovery_manager(
-        self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager
-    ) -> RecoveryManager:
+    def recovery_manager(self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager) -> RecoveryManager:
         """Create recovery manager."""
         return RecoveryManager(landscape_db, checkpoint_manager)
 
     @pytest.fixture
-    def orchestrator(
-        self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager
-    ) -> Orchestrator:
+    def orchestrator(self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager) -> Orchestrator:
         """Create orchestrator with checkpoint manager."""
         return Orchestrator(
             db=landscape_db,
@@ -289,7 +285,7 @@ class TestOrchestratorResumeRowProcessing:
         assert resume_point is not None
 
         # Create config and graph
-        config, output_path = self._create_test_config(tmp_path)
+        config, _output_path = self._create_test_config(tmp_path)
         graph = self._create_test_graph()
 
         # Act: Resume with payload store
@@ -366,11 +362,11 @@ class TestOrchestratorResumeRowProcessing:
         assert resume_point is not None
 
         # Create config and graph
-        config, output_path = self._create_test_config(tmp_path)
+        config, _output_path = self._create_test_config(tmp_path)
         graph = self._create_test_graph()
 
         # Act & Assert: Should raise without payload_store
-        with pytest.raises(ValueError, match="payload_store.*required"):
+        with pytest.raises(ValueError, match=r"payload_store.*required"):
             orchestrator.resume(resume_point, config, graph)
 
     def test_resume_returns_run_result_with_status(
@@ -389,7 +385,7 @@ class TestOrchestratorResumeRowProcessing:
         assert resume_point is not None
 
         # Create config and graph
-        config, output_path = self._create_test_config(tmp_path)
+        config, _output_path = self._create_test_config(tmp_path)
         graph = self._create_test_graph()
 
         # Act

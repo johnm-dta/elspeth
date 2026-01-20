@@ -203,17 +203,13 @@ class TestAcceptResultDeleted:
         """AcceptResult should be deleted from contracts.results."""
         import elspeth.contracts.results as results
 
-        assert not hasattr(
-            results, "AcceptResult"
-        ), "AcceptResult should be deleted - aggregation is structural"
+        assert not hasattr(results, "AcceptResult"), "AcceptResult should be deleted - aggregation is structural"
 
     def test_accept_result_not_exported(self) -> None:
         """AcceptResult should NOT be exported from elspeth.contracts."""
         import elspeth.contracts as contracts
 
-        assert not hasattr(
-            contracts, "AcceptResult"
-        ), "AcceptResult should not be exported - aggregation is structural"
+        assert not hasattr(contracts, "AcceptResult"), "AcceptResult should not be exported - aggregation is structural"
 
 
 class TestRowResult:

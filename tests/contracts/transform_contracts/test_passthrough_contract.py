@@ -42,9 +42,7 @@ class TestPassThroughContract(TransformContractPropertyTestBase):
 
     # Additional PassThrough-specific contract tests
 
-    def test_passthrough_preserves_all_fields(
-        self, transform: TransformProtocol
-    ) -> None:
+    def test_passthrough_preserves_all_fields(self, transform: TransformProtocol) -> None:
         """PassThrough MUST preserve all input fields in output."""
         from elspeth.plugins.context import PluginContext
 
@@ -57,9 +55,7 @@ class TestPassThroughContract(TransformContractPropertyTestBase):
         assert result.row is not None
         assert set(result.row.keys()) == set(input_row.keys())
 
-    def test_passthrough_does_not_mutate_input(
-        self, transform: TransformProtocol
-    ) -> None:
+    def test_passthrough_does_not_mutate_input(self, transform: TransformProtocol) -> None:
         """PassThrough MUST NOT mutate the input row."""
         from copy import deepcopy
 
@@ -73,9 +69,7 @@ class TestPassThroughContract(TransformContractPropertyTestBase):
 
         assert input_row == input_copy, "PassThrough mutated input row"
 
-    def test_passthrough_output_is_independent_copy(
-        self, transform: TransformProtocol
-    ) -> None:
+    def test_passthrough_output_is_independent_copy(self, transform: TransformProtocol) -> None:
         """PassThrough output MUST be independent of input (deep copy)."""
         from elspeth.plugins.context import PluginContext
 
@@ -84,12 +78,18 @@ class TestPassThroughContract(TransformContractPropertyTestBase):
 
         result = transform.process(input_row, ctx)
         assert result.row is not None
+        row = result.row
+        assert isinstance(row, dict)
+        # After isinstance check, mypy should know row is dict, but Protocol returns object
+        # so we need to help it
+        nested = row["nested"]  # type: ignore[index]
+        assert isinstance(nested, dict)
 
         # Mutate input after processing
-        input_row["nested"]["value"].append(4)
+        input_row["nested"]["value"].append(4)  # type: ignore[index]
 
         # Output should be unaffected
-        assert result.row["nested"]["value"] == [1, 2, 3]
+        assert nested["value"] == [1, 2, 3]
 
 
 class TestPassThroughStrictSchemaContract(TransformContractTestBase):
@@ -113,9 +113,7 @@ class TestPassThroughStrictSchemaContract(TransformContractTestBase):
         """Provide a valid input row matching the strict schema."""
         return {"id": 1, "name": "test"}
 
-    def test_strict_passthrough_rejects_wrong_type(
-        self, transform: TransformProtocol
-    ) -> None:
+    def test_strict_passthrough_rejects_wrong_type(self, transform: TransformProtocol) -> None:
         """Strict PassThrough MUST crash on wrong input type (upstream bug!)."""
         from pydantic import ValidationError
 
@@ -146,7 +144,7 @@ class TestPassThroughPropertyBased:
         )
 
     @pytest.fixture
-    def ctx(self):
+    def ctx(self) -> Any:
         """Create a PluginContext."""
         from elspeth.plugins.context import PluginContext
 
@@ -166,12 +164,8 @@ class TestPassThroughPropertyBased:
             max_size=10,
         )
     )
-    @settings(
-        max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture]
-    )
-    def test_passthrough_preserves_arbitrary_dicts(
-        self, transform: PassThrough, ctx, data: dict[str, Any]
-    ) -> None:
+    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_passthrough_preserves_arbitrary_dicts(self, transform: PassThrough, ctx: Any, data: dict[str, Any]) -> None:
         """Property: PassThrough preserves any valid JSON-like dict."""
         result = transform.process(data, ctx)
 
@@ -187,12 +181,8 @@ class TestPassThroughPropertyBased:
             max_size=5,
         )
     )
-    @settings(
-        max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture]
-    )
-    def test_passthrough_is_deterministic(
-        self, transform: PassThrough, ctx, data: dict[str, Any]
-    ) -> None:
+    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_passthrough_is_deterministic(self, transform: PassThrough, ctx: Any, data: dict[str, Any]) -> None:
         """Property: PassThrough produces same output for same input."""
         result1 = transform.process(data, ctx)
         result2 = transform.process(data, ctx)

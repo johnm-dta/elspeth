@@ -36,9 +36,7 @@ def checkpoint_manager(db: LandscapeDB) -> CheckpointManager:
 
 
 @pytest.fixture
-def recovery_manager(
-    db: LandscapeDB, checkpoint_manager: CheckpointManager
-) -> RecoveryManager:
+def recovery_manager(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> RecoveryManager:
     """Create recovery manager."""
     return RecoveryManager(db, checkpoint_manager)
 

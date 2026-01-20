@@ -10,6 +10,7 @@ from pydantic import Field
 
 from elspeth.contracts import Determinism, TransformResult
 from elspeth.plugins.base import BaseTransform
+from elspeth.plugins.clients.http import AuditedHTTPClient
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.base import LLMConfig
 from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
@@ -45,7 +46,7 @@ class OpenRouterLLMTransform(BaseTransform):
             options:
               model: "anthropic/claude-3-opus"
               template: |
-                Analyze: {{ text }}
+                Analyze: {{ row.text }}
               api_key: "${OPENROUTER_API_KEY}"
               schema:
                 fields: dynamic
@@ -70,7 +71,12 @@ class OpenRouterLLMTransform(BaseTransform):
 
         # Store common LLM settings (from LLMConfig)
         self._model = cfg.model
-        self._template = PromptTemplate(cfg.template)
+        self._template = PromptTemplate(
+            cfg.template,
+            template_source=cfg.template_source,
+            lookup_data=cfg.lookup,
+            lookup_source=cfg.lookup_source,
+        )
         self._system_prompt = cfg.system_prompt
         self._temperature = cfg.temperature
         self._max_tokens = cfg.max_tokens
@@ -98,13 +104,14 @@ class OpenRouterLLMTransform(BaseTransform):
         """
         # 1. Render template (THEIR DATA - wrap)
         try:
-            rendered = self._template.render_with_metadata(**row)
+            rendered = self._template.render_with_metadata(row)
         except TemplateError as e:
             return TransformResult.error(
                 {
                     "reason": "template_rendering_failed",
                     "error": str(e),
                     "template_hash": self._template.template_hash,
+                    "template_source": self._template.template_source,
                 }
             )
 
@@ -123,22 +130,27 @@ class OpenRouterLLMTransform(BaseTransform):
             request_body["max_tokens"] = self._max_tokens
 
         # 3. Call via audited HTTP client (EXTERNAL - wrap)
-        if ctx.http_client is None:
-            # This is OUR BUG - executor should have provided client
-            raise RuntimeError("HTTP client not available in PluginContext")
+        # Create client using context's recorder and state_id
+        if ctx.landscape is None or ctx.state_id is None:
+            raise RuntimeError(
+                "OpenRouter transform requires landscape recorder and state_id. Ensure transform is executed through the engine."
+            )
+
+        http_client = AuditedHTTPClient(
+            recorder=ctx.landscape,
+            state_id=ctx.state_id,
+            timeout=self._timeout,
+            base_url=self._base_url,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+        )
 
         try:
-            response = ctx.http_client.post(
-                f"{self._base_url}/chat/completions",
+            response = http_client.post(
+                "/chat/completions",
                 json=request_body,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers={"Content-Type": "application/json"},
             )
             response.raise_for_status()
-            data = response.json()
-
         except httpx.HTTPStatusError as e:
             # HTTP error (4xx, 5xx) - check for rate limit
             is_rate_limit = e.response.status_code == 429
@@ -153,8 +165,43 @@ class OpenRouterLLMTransform(BaseTransform):
                 retryable=False,
             )
 
-        # 4. Build output (OUR CODE - let crash if malformed)
-        content = data["choices"][0]["message"]["content"]
+        # 4. Parse JSON response (EXTERNAL DATA - wrap)
+        # OpenRouter/proxy may return non-JSON (e.g., HTML error page) with HTTP 200
+        try:
+            data = response.json()
+        except (ValueError, TypeError) as e:
+            # JSONDecodeError is a subclass of ValueError
+            return TransformResult.error(
+                {
+                    "reason": "invalid_json_response",
+                    "error": f"Response is not valid JSON: {e}",
+                    "content_type": response.headers.get("content-type", "unknown"),
+                    "body_preview": response.text[:500] if response.text else None,
+                },
+                retryable=False,
+            )
+
+        # 5. Extract content from response (EXTERNAL DATA - wrap)
+        # OpenRouter may return malformed responses: empty choices, error JSON
+        # with HTTP 200, or unexpected structure from various providers
+        try:
+            choices = data["choices"]
+            if not choices:
+                return TransformResult.error(
+                    {"reason": "empty_choices", "response": data},
+                    retryable=False,
+                )
+            content = choices[0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            return TransformResult.error(
+                {
+                    "reason": "malformed_response",
+                    "error": f"{type(e).__name__}: {e}",
+                    "response_keys": list(data.keys()) if isinstance(data, dict) else None,
+                },
+                retryable=False,
+            )
+
         usage = data.get("usage", {})
 
         output = dict(row)
@@ -162,6 +209,9 @@ class OpenRouterLLMTransform(BaseTransform):
         output[f"{self._response_field}_usage"] = usage
         output[f"{self._response_field}_template_hash"] = rendered.template_hash
         output[f"{self._response_field}_variables_hash"] = rendered.variables_hash
+        output[f"{self._response_field}_template_source"] = rendered.template_source
+        output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
+        output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
         output[f"{self._response_field}_model"] = data.get("model", self._model)
 
         return TransformResult.success(output)

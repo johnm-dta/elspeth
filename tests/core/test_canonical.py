@@ -155,7 +155,8 @@ class TestSpecialTypeConversion:
     def test_datetime_naive_to_utc_iso(self) -> None:
         from elspeth.core.canonical import _normalize_value
 
-        dt = datetime(2026, 1, 12, 10, 30, 0)  # noqa: DTZ001 - intentionally naive
+        # Naive datetime (no tzinfo) - test that _normalize_value treats it as UTC
+        dt = datetime(2026, 1, 12, 10, 30, 0, tzinfo=None)  # noqa: DTZ001
         result = _normalize_value(dt)
         assert result == "2026-01-12T10:30:00+00:00"
 
@@ -323,8 +324,7 @@ class TestCrossProcessStability:
 
         result = stable_hash(data)
         assert result == golden_hash, (
-            f"Hash stability broken! Got {result}, expected {golden_hash}. "
-            "This may indicate audit trail integrity issues."
+            f"Hash stability broken! Got {result}, expected {golden_hash}. This may indicate audit trail integrity issues."
         )
 
     def test_version_constant_exists(self) -> None:

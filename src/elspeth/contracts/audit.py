@@ -66,9 +66,7 @@ class Node:
     sequence_in_pipeline: int | None = None
     # Schema configuration for audit trail (WP-11.99)
     schema_mode: str | None = None  # "dynamic", "strict", "free"
-    schema_fields: list[dict[str, object]] | None = (
-        None  # Field definitions if explicit
-    )
+    schema_fields: list[dict[str, object]] | None = None  # Field definitions if explicit
 
 
 @dataclass
@@ -111,9 +109,7 @@ class Token:
     join_group_id: str | None = None
     expand_group_id: str | None = None  # For deaggregation grouping
     branch_name: str | None = None
-    step_in_pipeline: int | None = (
-        None  # Step where token was created (fork/coalesce/expand)
-    )
+    step_in_pipeline: int | None = None  # Step where token was created (fork/coalesce/expand)
 
 
 @dataclass

@@ -31,9 +31,7 @@ class TestDatabaseSink:
         """DatabaseSink implements SinkProtocol."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {"url": "sqlite:///:memory:", "table": "test", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": DYNAMIC_SCHEMA})
         assert isinstance(sink, SinkProtocol)
 
     def test_has_required_attributes(self) -> None:
@@ -42,18 +40,14 @@ class TestDatabaseSink:
 
         assert DatabaseSink.name == "database"
         # input_schema is now set per-instance based on config
-        sink = DatabaseSink(
-            {"url": "sqlite:///:memory:", "table": "test", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": DYNAMIC_SCHEMA})
         assert hasattr(sink, "input_schema")
 
     def test_write_creates_table(self, db_url: str, ctx: PluginContext) -> None:
         """write() creates table and inserts rows."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = DatabaseSink({"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA})
 
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.write([{"id": 2, "name": "bob"}], ctx)
@@ -75,9 +69,7 @@ class TestDatabaseSink:
         """Multiple batches can be written to the same table."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = DatabaseSink({"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA})
 
         # Write rows in multiple batches (batching now handled by caller)
         sink.write([{"id": 0, "value": "val0"}, {"id": 1, "value": "val1"}], ctx)
@@ -98,9 +90,7 @@ class TestDatabaseSink:
         """close() can be called multiple times."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = DatabaseSink({"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA})
 
         sink.write([{"id": 1}], ctx)
         sink.close()
@@ -110,24 +100,18 @@ class TestDatabaseSink:
         """Works with in-memory SQLite."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {"url": "sqlite:///:memory:", "table": "test", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": DYNAMIC_SCHEMA})
 
         sink.write([{"col": "value"}], ctx)
         # Can't verify in-memory after close, but should not raise
         sink.close()
 
-    def test_batch_write_returns_artifact_descriptor(
-        self, db_url: str, ctx: PluginContext
-    ) -> None:
+    def test_batch_write_returns_artifact_descriptor(self, db_url: str, ctx: PluginContext) -> None:
         """write() returns ArtifactDescriptor with content hash."""
         from elspeth.contracts import ArtifactDescriptor
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = DatabaseSink({"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA})
 
         artifact = sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.close()
@@ -137,16 +121,12 @@ class TestDatabaseSink:
         assert artifact.content_hash  # Non-empty
         assert artifact.size_bytes > 0
 
-    def test_batch_write_content_hash_is_payload_hash(
-        self, db_url: str, ctx: PluginContext
-    ) -> None:
+    def test_batch_write_content_hash_is_payload_hash(self, db_url: str, ctx: PluginContext) -> None:
         """content_hash is SHA-256 of canonical JSON payload BEFORE insert."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
         rows = [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
-        sink = DatabaseSink(
-            {"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = DatabaseSink({"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA})
 
         artifact = sink.write(rows, ctx)
         sink.close()
@@ -158,15 +138,11 @@ class TestDatabaseSink:
 
         assert artifact.content_hash == expected_hash
 
-    def test_batch_write_metadata_has_row_count(
-        self, db_url: str, ctx: PluginContext
-    ) -> None:
+    def test_batch_write_metadata_has_row_count(self, db_url: str, ctx: PluginContext) -> None:
         """ArtifactDescriptor metadata includes row_count."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = DatabaseSink({"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA})
 
         artifact = sink.write([{"id": 1}, {"id": 2}, {"id": 3}], ctx)
         sink.close()
@@ -179,9 +155,7 @@ class TestDatabaseSink:
         from elspeth.contracts import ArtifactDescriptor
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = DatabaseSink({"url": db_url, "table": "output", "schema": DYNAMIC_SCHEMA})
 
         artifact = sink.write([], ctx)
         sink.close()
@@ -196,9 +170,7 @@ class TestDatabaseSink:
         """DatabaseSink has plugin_version attribute."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {"url": "sqlite:///:memory:", "table": "test", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": DYNAMIC_SCHEMA})
         assert sink.plugin_version == "1.0.0"
 
     def test_has_determinism(self) -> None:
@@ -206,7 +178,5 @@ class TestDatabaseSink:
         from elspeth.contracts import Determinism
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
-        sink = DatabaseSink(
-            {"url": "sqlite:///:memory:", "table": "test", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": DYNAMIC_SCHEMA})
         assert sink.determinism == Determinism.IO_WRITE

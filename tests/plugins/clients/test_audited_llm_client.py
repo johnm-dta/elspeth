@@ -155,9 +155,7 @@ class TestAuditedLLMClient:
         assert call_kwargs["call_type"] == CallType.LLM
         assert call_kwargs["status"] == CallStatus.SUCCESS
         assert call_kwargs["request_data"]["model"] == "gpt-4"
-        assert call_kwargs["request_data"]["messages"] == [
-            {"role": "user", "content": "Hello"}
-        ]
+        assert call_kwargs["request_data"]["messages"] == [{"role": "user", "content": "Hello"}]
         assert call_kwargs["response_data"]["content"] == "Hello!"
         assert call_kwargs["latency_ms"] > 0
 
@@ -192,9 +190,7 @@ class TestAuditedLLMClient:
         """Failed LLM call records error details."""
         recorder = self._create_mock_recorder()
         openai_client = MagicMock()
-        openai_client.chat.completions.create.side_effect = Exception(
-            "API connection failed"
-        )
+        openai_client.chat.completions.create.side_effect = Exception("API connection failed")
 
         client = AuditedLLMClient(
             recorder=recorder,
@@ -220,9 +216,7 @@ class TestAuditedLLMClient:
         """Rate limit errors are marked as retryable."""
         recorder = self._create_mock_recorder()
         openai_client = MagicMock()
-        openai_client.chat.completions.create.side_effect = Exception(
-            "Rate limit exceeded (429)"
-        )
+        openai_client.chat.completions.create.side_effect = Exception("Rate limit exceeded (429)")
 
         client = AuditedLLMClient(
             recorder=recorder,
@@ -244,9 +238,7 @@ class TestAuditedLLMClient:
         """Rate limit is detected by 'rate' keyword in error."""
         recorder = self._create_mock_recorder()
         openai_client = MagicMock()
-        openai_client.chat.completions.create.side_effect = Exception(
-            "You have exceeded your rate limit"
-        )
+        openai_client.chat.completions.create.side_effect = Exception("You have exceeded your rate limit")
 
         client = AuditedLLMClient(
             recorder=recorder,

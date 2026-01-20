@@ -119,3 +119,10 @@ mutants/
 
 # Git worktrees
 .worktrees/
+
+# Example outputs (keep directory structure with .gitkeep)
+examples/*/output/*
+examples/*/runs/*
+!examples/*/.gitkeep
+!examples/*/output/.gitkeep
+!examples/*/runs/.gitkeep

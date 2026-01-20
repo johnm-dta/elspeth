@@ -56,7 +56,7 @@ class TestAzureBatchConfig:
                 {
                     "endpoint": "https://my-resource.openai.azure.com",
                     "api_key": "azure-api-key",
-                    "template": "Analyze: {{ text }}",
+                    "template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                 }
             )
@@ -68,7 +68,7 @@ class TestAzureBatchConfig:
                 {
                     "deployment_name": "my-gpt4o-batch",
                     "api_key": "azure-api-key",
-                    "template": "Analyze: {{ text }}",
+                    "template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                 }
             )
@@ -80,7 +80,7 @@ class TestAzureBatchConfig:
                 {
                     "deployment_name": "my-gpt4o-batch",
                     "endpoint": "https://my-resource.openai.azure.com",
-                    "template": "Analyze: {{ text }}",
+                    "template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                 }
             )
@@ -105,7 +105,7 @@ class TestAzureBatchConfig:
                     "deployment_name": "my-gpt4o-batch",
                     "endpoint": "https://my-resource.openai.azure.com",
                     "api_key": "azure-api-key",
-                    "template": "Analyze: {{ text }}",
+                    "template": "Analyze: {{ row.text }}",
                 }
             )
 
@@ -116,7 +116,7 @@ class TestAzureBatchConfig:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "Analyze: {{ text }}",
+                "template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -124,7 +124,7 @@ class TestAzureBatchConfig:
         assert config.deployment_name == "my-gpt4o-batch"
         assert config.endpoint == "https://my-resource.openai.azure.com"
         assert config.api_key == "azure-api-key"
-        assert config.template == "Analyze: {{ text }}"
+        assert config.template == "Analyze: {{ row.text }}"
 
     def test_default_values(self) -> None:
         """Config has sensible defaults."""
@@ -133,7 +133,7 @@ class TestAzureBatchConfig:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -154,7 +154,7 @@ class TestAzureBatchConfig:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "api_version": "2024-06-01",
                 "temperature": 0.7,
@@ -184,7 +184,7 @@ class TestAzureBatchConfig:
                 "deployment_name": "test",
                 "endpoint": "https://test.azure.com",
                 "api_key": "key",
-                "template": "{{ x }}",
+                "template": "{{ row.x }}",
                 "schema": DYNAMIC_SCHEMA,
                 "temperature": 0.0,
             }
@@ -197,7 +197,7 @@ class TestAzureBatchConfig:
                 "deployment_name": "test",
                 "endpoint": "https://test.azure.com",
                 "api_key": "key",
-                "template": "{{ x }}",
+                "template": "{{ row.x }}",
                 "schema": DYNAMIC_SCHEMA,
                 "temperature": 2.0,
             }
@@ -211,7 +211,7 @@ class TestAzureBatchConfig:
                     "deployment_name": "test",
                     "endpoint": "https://test.azure.com",
                     "api_key": "key",
-                    "template": "{{ x }}",
+                    "template": "{{ row.x }}",
                     "schema": DYNAMIC_SCHEMA,
                     "temperature": -0.1,
                 }
@@ -224,7 +224,7 @@ class TestAzureBatchConfig:
                     "deployment_name": "test",
                     "endpoint": "https://test.azure.com",
                     "api_key": "key",
-                    "template": "{{ x }}",
+                    "template": "{{ row.x }}",
                     "schema": DYNAMIC_SCHEMA,
                     "temperature": 2.1,
                 }
@@ -241,7 +241,7 @@ class TestAzureBatchLLMTransformInit:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -255,7 +255,7 @@ class TestAzureBatchLLMTransformInit:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -269,7 +269,7 @@ class TestAzureBatchLLMTransformInit:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -283,7 +283,7 @@ class TestAzureBatchLLMTransformInit:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com/",  # trailing slash
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "api_version": "2024-06-01",
                 "temperature": 0.5,
@@ -313,7 +313,7 @@ class TestAzureBatchLLMTransformInit:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "api_version": "2024-06-01",
             }
@@ -332,7 +332,7 @@ class TestAzureBatchLLMTransformInit:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -345,13 +345,11 @@ class TestAzureBatchLLMTransformEmptyBatch:
 
     @pytest.fixture
     def ctx(self) -> PluginContext:
-        """Create plugin context with checkpoint support."""
-        ctx = PluginContext(run_id="test-run", config={})
-        ctx._checkpoint = {}  # type: ignore[attr-defined]
-        ctx.get_checkpoint = lambda: ctx._checkpoint or None  # type: ignore[attr-defined]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[attr-defined]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[attr-defined]
-        return ctx
+        """Create plugin context for testing.
+
+        PluginContext now has native checkpoint support.
+        """
+        return PluginContext(run_id="test-run", config={})
 
     @pytest.fixture
     def transform(self) -> AzureBatchLLMTransform:
@@ -361,14 +359,12 @@ class TestAzureBatchLLMTransformEmptyBatch:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
 
-    def test_empty_batch_returns_success_with_metadata(
-        self, ctx: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_empty_batch_returns_success_with_metadata(self, ctx: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Empty batch returns success with batch_empty metadata."""
         result = transform.process([], ctx)
 
@@ -378,50 +374,17 @@ class TestAzureBatchLLMTransformEmptyBatch:
         assert result.row["row_count"] == 0
 
 
-class TestAzureBatchLLMTransformCheckpointRequired:
-    """Tests for checkpoint API requirement."""
-
-    @pytest.fixture
-    def transform(self) -> AzureBatchLLMTransform:
-        """Create a basic transform."""
-        return AzureBatchLLMTransform(
-            {
-                "deployment_name": "my-gpt4o-batch",
-                "endpoint": "https://my-resource.openai.azure.com",
-                "api_key": "azure-api-key",
-                "template": "{{ text }}",
-                "schema": DYNAMIC_SCHEMA,
-            }
-        )
-
-    def test_raises_without_checkpoint_api(
-        self, transform: AzureBatchLLMTransform
-    ) -> None:
-        """Processing fails with RuntimeError when checkpoint API is missing."""
-        # Context without checkpoint methods
-        ctx = PluginContext(run_id="test-run", config={})
-
-        rows = [{"text": "hello"}]
-
-        with pytest.raises(RuntimeError) as exc_info:
-            transform.process(rows, ctx)
-
-        assert "checkpoint API" in str(exc_info.value)
-        assert "get_checkpoint" in str(exc_info.value)
-
-
 class TestAzureBatchLLMTransformSubmit:
     """Tests for batch submission (Phase 1)."""
 
     @pytest.fixture
     def ctx(self) -> PluginContext:
-        """Create plugin context with checkpoint support."""
-        ctx = PluginContext(run_id="test-run", config={})
-        ctx._checkpoint = {}  # type: ignore[attr-defined]
-        ctx.get_checkpoint = lambda: ctx._checkpoint or None  # type: ignore[attr-defined]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[attr-defined]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[attr-defined]
-        return ctx
+        """Create plugin context for testing.
+
+        PluginContext now has native checkpoint support via
+        get_checkpoint/update_checkpoint/clear_checkpoint methods.
+        """
+        return PluginContext(run_id="test-run", config={})
 
     @pytest.fixture
     def transform(self) -> AzureBatchLLMTransform:
@@ -431,14 +394,12 @@ class TestAzureBatchLLMTransformSubmit:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "Analyze: {{ text }}",
+                "template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
 
-    def test_fresh_batch_submits_and_raises_pending(
-        self, ctx: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_fresh_batch_submits_and_raises_pending(self, ctx: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Fresh batch submits to Azure and raises BatchPendingError."""
         # Mock Azure client
         mock_client = Mock()
@@ -462,9 +423,7 @@ class TestAzureBatchLLMTransformSubmit:
         assert error.status == "submitted"
         assert error.check_after_seconds == 300
 
-    def test_checkpoint_saved_after_submit(
-        self, ctx: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_checkpoint_saved_after_submit(self, ctx: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Checkpoint is saved immediately after batch submission."""
         mock_client = Mock()
         mock_file = Mock()
@@ -497,7 +456,7 @@ class TestAzureBatchLLMTransformSubmit:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "system_prompt": "You are helpful.",
             }
@@ -538,7 +497,7 @@ class TestAzureBatchLLMTransformSubmit:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "max_tokens": 100,
             }
@@ -574,13 +533,11 @@ class TestAzureBatchLLMTransformTemplateErrors:
 
     @pytest.fixture
     def ctx(self) -> PluginContext:
-        """Create plugin context with checkpoint support."""
-        ctx = PluginContext(run_id="test-run", config={})
-        ctx._checkpoint = {}  # type: ignore[attr-defined]
-        ctx.get_checkpoint = lambda: ctx._checkpoint or None  # type: ignore[attr-defined]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[attr-defined]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[attr-defined]
-        return ctx
+        """Create plugin context for testing.
+
+        PluginContext now has native checkpoint support.
+        """
+        return PluginContext(run_id="test-run", config={})
 
     def test_all_templates_fail_returns_error(self, ctx: PluginContext) -> None:
         """When all templates fail, return error immediately."""
@@ -589,7 +546,7 @@ class TestAzureBatchLLMTransformTemplateErrors:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ required_field }}",  # Requires specific field
+                "template": "{{ row.required_field }}",  # Requires specific field
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -611,7 +568,7 @@ class TestAzureBatchLLMTransformTemplateErrors:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -648,23 +605,22 @@ class TestAzureBatchLLMTransformResume:
 
     @pytest.fixture
     def ctx_with_checkpoint(self) -> PluginContext:
-        """Create plugin context with existing checkpoint."""
+        """Create plugin context with existing checkpoint for resume tests."""
         from datetime import UTC, datetime
 
         ctx = PluginContext(run_id="test-run", config={})
-        # Use a recent timestamp to avoid timeout
+        # Pre-populate checkpoint for resume scenario (recent timestamp to avoid timeout)
         recent_timestamp = datetime.now(UTC).isoformat()
-        ctx._checkpoint = {  # type: ignore[attr-defined]
-            "batch_id": "batch-456",
-            "input_file_id": "file-123",
-            "row_mapping": {"row-0-abc12345": 0},
-            "template_errors": [],
-            "submitted_at": recent_timestamp,
-            "row_count": 1,
-        }
-        ctx.get_checkpoint = lambda: ctx._checkpoint if ctx._checkpoint else None  # type: ignore[attr-defined]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[attr-defined]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[attr-defined]
+        ctx._checkpoint.update(
+            {
+                "batch_id": "batch-456",
+                "input_file_id": "file-123",
+                "row_mapping": {"row-0-abc12345": 0},
+                "template_errors": [],
+                "submitted_at": recent_timestamp,
+                "row_count": 1,
+            }
+        )
         return ctx
 
     @pytest.fixture
@@ -675,14 +631,12 @@ class TestAzureBatchLLMTransformResume:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
 
-    def test_resume_with_checkpoint_checks_status(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_resume_with_checkpoint_checks_status(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Resume with checkpoint checks batch status."""
         mock_client = Mock()
         mock_batch = Mock()
@@ -701,9 +655,7 @@ class TestAzureBatchLLMTransformResume:
         assert error.batch_id == "batch-456"
         assert error.status == "in_progress"
 
-    def test_completed_batch_downloads_results(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_completed_batch_downloads_results(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Completed batch downloads and returns results."""
         mock_client = Mock()
         mock_batch = Mock()
@@ -739,9 +691,7 @@ class TestAzureBatchLLMTransformResume:
         assert result.rows[0]["llm_response"] == "Analysis result"
         assert result.rows[0]["llm_response_usage"]["prompt_tokens"] == 10
 
-    def test_failed_batch_returns_error(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_failed_batch_returns_error(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Failed batch returns TransformResult.error()."""
         mock_client = Mock()
         mock_batch = Mock()
@@ -762,9 +712,7 @@ class TestAzureBatchLLMTransformResume:
         assert result.reason["reason"] == "batch_failed"
         assert result.reason["batch_id"] == "batch-456"
 
-    def test_cancelled_batch_returns_error(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_cancelled_batch_returns_error(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Cancelled batch returns TransformResult.error()."""
         mock_client = Mock()
         mock_batch = Mock()
@@ -782,9 +730,7 @@ class TestAzureBatchLLMTransformResume:
         assert result.reason is not None
         assert result.reason["reason"] == "batch_cancelled"
 
-    def test_expired_batch_returns_error(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_expired_batch_returns_error(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Expired batch returns TransformResult.error()."""
         mock_client = Mock()
         mock_batch = Mock()
@@ -802,9 +748,7 @@ class TestAzureBatchLLMTransformResume:
         assert result.reason is not None
         assert result.reason["reason"] == "batch_expired"
 
-    def test_checkpoint_cleared_on_completion(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_checkpoint_cleared_on_completion(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Checkpoint is cleared after successful completion."""
         mock_client = Mock()
         mock_batch = Mock()
@@ -848,29 +792,26 @@ class TestAzureBatchLLMTransformTimeout:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "max_wait_hours": 1,  # Short timeout for testing
             }
         )
 
-    def test_batch_timeout_returns_error(
-        self, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_batch_timeout_returns_error(self, transform: AzureBatchLLMTransform) -> None:
         """Batch exceeding max_wait_hours returns error."""
         ctx = PluginContext(run_id="test-run", config={})
-        # Checkpoint from 2 hours ago
-        ctx._checkpoint = {  # type: ignore[attr-defined]
-            "batch_id": "batch-456",
-            "input_file_id": "file-123",
-            "row_mapping": {},
-            "template_errors": [],
-            "submitted_at": "2020-01-01T10:00:00+00:00",  # Old timestamp
-            "row_count": 1,
-        }
-        ctx.get_checkpoint = lambda: ctx._checkpoint  # type: ignore[attr-defined]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[attr-defined]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[attr-defined]
+        # Pre-populate checkpoint from old timestamp for timeout test
+        ctx._checkpoint.update(
+            {
+                "batch_id": "batch-456",
+                "input_file_id": "file-123",
+                "row_mapping": {},
+                "template_errors": [],
+                "submitted_at": "2020-01-01T10:00:00+00:00",  # Old timestamp
+                "row_count": 1,
+            }
+        )
 
         mock_client = Mock()
         mock_batch = Mock()
@@ -895,13 +836,11 @@ class TestAzureBatchLLMTransformSingleRow:
 
     @pytest.fixture
     def ctx(self) -> PluginContext:
-        """Create plugin context with checkpoint support."""
-        ctx = PluginContext(run_id="test-run", config={})
-        ctx._checkpoint = {}  # type: ignore[attr-defined]
-        ctx.get_checkpoint = lambda: ctx._checkpoint or None  # type: ignore[attr-defined]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[attr-defined]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[attr-defined]
-        return ctx
+        """Create plugin context for testing.
+
+        PluginContext now has native checkpoint support.
+        """
+        return PluginContext(run_id="test-run", config={})
 
     @pytest.fixture
     def transform(self) -> AzureBatchLLMTransform:
@@ -911,14 +850,12 @@ class TestAzureBatchLLMTransformSingleRow:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
 
-    def test_single_row_input_raises_pending(
-        self, ctx: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_single_row_input_raises_pending(self, ctx: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Single row input is processed through batch API."""
         mock_client = Mock()
         mock_file = Mock()
@@ -951,34 +888,32 @@ class TestAzureBatchLLMTransformResultAssembly:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
 
-    def test_results_assembled_in_original_order(
-        self, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_results_assembled_in_original_order(self, transform: AzureBatchLLMTransform) -> None:
         """Results are assembled in original row order."""
         from datetime import UTC, datetime
 
         ctx = PluginContext(run_id="test-run", config={})
+        # Pre-populate checkpoint for resume test
         recent_timestamp = datetime.now(UTC).isoformat()
-        ctx._checkpoint = {  # type: ignore[attr-defined]
-            "batch_id": "batch-456",
-            "input_file_id": "file-123",
-            "row_mapping": {
-                "row-0-aaa": 0,
-                "row-1-bbb": 1,
-                "row-2-ccc": 2,
-            },
-            "template_errors": [],
-            "submitted_at": recent_timestamp,
-            "row_count": 3,
-        }
-        ctx.get_checkpoint = lambda: ctx._checkpoint  # type: ignore[attr-defined]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[attr-defined]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[attr-defined]
+        ctx._checkpoint.update(
+            {
+                "batch_id": "batch-456",
+                "input_file_id": "file-123",
+                "row_mapping": {
+                    "row-0-aaa": 0,
+                    "row-1-bbb": 1,
+                    "row-2-ccc": 2,
+                },
+                "template_errors": [],
+                "submitted_at": recent_timestamp,
+                "row_count": 3,
+            }
+        )
 
         mock_client = Mock()
         mock_batch = Mock()
@@ -1046,18 +981,18 @@ class TestAzureBatchLLMTransformResultAssembly:
         from datetime import UTC, datetime
 
         ctx = PluginContext(run_id="test-run", config={})
+        # Pre-populate checkpoint for resume test
         recent_timestamp = datetime.now(UTC).isoformat()
-        ctx._checkpoint = {  # type: ignore[attr-defined]
-            "batch_id": "batch-456",
-            "input_file_id": "file-123",
-            "row_mapping": {"row-0-aaa": 0, "row-1-bbb": 1},
-            "template_errors": [],
-            "submitted_at": recent_timestamp,
-            "row_count": 2,
-        }
-        ctx.get_checkpoint = lambda: ctx._checkpoint  # type: ignore[attr-defined]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[attr-defined]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[attr-defined]
+        ctx._checkpoint.update(
+            {
+                "batch_id": "batch-456",
+                "input_file_id": "file-123",
+                "row_mapping": {"row-0-aaa": 0, "row-1-bbb": 1},
+                "template_errors": [],
+                "submitted_at": recent_timestamp,
+                "row_count": 2,
+            }
+        )
 
         mock_client = Mock()
         mock_batch = Mock()
@@ -1113,7 +1048,7 @@ class TestAzureBatchLLMTransformClose:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -1132,7 +1067,7 @@ class TestAzureBatchLLMTransformClose:
                 "deployment_name": "my-gpt4o-batch",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )

@@ -101,18 +101,14 @@ class RecoveryManager:
             return ResumeCheck(can_resume=False, reason=f"Run {run_id} not found")
 
         if run.status == RunStatus.COMPLETED:
-            return ResumeCheck(
-                can_resume=False, reason="Run already completed successfully"
-            )
+            return ResumeCheck(can_resume=False, reason="Run already completed successfully")
 
         if run.status == RunStatus.RUNNING:
             return ResumeCheck(can_resume=False, reason="Run is still in progress")
 
         checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
         if checkpoint is None:
-            return ResumeCheck(
-                can_resume=False, reason="No checkpoint found for recovery"
-            )
+            return ResumeCheck(can_resume=False, reason="No checkpoint found for recovery")
 
         return ResumeCheck(can_resume=True)
 
@@ -184,9 +180,7 @@ class RecoveryManager:
             for row_id in row_ids:
                 # Get row metadata
                 row_result = conn.execute(
-                    select(rows_table.c.row_index, rows_table.c.source_data_ref).where(
-                        rows_table.c.row_id == row_id
-                    )
+                    select(rows_table.c.row_index, rows_table.c.source_data_ref).where(rows_table.c.row_id == row_id)
                 ).fetchone()
 
                 if row_result is None:
@@ -196,18 +190,14 @@ class RecoveryManager:
                 source_data_ref = row_result.source_data_ref
 
                 if source_data_ref is None:
-                    raise ValueError(
-                        f"Row {row_id} has no source_data_ref - cannot resume without payload"
-                    )
+                    raise ValueError(f"Row {row_id} has no source_data_ref - cannot resume without payload")
 
                 # Retrieve from payload store
                 try:
                     payload_bytes = payload_store.retrieve(source_data_ref)
                     row_data = json.loads(payload_bytes.decode("utf-8"))
                 except KeyError:
-                    raise ValueError(
-                        f"Row {row_id} payload has been purged - cannot resume"
-                    ) from None
+                    raise ValueError(f"Row {row_id} payload has been purged - cannot resume") from None
 
                 result.append((row_id, row_index, row_data))
 
@@ -247,9 +237,7 @@ class RecoveryManager:
                 )
                 .where(tokens_table.c.token_id == checkpoint.token_id)
             )
-            checkpointed_row_result = conn.execute(
-                checkpointed_row_index_query
-            ).fetchone()
+            checkpointed_row_result = conn.execute(checkpointed_row_index_query).fetchone()
 
             if checkpointed_row_result is None:
                 raise RuntimeError(
@@ -279,8 +267,6 @@ class RecoveryManager:
             Row result with run data, or None if not found
         """
         with self._db.engine.connect() as conn:
-            result = conn.execute(
-                select(runs_table).where(runs_table.c.run_id == run_id)
-            ).fetchone()
+            result = conn.execute(select(runs_table).where(runs_table.c.run_id == run_id)).fetchone()
 
         return result

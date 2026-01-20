@@ -11,11 +11,12 @@ class ElspethBuiltinSinks:
     @hookimpl
     def elspeth_get_sinks(self) -> list[type[Any]]:
         """Return built-in sink plugin classes."""
+        from elspeth.plugins.azure.blob_sink import AzureBlobSink
         from elspeth.plugins.sinks.csv_sink import CSVSink
         from elspeth.plugins.sinks.database_sink import DatabaseSink
         from elspeth.plugins.sinks.json_sink import JSONSink
 
-        return [CSVSink, JSONSink, DatabaseSink]
+        return [CSVSink, JSONSink, DatabaseSink, AzureBlobSink]
 
 
 # Singleton instance for registration

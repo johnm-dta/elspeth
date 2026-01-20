@@ -27,21 +27,22 @@ class TestNodeModel:
     """Node table model."""
 
     def test_create_node(self) -> None:
+        from elspeth.contracts import Determinism, NodeType
         from elspeth.core.landscape.models import Node
 
         node = Node(
             node_id="node-001",
             run_id="run-001",
             plugin_name="csv",
-            node_type="source",
+            node_type=NodeType.SOURCE,
             plugin_version="1.0.0",
-            determinism="deterministic",
+            determinism=Determinism.DETERMINISTIC,
             config_hash="def456",
             config_json="{}",
             registered_at=datetime.now(UTC),
         )
-        assert node.node_type == "source"
-        assert node.determinism == "deterministic"
+        assert node.node_type == NodeType.SOURCE
+        assert node.determinism == Determinism.DETERMINISTIC
 
 
 class TestRowModel:

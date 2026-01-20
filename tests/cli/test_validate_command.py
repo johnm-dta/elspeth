@@ -104,16 +104,11 @@ class TestValidateCommand:
         assert result.exit_code != 0
         assert "datasource" in result.output.lower()
 
-    def test_validate_invalid_output_sink(
-        self, invalid_output_sink_config: Path
-    ) -> None:
+    def test_validate_invalid_output_sink(self, invalid_output_sink_config: Path) -> None:
         """Invalid output_sink reference shows error."""
         result = runner.invoke(app, ["validate", "-s", str(invalid_output_sink_config)])
         assert result.exit_code != 0
-        assert (
-            "nonexistent" in result.output.lower()
-            or "output_sink" in result.output.lower()
-        )
+        assert "nonexistent" in result.output.lower() or "output_sink" in result.output.lower()
 
 
 class TestValidateCommandGraphValidation:

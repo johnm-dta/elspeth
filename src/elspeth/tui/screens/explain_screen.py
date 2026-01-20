@@ -124,9 +124,7 @@ class ExplainScreen:
         """Current screen state for pattern matching."""
         return self._state
 
-    def _load_pipeline_structure(
-        self, db: LandscapeDB, run_id: str
-    ) -> LoadedState | LoadingFailedState:
+    def _load_pipeline_structure(self, db: LandscapeDB, run_id: str) -> LoadedState | LoadingFailedState:
         """Load pipeline structure from database.
 
         Args:
@@ -153,13 +151,8 @@ class ExplainScreen:
                 }
                 if source_nodes
                 else {"name": "unknown", "node_id": None},
-                "transforms": [
-                    {"name": n.plugin_name, "node_id": n.node_id}
-                    for n in transform_nodes
-                ],
-                "sinks": [
-                    {"name": n.plugin_name, "node_id": n.node_id} for n in sink_nodes
-                ],
+                "transforms": [{"name": n.plugin_name, "node_id": n.node_id} for n in transform_nodes],
+                "sinks": [{"name": n.plugin_name, "node_id": n.node_id} for n in sink_nodes],
                 "tokens": [],  # Tokens loaded separately when needed
             }
             tree = LineageTree(lineage_data)
@@ -232,9 +225,7 @@ class ExplainScreen:
         else:
             self._detail_panel.update_state(None)
 
-    def _load_node_state(
-        self, db: LandscapeDB, run_id: str, node_id: str
-    ) -> NodeStateInfo | None:
+    def _load_node_state(self, db: LandscapeDB, run_id: str, node_id: str) -> NodeStateInfo | None:
         """Load node state from database.
 
         Returns node information with required fields always populated.

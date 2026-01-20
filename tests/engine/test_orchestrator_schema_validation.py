@@ -72,9 +72,7 @@ class _TestSinkBase:
     plugin_version = "1.0"
     input_schema: type[PluginSchema] | None = None
 
-    def write_batch(
-        self, batch: list[dict[str, Any]], ctx: PluginContext, step: int
-    ) -> None:
+    def write_batch(self, batch: list[dict[str, Any]], ctx: PluginContext, step: int) -> None:
         pass
 
     def flush(self) -> None:
@@ -106,9 +104,7 @@ class TestOrchestratorSchemaValidation:
 
     def test_schema_validation_called_on_run(self) -> None:
         """Orchestrator should call validate_pipeline_schemas."""
-        with patch(
-            "elspeth.engine.orchestrator.validate_pipeline_schemas"
-        ) as mock_validate:
+        with patch("elspeth.engine.orchestrator.validate_pipeline_schemas") as mock_validate:
             mock_validate.return_value = []  # No errors
 
             # Create minimal mocks
@@ -145,12 +141,8 @@ class TestOrchestratorSchemaValidation:
 
     def test_schema_validation_errors_raise(self) -> None:
         """Schema validation errors should raise before processing."""
-        with patch(
-            "elspeth.engine.orchestrator.validate_pipeline_schemas"
-        ) as mock_validate:
-            mock_validate.return_value = [
-                "Source output missing fields required by transform[0]: {'missing_field'}"
-            ]
+        with patch("elspeth.engine.orchestrator.validate_pipeline_schemas") as mock_validate:
+            mock_validate.return_value = ["Source output missing fields required by transform[0]: {'missing_field'}"]
 
             db = MagicMock(spec=LandscapeDB)
             orchestrator = Orchestrator(db)
@@ -178,9 +170,7 @@ class TestOrchestratorSchemaValidation:
 
     def test_schema_validation_skipped_when_no_schemas(self) -> None:
         """Schema validation should pass when no schemas are defined."""
-        with patch(
-            "elspeth.engine.orchestrator.validate_pipeline_schemas"
-        ) as mock_validate:
+        with patch("elspeth.engine.orchestrator.validate_pipeline_schemas") as mock_validate:
             mock_validate.return_value = []  # No errors
 
             db = MagicMock(spec=LandscapeDB)

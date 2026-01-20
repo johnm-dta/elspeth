@@ -211,9 +211,7 @@ class TestFieldMapper:
         with pytest.raises(ValidationError):
             transform.process({"count": "not_an_int"}, ctx)
 
-    def test_validate_input_disabled_passes_wrong_type(
-        self, ctx: PluginContext
-    ) -> None:
+    def test_validate_input_disabled_passes_wrong_type(self, ctx: PluginContext) -> None:
         """validate_input=False (default) passes wrong types through.
 
         When validation is disabled, the transform doesn't check types.
@@ -232,11 +230,10 @@ class TestFieldMapper:
         # String passes through without validation
         result = transform.process({"count": "not_an_int"}, ctx)
         assert result.status == "success"
+        assert result.row is not None
         assert result.row["count"] == "not_an_int"
 
-    def test_validate_input_skipped_for_dynamic_schema(
-        self, ctx: PluginContext
-    ) -> None:
+    def test_validate_input_skipped_for_dynamic_schema(self, ctx: PluginContext) -> None:
         """validate_input=True with dynamic schema skips validation.
 
         Dynamic schemas accept anything, so validation is a no-op.

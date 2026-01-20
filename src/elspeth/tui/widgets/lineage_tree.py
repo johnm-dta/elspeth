@@ -129,9 +129,7 @@ class LineageTree:
         self._flatten_tree(self._root, 0, nodes)
         return nodes
 
-    def _flatten_tree(
-        self, node: TreeNode, depth: int, result: list[dict[str, Any]]
-    ) -> None:
+    def _flatten_tree(self, node: TreeNode, depth: int, result: list[dict[str, Any]]) -> None:
         """Recursively flatten tree to list.
 
         Args:

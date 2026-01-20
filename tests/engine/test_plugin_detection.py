@@ -53,9 +53,7 @@ class TestPluginTypeDetection:
 
             name = "duck"
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
         duck = DuckTypedTransform()

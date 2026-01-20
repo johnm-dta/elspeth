@@ -8,56 +8,24 @@ because the processor uses isinstance() for type-safe plugin detection.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
+from elspeth.contracts import Determinism, RoutingMode, SourceRow
 from elspeth.plugins.base import BaseGate, BaseTransform
+from tests.conftest import (
+    _TestSchema,
+    _TestSinkBase,
+    _TestSourceBase,
+    as_sink,
+    as_source,
+)
 
 if TYPE_CHECKING:
     from elspeth.contracts.results import TransformResult
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
-
-
-# ============================================================================
-# Test Fixture Base Classes
-# ============================================================================
-# These provide the required protocol attributes so inline test classes
-# don't need to repeat them.
-
-
-class _TestSchema(PluginSchema):
-    """Minimal schema for test fixtures."""
-
-    pass
-
-
-class _TestSourceBase:
-    """Base class providing SourceProtocol required attributes.
-
-    Note: output_schema is NOT provided here because child classes override it
-    with their own schemas, and mypy's type invariance would flag that as a conflict.
-    Each test class must provide its own output_schema.
-    """
-
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-
-class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes."""
-
-    input_schema = _TestSchema  # Required by protocol
-    idempotent = True
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0"
-
-    def flush(self) -> None:
-        pass
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
@@ -139,9 +107,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
             if target == "continue":
                 continue  # Not a sink route - no edge to create
             if target in sink_ids:
-                graph.add_edge(
-                    gate_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE
-                )
+                graph.add_edge(gate_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE)
 
         prev = gate_id
 
@@ -163,9 +129,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
         output_sink = ""
 
     if output_sink:
-        graph.add_edge(
-            prev, sink_ids[output_sink], label="continue", mode=RoutingMode.MOVE
-        )
+        graph.add_edge(prev, sink_ids[output_sink], label="continue", mode=RoutingMode.MOVE)
 
     # Populate internal ID maps
     graph._sink_id_map = sink_ids
@@ -219,9 +183,7 @@ def _build_fork_test_graph(
 
     # Add edge from last transform to default sink
     if "default" in sink_ids:
-        graph.add_edge(
-            prev, sink_ids["default"], label="continue", mode=RoutingMode.MOVE
-        )
+        graph.add_edge(prev, sink_ids["default"], label="continue", mode=RoutingMode.MOVE)
 
     # Populate internal maps
     graph._sink_id_map = sink_ids
@@ -237,11 +199,7 @@ def _build_fork_test_graph(
             route_resolution_map[(gate_id, path_name)] = "fork"
             # Add edge for each fork path (needed for edge_map lookup)
             # Fork paths go to the NEXT transform (or sink if last)
-            next_node = (
-                f"transform_{i+1}"
-                if i + 1 < len(config.transforms)
-                else sink_ids["default"]
-            )
+            next_node = f"transform_{i + 1}" if i + 1 < len(config.transforms) else sink_ids["default"]
             graph.add_edge(gate_id, next_node, label=path_name, mode=RoutingMode.COPY)
 
     graph._route_resolution_map = route_resolution_map
@@ -315,9 +273,7 @@ class TestOrchestrator:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -327,9 +283,9 @@ class TestOrchestrator:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -383,9 +339,7 @@ class TestOrchestrator:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -402,9 +356,9 @@ class TestOrchestrator:
         high_sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink, "high": high_sink},
+            sinks={"default": as_sink(default_sink), "high": as_sink(high_sink)},
             gates=[threshold_gate],
         )
 
@@ -475,9 +429,7 @@ class TestOrchestratorAuditTrail:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -487,9 +439,9 @@ class TestOrchestratorAuditTrail:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -571,9 +523,7 @@ class TestOrchestratorErrorHandling:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -583,9 +533,9 @@ class TestOrchestratorErrorHandling:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -602,10 +552,7 @@ class TestOrchestratorErrorHandling:
         assert len(runs) == 1, "Expected exactly one run in Landscape"
 
         failed_run = runs[0]
-        assert failed_run.status == RunStatus.FAILED, (
-            f"Landscape audit trail must record status=FAILED, "
-            f"got status={failed_run.status!r}"
-        )
+        assert failed_run.status == RunStatus.FAILED, f"Landscape audit trail must record status=FAILED, got status={failed_run.status!r}"
 
 
 class TestOrchestratorMultipleTransforms:
@@ -677,9 +624,7 @@ class TestOrchestratorMultipleTransforms:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -690,9 +635,9 @@ class TestOrchestratorMultipleTransforms:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform1, transform2],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -750,9 +695,7 @@ class TestOrchestratorEmptyPipeline:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -761,9 +704,9 @@ class TestOrchestratorEmptyPipeline:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -825,9 +768,7 @@ class TestOrchestratorEmptyPipeline:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -837,9 +778,9 @@ class TestOrchestratorEmptyPipeline:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -901,9 +842,7 @@ class TestOrchestratorInvalidRouting:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -922,9 +861,9 @@ class TestOrchestratorInvalidRouting:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": sink},  # Note: "nonexistent_sink" is NOT here
+            sinks={"default": as_sink(sink)},  # Note: "nonexistent_sink" is NOT here
             gates=[misrouting_gate],
         )
 
@@ -1045,17 +984,15 @@ class TestOrchestratorAcceptsGraph:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
 
         config = PipelineConfig(
-            source=DummySource(),
+            source=as_source(DummySource()),
             transforms=[],
-            sinks={"default": DummySink()},
+            sinks={"default": as_sink(DummySink())},
         )
 
         orchestrator = Orchestrator(db)
@@ -1100,30 +1037,20 @@ class TestOrchestratorOutputSinkRouting:
         mock_source.name = "csv"
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
-        mock_source.load.return_value = iter(
-            [SourceRow.valid({"id": 1, "value": "test"})]
-        )
+        mock_source.load.return_value = iter([SourceRow.valid({"id": 1, "value": "test"})])
 
         # Mock sinks - track what gets written
         mock_results_sink = MagicMock()
         mock_results_sink.name = "csv"
         mock_results_sink.determinism = Determinism.IO_WRITE
         mock_results_sink.plugin_version = "1.0.0"
-        mock_results_sink.write = MagicMock(
-            return_value=ArtifactDescriptor.for_file(
-                path="memory", size_bytes=0, content_hash="abc123"
-            )
-        )
+        mock_results_sink.write = MagicMock(return_value=ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123"))
 
         mock_errors_sink = MagicMock()
         mock_errors_sink.name = "csv"
         mock_errors_sink.determinism = Determinism.IO_WRITE
         mock_errors_sink.plugin_version = "1.0.0"
-        mock_errors_sink.write = MagicMock(
-            return_value=ArtifactDescriptor.for_file(
-                path="memory", size_bytes=0, content_hash="abc123"
-            )
-        )
+        mock_errors_sink.write = MagicMock(return_value=ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123"))
 
         pipeline_config = PipelineConfig(
             source=mock_source,
@@ -1140,12 +1067,8 @@ class TestOrchestratorOutputSinkRouting:
         # Row should go to "results" sink, not "default"
         assert result.rows_processed == 1
         assert result.rows_succeeded == 1
-        assert (
-            mock_results_sink.write.called
-        ), "results sink should receive completed rows"
-        assert (
-            not mock_errors_sink.write.called
-        ), "errors sink should not receive completed rows"
+        assert mock_results_sink.write.called, "results sink should receive completed rows"
+        assert not mock_errors_sink.write.called, "errors sink should not receive completed rows"
 
 
 class TestOrchestratorGateRouting:
@@ -1181,17 +1104,13 @@ class TestOrchestratorGateRouting:
         mock_results.name = "csv"
         mock_results.determinism = Determinism.IO_WRITE
         mock_results.plugin_version = "1.0.0"
-        mock_results.write.return_value = ArtifactDescriptor.for_file(
-            path="memory", size_bytes=0, content_hash="abc123"
-        )
+        mock_results.write.return_value = ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
         mock_flagged = MagicMock()
         mock_flagged.name = "csv"
         mock_flagged.determinism = Determinism.IO_WRITE
         mock_flagged.plugin_version = "1.0.0"
-        mock_flagged.write.return_value = ArtifactDescriptor.for_file(
-            path="memory", size_bytes=0, content_hash="abc123"
-        )
+        mock_flagged.write.return_value = ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
         pipeline_config = PipelineConfig(
             source=mock_source,
@@ -1201,17 +1120,13 @@ class TestOrchestratorGateRouting:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            pipeline_config, graph=_build_test_graph(pipeline_config)
-        )
+        result = orchestrator.run(pipeline_config, graph=_build_test_graph(pipeline_config))
 
         # Row should be routed, not completed
         assert result.rows_processed == 1
         assert result.rows_routed == 1
         assert mock_flagged.write.called, "flagged sink should receive routed row"
-        assert (
-            not mock_results.write.called
-        ), "results sink should not receive routed row"
+        assert not mock_results.write.called, "results sink should not receive routed row"
 
 
 class TestLifecycleHooks:
@@ -1232,7 +1147,7 @@ class TestLifecycleHooks:
         from elspeth.contracts import PluginSchema, SourceRow
 
         class TestSchema(PluginSchema):
-            model_config = {"extra": "allow"}  # noqa: RUF012
+            model_config: ClassVar[dict[str, Any]] = {"extra": "allow"}
 
         class TrackedTransform(BaseTransform):
             name = "tracked"
@@ -1263,9 +1178,7 @@ class TestLifecycleHooks:
         mock_sink.name = "csv"
         mock_sink.determinism = Determinism.IO_WRITE
         mock_sink.plugin_version = "1.0.0"
-        mock_sink.write.return_value = ArtifactDescriptor.for_file(
-            path="memory", size_bytes=0, content_hash="abc123"
-        )
+        mock_sink.write.return_value = ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
         config = PipelineConfig(
             source=mock_source,
@@ -1305,7 +1218,7 @@ class TestLifecycleHooks:
         call_order: list[str] = []
 
         class TestSchema(PluginSchema):
-            model_config = {"extra": "allow"}  # noqa: RUF012
+            model_config: ClassVar[dict[str, Any]] = {"extra": "allow"}
 
         class TrackedTransform(BaseTransform):
             name = "tracked"
@@ -1332,18 +1245,14 @@ class TestLifecycleHooks:
         mock_source.name = "csv"
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
-        mock_source.load.return_value = iter(
-            [SourceRow.valid({"id": 1}), SourceRow.valid({"id": 2})]
-        )
+        mock_source.load.return_value = iter([SourceRow.valid({"id": 1}), SourceRow.valid({"id": 2})])
 
         transform = TrackedTransform()
         mock_sink = MagicMock()
         mock_sink.name = "csv"
         mock_sink.determinism = Determinism.IO_WRITE
         mock_sink.plugin_version = "1.0.0"
-        mock_sink.write.return_value = ArtifactDescriptor.for_file(
-            path="memory", size_bytes=0, content_hash="abc123"
-        )
+        mock_sink.write.return_value = ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
         config = PipelineConfig(
             source=mock_source,
@@ -1365,9 +1274,7 @@ class TestLifecycleHooks:
         orchestrator.run(config, graph=graph)
 
         # on_complete should be called last (among transform lifecycle calls)
-        transform_calls = [
-            c for c in call_order if c in ["on_start", "process", "on_complete"]
-        ]
+        transform_calls = [c for c in call_order if c in ["on_start", "process", "on_complete"]]
         assert transform_calls[-1] == "on_complete"
         # All processing should happen before on_complete
         assert call_order.count("process") == 2
@@ -1386,7 +1293,7 @@ class TestLifecycleHooks:
         completed: list[bool] = []
 
         class TestSchema(PluginSchema):
-            model_config = {"extra": "allow"}  # noqa: RUF012
+            model_config: ClassVar[dict[str, Any]] = {"extra": "allow"}
 
         class FailingTransform(BaseTransform):
             name = "failing"
@@ -1503,9 +1410,7 @@ class TestOrchestratorLandscapeExport:
                     self.captured_rows.extend(row)
                 else:
                     self.captured_rows.append(row)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def flush(self) -> None:
                 pass
@@ -1541,11 +1446,11 @@ class TestOrchestratorLandscapeExport:
         source = ListSource([{"value": 42}])
 
         pipeline = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={
-                "output": output_sink,
-                "audit_export": export_sink,
+                "output": as_sink(output_sink),
+                "audit_export": as_sink(export_sink),
             },
         )
 
@@ -1622,9 +1527,7 @@ class TestOrchestratorLandscapeExport:
                     self.captured_rows.extend(row)
                 else:
                     self.captured_rows.append(row)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def flush(self) -> None:
                 pass
@@ -1657,11 +1560,11 @@ class TestOrchestratorLandscapeExport:
         source = ListSource([{"value": 42}])
 
         pipeline = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={
-                "output": output_sink,
-                "audit_export": export_sink,
+                "output": as_sink(output_sink),
+                "audit_export": as_sink(export_sink),
             },
         )
 
@@ -1735,9 +1638,7 @@ class TestOrchestratorLandscapeExport:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.captured_rows.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def flush(self) -> None:
                 pass
@@ -1770,11 +1671,11 @@ class TestOrchestratorLandscapeExport:
         source = ListSource([{"value": 42}])
 
         pipeline = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={
-                "output": output_sink,
-                "audit_export": export_sink,
+                "output": as_sink(output_sink),
+                "audit_export": as_sink(export_sink),
             },
         )
 
@@ -1782,9 +1683,7 @@ class TestOrchestratorLandscapeExport:
         orchestrator = Orchestrator(db)
 
         # Ensure ELSPETH_SIGNING_KEY is not set
-        env_without_key = {
-            k: v for k, v in os.environ.items() if k != "ELSPETH_SIGNING_KEY"
-        }
+        env_without_key = {k: v for k, v in os.environ.items() if k != "ELSPETH_SIGNING_KEY"}
         with (
             patch.dict(os.environ, env_without_key, clear=True),
             pytest.raises(ValueError, match="ELSPETH_SIGNING_KEY"),
@@ -1839,9 +1738,7 @@ class TestOrchestratorLandscapeExport:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.captured_rows.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def flush(self) -> None:
                 pass
@@ -1870,11 +1767,11 @@ class TestOrchestratorLandscapeExport:
         source = ListSource([{"value": 42}])
 
         pipeline = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={
-                "output": output_sink,
-                "audit": audit_sink,
+                "output": as_sink(output_sink),
+                "audit": as_sink(audit_sink),
             },
         )
 
@@ -1929,14 +1826,12 @@ class TestSourceLifecycleHooks:
         mock_sink.name = "csv"
         mock_sink.determinism = Determinism.IO_WRITE
         mock_sink.plugin_version = "1.0.0"
-        mock_sink.write.return_value = ArtifactDescriptor.for_file(
-            path="memory", size_bytes=0, content_hash="abc123"
-        )
+        mock_sink.write.return_value = ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"output": mock_sink},
+            sinks={"output": as_sink(mock_sink)},
         )
 
         # Minimal graph
@@ -1953,17 +1848,11 @@ class TestSourceLifecycleHooks:
 
         # on_start should be called BEFORE load
         assert "source_on_start" in call_order, "Source on_start should be called"
-        assert call_order.index("source_on_start") < call_order.index(
-            "source_load"
-        ), "Source on_start should be called before load"
+        assert call_order.index("source_on_start") < call_order.index("source_load"), "Source on_start should be called before load"
         # on_complete should be called AFTER load and BEFORE close
         assert "source_on_complete" in call_order, "Source on_complete should be called"
-        assert call_order.index("source_on_complete") > call_order.index(
-            "source_load"
-        ), "Source on_complete should be called after load"
-        assert call_order.index("source_on_complete") < call_order.index(
-            "source_close"
-        ), "Source on_complete should be called before close"
+        assert call_order.index("source_on_complete") > call_order.index("source_load"), "Source on_complete should be called after load"
+        assert call_order.index("source_on_complete") < call_order.index("source_close"), "Source on_complete should be called before close"
 
 
 class TestSinkLifecycleHooks:
@@ -1993,9 +1882,7 @@ class TestSinkLifecycleHooks:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 call_order.append("sink_write")
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash="abc123"
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
             def close(self) -> None:
                 call_order.append("sink_close")
@@ -2030,14 +1917,10 @@ class TestSinkLifecycleHooks:
 
         # on_start should be called before write
         assert "sink_on_start" in call_order, "Sink on_start should be called"
-        assert call_order.index("sink_on_start") < call_order.index(
-            "sink_write"
-        ), "Sink on_start should be called before write"
+        assert call_order.index("sink_on_start") < call_order.index("sink_write"), "Sink on_start should be called before write"
         # on_complete should be called after write, before close
         assert "sink_on_complete" in call_order, "Sink on_complete should be called"
-        assert call_order.index("sink_on_complete") > call_order.index(
-            "sink_write"
-        ), "Sink on_complete should be called after write"
+        assert call_order.index("sink_on_complete") > call_order.index("sink_write"), "Sink on_complete should be called after write"
 
     def test_sink_on_complete_called_even_on_error(self) -> None:
         """Sink on_complete should be called even when run fails."""
@@ -2054,7 +1937,7 @@ class TestSinkLifecycleHooks:
         completed: list[str] = []
 
         class TestSchema(PluginSchema):
-            model_config = {"extra": "allow"}  # noqa: RUF012
+            model_config: ClassVar[dict[str, Any]] = {"extra": "allow"}
 
         class FailingTransform(BaseTransform):
             name = "failing"
@@ -2084,9 +1967,7 @@ class TestSinkLifecycleHooks:
                 completed.append("sink_on_complete")
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash="abc123"
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
             def close(self) -> None:
                 pass
@@ -2217,9 +2098,7 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -2229,9 +2108,9 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -2262,9 +2141,7 @@ class TestOrchestratorCheckpointing:
         db = LandscapeDB.in_memory()
         checkpoint_mgr = CheckpointManager(db)
         # Checkpoint every 3 rows
-        settings = CheckpointSettings(
-            enabled=True, frequency="every_n", checkpoint_interval=3
-        )
+        settings = CheckpointSettings(enabled=True, frequency="every_n", checkpoint_interval=3)
 
         class ValueSchema(PluginSchema):
             value: int
@@ -2311,9 +2188,7 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -2324,9 +2199,9 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -2398,9 +2273,7 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -2410,9 +2283,9 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -2502,9 +2375,7 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash="good123"
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="good123")
 
             def close(self) -> None:
                 pass
@@ -2539,9 +2410,9 @@ class TestOrchestratorCheckpointing:
         bad_sink = BadSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"good": good_sink, "bad": bad_sink},
+            sinks={"good": as_sink(good_sink), "bad": as_sink(bad_sink)},
             gates=[gate_config],
         )
 
@@ -2562,15 +2433,9 @@ class TestOrchestratorCheckpointing:
         graph.add_node("sink_bad", node_type="sink", plugin_name="bad_sink")
 
         graph.add_edge("source", "transform_0", label="continue", mode=RoutingMode.MOVE)
-        graph.add_edge(
-            "transform_0", "config_gate_split", label="continue", mode=RoutingMode.MOVE
-        )
-        graph.add_edge(
-            "config_gate_split", "sink_good", label="true", mode=RoutingMode.MOVE
-        )
-        graph.add_edge(
-            "config_gate_split", "sink_bad", label="false", mode=RoutingMode.MOVE
-        )
+        graph.add_edge("transform_0", "config_gate_split", label="continue", mode=RoutingMode.MOVE)
+        graph.add_edge("config_gate_split", "sink_good", label="true", mode=RoutingMode.MOVE)
+        graph.add_edge("config_gate_split", "sink_bad", label="false", mode=RoutingMode.MOVE)
 
         graph._sink_id_map = {"good": "sink_good", "bad": "sink_bad"}
         graph._transform_id_map = {0: "transform_0"}
@@ -2613,8 +2478,7 @@ class TestOrchestratorCheckpointing:
         if len(good_sink.results) > 0:
             # Good sink wrote - should have checkpoints for those rows
             assert len(remaining_checkpoints) == len(good_sink.results), (
-                f"Expected {len(good_sink.results)} checkpoints for written rows, "
-                f"got {len(remaining_checkpoints)}"
+                f"Expected {len(good_sink.results)} checkpoints for written rows, got {len(remaining_checkpoints)}"
             )
         # If good sink didn't write (bad sink failed first), that's also valid behavior
 
@@ -2677,9 +2541,7 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -2689,9 +2551,9 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -2764,9 +2626,7 @@ class TestOrchestratorCheckpointing:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -2776,9 +2636,9 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         # No checkpoint_manager passed - should work without checkpointing
@@ -2852,9 +2712,7 @@ class TestOrchestratorConfigRecording:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -2871,9 +2729,9 @@ class TestOrchestratorConfigRecording:
         }
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
             config=resolved_config,  # Pass the resolved config
         )
 
@@ -2936,9 +2794,7 @@ class TestOrchestratorConfigRecording:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -2948,9 +2804,9 @@ class TestOrchestratorConfigRecording:
 
         # No config passed - should default to empty dict
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
             # config not passed - defaults to {}
         )
 
@@ -3039,9 +2895,7 @@ class TestNodeMetadataFromPlugin:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -3051,17 +2905,15 @@ class TestNodeMetadataFromPlugin:
         sink = VersionedSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         # Build graph
         graph = ExecutionGraph()
         graph.add_node("source", node_type="source", plugin_name="versioned_source")
-        graph.add_node(
-            "transform", node_type="transform", plugin_name="versioned_transform"
-        )
+        graph.add_node("transform", node_type="transform", plugin_name="versioned_transform")
         graph.add_node("sink", node_type="sink", plugin_name="versioned_sink")
         graph.add_edge("source", "transform", label="continue", mode=RoutingMode.MOVE)
         graph.add_edge("transform", "sink", label="continue", mode=RoutingMode.MOVE)
@@ -3082,21 +2934,17 @@ class TestNodeMetadataFromPlugin:
 
         # Verify source has correct version
         source_node = nodes_by_name["versioned_source"]
-        assert (
-            source_node.plugin_version == "3.7.2"
-        ), f"Source plugin_version should be '3.7.2', got '{source_node.plugin_version}'"
+        assert source_node.plugin_version == "3.7.2", f"Source plugin_version should be '3.7.2', got '{source_node.plugin_version}'"
 
         # Verify transform has correct version
         transform_node = nodes_by_name["versioned_transform"]
-        assert (
-            transform_node.plugin_version == "2.5.0"
-        ), f"Transform plugin_version should be '2.5.0', got '{transform_node.plugin_version}'"
+        assert transform_node.plugin_version == "2.5.0", (
+            f"Transform plugin_version should be '2.5.0', got '{transform_node.plugin_version}'"
+        )
 
         # Verify sink has correct version
         sink_node = nodes_by_name["versioned_sink"]
-        assert (
-            sink_node.plugin_version == "4.1.0"
-        ), f"Sink plugin_version should be '4.1.0', got '{sink_node.plugin_version}'"
+        assert sink_node.plugin_version == "4.1.0", f"Sink plugin_version should be '4.1.0', got '{sink_node.plugin_version}'"
 
     def test_node_metadata_records_determinism(self) -> None:
         """Node registration should record plugin determinism.
@@ -3162,9 +3010,7 @@ class TestNodeMetadataFromPlugin:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -3174,17 +3020,15 @@ class TestNodeMetadataFromPlugin:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         # Build graph
         graph = ExecutionGraph()
         graph.add_node("source", node_type="source", plugin_name="test_source")
-        graph.add_node(
-            "transform", node_type="transform", plugin_name="nondeterministic_transform"
-        )
+        graph.add_node("transform", node_type="transform", plugin_name="nondeterministic_transform")
         graph.add_node("sink", node_type="sink", plugin_name="test_sink")
         graph.add_edge("source", "transform", label="continue", mode=RoutingMode.MOVE)
         graph.add_edge("transform", "sink", label="continue", mode=RoutingMode.MOVE)
@@ -3200,14 +3044,12 @@ class TestNodeMetadataFromPlugin:
         nodes = recorder.get_nodes(run_result.run_id)
 
         # Find the transform node
-        transform_node = next(
-            n for n in nodes if n.plugin_name == "nondeterministic_transform"
-        )
+        transform_node = next(n for n in nodes if n.plugin_name == "nondeterministic_transform")
 
         # Verify determinism is recorded correctly
-        assert (
-            transform_node.determinism == "external_call"
-        ), f"Transform determinism should be 'nondeterministic', got '{transform_node.determinism}'"
+        assert transform_node.determinism == "external_call", (
+            f"Transform determinism should be 'nondeterministic', got '{transform_node.determinism}'"
+        )
 
 
 class TestRouteValidation:
@@ -3269,9 +3111,7 @@ class TestRouteValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -3281,9 +3121,12 @@ class TestRouteValidation:
         quarantine_sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink, "quarantine": quarantine_sink},
+            sinks={
+                "default": as_sink(default_sink),
+                "quarantine": as_sink(quarantine_sink),
+            },
             gates=[routing_gate],
         )
 
@@ -3352,9 +3195,7 @@ class TestRouteValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -3364,9 +3205,9 @@ class TestRouteValidation:
         # Note: NO quarantine sink provided!
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink},  # Only default, no quarantine
+            sinks={"default": as_sink(default_sink)},  # Only default, no quarantine
             gates=[safety_gate],
         )
 
@@ -3383,9 +3224,7 @@ class TestRouteValidation:
         assert "default" in error_msg  # Available sinks
 
         # Verify no rows were processed
-        assert (
-            not source.load_called
-        ), "Source should not be loaded on validation failure"
+        assert not source.load_called, "Source should not be loaded on validation failure"
         assert len(default_sink.results) == 0, "No rows should be written on failure"
 
     def test_error_message_includes_route_label(self) -> None:
@@ -3443,9 +3282,7 @@ class TestRouteValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -3454,9 +3291,9 @@ class TestRouteValidation:
         default_sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink, "errors": CollectSink()},
+            sinks={"default": as_sink(default_sink), "errors": as_sink(CollectSink())},
             gates=[threshold_gate],
         )
 
@@ -3528,9 +3365,7 @@ class TestRouteValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -3539,9 +3374,9 @@ class TestRouteValidation:
         default_sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink},
+            sinks={"default": as_sink(default_sink)},
             gates=[filter_gate],
         )
 
@@ -3639,9 +3474,9 @@ class TestOrchestratorForkExecution:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         graph = _build_test_graph(config)
@@ -3713,9 +3548,7 @@ class TestOrchestratorQuarantineMetrics:
 
             def process(self, row: Any, ctx: Any) -> TransformResult:
                 if row.get("quality") == "bad":
-                    return TransformResult.error(
-                        {"reason": "bad_quality", "value": row["value"]}
-                    )
+                    return TransformResult.error({"reason": "bad_quality", "value": row["value"]})
                 return TransformResult.success(row)
 
         class CollectSink(_TestSinkBase):
@@ -3732,9 +3565,7 @@ class TestOrchestratorQuarantineMetrics:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -3751,9 +3582,9 @@ class TestOrchestratorQuarantineMetrics:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -3763,9 +3594,7 @@ class TestOrchestratorQuarantineMetrics:
         assert run_result.status == "completed"
         assert run_result.rows_processed == 3, "All 3 rows should be processed"
         assert run_result.rows_succeeded == 2, "2 good quality rows should succeed"
-        assert (
-            run_result.rows_quarantined == 1
-        ), "1 bad quality row should be quarantined"
+        assert run_result.rows_quarantined == 1, "1 bad quality row should be quarantined"
         assert run_result.rows_failed == 0, "No rows should fail (quarantine != fail)"
 
         # Only good rows written to sink
@@ -3844,9 +3673,7 @@ class TestOrchestratorRetry:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -3868,9 +3695,9 @@ class TestOrchestratorRetry:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         # Use _build_test_graph to create graph matching PipelineConfig
@@ -3884,9 +3711,7 @@ class TestOrchestratorRetry:
         assert result.rows_processed == 1
         assert result.rows_succeeded == 1
         # Transform was called twice (first attempt failed, second succeeded)
-        assert (
-            attempt_count["count"] == 2
-        ), f"Expected 2 attempts (1 failure + 1 success), got {attempt_count['count']}"
+        assert attempt_count["count"] == 2, f"Expected 2 attempts (1 failure + 1 success), got {attempt_count['count']}"
         assert len(sink.results) == 1
 
     def test_orchestrator_retry_exhausted_marks_row_failed(self) -> None:
@@ -3950,9 +3775,7 @@ class TestOrchestratorRetry:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -3973,9 +3796,9 @@ class TestOrchestratorRetry:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         # Use _build_test_graph to create graph matching PipelineConfig
@@ -4099,9 +3922,7 @@ class TestCoalesceWiring:
 
         mock_source = MagicMock()
         mock_source.name = "csv"
-        mock_source.load.return_value = iter(
-            [MagicMock(is_quarantined=False, row={"value": 1})]
-        )
+        mock_source.load.return_value = iter([MagicMock(is_quarantined=False, row={"value": 1})])
         mock_source.plugin_version = "1.0.0"
         mock_source.determinism = "deterministic"
         mock_source.output_schema = _TestSchema
@@ -4111,9 +3932,7 @@ class TestCoalesceWiring:
         mock_sink.plugin_version = "1.0.0"
         mock_sink.determinism = "deterministic"
         mock_sink.input_schema = _TestSchema
-        mock_sink.write.return_value = ArtifactDescriptor.for_file(
-            path="memory", size_bytes=0, content_hash="abc123"
-        )
+        mock_sink.write.return_value = ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
         # Settings with coalesce (needed to enable coalesce path in orchestrator)
         settings = ElspethSettings(
@@ -4168,9 +3987,7 @@ class TestCoalesceWiring:
         ):
             mock_processor = MagicMock()
             mock_processor.process_row.return_value = [coalesced_result]
-            mock_processor.token_manager.create_initial_token.return_value = MagicMock(
-                row_id="row_1", token_id="t1", row_data={"value": 1}
-            )
+            mock_processor.token_manager.create_initial_token.return_value = MagicMock(row_id="row_1", token_id="t1", row_data={"value": 1})
             mock_processor_cls.return_value = mock_processor
 
             # Mock SinkExecutor to avoid foreign key constraint errors
@@ -4251,9 +4068,7 @@ class TestCoalesceWiring:
         orchestrator = Orchestrator(db=db)
         graph = ExecutionGraph.from_config(settings)
 
-        with patch(
-            "elspeth.engine.coalesce_executor.CoalesceExecutor"
-        ) as mock_executor_cls:
+        with patch("elspeth.engine.coalesce_executor.CoalesceExecutor") as mock_executor_cls:
             mock_executor = MagicMock()
             mock_executor.flush_pending.return_value = []
             mock_executor_cls.return_value = mock_executor
@@ -4316,9 +4131,7 @@ class TestCoalesceWiring:
         mock_sink.plugin_version = "1.0.0"
         mock_sink.determinism = "deterministic"
         mock_sink.input_schema = _TestSchema
-        mock_sink.write.return_value = ArtifactDescriptor.for_file(
-            path="memory", size_bytes=0, content_hash="abc123"
-        )
+        mock_sink.write.return_value = ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
         config = PipelineConfig(
             source=mock_source,
@@ -4340,9 +4153,7 @@ class TestCoalesceWiring:
         )
 
         with (
-            patch(
-                "elspeth.engine.coalesce_executor.CoalesceExecutor"
-            ) as mock_executor_cls,
+            patch("elspeth.engine.coalesce_executor.CoalesceExecutor") as mock_executor_cls,
             patch("elspeth.engine.executors.SinkExecutor") as mock_sink_executor_cls,
         ):
             mock_executor = MagicMock()
@@ -4437,9 +4248,7 @@ class TestCoalesceWiring:
         orchestrator = Orchestrator(db=db)
         graph = ExecutionGraph.from_config(settings)
 
-        with patch(
-            "elspeth.engine.coalesce_executor.CoalesceExecutor"
-        ) as mock_executor_cls:
+        with patch("elspeth.engine.coalesce_executor.CoalesceExecutor") as mock_executor_cls:
             mock_executor = MagicMock()
             # flush_pending returns a failure outcome (incomplete branches)
             mock_executor.flush_pending.return_value = [

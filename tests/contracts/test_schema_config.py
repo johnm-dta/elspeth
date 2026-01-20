@@ -104,6 +104,7 @@ class TestSchemaConfig:
         )
         assert config.is_dynamic is False
         assert config.mode == "strict"
+        assert config.fields is not None  # strict mode always has fields
         assert len(config.fields) == 2
         assert config.fields[0].name == "id"
         assert config.fields[1].name == "name"
@@ -120,6 +121,7 @@ class TestSchemaConfig:
         )
         assert config.is_dynamic is False
         assert config.mode == "free"
+        assert config.fields is not None  # free mode with explicit fields
         assert len(config.fields) == 3
         assert config.fields[2].required is False
 

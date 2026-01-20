@@ -95,17 +95,13 @@ class SourceContractTestBase(ABC):
     # load() Method Contracts
     # =========================================================================
 
-    def test_load_returns_iterator(
-        self, source: SourceProtocol, ctx: PluginContext
-    ) -> None:
+    def test_load_returns_iterator(self, source: SourceProtocol, ctx: PluginContext) -> None:
         """Contract: load() MUST return an iterator."""
         result = source.load(ctx)
         assert hasattr(result, "__iter__")
         assert hasattr(result, "__next__")
 
-    def test_load_yields_source_rows(
-        self, source: SourceProtocol, ctx: PluginContext
-    ) -> None:
+    def test_load_yields_source_rows(self, source: SourceProtocol, ctx: PluginContext) -> None:
         """Contract: load() MUST yield SourceRow objects, not raw dicts."""
         for row in source.load(ctx):
             assert isinstance(row, SourceRow), (
@@ -113,51 +109,34 @@ class SourceContractTestBase(ABC):
                 "Sources must wrap rows with SourceRow.valid() or SourceRow.quarantined()."
             )
 
-    def test_valid_rows_have_data(
-        self, source: SourceProtocol, ctx: PluginContext
-    ) -> None:
+    def test_valid_rows_have_data(self, source: SourceProtocol, ctx: PluginContext) -> None:
         """Contract: Valid SourceRows MUST have non-None data dict."""
         for row in source.load(ctx):
             if not row.is_quarantined:
                 assert row.row is not None, "Valid SourceRow has None data"
-                assert isinstance(
-                    row.row, dict
-                ), f"Valid SourceRow.row is {type(row.row).__name__}, expected dict"
+                assert isinstance(row.row, dict), f"Valid SourceRow.row is {type(row.row).__name__}, expected dict"
 
-    def test_quarantined_rows_have_error(
-        self, source: SourceProtocol, ctx: PluginContext
-    ) -> None:
+    def test_quarantined_rows_have_error(self, source: SourceProtocol, ctx: PluginContext) -> None:
         """Contract: Quarantined SourceRows MUST have error message."""
         for row in source.load(ctx):
             if row.is_quarantined:
-                assert (
-                    row.quarantine_error is not None
-                ), "Quarantined SourceRow has None error"
-                assert isinstance(
-                    row.quarantine_error, str
-                ), f"quarantine_error is {type(row.quarantine_error).__name__}, expected str"
+                assert row.quarantine_error is not None, "Quarantined SourceRow has None error"
+                assert isinstance(row.quarantine_error, str), f"quarantine_error is {type(row.quarantine_error).__name__}, expected str"
 
-    def test_quarantined_rows_have_destination(
-        self, source: SourceProtocol, ctx: PluginContext
-    ) -> None:
+    def test_quarantined_rows_have_destination(self, source: SourceProtocol, ctx: PluginContext) -> None:
         """Contract: Quarantined SourceRows MUST have destination."""
         for row in source.load(ctx):
             if row.is_quarantined:
-                assert (
-                    row.quarantine_destination is not None
-                ), "Quarantined SourceRow has None destination"
+                assert row.quarantine_destination is not None, "Quarantined SourceRow has None destination"
                 assert isinstance(row.quarantine_destination, str), (
-                    f"quarantine_destination is {type(row.quarantine_destination).__name__}, "
-                    "expected str"
+                    f"quarantine_destination is {type(row.quarantine_destination).__name__}, expected str"
                 )
 
     # =========================================================================
     # Lifecycle Contracts
     # =========================================================================
 
-    def test_close_is_idempotent(
-        self, source: SourceProtocol, ctx: PluginContext
-    ) -> None:
+    def test_close_is_idempotent(self, source: SourceProtocol, ctx: PluginContext) -> None:
         """Contract: close() MUST be safe to call multiple times."""
         # Exhaust the iterator
         list(source.load(ctx))
@@ -169,18 +148,14 @@ class SourceContractTestBase(ABC):
         source.close()
         source.close()
 
-    def test_on_start_does_not_raise(
-        self, source: SourceProtocol, ctx: PluginContext
-    ) -> None:
+    def test_on_start_does_not_raise(self, source: SourceProtocol, ctx: PluginContext) -> None:
         """Contract: on_start() lifecycle hook MUST not raise."""
         # on_start is optional, so check if it exists
         if hasattr(source, "on_start"):
             # Should not raise
             source.on_start(ctx)
 
-    def test_on_complete_does_not_raise(
-        self, source: SourceProtocol, ctx: PluginContext
-    ) -> None:
+    def test_on_complete_does_not_raise(self, source: SourceProtocol, ctx: PluginContext) -> None:
         """Contract: on_complete() lifecycle hook MUST not raise."""
         # on_complete is optional, so check if it exists
         if hasattr(source, "on_complete"):
@@ -201,9 +176,7 @@ class SourceContractPropertyTestBase(SourceContractTestBase):
     Adds property tests that verify contracts hold for multiple loads.
     """
 
-    def test_multiple_loads_yield_consistent_count(
-        self, source: SourceProtocol, ctx: PluginContext
-    ) -> None:
+    def test_multiple_loads_yield_consistent_count(self, source: SourceProtocol, ctx: PluginContext) -> None:
         """Property: Multiple loads should yield same row count (determinism check).
 
         Note: This only applies to DETERMINISTIC sources. Non-deterministic
@@ -212,13 +185,9 @@ class SourceContractPropertyTestBase(SourceContractTestBase):
         if source.determinism == Determinism.DETERMINISTIC:
             count1 = sum(1 for _ in source.load(ctx))
             count2 = sum(1 for _ in source.load(ctx))
-            assert (
-                count1 == count2
-            ), f"Deterministic source returned different counts: {count1} vs {count2}"
+            assert count1 == count2, f"Deterministic source returned different counts: {count1} vs {count2}"
 
-    def test_load_exhaust_does_not_raise(
-        self, source: SourceProtocol, ctx: PluginContext
-    ) -> None:
+    def test_load_exhaust_does_not_raise(self, source: SourceProtocol, ctx: PluginContext) -> None:
         """Property: Fully exhausting load() iterator should not raise."""
         # This catches iterator issues like premature StopIteration
         rows = list(source.load(ctx))

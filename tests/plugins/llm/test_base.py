@@ -7,13 +7,53 @@ import pytest
 from pydantic import ValidationError
 
 from elspeth.contracts import Determinism
-from elspeth.plugins.clients.llm import LLMClientError, LLMResponse, RateLimitError
+from elspeth.plugins.clients.llm import (
+    AuditedLLMClient,
+    LLMClientError,
+    LLMResponse,
+    RateLimitError,
+)
 from elspeth.plugins.config_base import PluginConfigError
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.base import BaseLLMTransform, LLMConfig
 
 # Common schema config for dynamic field handling (accepts any fields)
 DYNAMIC_SCHEMA = {"fields": "dynamic"}
+
+
+def create_test_transform_class(
+    name: str = "test_llm",
+    mock_client: Mock | None = None,
+) -> type[BaseLLMTransform]:
+    """Create a concrete test subclass of BaseLLMTransform.
+
+    Args:
+        name: The transform name
+        mock_client: Optional mock client to return from _get_llm_client.
+                    If None, creates a new Mock on each call.
+
+    Returns:
+        A concrete subclass of BaseLLMTransform for testing
+    """
+    # Capture parameters in closure variables with different names
+    # (class scope can't directly access outer function parameters by same name)
+    _name = name
+    _mock_client = mock_client
+
+    class TestLLMTransform(BaseLLMTransform):
+        name = _name  # type: ignore[assignment]
+
+        def _get_llm_client(self, ctx: PluginContext) -> AuditedLLMClient:
+            # Return provided mock or create new one
+            # Store on context for test assertions
+            if _mock_client is not None:
+                ctx._test_llm_client = _mock_client  # type: ignore[attr-defined]
+                return _mock_client  # type: ignore[return-value]
+            if not hasattr(ctx, "_test_llm_client"):
+                ctx._test_llm_client = Mock(spec=AuditedLLMClient)  # type: ignore[attr-defined]
+            return ctx._test_llm_client  # type: ignore[attr-defined, return-value, no-any-return]
+
+    return TestLLMTransform
 
 
 class TestLLMConfig:
@@ -34,7 +74,7 @@ class TestLLMConfig:
         with pytest.raises(PluginConfigError):
             LLMConfig.from_dict(
                 {
-                    "template": "Analyze: {{ text }}",
+                    "template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                 }
             )  # Missing 'model'
@@ -45,7 +85,7 @@ class TestLLMConfig:
             LLMConfig.from_dict(
                 {
                     "model": "gpt-4",
-                    "template": "Analyze: {{ text }}",
+                    "template": "Analyze: {{ row.text }}",
                 }
             )  # Missing 'schema'
 
@@ -54,12 +94,12 @@ class TestLLMConfig:
         config = LLMConfig.from_dict(
             {
                 "model": "gpt-4",
-                "template": "Analyze: {{ text }}",
+                "template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
         assert config.model == "gpt-4"
-        assert config.template == "Analyze: {{ text }}"
+        assert config.template == "Analyze: {{ row.text }}"
 
     def test_invalid_template_syntax_rejected(self) -> None:
         """Invalid Jinja2 syntax rejected at config time."""
@@ -88,7 +128,7 @@ class TestLLMConfig:
         config = LLMConfig.from_dict(
             {
                 "model": "gpt-4",
-                "template": "Hello, {{ name }}!",
+                "template": "Hello, {{ row.name }}!",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -103,7 +143,7 @@ class TestLLMConfig:
         config = LLMConfig.from_dict(
             {
                 "model": "claude-3-opus",
-                "template": "Analyze: {{ text }}",
+                "template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "temperature": 0.7,
                 "max_tokens": 1000,
@@ -125,7 +165,7 @@ class TestLLMConfig:
         config = LLMConfig.from_dict(
             {
                 "model": "gpt-4",
-                "template": "{{ x }}",
+                "template": "{{ row.x }}",
                 "schema": DYNAMIC_SCHEMA,
                 "temperature": 0.0,
             }
@@ -136,7 +176,7 @@ class TestLLMConfig:
         config = LLMConfig.from_dict(
             {
                 "model": "gpt-4",
-                "template": "{{ x }}",
+                "template": "{{ row.x }}",
                 "schema": DYNAMIC_SCHEMA,
                 "temperature": 2.0,
             }
@@ -148,7 +188,7 @@ class TestLLMConfig:
             LLMConfig.from_dict(
                 {
                     "model": "gpt-4",
-                    "template": "{{ x }}",
+                    "template": "{{ row.x }}",
                     "schema": DYNAMIC_SCHEMA,
                     "temperature": -0.1,
                 }
@@ -159,7 +199,7 @@ class TestLLMConfig:
             LLMConfig.from_dict(
                 {
                     "model": "gpt-4",
-                    "template": "{{ x }}",
+                    "template": "{{ row.x }}",
                     "schema": DYNAMIC_SCHEMA,
                     "temperature": 2.1,
                 }
@@ -171,7 +211,7 @@ class TestLLMConfig:
             LLMConfig.from_dict(
                 {
                     "model": "gpt-4",
-                    "template": "{{ x }}",
+                    "template": "{{ row.x }}",
                     "schema": DYNAMIC_SCHEMA,
                     "max_tokens": 0,
                 }
@@ -181,11 +221,28 @@ class TestLLMConfig:
             LLMConfig.from_dict(
                 {
                     "model": "gpt-4",
-                    "template": "{{ x }}",
+                    "template": "{{ row.x }}",
                     "schema": DYNAMIC_SCHEMA,
                     "max_tokens": -100,
                 }
             )
+
+    def test_llm_config_accepts_lookup_fields(self) -> None:
+        """LLMConfig accepts lookup and source metadata fields."""
+        config = LLMConfig.from_dict(
+            {
+                "model": "test-model",
+                "template": "Hello, {{ row.name }}!",
+                "template_source": "prompts/test.j2",
+                "lookup": {"key": "value"},
+                "lookup_source": "prompts/lookups.yaml",
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        assert config.template_source == "prompts/test.j2"
+        assert config.lookup == {"key": "value"}
+        assert config.lookup_source == "prompts/lookups.yaml"
 
 
 class TestBaseLLMTransformInit:
@@ -201,28 +258,27 @@ class TestBaseLLMTransformInit:
         # BaseLLMTransform can be instantiated but name must be provided
         # by subclass as a class attribute
         class NoNameTransform(BaseLLMTransform):
-            pass  # Deliberately missing name
+            def _get_llm_client(self, ctx: PluginContext) -> AuditedLLMClient:
+                return Mock(spec=AuditedLLMClient)  # type: ignore[return-value]
 
         # Instantiation fails because __init__ accesses self.name for schema naming
         with pytest.raises(AttributeError):
             NoNameTransform(
                 {
                     "model": "gpt-4",
-                    "template": "{{ text }}",
+                    "template": "{{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                 }
             )
 
     def test_concrete_subclass_works(self) -> None:
-        """Concrete subclass with name property can be instantiated."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+        """Concrete subclass with name and _get_llm_client can be instantiated."""
+        TestLLMTransform = create_test_transform_class()
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "Analyze: {{ text }}",
+                "template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -233,14 +289,12 @@ class TestBaseLLMTransformInit:
 
     def test_determinism_is_non_deterministic(self) -> None:
         """LLM transforms are marked as non-deterministic."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+        TestLLMTransform = create_test_transform_class()
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -249,14 +303,12 @@ class TestBaseLLMTransformInit:
 
     def test_on_error_set_from_config(self) -> None:
         """on_error is set from config for error routing."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+        TestLLMTransform = create_test_transform_class()
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "on_error": "error_sink",
             }
@@ -266,30 +318,34 @@ class TestBaseLLMTransformInit:
 
 
 class TestBaseLLMTransformProcess:
-    """Tests for transform processing."""
+    """Tests for transform processing.
+
+    These tests use a concrete subclass that implements _get_llm_client()
+    returning a mock client. The mock is configured per-test to simulate
+    various LLM behaviors.
+    """
 
     @pytest.fixture
     def ctx(self) -> PluginContext:
         """Create minimal plugin context."""
         return PluginContext(run_id="test-run", config={})
 
-    def test_template_rendering_error_returns_transform_error(
-        self, ctx: PluginContext
-    ) -> None:
-        """Template rendering failure returns TransformResult.error()."""
+    @pytest.fixture
+    def mock_client(self) -> Mock:
+        """Create a mock LLM client."""
+        return Mock(spec=AuditedLLMClient)
 
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+    def test_template_rendering_error_returns_transform_error(self, ctx: PluginContext, mock_client: Mock) -> None:
+        """Template rendering failure returns TransformResult.error()."""
+        TestLLMTransform = create_test_transform_class(mock_client=mock_client)
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "Hello, {{ required_field }}!",
+                "template": "Hello, {{ row.required_field }}!",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
-
-        ctx.llm_client = Mock()
 
         # Missing required_field should return error
         result = transform.process({"other_field": "value"}, ctx)
@@ -299,22 +355,18 @@ class TestBaseLLMTransformProcess:
         assert result.reason["reason"] == "template_rendering_failed"
         assert "template_hash" in result.reason
 
-    def test_llm_client_error_returns_transform_error(self, ctx: PluginContext) -> None:
+    def test_llm_client_error_returns_transform_error(self, ctx: PluginContext, mock_client: Mock) -> None:
         """LLM client failure returns TransformResult.error()."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+        mock_client.chat_completion.side_effect = LLMClientError("API Error")
+        TestLLMTransform = create_test_transform_class(mock_client=mock_client)
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "Analyze: {{ text }}",
+                "template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
-
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.side_effect = LLMClientError("API Error")
 
         result = transform.process({"text": "hello"}, ctx)
 
@@ -324,23 +376,17 @@ class TestBaseLLMTransformProcess:
         assert "API Error" in result.reason["error"]
         assert result.retryable is False
 
-    def test_rate_limit_error_is_retryable(self, ctx: PluginContext) -> None:
+    def test_rate_limit_error_is_retryable(self, ctx: PluginContext, mock_client: Mock) -> None:
         """Rate limit errors marked retryable=True."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+        mock_client.chat_completion.side_effect = RateLimitError("Rate limit exceeded")
+        TestLLMTransform = create_test_transform_class(mock_client=mock_client)
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "Analyze: {{ text }}",
+                "template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
-        )
-
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.side_effect = RateLimitError(
-            "Rate limit exceeded"
         )
 
         result = transform.process({"text": "hello"}, ctx)
@@ -350,28 +396,22 @@ class TestBaseLLMTransformProcess:
         assert result.reason["reason"] == "rate_limited"
         assert result.retryable is True
 
-    def test_successful_transform_returns_enriched_row(
-        self, ctx: PluginContext
-    ) -> None:
+    def test_successful_transform_returns_enriched_row(self, ctx: PluginContext, mock_client: Mock) -> None:
         """Successful transform returns row with LLM response."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
-
-        transform = TestLLMTransform(
-            {
-                "model": "gpt-4",
-                "template": "Analyze: {{ text }}",
-                "schema": DYNAMIC_SCHEMA,
-            }
-        )
-
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.return_value = LLMResponse(
+        mock_client.chat_completion.return_value = LLMResponse(
             content="Analysis result",
             model="gpt-4",
             usage={"prompt_tokens": 10, "completion_tokens": 20},
             latency_ms=150.0,
+        )
+        TestLLMTransform = create_test_transform_class(mock_client=mock_client)
+
+        transform = TestLLMTransform(
+            {
+                "model": "gpt-4",
+                "template": "Analyze: {{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+            }
         )
 
         result = transform.process({"text": "hello"}, ctx)
@@ -388,26 +428,22 @@ class TestBaseLLMTransformProcess:
         # Original data preserved
         assert result.row["text"] == "hello"
 
-    def test_custom_response_field(self, ctx: PluginContext) -> None:
+    def test_custom_response_field(self, ctx: PluginContext, mock_client: Mock) -> None:
         """Custom response_field name is used."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+        mock_client.chat_completion.return_value = LLMResponse(
+            content="Result",
+            model="gpt-4",
+            usage={},
+        )
+        TestLLMTransform = create_test_transform_class(mock_client=mock_client)
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "Analyze: {{ text }}",
+                "template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "response_field": "analysis",
             }
-        )
-
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.return_value = LLMResponse(
-            content="Result",
-            model="gpt-4",
-            usage={},
         )
 
         result = transform.process({"text": "hello"}, ctx)
@@ -419,51 +455,28 @@ class TestBaseLLMTransformProcess:
         assert "analysis_template_hash" in result.row
         assert "analysis_variables_hash" in result.row
 
-    def test_missing_llm_client_raises_runtime_error(self, ctx: PluginContext) -> None:
-        """Missing llm_client in context raises RuntimeError."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
-
-        transform = TestLLMTransform(
-            {
-                "model": "gpt-4",
-                "template": "Analyze: {{ text }}",
-                "schema": DYNAMIC_SCHEMA,
-            }
-        )
-
-        ctx.llm_client = None
-
-        with pytest.raises(RuntimeError, match="LLM client not available"):
-            transform.process({"text": "hello"}, ctx)
-
-    def test_system_prompt_included_in_messages(self, ctx: PluginContext) -> None:
+    def test_system_prompt_included_in_messages(self, ctx: PluginContext, mock_client: Mock) -> None:
         """System prompt is included when configured."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+        mock_client.chat_completion.return_value = LLMResponse(
+            content="Response",
+            model="gpt-4",
+            usage={},
+        )
+        TestLLMTransform = create_test_transform_class(mock_client=mock_client)
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "system_prompt": "You are a helpful assistant.",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
 
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.return_value = LLMResponse(
-            content="Response",
-            model="gpt-4",
-            usage={},
-        )
-
         transform.process({"text": "hello"}, ctx)
 
         # Verify messages passed to client
-        call_args = ctx.llm_client.chat_completion.call_args
+        call_args = mock_client.chat_completion.call_args
         messages = call_args.kwargs["messages"]
         assert len(messages) == 2
         assert messages[0]["role"] == "system"
@@ -471,84 +484,68 @@ class TestBaseLLMTransformProcess:
         assert messages[1]["role"] == "user"
         assert messages[1]["content"] == "hello"
 
-    def test_no_system_prompt_single_message(self, ctx: PluginContext) -> None:
+    def test_no_system_prompt_single_message(self, ctx: PluginContext, mock_client: Mock) -> None:
         """Without system prompt, only user message is sent."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
-
-        transform = TestLLMTransform(
-            {
-                "model": "gpt-4",
-                "template": "{{ text }}",
-                "schema": DYNAMIC_SCHEMA,
-            }
-        )
-
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.return_value = LLMResponse(
+        mock_client.chat_completion.return_value = LLMResponse(
             content="Response",
             model="gpt-4",
             usage={},
         )
-
-        transform.process({"text": "hello"}, ctx)
-
-        call_args = ctx.llm_client.chat_completion.call_args
-        messages = call_args.kwargs["messages"]
-        assert len(messages) == 1
-        assert messages[0]["role"] == "user"
-
-    def test_temperature_and_max_tokens_passed_to_client(
-        self, ctx: PluginContext
-    ) -> None:
-        """Temperature and max_tokens are passed to LLM client."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+        TestLLMTransform = create_test_transform_class(mock_client=mock_client)
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        transform.process({"text": "hello"}, ctx)
+
+        call_args = mock_client.chat_completion.call_args
+        messages = call_args.kwargs["messages"]
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+
+    def test_temperature_and_max_tokens_passed_to_client(self, ctx: PluginContext, mock_client: Mock) -> None:
+        """Temperature and max_tokens are passed to LLM client."""
+        mock_client.chat_completion.return_value = LLMResponse(
+            content="Response",
+            model="gpt-4",
+            usage={},
+        )
+        TestLLMTransform = create_test_transform_class(mock_client=mock_client)
+
+        transform = TestLLMTransform(
+            {
+                "model": "gpt-4",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "temperature": 0.7,
                 "max_tokens": 500,
             }
         )
 
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.return_value = LLMResponse(
-            content="Response",
-            model="gpt-4",
-            usage={},
-        )
-
         transform.process({"text": "hello"}, ctx)
 
-        call_args = ctx.llm_client.chat_completion.call_args
+        call_args = mock_client.chat_completion.call_args
         assert call_args.kwargs["model"] == "gpt-4"
         assert call_args.kwargs["temperature"] == 0.7
         assert call_args.kwargs["max_tokens"] == 500
 
-    def test_retryable_llm_error_propagates_flag(self, ctx: PluginContext) -> None:
+    def test_retryable_llm_error_propagates_flag(self, ctx: PluginContext, mock_client: Mock) -> None:
         """LLMClientError retryable flag is propagated."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+        # Non-rate-limit but retryable error
+        mock_client.chat_completion.side_effect = LLMClientError("Server overloaded", retryable=True)
+        TestLLMTransform = create_test_transform_class(mock_client=mock_client)
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
-        )
-
-        ctx.llm_client = Mock()
-        # Non-rate-limit but retryable error
-        ctx.llm_client.chat_completion.side_effect = LLMClientError(
-            "Server overloaded", retryable=True
         )
 
         result = transform.process({"text": "hello"}, ctx)
@@ -558,14 +555,12 @@ class TestBaseLLMTransformProcess:
 
     def test_close_is_noop(self) -> None:
         """close() does nothing but doesn't raise."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+        TestLLMTransform = create_test_transform_class()
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -579,14 +574,12 @@ class TestBaseLLMTransformSchemaHandling:
 
     def test_schema_created_with_no_coercion(self) -> None:
         """Schema is created with allow_coercion=False (transform behavior)."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+        TestLLMTransform = create_test_transform_class()
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": {"mode": "strict", "fields": ["count: int"]},
             }
         )
@@ -597,14 +590,12 @@ class TestBaseLLMTransformSchemaHandling:
 
     def test_dynamic_schema_accepts_any_fields(self) -> None:
         """Dynamic schema accepts any fields."""
-
-        class TestLLMTransform(BaseLLMTransform):
-            name = "test_llm"
+        TestLLMTransform = create_test_transform_class()
 
         transform = TestLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )

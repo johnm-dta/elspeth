@@ -53,9 +53,7 @@ def _schema_hash(schema_cls: Any) -> str | None:
         )
 
     # Build deterministic representation
-    fields_repr = {
-        name: str(field.annotation) for name, field in schema_cls.model_fields.items()
-    }
+    fields_repr = {name: str(field.annotation) for name, field in schema_cls.model_fields.items()}
     return stable_hash(fields_repr)
 
 
@@ -75,9 +73,7 @@ class PluginSpec:
     output_schema_hash: str | None = None
 
     @classmethod
-    def from_plugin(
-        cls, plugin_cls: type[PluginProtocol], node_type: NodeType
-    ) -> "PluginSpec":
+    def from_plugin(cls, plugin_cls: type[PluginProtocol], node_type: NodeType) -> "PluginSpec":
         """Create spec from plugin class with schema hashes.
 
         Args:
@@ -171,40 +167,28 @@ class PluginManager:
             for cls in sources:
                 name = cls.name
                 if name in new_sources:
-                    raise ValueError(
-                        f"Duplicate source plugin name: '{name}'. "
-                        f"Already registered by {new_sources[name].__name__}"
-                    )
+                    raise ValueError(f"Duplicate source plugin name: '{name}'. Already registered by {new_sources[name].__name__}")
                 new_sources[name] = cls
 
         for transforms in self._pm.hook.elspeth_get_transforms():
             for cls in transforms:
                 name = cls.name
                 if name in new_transforms:
-                    raise ValueError(
-                        f"Duplicate transform plugin name: '{name}'. "
-                        f"Already registered by {new_transforms[name].__name__}"
-                    )
+                    raise ValueError(f"Duplicate transform plugin name: '{name}'. Already registered by {new_transforms[name].__name__}")
                 new_transforms[name] = cls
 
         for gates in self._pm.hook.elspeth_get_gates():
             for cls in gates:
                 name = cls.name
                 if name in new_gates:
-                    raise ValueError(
-                        f"Duplicate gate plugin name: '{name}'. "
-                        f"Already registered by {new_gates[name].__name__}"
-                    )
+                    raise ValueError(f"Duplicate gate plugin name: '{name}'. Already registered by {new_gates[name].__name__}")
                 new_gates[name] = cls
 
         for sinks in self._pm.hook.elspeth_get_sinks():
             for cls in sinks:
                 name = cls.name
                 if name in new_sinks:
-                    raise ValueError(
-                        f"Duplicate sink plugin name: '{name}'. "
-                        f"Already registered by {new_sinks[name].__name__}"
-                    )
+                    raise ValueError(f"Duplicate sink plugin name: '{name}'. Already registered by {new_sinks[name].__name__}")
                 new_sinks[name] = cls
 
         # All validated, update caches

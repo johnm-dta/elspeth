@@ -73,13 +73,9 @@ def find_type_definitions(file_path: Path) -> list[tuple[str, int, str]]:
         if isinstance(node, ast.ClassDef):
             # Check for @dataclass decorator
             for decorator in node.decorator_list:
-                is_dataclass_name = (
-                    isinstance(decorator, ast.Name) and decorator.id == "dataclass"
-                )
+                is_dataclass_name = isinstance(decorator, ast.Name) and decorator.id == "dataclass"
                 is_dataclass_call = (
-                    isinstance(decorator, ast.Call)
-                    and isinstance(decorator.func, ast.Name)
-                    and decorator.func.id == "dataclass"
+                    isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name) and decorator.func.id == "dataclass"
                 )
                 if is_dataclass_name or is_dataclass_call:
                     definitions.append((node.name, node.lineno, "dataclass"))
@@ -106,19 +102,16 @@ def _is_dict_str_any(annotation: ast.expr | None) -> bool:
         return False
 
     # dict[str, Any] - modern syntax
-    if isinstance(annotation, ast.Subscript):
-        if isinstance(annotation.value, ast.Name) and annotation.value.id in (
-            "dict",
-            "Dict",
-        ):
-            if (
-                isinstance(annotation.slice, ast.Tuple)
-                and len(annotation.slice.elts) == 2
-            ):
-                key_type, value_type = annotation.slice.elts
-                if isinstance(key_type, ast.Name) and key_type.id == "str":
-                    if isinstance(value_type, ast.Name) and value_type.id == "Any":
-                        return True
+    if (
+        isinstance(annotation, ast.Subscript)
+        and isinstance(annotation.value, ast.Name)
+        and annotation.value.id in ("dict", "Dict")
+        and isinstance(annotation.slice, ast.Tuple)
+        and len(annotation.slice.elts) == 2
+    ):
+        key_type, value_type = annotation.slice.elts
+        if isinstance(key_type, ast.Name) and key_type.id == "str" and isinstance(value_type, ast.Name) and value_type.id == "Any":
+            return True
     return False
 
 
@@ -127,12 +120,8 @@ def _is_list_of_dict_str_any(annotation: ast.expr | None) -> bool:
     if annotation is None:
         return False
 
-    if isinstance(annotation, ast.Subscript):
-        if isinstance(annotation.value, ast.Name) and annotation.value.id in (
-            "list",
-            "List",
-        ):
-            return _is_dict_str_any(annotation.slice)
+    if isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name) and annotation.value.id in ("list", "List"):
+        return _is_dict_str_any(annotation.slice)
     return False
 
 
@@ -144,16 +133,11 @@ def _is_optional_dict(annotation: ast.expr | None) -> bool:
     # dict[str, Any] | None
     if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
         left_is_dict = _is_dict_str_any(annotation.left)
-        right_is_none = (
-            isinstance(annotation.right, ast.Constant)
-            and annotation.right.value is None
-        )
+        right_is_none = isinstance(annotation.right, ast.Constant) and annotation.right.value is None
         if left_is_dict and right_is_none:
             return True
         # None | dict[str, Any]
-        left_is_none = (
-            isinstance(annotation.left, ast.Constant) and annotation.left.value is None
-        )
+        left_is_none = isinstance(annotation.left, ast.Constant) and annotation.left.value is None
         right_is_dict = _is_dict_str_any(annotation.right)
         if left_is_none and right_is_dict:
             return True
@@ -198,9 +182,7 @@ def find_dict_violations(file_path: Path, whitelist: set[str]) -> list[DictViola
                         violations.append(
                             DictViolation(
                                 file=relative_path,
-                                line=arg.lineno
-                                if hasattr(arg, "lineno")
-                                else node.lineno,
+                                line=arg.lineno if hasattr(arg, "lineno") else node.lineno,
                                 context=context,
                                 param_name=param_name,
                             )
@@ -212,9 +194,7 @@ def find_dict_violations(file_path: Path, whitelist: set[str]) -> list[DictViola
                         violations.append(
                             DictViolation(
                                 file=relative_path,
-                                line=arg.lineno
-                                if hasattr(arg, "lineno")
-                                else node.lineno,
+                                line=arg.lineno if hasattr(arg, "lineno") else node.lineno,
                                 context=context,
                                 param_name=f"{param_name} (list)",
                             )
@@ -263,9 +243,7 @@ def get_top_level_module(file_path: Path, src_dir: Path) -> str:
     return ""
 
 
-def is_cross_boundary_usage(
-    defining_file: Path, using_file: Path, src_dir: Path
-) -> bool:
+def is_cross_boundary_usage(defining_file: Path, using_file: Path, src_dir: Path) -> bool:
     """Check if usage crosses module boundaries.
 
     Cross-boundary means the using file is in a different top-level module
@@ -276,14 +254,10 @@ def is_cross_boundary_usage(
     return defining_module != using_module
 
 
-def find_cross_boundary_usages(
-    src_dir: Path, type_name: str, defining_file: Path
-) -> list[Path]:
+def find_cross_boundary_usages(src_dir: Path, type_name: str, defining_file: Path) -> list[Path]:
     """Find files that import a type from a DIFFERENT top-level module."""
     usages = []
-    defining_module = (
-        defining_file.relative_to(src_dir).with_suffix("").as_posix().replace("/", ".")
-    )
+    defining_module = defining_file.relative_to(src_dir).with_suffix("").as_posix().replace("/", ".")
 
     for py_file in src_dir.rglob("*.py"):
         if py_file == defining_file:
@@ -300,11 +274,7 @@ def find_cross_boundary_usages(
             continue
 
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.ImportFrom)
-                and node.module
-                and defining_module in node.module
-            ):
+            if isinstance(node, ast.ImportFrom) and node.module and defining_module in node.module:
                 for alias in node.names:
                     if alias.name == type_name:
                         usages.append(py_file)
@@ -330,9 +300,7 @@ def main() -> int:
         # Check for type definitions
         definitions = find_type_definitions(py_file)
         for type_name, line_no, kind in definitions:
-            qualified_name = (
-                f"{py_file.relative_to(src_dir).with_suffix('')}:{type_name}"
-            )
+            qualified_name = f"{py_file.relative_to(src_dir).with_suffix('')}:{type_name}"
 
             if qualified_name in whitelist["types"]:
                 continue
@@ -357,24 +325,24 @@ def main() -> int:
 
     if violations:
         has_violations = True
-        print("❌ Type definition violations found:\n")  # noqa: T201
+        print("❌ Type definition violations found:\n")
         for v in violations:
-            print(f"  {v.file}:{v.line}: {v.kind} '{v.type_name}'")  # noqa: T201
-            print(f"    Used in: {', '.join(v.used_in)}")  # noqa: T201
+            print(f"  {v.file}:{v.line}: {v.kind} '{v.type_name}'")
+            print(f"    Used in: {', '.join(v.used_in)}")
             fix_msg = "    Fix: Move to src/elspeth/contracts/ or add to .contracts-whitelist.yaml\n"
-            print(fix_msg)  # noqa: T201
+            print(fix_msg)
 
     if dict_violations:
         has_violations = True
-        print("❌ dict[str, Any] violations found:\n")  # noqa: T201
+        print("❌ dict[str, Any] violations found:\n")
         for dv in dict_violations:
-            print(f"  {dv.file}:{dv.line}: {dv.context} - {dv.param_name}")  # noqa: T201
-            print("    Fix: Use TypedDict/dataclass or add to allowed_dict_patterns\n")  # noqa: T201
+            print(f"  {dv.file}:{dv.line}: {dv.context} - {dv.param_name}")
+            print("    Fix: Use TypedDict/dataclass or add to allowed_dict_patterns\n")
 
     if has_violations:
         return 1
 
-    print("✅ All cross-boundary types are properly centralized in contracts/")  # noqa: T201
+    print("✅ All cross-boundary types are properly centralized in contracts/")
     return 0
 
 

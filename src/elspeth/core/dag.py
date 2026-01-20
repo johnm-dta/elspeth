@@ -54,12 +54,8 @@ class ExecutionGraph:
         self._coalesce_id_map: dict[str, str] = {}  # coalesce_name -> node_id
         self._branch_to_coalesce: dict[str, str] = {}  # branch_name -> coalesce_name
         self._output_sink: str = ""
-        self._route_label_map: dict[
-            tuple[str, str], str
-        ] = {}  # (gate_node, sink_name) -> route_label
-        self._route_resolution_map: dict[
-            tuple[str, str], str
-        ] = {}  # (gate_node, label) -> sink_name | "continue"
+        self._route_label_map: dict[tuple[str, str], str] = {}  # (gate_node, sink_name) -> route_label
+        self._route_resolution_map: dict[tuple[str, str], str] = {}  # (gate_node, label) -> sink_name | "continue"
 
     @property
     def node_count(self) -> int:
@@ -138,15 +134,9 @@ class ExecutionGraph:
 
         # Check for exactly one source
         # All nodes have "info" - added via add_node(), direct access is safe
-        sources = [
-            node_id
-            for node_id, data in self._graph.nodes(data=True)
-            if data["info"].node_type == "source"
-        ]
+        sources = [node_id for node_id, data in self._graph.nodes(data=True) if data["info"].node_type == "source"]
         if len(sources) != 1:
-            raise GraphValidationError(
-                f"Graph must have exactly one source, found {len(sources)}"
-            )
+            raise GraphValidationError(f"Graph must have exactly one source, found {len(sources)}")
 
         # Check for at least one sink
         sinks = self.get_sinks()
@@ -190,11 +180,7 @@ class ExecutionGraph:
             The source node ID, or None if not exactly one source exists.
         """
         # All nodes have "info" - added via add_node(), direct access is safe
-        sources = [
-            node_id
-            for node_id, data in self._graph.nodes(data=True)
-            if data["info"].node_type == "source"
-        ]
+        sources = [node_id for node_id, data in self._graph.nodes(data=True) if data["info"].node_type == "source"]
         return sources[0] if len(sources) == 1 else None
 
     def get_sinks(self) -> list[str]:
@@ -204,11 +190,7 @@ class ExecutionGraph:
             List of sink node IDs.
         """
         # All nodes have "info" - added via add_node(), direct access is safe
-        return [
-            node_id
-            for node_id, data in self._graph.nodes(data=True)
-            if data["info"].node_type == "sink"
-        ]
+        return [node_id for node_id, data in self._graph.nodes(data=True) if data["info"].node_type == "sink"]
 
     def get_node_info(self, node_id: str) -> NodeInfo:
         """Get NodeInfo for a node.
@@ -409,9 +391,7 @@ class ExecutionGraph:
                         f"Available sinks: {list(sink_ids.keys())}"
                     )
                 # Edge label = route_label
-                graph.add_edge(
-                    gid, sink_ids[target], label=route_label, mode=RoutingMode.MOVE
-                )
+                graph.add_edge(gid, sink_ids[target], label=route_label, mode=RoutingMode.MOVE)
                 # Store reverse mapping: (gate_node, sink_name) -> route_label
                 graph._route_label_map[(gid, target)] = route_label
 
@@ -466,9 +446,7 @@ class ExecutionGraph:
                         coalesce_id = coalesce_ids[coalesce_name]
                         # Remove any existing edge with this label (fallback to output_sink)
                         if graph._graph.has_edge(gate_id, output_sink_node, key=branch):
-                            graph._graph.remove_edge(
-                                gate_id, output_sink_node, key=branch
-                            )
+                            graph._graph.remove_edge(gate_id, output_sink_node, key=branch)
                         # Add edge to coalesce node
                         graph.add_edge(
                             gate_id,

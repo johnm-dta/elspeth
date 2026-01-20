@@ -11,56 +11,18 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
+from elspeth.contracts import PluginSchema, RoutingMode, SourceRow
 from elspeth.core.config import GateSettings
+from tests.conftest import (
+    _TestSinkBase,
+    _TestSourceBase,
+    as_sink,
+    as_source,
+)
 
 if TYPE_CHECKING:
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
-
-
-# ============================================================================
-# Test Fixture Base Classes
-# ============================================================================
-
-
-class _TestSchema(PluginSchema):
-    """Minimal schema for test fixtures."""
-
-    pass
-
-
-class _TestSourceBase:
-    """Base class providing SourceProtocol required attributes."""
-
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-    def on_start(self, ctx: Any) -> None:
-        pass
-
-    def on_complete(self, ctx: Any) -> None:
-        pass
-
-
-class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes."""
-
-    input_schema = _TestSchema
-    idempotent = True
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0"
-
-    def flush(self) -> None:
-        pass
-
-    def on_start(self, ctx: Any) -> None:
-        pass
-
-    def on_complete(self, ctx: Any) -> None:
-        pass
 
 
 def _build_test_graph_with_config_gates(
@@ -121,9 +83,7 @@ def _build_test_graph_with_config_gates(
         for route_label, target in gate_config.routes.items():
             route_resolution_map[(node_id, route_label)] = target
             if target not in ("continue", "fork") and target in sink_ids:
-                graph.add_edge(
-                    node_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE
-                )
+                graph.add_edge(node_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE)
 
         prev = node_id
 
@@ -178,9 +138,7 @@ class TestConfigGateIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -196,16 +154,14 @@ class TestConfigGateIntegration:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
             gates=[gate],
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 2
@@ -246,9 +202,7 @@ class TestConfigGateIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -269,16 +223,14 @@ class TestConfigGateIntegration:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink, "high": high_sink},
+            sinks={"default": as_sink(default_sink), "high": as_sink(high_sink)},
             gates=[gate],
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 3
@@ -335,9 +287,7 @@ class TestConfigGateIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -371,9 +321,9 @@ class TestConfigGateIntegration:
 
         # Build PipelineConfig with actual plugin instances
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"a_sink": a_sink, "b_sink": b_sink},
+            sinks={"a_sink": as_sink(a_sink), "b_sink": as_sink(b_sink)},
             gates=settings.gates,
         )
 
@@ -437,9 +387,7 @@ class TestConfigGateIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -476,9 +424,12 @@ class TestConfigGateIntegration:
 
         # Build PipelineConfig with actual plugin instances
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"priority_1": priority_1_sink, "priority_2": priority_2_sink},
+            sinks={
+                "priority_1": as_sink(priority_1_sink),
+                "priority_2": as_sink(priority_2_sink),
+            },
             gates=settings.gates,
         )
 
@@ -530,9 +481,7 @@ class TestConfigGateIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -547,19 +496,17 @@ class TestConfigGateIntegration:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
             gates=[gate],
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         # Query Landscape for registered nodes
-        with db._engine.connect() as conn:
+        with db.engine.connect() as conn:
             from sqlalchemy import text
 
             nodes = conn.execute(
@@ -726,9 +673,7 @@ class TestMultipleConfigGates:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -751,16 +696,18 @@ class TestMultipleConfigGates:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink, "low": low_sink, "mid": mid_sink},
+            sinks={
+                "default": as_sink(default_sink),
+                "low": as_sink(low_sink),
+                "mid": as_sink(mid_sink),
+            },
             gates=[gate1, gate2],
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         # Row passes gate1, routes to mid via gate2

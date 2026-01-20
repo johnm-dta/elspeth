@@ -4,13 +4,14 @@
 Provides the foundation for all LLM-based transforms with:
 - Typed configuration (LLMConfig extending TransformDataConfig)
 - Jinja2 prompt templating with audit metadata
-- Audited LLM client integration
+- Self-contained client creation (subclasses implement _get_llm_client)
 - Three-tier trust model error handling
 """
 
 from __future__ import annotations
 
-from typing import Any
+from abc import abstractmethod
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator
 
@@ -21,6 +22,9 @@ from elspeth.plugins.config_base import TransformDataConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
 from elspeth.plugins.schema_factory import create_schema_from_config
+
+if TYPE_CHECKING:
+    from elspeth.plugins.clients.llm import AuditedLLMClient
 
 
 class LLMConfig(TransformDataConfig):
@@ -39,16 +43,17 @@ class LLMConfig(TransformDataConfig):
     - response_field: Field name for LLM response in output
     """
 
-    model: str = Field(
-        ..., description="Model identifier (e.g., 'gpt-4', 'claude-3-opus')"
-    )
+    model: str = Field(..., description="Model identifier (e.g., 'gpt-4', 'claude-3-opus')")
     template: str = Field(..., description="Jinja2 prompt template")
     system_prompt: str | None = Field(None, description="Optional system prompt")
     temperature: float = Field(0.0, ge=0.0, le=2.0, description="Sampling temperature")
     max_tokens: int | None = Field(None, gt=0, description="Maximum tokens in response")
-    response_field: str = Field(
-        "llm_response", description="Field name for LLM response in output"
-    )
+    response_field: str = Field("llm_response", description="Field name for LLM response in output")
+
+    # New fields for file-based templates
+    lookup: dict[str, Any] | None = Field(None, description="Lookup data loaded from YAML file")
+    template_source: str | None = Field(None, description="Template file path for audit (None if inline)")
+    lookup_source: str | None = Field(None, description="Lookup file path for audit (None if no lookup)")
 
     @field_validator("template")
     @classmethod
@@ -67,21 +72,36 @@ class LLMConfig(TransformDataConfig):
 class BaseLLMTransform(BaseTransform):
     """Abstract base class for LLM transforms.
 
-    Uses audited clients for external calls - recording is automatic.
+    Provides shared functionality for all LLM transforms:
+    - Configuration parsing (LLMConfig)
+    - Template rendering with audit metadata
+    - Error handling following Three-Tier Trust Model
+    - Output row building with usage tracking
 
-    Error handling follows Three-Tier Trust Model:
-    - Template rendering with row data: wrap, return error (THEIR DATA)
-    - LLM API calls: wrap, return error (EXTERNAL SYSTEM)
-    - Internal logic: let crash (OUR CODE)
+    Subclasses MUST implement:
+    - `name`: Unique plugin identifier (class attribute)
+    - `_get_llm_client(ctx)`: Create/return an AuditedLLMClient
 
-    Subclasses must implement the `name` property to provide a unique
-    plugin identifier.
+    The `_get_llm_client()` method allows subclasses to be self-contained,
+    creating their own audited clients using `ctx.landscape` and `ctx.state_id`.
 
     Example:
         class MyLLMTransform(BaseLLMTransform):
             name = "my_llm_transform"
 
-            # Optional: override process() for custom behavior
+            def __init__(self, config: dict[str, Any]) -> None:
+                super().__init__(config)
+                self._api_key = config["api_key"]
+
+            def _get_llm_client(self, ctx: PluginContext) -> AuditedLLMClient:
+                from openai import OpenAI
+                underlying = OpenAI(api_key=self._api_key)
+                return AuditedLLMClient(
+                    recorder=ctx.landscape,
+                    state_id=ctx.state_id,
+                    underlying_client=underlying,
+                    provider="openai",
+                )
     """
 
     # LLM transforms are non-deterministic by nature
@@ -92,7 +112,12 @@ class BaseLLMTransform(BaseTransform):
 
         cfg = LLMConfig.from_dict(config)
         self._model = cfg.model
-        self._template = PromptTemplate(cfg.template)
+        self._template = PromptTemplate(
+            cfg.template,
+            template_source=cfg.template_source,
+            lookup_data=cfg.lookup,
+            lookup_source=cfg.lookup_source,
+        )
         self._system_prompt = cfg.system_prompt
         self._temperature = cfg.temperature
         self._max_tokens = cfg.max_tokens
@@ -113,17 +138,36 @@ class BaseLLMTransform(BaseTransform):
     # name must be set by subclasses - this is enforced by BaseTransform
     # Example: name = "my_llm_transform"
 
+    @abstractmethod
+    def _get_llm_client(self, ctx: PluginContext) -> AuditedLLMClient:
+        """Create or return an AuditedLLMClient for this transform.
+
+        Subclasses MUST implement this to be self-contained. The client
+        should be created using ctx.landscape and ctx.state_id for
+        automatic audit trail recording.
+
+        Args:
+            ctx: Plugin context with landscape and state_id
+
+        Returns:
+            An AuditedLLMClient configured for this transform's provider
+
+        Raises:
+            RuntimeError: If ctx.landscape or ctx.state_id is None
+        """
+        ...
+
     def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
         """Process a row through the LLM.
 
-        Error handling:
+        Error handling follows Three-Tier Trust Model:
         1. Template rendering (THEIR DATA) - catch TemplateError, return error
         2. LLM call (EXTERNAL) - catch LLMClientError, return error
         3. Internal logic (OUR CODE) - let it crash
 
         Args:
             row: Input row matching input_schema
-            ctx: Plugin context with llm_client
+            ctx: Plugin context with landscape and state_id
 
         Returns:
             TransformResult with processed row or error
@@ -131,7 +175,7 @@ class BaseLLMTransform(BaseTransform):
         # 1. Render template with row data
         # This operates on THEIR DATA - wrap in try/catch
         try:
-            rendered = self._template.render_with_metadata(**row)
+            rendered = self._template.render_with_metadata(row)
         except TemplateError as e:
             return TransformResult.error(
                 {
@@ -147,14 +191,13 @@ class BaseLLMTransform(BaseTransform):
             messages.append({"role": "system", "content": self._system_prompt})
         messages.append({"role": "user", "content": rendered.prompt})
 
-        # 3. Call LLM via audited client
-        # This is an EXTERNAL SYSTEM - wrap in try/catch
-        if ctx.llm_client is None:
-            # This is OUR BUG - executor should have provided client
-            raise RuntimeError("LLM client not available in PluginContext")
+        # 3. Get LLM client from subclass (self-contained pattern)
+        llm_client = self._get_llm_client(ctx)
 
+        # 4. Call LLM via audited client
+        # This is an EXTERNAL SYSTEM - wrap in try/catch
         try:
-            response = ctx.llm_client.chat_completion(
+            response = llm_client.chat_completion(
                 model=self._model,
                 messages=messages,
                 temperature=self._temperature,
@@ -173,14 +216,17 @@ class BaseLLMTransform(BaseTransform):
                 retryable=e.retryable,
             )
 
-        # 4. Build output row (OUR CODE - let exceptions crash)
+        # 5. Build output row (OUR CODE - let exceptions crash)
         output = dict(row)
         output[self._response_field] = response.content
         output[f"{self._response_field}_usage"] = response.usage
 
-        # 5. Add audit metadata for template traceability
+        # 6. Add audit metadata for template traceability
         output[f"{self._response_field}_template_hash"] = rendered.template_hash
         output[f"{self._response_field}_variables_hash"] = rendered.variables_hash
+        output[f"{self._response_field}_template_source"] = rendered.template_source
+        output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
+        output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
 
         return TransformResult.success(output)
 

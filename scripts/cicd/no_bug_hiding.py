@@ -20,7 +20,7 @@ import json
 import sys
 from calendar import monthrange
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -58,14 +58,12 @@ class Finding:
     @property
     def canonical_key(self) -> str:
         """Generate the canonical key for allowlist matching."""
-        symbol_part = (
-            ":".join(self.symbol_context) if self.symbol_context else "_module_"
-        )
+        symbol_part = ":".join(self.symbol_context) if self.symbol_context else "_module_"
         return f"{self.file_path}:{self.rule_id}:{symbol_part}:line={self.line}"
 
     def suggested_allowlist_entry(self) -> dict[str, Any]:
         """Generate a suggested allowlist entry for this finding."""
-        today = date.today()
+        today = datetime.now(UTC).date()
         return {
             "key": self.canonical_key,
             "owner": "<your-name>",
@@ -109,7 +107,7 @@ class Allowlist:
 
     def get_expired_entries(self) -> list[AllowlistEntry]:
         """Return entries that have expired."""
-        today = date.today()
+        today = datetime.now(UTC).date()
         return [e for e in self.entries if e.expires and e.expires < today]
 
 
@@ -161,9 +159,7 @@ class BugHidingVisitor(ast.NodeVisitor):
             return self.source_lines[lineno - 1].strip()
         return "<source unavailable>"
 
-    def _add_finding(
-        self, rule_id: str, node: ast.expr | ast.stmt | ast.ExceptHandler, message: str
-    ) -> None:
+    def _add_finding(self, rule_id: str, node: ast.expr | ast.stmt | ast.ExceptHandler, message: str) -> None:
         """Record a finding."""
         self.findings.append(
             Finding(
@@ -208,14 +204,13 @@ class BugHidingVisitor(ast.NodeVisitor):
             )
 
         # R2: getattr() - Call(func=Name("getattr"))
-        if isinstance(node.func, ast.Name) and node.func.id == "getattr":
-            # Only flag if there's a default argument (3 args)
-            if len(node.args) >= 3 or node.keywords:
-                self._add_finding(
-                    "R2",
-                    node,
-                    f"getattr() with default hides AttributeError: {self._get_code_snippet(node.lineno)}",
-                )
+        # Only flag if there's a default argument (3 args)
+        if isinstance(node.func, ast.Name) and node.func.id == "getattr" and (len(node.args) >= 3 or node.keywords):
+            self._add_finding(
+                "R2",
+                node,
+                f"getattr() with default hides AttributeError: {self._get_code_snippet(node.lineno)}",
+            )
 
         # R3: hasattr() - Call(func=Name("hasattr"))
         if isinstance(node.func, ast.Name) and node.func.id == "hasattr":
@@ -307,9 +302,7 @@ def scan_directory(
         relative = py_file.relative_to(root)
         skip = False
         for pattern in exclude_patterns:
-            if relative.match(pattern) or str(relative).startswith(
-                pattern.rstrip("*/")
-            ):
+            if relative.match(pattern) or str(relative).startswith(pattern.rstrip("*/")):
                 skip = True
                 break
         if skip:
@@ -345,7 +338,7 @@ def load_allowlist(path: Path) -> Allowlist:
         expires_date = None
         if expires_str:
             try:
-                expires_date = datetime.strptime(expires_str, "%Y-%m-%d").date()
+                expires_date = datetime.strptime(expires_str, "%Y-%m-%d").replace(tzinfo=UTC).date()
             except ValueError:
                 print(
                     f"Warning: Invalid date format for expires: {expires_str}",
@@ -420,14 +413,8 @@ def report_json(
                 }
                 for f in violations
             ],
-            "stale_allowlist_entries": [
-                {"key": e.key, "owner": e.owner, "reason": e.reason}
-                for e in stale_entries
-            ],
-            "expired_allowlist_entries": [
-                {"key": e.key, "owner": e.owner, "expires": str(e.expires)}
-                for e in expired_entries
-            ],
+            "stale_allowlist_entries": [{"key": e.key, "owner": e.owner, "reason": e.reason} for e in stale_entries],
+            "expired_allowlist_entries": [{"key": e.key, "owner": e.owner, "expires": str(e.expires)} for e in expired_entries],
         },
         indent=2,
     )
@@ -440,9 +427,7 @@ def report_json(
 
 def main() -> int:
     """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="No Bug-Hiding Enforcement Tool - detect defensive patterns that mask bugs"
-    )
+    parser = argparse.ArgumentParser(description="No Bug-Hiding Enforcement Tool - detect defensive patterns that mask bugs")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # check subcommand
@@ -497,12 +482,7 @@ def run_check(args: argparse.Namespace) -> int:
     allowlist_path = args.allowlist
     if allowlist_path is None:
         # Default: config/cicd/no_bug_hiding.yaml relative to repo root
-        allowlist_path = (
-            Path(__file__).parent.parent.parent
-            / "config"
-            / "cicd"
-            / "no_bug_hiding.yaml"
-        )
+        allowlist_path = Path(__file__).parent.parent.parent / "config" / "cicd" / "no_bug_hiding.yaml"
 
     allowlist = load_allowlist(allowlist_path)
 
@@ -517,9 +497,7 @@ def run_check(args: argparse.Namespace) -> int:
 
     # Check for stale/expired allowlist entries
     stale_entries = allowlist.get_stale_entries() if allowlist.fail_on_stale else []
-    expired_entries = (
-        allowlist.get_expired_entries() if allowlist.fail_on_expired else []
-    )
+    expired_entries = allowlist.get_expired_entries() if allowlist.fail_on_expired else []
 
     # Report results
     has_errors = bool(violations or stale_entries or expired_entries)
@@ -529,14 +507,14 @@ def run_check(args: argparse.Namespace) -> int:
     else:
         # Text format
         if violations:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"VIOLATIONS FOUND: {len(violations)}")
             print("=" * 60)
             for v in violations:
                 print(format_finding_text(v))
 
         if stale_entries:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"STALE ALLOWLIST ENTRIES: {len(stale_entries)}")
             print("(These entries don't match any code - remove them)")
             print("=" * 60)
@@ -544,7 +522,7 @@ def run_check(args: argparse.Namespace) -> int:
                 print(format_stale_entry_text(e))
 
         if expired_entries:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"EXPIRED ALLOWLIST ENTRIES: {len(expired_entries)}")
             print("(These entries have passed their expiration date)")
             print("=" * 60)
@@ -552,7 +530,7 @@ def run_check(args: argparse.Namespace) -> int:
                 print(format_expired_entry_text(e))
 
         if has_errors:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print("CHECK FAILED")
             print("=" * 60)
             if violations:

@@ -20,9 +20,7 @@ def ctx() -> PluginContext:
 class TestCSVSinkAppendMode:
     """Tests for CSVSink append mode."""
 
-    def test_append_mode_adds_to_existing_file(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_append_mode_adds_to_existing_file(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Append mode should add rows without rewriting header."""
         output_path = tmp_path / "output.csv"
 
@@ -60,9 +58,7 @@ class TestCSVSinkAppendMode:
         lines2 = content2.strip().split("\n")
         assert len(lines2) == 3  # header + 2 rows
 
-    def test_append_mode_reads_headers_from_existing_file(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_append_mode_reads_headers_from_existing_file(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Append mode should use headers from existing file."""
         output_path = tmp_path / "output.csv"
 
@@ -101,9 +97,7 @@ class TestCSVSinkAppendMode:
         # Data rows should follow header column order
         assert len(lines) == 3  # header + 2 rows
 
-    def test_append_mode_creates_file_if_not_exists(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_append_mode_creates_file_if_not_exists(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Append mode should create file with header if it doesn't exist."""
         output_path = tmp_path / "new_file.csv"
         assert not output_path.exists()
@@ -158,9 +152,7 @@ class TestCSVSinkAppendMode:
         assert "2" in lines[1]
         assert "1" not in lines[1]  # First row data should be gone
 
-    def test_append_mode_with_empty_existing_file(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_append_mode_with_empty_existing_file(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Append mode with empty file should add header and data."""
         output_path = tmp_path / "empty.csv"
         output_path.touch()  # Create empty file
@@ -182,9 +174,7 @@ class TestCSVSinkAppendMode:
         assert len(lines) == 2  # header + row
         assert "id" in lines[0] and "value" in lines[0]
 
-    def test_append_mode_multiple_appends(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_append_mode_multiple_appends(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Multiple append operations should accumulate rows."""
         output_path = tmp_path / "output.csv"
 

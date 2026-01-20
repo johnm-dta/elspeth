@@ -10,6 +10,7 @@ class TestPluginSystemIntegration:
 
     def test_full_plugin_workflow(self) -> None:
         """Test source -> transform -> sink workflow."""
+        from elspeth.contracts import ArtifactDescriptor, SourceRow
         from elspeth.plugins import (
             BaseSink,
             BaseSource,
@@ -34,9 +35,9 @@ class TestPluginSystemIntegration:
             name = "list"
             output_schema = InputSchema
 
-            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
+            def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
                 for v in self.config["values"]:
-                    yield {"value": v}
+                    yield SourceRow.valid({"value": v})
 
             def close(self) -> None:
                 pass
@@ -46,9 +47,7 @@ class TestPluginSystemIntegration:
             input_schema = InputSchema
             output_schema = EnrichedSchema
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(
                     {
                         "value": row["value"],
@@ -61,8 +60,9 @@ class TestPluginSystemIntegration:
             input_schema = EnrichedSchema
             collected: ClassVar[list[dict[str, Any]]] = []
 
-            def write(self, row: dict[str, Any], ctx: PluginContext) -> None:
-                MemorySink.collected.append(row)
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
+                MemorySink.collected.extend(rows)
+                return ArtifactDescriptor.for_file(path="memory://collected", content_hash="test", size_bytes=0)
 
             def flush(self) -> None:
                 pass
@@ -110,11 +110,13 @@ class TestPluginSystemIntegration:
 
         MemorySink.collected = []  # Reset
 
-        for row in source.load(ctx):
-            result = transform.process(row, ctx)
+        for source_row in source.load(ctx):
+            # Extract row data from SourceRow for transform
+            assert source_row.row is not None
+            result = transform.process(source_row.row, ctx)
             assert result.status == "success"
             assert result.row is not None  # Success always has row
-            sink.write(result.row, ctx)
+            sink.write([result.row], ctx)  # write() takes list of rows
 
         # Verify results
         # Values: 10*2=20, 50*2=100, 100*2=200
@@ -149,6 +151,4 @@ class TestPluginSystemIntegration:
         """
         import elspeth.plugins.base as base
 
-        assert not hasattr(
-            base, "BaseAggregation"
-        ), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
+        assert not hasattr(base, "BaseAggregation"), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"

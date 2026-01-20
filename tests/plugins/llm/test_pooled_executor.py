@@ -71,6 +71,111 @@ class TestRowContext:
         assert ctx.row["id"] == 2
 
 
+class TestPooledExecutorBatch:
+    """Test batch execution with ordering."""
+
+    def test_execute_batch_returns_results_in_order(self) -> None:
+        """Results should be in submission order regardless of completion."""
+        import time
+        from threading import Lock
+
+        from elspeth.contracts import TransformResult
+
+        config = PoolConfig(pool_size=3)
+        executor = PooledExecutor(config)
+
+        # Mock process function with varying delays
+        call_order: list[int] = []
+        lock = Lock()
+
+        def mock_process(row: dict, state_id: str) -> TransformResult:
+            idx = row["idx"]
+            with lock:
+                call_order.append(idx)
+            # Varying delays to cause out-of-order completion
+            time.sleep(0.01 * (3 - idx))  # idx 0 slowest, idx 2 fastest
+            return TransformResult.success({"idx": idx, "result": f"done_{idx}"})
+
+        contexts = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(3)]
+
+        results = executor.execute_batch(contexts, mock_process)
+
+        # Results must be in submission order
+        assert len(results) == 3
+        assert results[0].row["idx"] == 0
+        assert results[1].row["idx"] == 1
+        assert results[2].row["idx"] == 2
+
+        executor.shutdown()
+
+    def test_execute_batch_passes_state_id_per_row(self) -> None:
+        """Each row should receive its own state_id."""
+        from threading import Lock
+
+        from elspeth.contracts import TransformResult
+
+        config = PoolConfig(pool_size=2)
+        executor = PooledExecutor(config)
+
+        received_state_ids: list[tuple[int, str]] = []
+        lock = Lock()
+
+        def mock_process(row: dict, state_id: str) -> TransformResult:
+            with lock:
+                received_state_ids.append((row["idx"], state_id))
+            return TransformResult.success(row)
+
+        contexts = [RowContext(row={"idx": i}, state_id=f"unique_state_{i}", row_index=i) for i in range(3)]
+
+        executor.execute_batch(contexts, mock_process)
+
+        # Verify each row got its own state_id
+        assert len(received_state_ids) == 3
+        state_id_map = dict(received_state_ids)
+        assert state_id_map[0] == "unique_state_0"
+        assert state_id_map[1] == "unique_state_1"
+        assert state_id_map[2] == "unique_state_2"
+
+        executor.shutdown()
+
+    def test_execute_batch_respects_pool_size(self) -> None:
+        """Should never exceed pool_size concurrent requests."""
+        import time
+        from threading import Lock
+
+        from elspeth.contracts import TransformResult
+
+        config = PoolConfig(pool_size=2)
+        executor = PooledExecutor(config)
+
+        max_concurrent = 0
+        current_concurrent = 0
+        lock = Lock()
+
+        def mock_process(row: dict, state_id: str) -> TransformResult:
+            nonlocal max_concurrent, current_concurrent
+            with lock:
+                current_concurrent += 1
+                if current_concurrent > max_concurrent:
+                    max_concurrent = current_concurrent
+
+            time.sleep(0.05)
+
+            with lock:
+                current_concurrent -= 1
+
+            return TransformResult.success(row)
+
+        contexts = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(5)]
+
+        results = executor.execute_batch(contexts, mock_process)
+
+        assert len(results) == 5
+        assert max_concurrent <= 2  # Never exceeded pool_size
+
+        executor.shutdown()
+
+
 class TestPooledExecutorStats:
     """Test executor statistics."""
 

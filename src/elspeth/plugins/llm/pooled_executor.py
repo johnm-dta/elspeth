@@ -11,7 +11,9 @@ Manages concurrent requests while:
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import time
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from threading import Semaphore
 from typing import Any
@@ -137,3 +139,110 @@ class PooledExecutor:
                 "total_throttle_time_ms": throttle_stats["total_throttle_time_ms"],
             },
         }
+
+    def execute_batch(
+        self,
+        contexts: list[RowContext],
+        process_fn: Callable[[dict[str, Any], str], TransformResult],
+    ) -> list[TransformResult]:
+        """Execute batch of rows with parallel processing.
+
+        Dispatches rows to the thread pool with semaphore control,
+        applies AIMD throttle delays, and returns results in
+        submission order.
+
+        Each row is processed with its own state_id for audit trail.
+
+        Args:
+            contexts: List of RowContext with row data and state_ids
+            process_fn: Function that processes a single row with state_id
+
+        Returns:
+            List of TransformResults in same order as input contexts
+        """
+        if not contexts:
+            return []
+
+        # Track futures by their buffer index
+        futures: dict[Future[tuple[int, TransformResult]], int] = {}
+
+        # Submit all rows
+        for ctx in contexts:
+            # Reserve slot in reorder buffer
+            buffer_idx = self._buffer.submit()
+
+            # Acquire semaphore (blocks if pool is full)
+            # NOTE: Throttle delay is applied INSIDE the worker, not here,
+            # to avoid serial delays blocking parallel submission
+            self._semaphore.acquire()
+
+            # Submit to thread pool
+            future = self._thread_pool.submit(
+                self._execute_single,
+                buffer_idx,
+                ctx.row,
+                ctx.state_id,
+                process_fn,
+            )
+            futures[future] = buffer_idx
+
+        # Wait for all futures and collect results
+        results: list[TransformResult] = []
+
+        for future in as_completed(futures):
+            buffer_idx, result = future.result()
+
+            # Complete in buffer (may be out of order)
+            self._buffer.complete(buffer_idx, result)
+
+            # Collect any ready results
+            ready = self._buffer.get_ready_results()
+            for entry in ready:
+                results.append(entry.result)
+
+        # CRITICAL: Final drain - collect any remaining results not yet emitted
+        # (the last completed future may not have been at the head of the queue)
+        while self._buffer.pending_count > 0:
+            ready = self._buffer.get_ready_results()
+            if not ready:
+                break  # Safety: shouldn't happen if all futures completed
+            for entry in ready:
+                results.append(entry.result)
+
+        return results
+
+    def _execute_single(
+        self,
+        buffer_idx: int,
+        row: dict[str, Any],
+        state_id: str,
+        process_fn: Callable[[dict[str, Any], str], TransformResult],
+    ) -> tuple[int, TransformResult]:
+        """Execute single row and handle throttle feedback.
+
+        Throttle delay is applied HERE (inside the worker) rather than
+        in the submission loop. This ensures parallel dispatch isn't
+        serialized by throttle delays.
+
+        Args:
+            buffer_idx: Index in reorder buffer
+            row: Row to process
+            state_id: State ID for audit trail
+            process_fn: Processing function
+
+        Returns:
+            Tuple of (buffer_idx, result)
+        """
+        try:
+            # Apply throttle delay INSIDE worker (after semaphore acquired)
+            delay_ms = self._throttle.current_delay_ms
+            if delay_ms > 0:
+                time.sleep(delay_ms / 1000)
+                self._throttle.record_throttle_wait(delay_ms)
+
+            result = process_fn(row, state_id)
+            self._throttle.on_success()
+            return (buffer_idx, result)
+        finally:
+            # Always release semaphore
+            self._semaphore.release()

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     # Using string annotations to avoid import errors in Phase 2
     from opentelemetry.trace import Span, Tracer
 
+    from elspeth.contracts import Call, CallStatus, CallType
     from elspeth.core.landscape.recorder import LandscapeRecorder
     from elspeth.core.payload_store import PayloadStore
     from elspeth.plugins.clients.http import AuditedHTTPClient
@@ -86,6 +87,11 @@ class PluginContext:
     node_id: str | None = field(default=None)
     plugin_name: str | None = field(default=None)
 
+    # === Phase 6: State & Call Recording ===
+    # Set by executor to enable transforms to record external calls
+    state_id: str | None = field(default=None)
+    _call_index: int = field(default=0)
+
     # === Phase 6: Audited Clients ===
     # Set by executor when processing LLM transforms
     llm_client: "AuditedLLMClient | None" = None
@@ -122,6 +128,58 @@ class PluginContext:
         if self.tracer is None:
             return nullcontext()
         return self.tracer.start_as_current_span(name)
+
+    def record_call(
+        self,
+        call_type: "CallType",
+        status: "CallStatus",
+        request_data: dict[str, Any],
+        response_data: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+        latency_ms: float | None = None,
+    ) -> "Call | None":
+        """Record an external API call to the audit trail.
+
+        Provides a convenient way for transforms to record external calls
+        without managing call indices manually. Requires state_id to be set.
+
+        Args:
+            call_type: Type of call (LLM, HTTP, SQL, FILESYSTEM)
+            status: Outcome (SUCCESS, ERROR)
+            request_data: Request payload (will be hashed)
+            response_data: Response payload (optional for errors)
+            error: Error details if status is ERROR
+            latency_ms: Call duration in milliseconds
+
+        Returns:
+            The recorded Call, or None if landscape not configured
+
+        Raises:
+            RuntimeError: If state_id is not set (transform not in execution context)
+        """
+        if self.landscape is None:
+            logger.warning("External call not recorded (no landscape)")
+            return None
+
+        if self.state_id is None:
+            raise RuntimeError(
+                "Cannot record call: state_id not set. "
+                "Ensure transform is being executed through the engine."
+            )
+
+        call_index = self._call_index
+        self._call_index += 1
+
+        return self.landscape.record_call(
+            state_id=self.state_id,
+            call_index=call_index,
+            call_type=call_type,
+            status=status,
+            request_data=request_data,
+            response_data=response_data,
+            error=error,
+            latency_ms=latency_ms,
+        )
 
     def record_validation_error(
         self,

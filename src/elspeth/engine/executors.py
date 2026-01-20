@@ -164,6 +164,10 @@ class TransformExecutor:
             attempt=attempt,
         )
 
+        # Set state_id on context for external call recording
+        ctx.state_id = state.state_id
+        ctx._call_index = 0  # Reset call index for this state
+
         # Execute with timing and span
         with self._spans.transform_span(transform.name, input_hash=input_hash):
             start = time.perf_counter()
@@ -896,6 +900,10 @@ class AggregationExecutor:
             input_data=batch_input,
             attempt=0,
         )
+
+        # Set state_id on context for external call recording
+        ctx.state_id = state.state_id
+        ctx._call_index = 0  # Reset call index for this state
 
         # Step 3: Execute with timing and span
         with self._spans.transform_span(transform.name, input_hash=input_hash):

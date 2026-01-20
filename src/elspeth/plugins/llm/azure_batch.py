@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import Field
 
-from elspeth.contracts import Determinism, TransformResult
+from elspeth.contracts import CallStatus, CallType, Determinism, TransformResult
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.config_base import TransformDataConfig
 from elspeth.plugins.context import PluginContext
@@ -381,18 +382,46 @@ class AzureBatchLLMTransform(BaseTransform):
         # 3. Upload and create batch
         client = self._get_client()
 
-        # Upload JSONL file
+        # Upload JSONL file (with audit recording)
         file_bytes = io.BytesIO(jsonl_content.encode("utf-8"))
+        upload_request = {
+            "operation": "files.create",
+            "filename": "batch_input.jsonl",
+            "purpose": "batch",
+            "content_size": len(jsonl_content),
+        }
+        start = time.perf_counter()
         batch_file = client.files.create(
             file=("batch_input.jsonl", file_bytes),
             purpose="batch",
         )
+        ctx.record_call(
+            call_type=CallType.HTTP,
+            status=CallStatus.SUCCESS,
+            request_data=upload_request,
+            response_data={"file_id": batch_file.id, "status": batch_file.status},
+            latency_ms=(time.perf_counter() - start) * 1000,
+        )
 
-        # Create batch job
+        # Create batch job (with audit recording)
+        batch_request = {
+            "operation": "batches.create",
+            "input_file_id": batch_file.id,
+            "endpoint": "/chat/completions",
+            "completion_window": "24h",
+        }
+        start = time.perf_counter()
         batch = client.batches.create(
             input_file_id=batch_file.id,
             endpoint="/chat/completions",
             completion_window="24h",
+        )
+        ctx.record_call(
+            call_type=CallType.HTTP,
+            status=CallStatus.SUCCESS,
+            request_data=batch_request,
+            response_data={"batch_id": batch.id, "status": batch.status},
+            latency_ms=(time.perf_counter() - start) * 1000,
         )
 
         # 4. CHECKPOINT immediately after submit
@@ -435,8 +464,24 @@ class AzureBatchLLMTransform(BaseTransform):
         batch_id = checkpoint["batch_id"]
         client = self._get_client()
 
-        # Check batch status
+        # Check batch status (with audit recording)
+        retrieve_request = {
+            "operation": "batches.retrieve",
+            "batch_id": batch_id,
+        }
+        start = time.perf_counter()
         batch = client.batches.retrieve(batch_id)
+        ctx.record_call(
+            call_type=CallType.HTTP,
+            status=CallStatus.SUCCESS,
+            request_data=retrieve_request,
+            response_data={
+                "batch_id": batch.id,
+                "status": batch.status,
+                "output_file_id": getattr(batch, "output_file_id", None),
+            },
+            latency_ms=(time.perf_counter() - start) * 1000,
+        )
 
         if batch.status == "completed":
             # Download results and assemble output
@@ -527,9 +572,24 @@ class AzureBatchLLMTransform(BaseTransform):
         row_mapping: dict[str, int] = checkpoint.get("row_mapping", {})
         template_errors: list[tuple[int, str]] = checkpoint.get("template_errors", [])
 
-        # Download output file
+        # Download output file (with audit recording)
         output_file_id = batch.output_file_id
+        download_request = {
+            "operation": "files.content",
+            "file_id": output_file_id,
+        }
+        start = time.perf_counter()
         output_content = client.files.content(output_file_id)
+        ctx.record_call(
+            call_type=CallType.HTTP,
+            status=CallStatus.SUCCESS,
+            request_data=download_request,
+            response_data={
+                "file_id": output_file_id,
+                "content_length": len(output_content.text),
+            },
+            latency_ms=(time.perf_counter() - start) * 1000,
+        )
 
         # Parse JSONL results
         results_by_id: dict[str, dict[str, Any]] = {}

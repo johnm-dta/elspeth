@@ -2185,6 +2185,45 @@ class TestRunModeSettings:
 class TestExpandTemplateFiles:
     """Tests for _expand_template_files function."""
 
+    def test_expand_template_file_not_found(self, tmp_path: Path) -> None:
+        """Missing template file raises TemplateFileError."""
+        from elspeth.core.config import TemplateFileError, _expand_template_files
+
+        settings_path = tmp_path / "settings.yaml"
+        config = {"template_file": "prompts/missing.j2"}
+
+        with pytest.raises(TemplateFileError, match="not found"):
+            _expand_template_files(config, settings_path)
+
+    def test_expand_template_file_with_inline_raises(self, tmp_path: Path) -> None:
+        """Cannot specify both template and template_file."""
+        from elspeth.core.config import TemplateFileError, _expand_template_files
+
+        settings_path = tmp_path / "settings.yaml"
+        config = {
+            "template": "inline template",
+            "template_file": "prompts/test.j2",
+        }
+
+        with pytest.raises(TemplateFileError, match="Cannot specify both"):
+            _expand_template_files(config, settings_path)
+
+    def test_expand_lookup_file_invalid_yaml(self, tmp_path: Path) -> None:
+        """Invalid YAML in lookup file raises TemplateFileError."""
+        from elspeth.core.config import TemplateFileError, _expand_template_files
+
+        lookup_file = tmp_path / "bad.yaml"
+        lookup_file.write_text("invalid: yaml: content: [")
+
+        settings_path = tmp_path / "settings.yaml"
+        config = {
+            "template": "test",
+            "lookup_file": "bad.yaml",
+        }
+
+        with pytest.raises(TemplateFileError, match="Invalid YAML"):
+            _expand_template_files(config, settings_path)
+
     def test_expand_template_file(self, tmp_path: Path) -> None:
         """template_file is expanded to template content at config time."""
         from elspeth.core.config import _expand_template_files

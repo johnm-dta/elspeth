@@ -1,0 +1,42 @@
+# Template Lookups Example
+# Demonstrates external template files and two-dimensional lookups
+
+datasource:
+  plugin: csv_local
+  options:
+    path: examples/template_lookups/input.csv
+
+sinks:
+  output:
+    plugin: csv_local
+    options:
+      path: examples/template_lookups/output/results.csv
+
+output_sink: output
+
+row_plugins:
+  - plugin: openrouter_llm
+    options:
+      model: "anthropic/claude-3-haiku"
+      api_key: "${OPENROUTER_API_KEY}"
+
+      # External template file - loaded at config time
+      # The template uses {{ row.* }} for input data and {{ lookup.* }} for lookup data
+      template_file: prompts/classify.j2
+
+      # External lookup file - YAML parsed and available as lookup.* in template
+      # Enables two-dimensional lookups like: lookup.categories[row.category_id].name
+      lookup_file: prompts/categories.yaml
+
+      # System prompt for consistent behavior
+      system_prompt: |
+        You are a precise customer support ticket classifier.
+        Always respond with valid JSON matching the requested format.
+        Be concise but accurate in your analysis.
+
+      temperature: 0.1  # Low temperature for consistent classification
+      max_tokens: 500
+      response_field: classification
+
+      schema:
+        fields: dynamic

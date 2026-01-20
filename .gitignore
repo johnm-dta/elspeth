@@ -119,3 +119,5 @@ mutants/
 
 # Git worktrees
 .worktrees/
+examples/template_lookups/output/*
+!examples/template_lookups/output/.gitkeep

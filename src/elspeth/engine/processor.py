@@ -9,6 +9,8 @@ Coordinates:
 - Final outcome recording
 """
 
+import hashlib
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -198,6 +200,14 @@ class RowProcessor:
             )
 
             if result.status != "success":
+                error_msg = "Batch transform failed"
+                error_hash = hashlib.sha256(error_msg.encode()).hexdigest()[:16]
+                self._recorder.record_token_outcome(
+                    run_id=self._run_id,
+                    token_id=current_token.token_id,
+                    outcome=RowOutcome.FAILED,
+                    error_hash=error_hash,
+                )
                 return (
                     RowResult(
                         token=current_token,
@@ -205,7 +215,7 @@ class RowProcessor:
                         outcome=RowOutcome.FAILED,
                         error=FailureInfo(
                             exception_type="TransformError",
-                            message="Batch transform failed",
+                            message=error_msg,
                         ),
                     ),
                     child_items,
@@ -313,6 +323,13 @@ class RowProcessor:
                 )
 
                 # The triggering token becomes CONSUMED_IN_BATCH
+                batch_id = self._aggregation_executor.get_batch_id(node_id)
+                self._recorder.record_token_outcome(
+                    run_id=self._run_id,
+                    token_id=current_token.token_id,
+                    outcome=RowOutcome.CONSUMED_IN_BATCH,
+                    batch_id=batch_id,
+                )
                 triggering_result = RowResult(
                     token=current_token,
                     final_data=current_token.row_data,
@@ -354,6 +371,13 @@ class RowProcessor:
         # In passthrough mode: BUFFERED (non-terminal, will reappear)
         # In single/transform modes: CONSUMED_IN_BATCH (terminal)
         if output_mode == "passthrough":
+            buf_batch_id = self._aggregation_executor.get_batch_id(node_id)
+            self._recorder.record_token_outcome(
+                run_id=self._run_id,
+                token_id=current_token.token_id,
+                outcome=RowOutcome.BUFFERED,
+                batch_id=buf_batch_id,
+            )
             return (
                 RowResult(
                     token=current_token,
@@ -363,6 +387,13 @@ class RowProcessor:
                 child_items,
             )
         else:
+            nf_batch_id = self._aggregation_executor.get_batch_id(node_id)
+            self._recorder.record_token_outcome(
+                run_id=self._run_id,
+                token_id=current_token.token_id,
+                outcome=RowOutcome.CONSUMED_IN_BATCH,
+                batch_id=nf_batch_id,
+            )
             return (
                 RowResult(
                     token=current_token,
@@ -631,6 +662,12 @@ class RowProcessor:
 
                 # Check if gate routed to a sink (sink_name set by executor)
                 if outcome.sink_name is not None:
+                    self._recorder.record_token_outcome(
+                        run_id=self._run_id,
+                        token_id=current_token.token_id,
+                        outcome=RowOutcome.ROUTED,
+                        sink_name=outcome.sink_name,
+                    )
                     return (
                         RowResult(
                             token=current_token,
@@ -662,6 +699,14 @@ class RowProcessor:
                             )
                         )
 
+                    # Generate fork group ID linking parent to children
+                    fork_group_id = uuid.uuid4().hex[:16]
+                    self._recorder.record_token_outcome(
+                        run_id=self._run_id,
+                        token_id=current_token.token_id,
+                        outcome=RowOutcome.FORKED,
+                        fork_group_id=fork_group_id,
+                    )
                     return (
                         RowResult(
                             token=current_token,
@@ -699,6 +744,13 @@ class RowProcessor:
                     )
                 except MaxRetriesExceeded as e:
                     # All retries exhausted - return FAILED outcome
+                    error_hash = hashlib.sha256(str(e).encode()).hexdigest()[:16]
+                    self._recorder.record_token_outcome(
+                        run_id=self._run_id,
+                        token_id=current_token.token_id,
+                        outcome=RowOutcome.FAILED,
+                        error_hash=error_hash,
+                    )
                     return (
                         RowResult(
                             token=current_token,
@@ -713,6 +765,14 @@ class RowProcessor:
                     # Determine outcome based on error routing
                     if error_sink == "discard":
                         # Intentionally discarded - QUARANTINED
+                        error_detail = str(result.reason) if result.reason else "unknown_error"
+                        quarantine_error_hash = hashlib.sha256(error_detail.encode()).hexdigest()[:16]
+                        self._recorder.record_token_outcome(
+                            run_id=self._run_id,
+                            token_id=current_token.token_id,
+                            outcome=RowOutcome.QUARANTINED,
+                            error_hash=quarantine_error_hash,
+                        )
                         return (
                             RowResult(
                                 token=current_token,
@@ -723,6 +783,12 @@ class RowProcessor:
                         )
                     else:
                         # Routed to error sink
+                        self._recorder.record_token_outcome(
+                            run_id=self._run_id,
+                            token_id=current_token.token_id,
+                            outcome=RowOutcome.ROUTED,
+                            sink_name=error_sink,
+                        )
                         return (
                             RowResult(
                                 token=current_token,
@@ -768,6 +834,13 @@ class RowProcessor:
                         )
 
                     # Parent token is EXPANDED (terminal for parent)
+                    expand_group_id = uuid.uuid4().hex[:16]
+                    self._recorder.record_token_outcome(
+                        run_id=self._run_id,
+                        token_id=current_token.token_id,
+                        outcome=RowOutcome.EXPANDED,
+                        expand_group_id=expand_group_id,
+                    )
                     return (
                         RowResult(
                             token=current_token,
@@ -809,6 +882,12 @@ class RowProcessor:
 
             # Check if gate routed to a sink
             if outcome.sink_name is not None:
+                self._recorder.record_token_outcome(
+                    run_id=self._run_id,
+                    token_id=current_token.token_id,
+                    outcome=RowOutcome.ROUTED,
+                    sink_name=outcome.sink_name,
+                )
                 return (
                     RowResult(
                         token=current_token,
@@ -841,6 +920,14 @@ class RowProcessor:
                         )
                     )
 
+                # Generate fork group ID linking parent to children
+                cfg_fork_group_id = uuid.uuid4().hex[:16]
+                self._recorder.record_token_outcome(
+                    run_id=self._run_id,
+                    token_id=current_token.token_id,
+                    outcome=RowOutcome.FORKED,
+                    fork_group_id=cfg_fork_group_id,
+                )
                 return (
                     RowResult(
                         token=current_token,
@@ -876,6 +963,14 @@ class RowProcessor:
 
                 if coalesce_outcome.merged_token is not None:
                     # All siblings arrived - return COALESCED with merged data
+                    # Use coalesce_name + parent token for join group identification
+                    join_group_id = f"{coalesce_name}_{uuid.uuid4().hex[:8]}"
+                    self._recorder.record_token_outcome(
+                        run_id=self._run_id,
+                        token_id=coalesce_outcome.merged_token.token_id,
+                        outcome=RowOutcome.COALESCED,
+                        join_group_id=join_group_id,
+                    )
                     return (
                         RowResult(
                             token=coalesce_outcome.merged_token,

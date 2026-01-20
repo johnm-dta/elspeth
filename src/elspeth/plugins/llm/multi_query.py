@@ -1,0 +1,169 @@
+"""Multi-query LLM support for case study x criteria cross-product evaluation."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from pydantic import Field, field_validator
+
+from elspeth.plugins.config_base import PluginConfig
+from elspeth.plugins.llm.azure import AzureOpenAIConfig
+
+
+@dataclass
+class QuerySpec:
+    """Specification for a single query in the cross-product.
+
+    Represents one (case_study, criterion) pair to be evaluated.
+
+    Attributes:
+        case_study_name: Name of the case study (e.g., "cs1")
+        criterion_name: Name of the criterion (e.g., "diagnosis")
+        input_fields: List of row field names to map to input_1, input_2, etc.
+        output_prefix: Prefix for output fields (e.g., "cs1_diagnosis")
+        criterion_data: Full criterion object for template injection
+    """
+
+    case_study_name: str
+    criterion_name: str
+    input_fields: list[str]
+    output_prefix: str
+    criterion_data: dict[str, Any]
+
+    def build_template_context(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Build template context for this query.
+
+        Maps input_fields to input_1, input_2, etc. and injects criterion data.
+
+        Args:
+            row: Full row data
+
+        Returns:
+            Context dict with input_N, criterion, and row
+        """
+        context: dict[str, Any] = {}
+
+        # Map input fields to positional variables
+        # Access directly - missing field is a config error, should crash
+        for i, field_name in enumerate(self.input_fields, start=1):
+            if field_name not in row:
+                raise KeyError(f"Required field '{field_name}' not found in row for query {self.output_prefix}")
+            context[f"input_{i}"] = row[field_name]
+
+        # Inject criterion data
+        context["criterion"] = self.criterion_data
+
+        # Include full row for row-based lookups
+        context["row"] = row
+
+        return context
+
+
+class CaseStudyConfig(PluginConfig):
+    """Configuration for a single case study.
+
+    Attributes:
+        name: Unique identifier for this case study (used in output field prefix)
+        input_fields: Row field names to map to input_1, input_2, etc.
+    """
+
+    name: str = Field(..., description="Case study identifier")
+    input_fields: list[str] = Field(..., description="Row fields to map to input_N")
+
+    @field_validator("input_fields")
+    @classmethod
+    def validate_input_fields_not_empty(cls, v: list[str]) -> list[str]:
+        """Ensure at least one input field."""
+        if not v:
+            raise ValueError("input_fields cannot be empty")
+        return v
+
+
+class CriterionConfig(PluginConfig):
+    """Configuration for a single evaluation criterion.
+
+    All fields except 'name' are optional and available in templates
+    via {{ row.criterion.field_name }}.
+
+    Attributes:
+        name: Unique identifier (used in output field prefix)
+        code: Short code for lookups (e.g., "DIAG")
+        description: Human-readable description
+        subcriteria: List of subcriteria names/descriptions
+    """
+
+    name: str = Field(..., description="Criterion identifier")
+    code: str | None = Field(None, description="Short code for lookups")
+    description: str | None = Field(None, description="Human-readable description")
+    subcriteria: list[str] = Field(default_factory=list, description="Subcriteria list")
+
+    def to_template_data(self) -> dict[str, Any]:
+        """Convert to dict for template injection."""
+        return {
+            "name": self.name,
+            "code": self.code,
+            "description": self.description,
+            "subcriteria": self.subcriteria,
+        }
+
+
+class MultiQueryConfig(AzureOpenAIConfig):
+    """Configuration for multi-query LLM transform.
+
+    Extends AzureOpenAIConfig with:
+    - case_studies: List of case study definitions
+    - criteria: List of criterion definitions
+    - output_mapping: JSON field -> row column suffix mapping
+    - response_format: Expected LLM output format (json)
+
+    The cross-product of case_studies x criteria defines all queries.
+    """
+
+    case_studies: list[CaseStudyConfig] = Field(
+        ...,
+        description="Case study definitions",
+        min_length=1,
+    )
+    criteria: list[CriterionConfig] = Field(
+        ...,
+        description="Criterion definitions",
+        min_length=1,
+    )
+    output_mapping: dict[str, str] = Field(
+        ...,
+        description="JSON field -> row column suffix mapping",
+    )
+    response_format: str = Field(
+        "json",
+        description="Expected response format",
+    )
+
+    @field_validator("output_mapping")
+    @classmethod
+    def validate_output_mapping_not_empty(cls, v: dict[str, str]) -> dict[str, str]:
+        """Ensure at least one output mapping."""
+        if not v:
+            raise ValueError("output_mapping cannot be empty")
+        return v
+
+    def expand_queries(self) -> list[QuerySpec]:
+        """Expand config into QuerySpec list (case_studies x criteria).
+
+        Returns:
+            List of QuerySpec, one per (case_study, criterion) pair
+        """
+        specs: list[QuerySpec] = []
+
+        for case_study in self.case_studies:
+            for criterion in self.criteria:
+                spec = QuerySpec(
+                    case_study_name=case_study.name,
+                    criterion_name=criterion.name,
+                    input_fields=case_study.input_fields,
+                    output_prefix=f"{case_study.name}_{criterion.name}",
+                    criterion_data=criterion.to_template_data(),
+                )
+                specs.append(spec)
+
+        return specs

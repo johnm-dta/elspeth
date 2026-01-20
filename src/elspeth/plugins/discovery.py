@@ -37,6 +37,7 @@ EXCLUDED_FILES: frozenset[str] = frozenset(
         "capacity_errors.py",
         "reorder_buffer.py",
         "pooled_executor.py",
+        "multi_query.py",
         # Client helpers (not plugins)
         "http.py",
         "llm.py",

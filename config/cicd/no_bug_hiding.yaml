@@ -565,7 +565,7 @@ allow_hits:
     safety: "Graceful default to 0 - total_tokens is convenience property, not critical"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/clients/llm.py:R3:AuditedLLMClient:chat_completion:line=195"
+  - key: "plugins/clients/llm.py:R3:AuditedLLMClient:chat_completion:line=203"
     owner: "architecture"
     reason: "SDK version compatibility: older OpenAI SDK versions lack model_dump()"
     safety: "None is safe for raw_response - only used for debugging, not audit"

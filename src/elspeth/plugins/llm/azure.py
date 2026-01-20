@@ -539,15 +539,17 @@ class AzureLLMTransform(BaseTransform):
 
             if result.status == "success" and result.row is not None:
                 all_failed = False
-                # Copy response fields from result
-                output_row[self._response_field] = result.row.get(self._response_field)
-                output_row[f"{self._response_field}_usage"] = result.row.get(f"{self._response_field}_usage")
-                output_row[f"{self._response_field}_template_hash"] = result.row.get(f"{self._response_field}_template_hash")
-                output_row[f"{self._response_field}_variables_hash"] = result.row.get(f"{self._response_field}_variables_hash")
-                output_row[f"{self._response_field}_template_source"] = result.row.get(f"{self._response_field}_template_source")
-                output_row[f"{self._response_field}_lookup_hash"] = result.row.get(f"{self._response_field}_lookup_hash")
-                output_row[f"{self._response_field}_lookup_source"] = result.row.get(f"{self._response_field}_lookup_source")
-                output_row[f"{self._response_field}_model"] = result.row.get(f"{self._response_field}_model")
+                # Copy response fields from result - direct access because these are
+                # OUR data from _process_single_with_state/_process_sequential.
+                # Missing fields = bug in our code, not external data issue.
+                output_row[self._response_field] = result.row[self._response_field]
+                output_row[f"{self._response_field}_usage"] = result.row[f"{self._response_field}_usage"]
+                output_row[f"{self._response_field}_template_hash"] = result.row[f"{self._response_field}_template_hash"]
+                output_row[f"{self._response_field}_variables_hash"] = result.row[f"{self._response_field}_variables_hash"]
+                output_row[f"{self._response_field}_template_source"] = result.row[f"{self._response_field}_template_source"]
+                output_row[f"{self._response_field}_lookup_hash"] = result.row[f"{self._response_field}_lookup_hash"]
+                output_row[f"{self._response_field}_lookup_source"] = result.row[f"{self._response_field}_lookup_source"]
+                output_row[f"{self._response_field}_model"] = result.row[f"{self._response_field}_model"]
             else:
                 # Per-row error tracking - don't fail entire batch
                 output_row[self._response_field] = None

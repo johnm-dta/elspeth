@@ -615,91 +615,39 @@ allow_hits:
     safety: "Graceful fallback to requested model - audit still captures actual value"
     expires: null  # Permanent - intentional design
 
-  # --- _assemble_batch_results() method (batch result assembly) ---
-  # These .get() calls access result.row which is our own TransformResult data.
-  # However, the result may come from various processing paths (pooled, sequential,
-  # or even externally mocked in tests), so we use .get() for defensive extraction.
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_assemble_batch_results:line=318"
-    owner: "architecture"
-    reason: "Result row may not have response field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_assemble_batch_results:line=319"
-    owner: "architecture"
-    reason: "Result row may not have usage field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_assemble_batch_results:line=320"
-    owner: "architecture"
-    reason: "Result row may not have template_hash field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_assemble_batch_results:line=321"
-    owner: "architecture"
-    reason: "Result row may not have variables_hash field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_assemble_batch_results:line=322"
-    owner: "architecture"
-    reason: "Result row may not have template_source field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_assemble_batch_results:line=323"
-    owner: "architecture"
-    reason: "Result row may not have lookup_hash field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_assemble_batch_results:line=324"
-    owner: "architecture"
-    reason: "Result row may not have lookup_source field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_assemble_batch_results:line=325"
-    owner: "architecture"
-    reason: "Result row may not have model field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
   # --- process() method ---
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=470"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=472"
     owner: "architecture"
     reason: "Trust boundary: HTTP response headers may not include content-type"
     safety: "Graceful default to 'unknown' - used for error reporting only"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=497"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=499"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API 'usage' field is optional in response"
     safety: "Graceful default to {} - usage is metadata, not critical for processing"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=507"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=509"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API may return different model than requested"
     safety: "Graceful fallback to requested model - audit still captures actual value"
     expires: null  # Permanent - intentional design
 
   # --- _process_single_with_state() method (pooled execution) ---
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=609"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=611"
     owner: "architecture"
     reason: "Trust boundary: HTTP response headers may not include content-type"
     safety: "Graceful default to 'unknown' - used for error reporting only"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=634"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=636"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API 'usage' field is optional in response"
     safety: "Graceful default to {} - usage is metadata, not critical for processing"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=644"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=646"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API may return different model than requested"
     safety: "Graceful fallback to requested model - audit still captures actual value"
@@ -848,63 +796,6 @@ allow_hits:
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
-    expires: null  # Permanent - intentional design
-
-  # ============================================================
-  # AZURE LLM TRANSFORM BATCH PROCESSING (Permanent)
-  # ============================================================
-  # AzureLLMTransform._assemble_batch_results uses .get() to access
-  # result.row fields. The result may come from various processing paths
-  # (pooled, sequential, or mocked in tests), and error rows will not
-  # have all response fields. This is the same pattern as OpenRouter.
-  # ============================================================
-
-  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=543"
-    owner: "architecture"
-    reason: "Result row may not have response field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=544"
-    owner: "architecture"
-    reason: "Result row may not have usage field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=545"
-    owner: "architecture"
-    reason: "Result row may not have template_hash field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=546"
-    owner: "architecture"
-    reason: "Result row may not have variables_hash field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=547"
-    owner: "architecture"
-    reason: "Result row may not have template_source field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=548"
-    owner: "architecture"
-    reason: "Result row may not have lookup_hash field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=549"
-    owner: "architecture"
-    reason: "Result row may not have lookup_source field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
-    expires: null  # Permanent - intentional design
-
-  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=550"
-    owner: "architecture"
-    reason: "Result row may not have model field if error occurred during processing"
-    safety: "Graceful default to None - error rows get explicit error tracking"
     expires: null  # Permanent - intentional design
 
   # ============================================================

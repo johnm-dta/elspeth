@@ -303,3 +303,40 @@ class TestKeywordFilterProcessing:
         result = transform.process(row, make_mock_context())
 
         assert result.status == "error"
+
+    def test_skips_missing_configured_field(self) -> None:
+        """Transform skips fields not present in the row."""
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": ["content", "optional_field"],
+                "blocked_patterns": [r"secret"],
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        # Row is missing "optional_field" but has "content"
+        row = {"content": "safe data", "id": 1}
+        result = transform.process(row, make_mock_context())
+
+        assert result.status == "success"
+
+    def test_detects_pattern_in_present_field_when_other_missing(self) -> None:
+        """Transform still detects patterns in fields that ARE present."""
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": ["content", "optional_field"],
+                "blocked_patterns": [r"secret"],
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        # Row is missing "optional_field" but "content" has blocked pattern
+        row = {"content": "contains secret data", "id": 1}
+        result = transform.process(row, make_mock_context())
+
+        assert result.status == "error"
+        assert result.reason["field"] == "content"

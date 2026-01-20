@@ -111,6 +111,9 @@ class KeywordFilter(BaseTransform):
         fields_to_scan = self._get_fields_to_scan(row)
 
         for field_name in fields_to_scan:
+            if field_name not in row:
+                continue  # Skip fields not present in this row
+
             value = row[field_name]
 
             # Only scan string values

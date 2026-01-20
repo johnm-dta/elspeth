@@ -228,3 +228,41 @@ def get_plugin_description(plugin_cls: type) -> str:
     # Fallback to name-based description
     name = getattr(plugin_cls, "name", plugin_cls.__name__)
     return f"{name} plugin"
+
+
+def create_dynamic_hookimpl(
+    plugin_classes: list[type],
+    hook_method_name: str,
+) -> object:
+    """Create a pluggy hookimpl object for plugin registration.
+
+    Dynamically generates a class with the appropriate hook method
+    decorated with @hookimpl that returns the provided plugin classes.
+
+    Args:
+        plugin_classes: List of plugin classes to register
+        hook_method_name: Name of the hook method (e.g., "elspeth_get_source")
+
+    Returns:
+        Object instance with the decorated hook method
+    """
+    from typing import Any
+
+    from elspeth.plugins.hookspecs import hookimpl
+
+    class DynamicHookImpl:
+        """Dynamically generated hook implementer."""
+
+        pass
+
+    # Create the hook method that returns the plugin classes
+    def hook_method(self: Any) -> list[type]:
+        return plugin_classes
+
+    # Apply the hookimpl decorator
+    decorated_method = hookimpl(hook_method)
+
+    # Attach to the class
+    setattr(DynamicHookImpl, hook_method_name, decorated_method)
+
+    return DynamicHookImpl()

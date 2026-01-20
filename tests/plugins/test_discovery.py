@@ -186,3 +186,71 @@ class TestGetPluginDescription:
         description = get_plugin_description(WhitespaceDocPlugin)
 
         assert description == "Lots of whitespace here."
+
+
+class TestCreateDynamicHookimpl:
+    """Test dynamic hookimpl generation for pluggy."""
+
+    def test_creates_hookimpl_with_correct_method(self) -> None:
+        """Verify hookimpl has correct method name."""
+        from elspeth.plugins.discovery import create_dynamic_hookimpl
+
+        class FakePlugin:
+            name = "fake"
+
+        hookimpl_obj = create_dynamic_hookimpl([FakePlugin], "elspeth_get_source")
+
+        assert hasattr(hookimpl_obj, "elspeth_get_source")
+
+    def test_hookimpl_returns_plugin_list(self) -> None:
+        """Verify hookimpl method returns the plugin classes."""
+        from elspeth.plugins.discovery import create_dynamic_hookimpl
+
+        class FakePlugin1:
+            name = "fake1"
+
+        class FakePlugin2:
+            name = "fake2"
+
+        hookimpl_obj = create_dynamic_hookimpl([FakePlugin1, FakePlugin2], "elspeth_get_source")
+
+        result = hookimpl_obj.elspeth_get_source()
+        assert result == [FakePlugin1, FakePlugin2]
+
+    def test_hookimpl_integrates_with_pluggy(self) -> None:
+        """Verify dynamic hookimpl works with PluginManager."""
+        from collections.abc import Iterator
+        from typing import Any
+
+        from elspeth.plugins.discovery import create_dynamic_hookimpl
+        from elspeth.plugins.manager import PluginManager
+
+        class TestSource:
+            name = "test_dynamic"
+            output_schema = None
+            node_id = None
+            determinism = "deterministic"
+            plugin_version = "1.0.0"
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                pass
+
+            def load(self, ctx: Any) -> Iterator[Any]:
+                return iter([])
+
+            def close(self) -> None:
+                pass
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+        hookimpl_obj = create_dynamic_hookimpl([TestSource], "elspeth_get_source")
+
+        manager = PluginManager()
+        manager.register(hookimpl_obj)
+
+        source = manager.get_source_by_name("test_dynamic")
+        assert source is TestSource

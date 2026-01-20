@@ -1,0 +1,41 @@
+# smoke-test.yaml - Minimal Pipeline for Deployment Verification
+#
+# This configuration is used by deployment scripts and CI/CD pipelines
+# to verify that ELSPETH is properly installed and functional.
+#
+# The null source yields no rows, so this pipeline completes immediately
+# while still exercising the core engine components:
+#   - Configuration loading and validation
+#   - Plugin discovery and initialization
+#   - Landscape database connection
+#   - Pipeline execution flow
+#
+# Usage:
+#   elspeth validate --settings config/smoke-test.yaml
+#   elspeth run --settings config/smoke-test.yaml --execute
+
+# Source: null source yields no rows (instant completion)
+datasource:
+  plugin: "null"
+
+# Sink: JSON output for verification
+sinks:
+  output:
+    plugin: json
+    options:
+      path: /app/output/smoke-test-output.json
+
+# Default output sink
+output_sink: output
+
+# Landscape: SQLite database for audit trail
+landscape:
+  url: ${DATABASE_URL:-sqlite:////app/state/landscape.db}
+
+# Payload store: filesystem storage
+payload_store:
+  base_path: /app/state/payloads
+
+# Concurrency: single worker for smoke test
+concurrency:
+  max_workers: 1

@@ -1,0 +1,112 @@
+# .dockerignore - Exclude files from Docker build context
+#
+# This speeds up builds and reduces image size by excluding
+# development files, tests, documentation, and git metadata.
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Python development
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+.eggs/
+*.manifest
+*.spec
+
+# Virtual environments (host venvs, not container)
+.venv/
+venv/
+ENV/
+env/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Testing
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.hypothesis/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+
+# Documentation (not needed in runtime image)
+docs/
+*.md
+!README.md
+
+# Development files
+tests/
+conftest.py
+pytest.ini
+setup.cfg
+.pre-commit-config.yaml
+Makefile
+
+# CI/CD (not needed in image)
+.github/
+.gitlab-ci.yml
+.travis.yml
+Jenkinsfile
+azure-pipelines.yml
+
+# Docker files (avoid recursive inclusion)
+Dockerfile*
+docker-compose*.yaml
+docker-compose*.yml
+.docker/
+
+# Worktrees
+.worktrees/
+worktrees/
+
+# Data and state (mounted at runtime)
+*.db
+*.sqlite
+*.sqlite3
+payloads/
+landscape.db
+
+# Secrets (never include in image!)
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Alembic (migrations run separately)
+alembic/
+
+# Example and test configurations
+examples/
+fixtures/

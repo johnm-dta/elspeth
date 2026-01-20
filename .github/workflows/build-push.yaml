@@ -1,0 +1,283 @@
+# Build and Push Docker Images
+#
+# Builds Docker image and pushes to registries:
+#   - GitHub Container Registry (GHCR)
+#   - Azure Container Registry (ACR) - optional
+#
+# Triggers:
+#   - After CI passes on main branch
+#   - On version tags (v*)
+#   - Manual dispatch with registry selection
+#
+# Tags:
+#   - sha-<commit>  (immutable, for CI)
+#   - v1.2.3        (semantic version, for releases)
+#   - latest        (most recent main, avoid in production)
+
+name: Build and Push
+
+on:
+  # Trigger after CI passes on main
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+  # Trigger on version tags
+  push:
+    tags:
+      - 'v*'
+
+  # Manual trigger with registry selection
+  workflow_dispatch:
+    inputs:
+      registry:
+        description: 'Which registry to push to'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - ghcr
+          - acr
+          - both
+
+# Cancel in-progress runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Image name (without registry prefix)
+  IMAGE_NAME: elspeth
+  # Platforms to build for
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  # ===========================================================================
+  # Build and Push Docker Image
+  # ===========================================================================
+  build-push:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    # Only run if CI passed (for workflow_run trigger) or always for tags/dispatch
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      ghcr_image: ${{ steps.ghcr-push.outputs.digest && format('ghcr.io/{0}/{1}@{2}', github.repository_owner, env.IMAGE_NAME, steps.ghcr-push.outputs.digest) || '' }}
+      acr_image: ${{ steps.acr-push.outputs.digest && format('{0}/{1}@{2}', secrets.ACR_REGISTRY, env.IMAGE_NAME, steps.acr-push.outputs.digest) || '' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (for multi-platform builds)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # -----------------------------------------------------------------------
+      # Determine which registries to push to
+      # -----------------------------------------------------------------------
+      - name: Determine registry targets
+        id: registries
+        run: |
+          # Default to both for automatic triggers
+          REGISTRY="${{ github.event.inputs.registry || 'both' }}"
+
+          if [[ "$REGISTRY" == "ghcr" || "$REGISTRY" == "both" ]]; then
+            echo "push_ghcr=true" >> $GITHUB_OUTPUT
+          else
+            echo "push_ghcr=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [[ "$REGISTRY" == "acr" || "$REGISTRY" == "both" ]]; then
+            # Only push to ACR if credentials are configured
+            if [[ -n "${{ secrets.ACR_REGISTRY }}" ]]; then
+              echo "push_acr=true" >> $GITHUB_OUTPUT
+            else
+              echo "push_acr=false" >> $GITHUB_OUTPUT
+              echo "::warning::ACR credentials not configured, skipping ACR push"
+            fi
+          else
+            echo "push_acr=false" >> $GITHUB_OUTPUT
+          fi
+
+      # -----------------------------------------------------------------------
+      # Generate image metadata (tags, labels)
+      # -----------------------------------------------------------------------
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+            ${{ secrets.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # SHA tag (immutable)
+            type=sha,prefix=sha-,format=short
+            # Semantic version from tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # Latest on main
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # -----------------------------------------------------------------------
+      # Login to registries
+      # -----------------------------------------------------------------------
+      - name: Login to GHCR
+        if: steps.registries.outputs.push_ghcr == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to ACR
+        if: steps.registries.outputs.push_acr == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_REGISTRY }}
+          username: ${{ secrets.AZURE_CLIENT_ID }}
+          password: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      # -----------------------------------------------------------------------
+      # Build and push to GHCR
+      # -----------------------------------------------------------------------
+      - name: Build and push to GHCR
+        id: ghcr-push
+        if: steps.registries.outputs.push_ghcr == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            ${{ contains(github.ref, 'refs/tags/v') && format('ghcr.io/{0}/{1}:{2}', github.repository_owner, env.IMAGE_NAME, github.ref_name) || '' }}
+            ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}/{1}:latest', github.repository_owner, env.IMAGE_NAME) || '' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      # -----------------------------------------------------------------------
+      # Build and push to ACR
+      # -----------------------------------------------------------------------
+      - name: Build and push to ACR
+        id: acr-push
+        if: steps.registries.outputs.push_acr == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: |
+            ${{ secrets.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            ${{ contains(github.ref, 'refs/tags/v') && format('{0}/{1}:{2}', secrets.ACR_REGISTRY, env.IMAGE_NAME, github.ref_name) || '' }}
+            ${{ github.ref == 'refs/heads/main' && format('{0}/{1}:latest', secrets.ACR_REGISTRY, env.IMAGE_NAME) || '' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # -----------------------------------------------------------------------
+      # Summary
+      # -----------------------------------------------------------------------
+      - name: Print image summary
+        run: |
+          echo "## Docker Image Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Registry | Image | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ steps.registries.outputs.push_ghcr }}" == "true" ]]; then
+            echo "| GHCR | \`ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}\` | ✅ Pushed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| GHCR | - | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [[ "${{ steps.registries.outputs.push_acr }}" == "true" ]]; then
+            echo "| ACR | \`${{ secrets.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}\` | ✅ Pushed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| ACR | - | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ===========================================================================
+  # Smoke Test (Verify image works)
+  # ===========================================================================
+  smoke-test:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    needs: [build-push]
+    steps:
+      - name: Pull and test image
+        run: |
+          # Use GHCR image for smoke test
+          IMAGE="ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}"
+
+          echo "Testing image: $IMAGE"
+
+          # Test 1: Version check
+          echo "=== Test 1: Version check ==="
+          docker run --rm "$IMAGE" --version
+
+          # Test 2: Help output
+          echo "=== Test 2: Help output ==="
+          docker run --rm "$IMAGE" --help
+
+          # Test 3: Plugin list
+          echo "=== Test 3: Plugin list ==="
+          docker run --rm "$IMAGE" plugins list
+
+          echo "=== All smoke tests passed ==="
+
+  # ===========================================================================
+  # Create GitHub Release (on version tags)
+  # ===========================================================================
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build-push, smoke-test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+          body: |
+            ## Docker Images
+
+            Pull from GitHub Container Registry:
+            ```bash
+            docker pull ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ```
+
+            ${{ secrets.ACR_REGISTRY && format('Pull from Azure Container Registry:\n```bash\ndocker pull {0}/{1}:{2}\n```', secrets.ACR_REGISTRY, env.IMAGE_NAME, github.ref_name) || '' }}
+
+            ## Quick Start
+
+            ```bash
+            # Show help
+            docker run ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+
+            # Run a pipeline
+            docker run -v ./config:/app/config:ro \\
+                       -v ./input:/app/input:ro \\
+                       -v ./output:/app/output \\
+                       ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \\
+                       run --settings /app/config/pipeline.yaml --execute
+            ```

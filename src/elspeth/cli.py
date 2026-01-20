@@ -900,5 +900,199 @@ def resume(
         db.close()
 
 
+@app.command()
+def health(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        "-j",
+        help="Output as JSON.",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Include detailed check information.",
+    ),
+) -> None:
+    """Check system health for deployment verification.
+
+    Verifies that ELSPETH is properly configured and can connect to
+    required services. Used by deployment scripts and container health checks.
+
+    Examples:
+
+        # Basic health check
+        elspeth health
+
+        # JSON output for automation
+        elspeth health --json
+
+        # Verbose with details
+        elspeth health --verbose
+    """
+    import json as json_module
+    import os
+    import subprocess
+    import sys
+
+    from elspeth import __version__
+
+    # Health check results
+    checks: dict[str, dict[str, str | bool]] = {}
+    overall_healthy = True
+
+    # Check 1: Version (always passes if we got here)
+    checks["version"] = {
+        "status": "ok",
+        "value": __version__,
+    }
+
+    # Check 2: Git commit SHA (if available)
+    git_sha = os.environ.get("GIT_COMMIT_SHA", "")
+    if not git_sha:
+        # Try to get from git
+        try:
+            git_result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if git_result.returncode == 0:
+                git_sha = git_result.stdout.strip()
+        except Exception:
+            git_sha = "unknown"
+
+    checks["commit"] = {
+        "status": "ok" if git_sha and git_sha != "unknown" else "warn",
+        "value": git_sha or "unknown",
+    }
+
+    # Check 3: Python version
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    checks["python"] = {
+        "status": "ok",
+        "value": python_version,
+    }
+
+    # Check 4: Database connectivity (if DATABASE_URL is set)
+    db_url = os.environ.get("DATABASE_URL", "")
+    if db_url:
+        try:
+            from sqlalchemy import create_engine, text
+
+            engine = create_engine(db_url)
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            checks["database"] = {
+                "status": "ok",
+                "value": "connected",
+            }
+        except Exception as e:
+            checks["database"] = {
+                "status": "error",
+                "value": str(e),
+            }
+            overall_healthy = False
+    else:
+        checks["database"] = {
+            "status": "skip",
+            "value": "DATABASE_URL not set",
+        }
+
+    # Check 5: Config directory readable (container path)
+    config_paths = ["/app/config", "./config"]
+    config_readable = False
+    config_path_used = ""
+    for path in config_paths:
+        if os.path.isdir(path) and os.access(path, os.R_OK):
+            config_readable = True
+            config_path_used = path
+            break
+
+    if config_readable:
+        checks["config_dir"] = {
+            "status": "ok",
+            "value": config_path_used,
+        }
+    else:
+        checks["config_dir"] = {
+            "status": "warn",
+            "value": "not found or not readable",
+        }
+
+    # Check 6: Output directory writable (container path)
+    output_paths = ["/app/output", "./output"]
+    output_writable = False
+    output_path_used = ""
+    for path in output_paths:
+        if os.path.isdir(path) and os.access(path, os.W_OK):
+            output_writable = True
+            output_path_used = path
+            break
+
+    if output_writable:
+        checks["output_dir"] = {
+            "status": "ok",
+            "value": output_path_used,
+        }
+    else:
+        checks["output_dir"] = {
+            "status": "warn",
+            "value": "not found or not writable",
+        }
+
+    # Check 7: Plugins loaded
+    try:
+        manager = _get_plugin_manager()
+        source_count = len(manager.get_sources())
+        transform_count = len(manager.get_transforms())
+        sink_count = len(manager.get_sinks())
+        checks["plugins"] = {
+            "status": "ok",
+            "value": f"{source_count} sources, {transform_count} transforms, {sink_count} sinks",
+        }
+    except Exception as e:
+        checks["plugins"] = {
+            "status": "error",
+            "value": str(e),
+        }
+        overall_healthy = False
+
+    # Determine overall status
+    status = "healthy" if overall_healthy else "unhealthy"
+
+    # Output results
+    if json_output:
+        result = {
+            "status": status,
+            "version": __version__,
+            "commit": git_sha,
+            "checks": checks,
+        }
+        typer.echo(json_module.dumps(result, indent=2))
+    else:
+        typer.echo(f"Status: {status}")
+        typer.echo(f"Version: {__version__}")
+        typer.echo(f"Commit: {git_sha}")
+
+        if verbose:
+            typer.echo("\nChecks:")
+            for name, info in checks.items():
+                check_status = info["status"]
+                if check_status == "ok":
+                    status_icon = "✓"
+                elif check_status in ("warn", "skip"):
+                    status_icon = "⚠"
+                else:
+                    status_icon = "✗"
+                typer.echo(f"  {status_icon} {name}: {info['value']}")
+
+    # Exit with appropriate code
+    if not overall_healthy:
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()

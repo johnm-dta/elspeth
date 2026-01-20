@@ -2004,6 +2004,22 @@ class LandscapeRecorder:
             stable_hash(response_data) if response_data is not None else None
         )
 
+        # Auto-persist request to payload store if available and ref not provided
+        # This enables replay/verify modes to retrieve the original request
+        if request_ref is None and self._payload_store is not None:
+            request_bytes = canonical_json(request_data).encode("utf-8")
+            request_ref = self._payload_store.store(request_bytes)
+
+        # Auto-persist response to payload store if available and ref not provided
+        # This enables replay/verify modes to retrieve the original response
+        if (
+            response_data is not None
+            and response_ref is None
+            and self._payload_store is not None
+        ):
+            response_bytes = canonical_json(response_data).encode("utf-8")
+            response_ref = self._payload_store.store(response_bytes)
+
         # Serialize error if present
         error_json = canonical_json(error) if error is not None else None
 

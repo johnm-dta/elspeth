@@ -71,7 +71,12 @@ class OpenRouterLLMTransform(BaseTransform):
 
         # Store common LLM settings (from LLMConfig)
         self._model = cfg.model
-        self._template = PromptTemplate(cfg.template)
+        self._template = PromptTemplate(
+            cfg.template,
+            template_source=cfg.template_source,
+            lookup_data=cfg.lookup,
+            lookup_source=cfg.lookup_source,
+        )
         self._system_prompt = cfg.system_prompt
         self._temperature = cfg.temperature
         self._max_tokens = cfg.max_tokens
@@ -106,6 +111,7 @@ class OpenRouterLLMTransform(BaseTransform):
                     "reason": "template_rendering_failed",
                     "error": str(e),
                     "template_hash": self._template.template_hash,
+                    "template_source": self._template.template_source,
                 }
             )
 

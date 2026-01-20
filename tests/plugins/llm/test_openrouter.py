@@ -687,3 +687,226 @@ class TestOpenRouterLLMTransformIntegration:
         assert result.reason["content_type"] == "text/html"
         assert "body_preview" in result.reason
         assert "Error: Service Unavailable" in result.reason["body_preview"]
+
+
+class TestOpenRouterTemplateFeatures:
+    """Tests for template files and lookup features in OpenRouter transform."""
+
+    @pytest.fixture
+    def mock_recorder(self) -> Mock:
+        """Create a mock LandscapeRecorder."""
+        recorder = Mock()
+        recorder.record_call = Mock()
+        return recorder
+
+    @pytest.fixture
+    def ctx(self, mock_recorder: Mock) -> PluginContext:
+        """Create plugin context with landscape and state_id."""
+        return PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_recorder,
+            state_id="test-state-id",
+        )
+
+    def test_lookup_data_accessible_in_template(self, ctx: PluginContext) -> None:
+        """Lookup data is accessible via lookup.* namespace in templates."""
+        transform = OpenRouterLLMTransform(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "template": "Classify as {{ lookup.categories[0] }} or {{ lookup.categories[1] }}: {{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "lookup": {"categories": ["positive", "negative"]},
+            }
+        )
+
+        mock_response = _create_mock_response(content="positive")
+        with mock_httpx_client(response=mock_response) as mock_client:
+            result = transform.process({"text": "I love this!"}, ctx)
+
+            assert result.status == "success"
+            # Verify template rendered correctly with lookup data
+            call_args = mock_client.post.call_args
+            request_body = call_args.kwargs["json"]
+            user_message = request_body["messages"][0]["content"]
+            assert "Classify as positive or negative:" in user_message
+            assert "I love this!" in user_message
+
+    def test_two_dimensional_lookup_row_plus_lookup(self, ctx: PluginContext) -> None:
+        """Two-dimensional lookup: lookup.X[row.Y] works correctly."""
+        transform = OpenRouterLLMTransform(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "template": "Use tone: {{ lookup.tones[row.tone_id] }}. Message: {{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "lookup": {"tones": {"formal": "professional", "casual": "friendly"}},
+            }
+        )
+
+        mock_response = _create_mock_response(content="Processed")
+        with mock_httpx_client(response=mock_response) as mock_client:
+            result = transform.process({"text": "Hello", "tone_id": "formal"}, ctx)
+
+            assert result.status == "success"
+            call_args = mock_client.post.call_args
+            request_body = call_args.kwargs["json"]
+            user_message = request_body["messages"][0]["content"]
+            assert "Use tone: professional" in user_message
+
+    def test_lookup_hash_included_in_output(self, ctx: PluginContext) -> None:
+        """Output includes lookup_hash when lookup data is configured."""
+        transform = OpenRouterLLMTransform(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "template": "Categories: {{ lookup.cats }}. Input: {{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "lookup": {"cats": ["A", "B", "C"]},
+            }
+        )
+
+        mock_response = _create_mock_response(content="Result")
+        with mock_httpx_client(response=mock_response):
+            result = transform.process({"text": "test"}, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        # New audit fields should be present
+        assert "llm_response_lookup_hash" in result.row
+        assert result.row["llm_response_lookup_hash"] is not None
+        # lookup_source is None when lookup is inline (not from file)
+        assert "llm_response_lookup_source" in result.row
+
+    def test_template_source_included_in_output(self, ctx: PluginContext) -> None:
+        """Output includes template_source when provided."""
+        transform = OpenRouterLLMTransform(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "template": "Analyze: {{ row.text }}",
+                "template_source": "prompts/analysis.j2",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        mock_response = _create_mock_response(content="Analysis result")
+        with mock_httpx_client(response=mock_response):
+            result = transform.process({"text": "hello"}, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["llm_response_template_source"] == "prompts/analysis.j2"
+
+    def test_all_audit_fields_present_with_lookup(self, ctx: PluginContext) -> None:
+        """All audit metadata fields are present when using template with lookup."""
+        transform = OpenRouterLLMTransform(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "template": "{{ lookup.prompt_prefix }} {{ row.text }}",
+                "template_source": "prompts/prefixed.j2",
+                "schema": DYNAMIC_SCHEMA,
+                "lookup": {"prompt_prefix": "Please analyze:"},
+                "lookup_source": "prompts/lookups.yaml",
+            }
+        )
+
+        mock_response = _create_mock_response(content="Done")
+        with mock_httpx_client(response=mock_response):
+            result = transform.process({"text": "data"}, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+
+        # All audit fields should be present
+        assert "llm_response_template_hash" in result.row
+        assert "llm_response_variables_hash" in result.row
+        assert "llm_response_template_source" in result.row
+        assert "llm_response_lookup_hash" in result.row
+        assert "llm_response_lookup_source" in result.row
+        assert "llm_response_model" in result.row
+
+        # Values should be set correctly
+        assert result.row["llm_response_template_source"] == "prompts/prefixed.j2"
+        assert result.row["llm_response_lookup_source"] == "prompts/lookups.yaml"
+        assert result.row["llm_response_lookup_hash"] is not None
+
+    def test_no_lookup_has_none_hash_in_output(self, ctx: PluginContext) -> None:
+        """Output has None for lookup fields when no lookup configured."""
+        transform = OpenRouterLLMTransform(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "template": "Simple: {{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                # No lookup configured
+            }
+        )
+
+        mock_response = _create_mock_response(content="Result")
+        with mock_httpx_client(response=mock_response):
+            result = transform.process({"text": "test"}, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        # Fields should be present but None
+        assert "llm_response_lookup_hash" in result.row
+        assert result.row["llm_response_lookup_hash"] is None
+        assert "llm_response_lookup_source" in result.row
+        assert result.row["llm_response_lookup_source"] is None
+
+    def test_lookup_iteration_in_template(self, ctx: PluginContext) -> None:
+        """Lookup data can be iterated in templates."""
+        transform = OpenRouterLLMTransform(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "template": """Classify into one of:
+{% for cat in lookup.categories %}
+- {{ cat.name }}: {{ cat.description }}
+{% endfor %}
+Text: {{ row.text }}""",
+                "schema": DYNAMIC_SCHEMA,
+                "lookup": {
+                    "categories": [
+                        {"name": "spam", "description": "unwanted messages"},
+                        {"name": "ham", "description": "legitimate messages"},
+                    ]
+                },
+            }
+        )
+
+        mock_response = _create_mock_response(content="spam")
+        with mock_httpx_client(response=mock_response) as mock_client:
+            result = transform.process({"text": "Buy now! Limited offer!"}, ctx)
+
+            assert result.status == "success"
+            call_args = mock_client.post.call_args
+            request_body = call_args.kwargs["json"]
+            user_message = request_body["messages"][0]["content"]
+            assert "spam: unwanted messages" in user_message
+            assert "ham: legitimate messages" in user_message
+
+    def test_template_error_includes_source_in_error_details(
+        self, ctx: PluginContext
+    ) -> None:
+        """Template rendering error includes template_source for debugging."""
+        transform = OpenRouterLLMTransform(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "template": "Missing: {{ row.required_field }}",
+                "template_source": "prompts/requires_field.j2",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        # Process with missing required_field - should fail template rendering
+        result = transform.process({"other_field": "value"}, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "template_rendering_failed"
+        assert result.reason["template_source"] == "prompts/requires_field.j2"

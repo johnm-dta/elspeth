@@ -1,7 +1,14 @@
 # tests/plugins/llm/test_pooled_executor.py
 """Tests for PooledExecutor parallel request handling."""
 
+import threading
+import time
+from threading import Lock
+from typing import Any
+
+from elspeth.contracts import TransformResult
 from elspeth.plugins.llm.base import PoolConfig
+from elspeth.plugins.llm.capacity_errors import CapacityError
 from elspeth.plugins.llm.pooled_executor import PooledExecutor, RowContext
 
 
@@ -88,7 +95,7 @@ class TestPooledExecutorBatch:
         call_order: list[int] = []
         lock = Lock()
 
-        def mock_process(row: dict, state_id: str) -> TransformResult:
+        def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
             idx = row["idx"]
             with lock:
                 call_order.append(idx)
@@ -102,9 +109,9 @@ class TestPooledExecutorBatch:
 
         # Results must be in submission order
         assert len(results) == 3
-        assert results[0].row["idx"] == 0
-        assert results[1].row["idx"] == 1
-        assert results[2].row["idx"] == 2
+        assert results[0].row is not None and results[0].row["idx"] == 0
+        assert results[1].row is not None and results[1].row["idx"] == 1
+        assert results[2].row is not None and results[2].row["idx"] == 2
 
         executor.shutdown()
 
@@ -120,7 +127,7 @@ class TestPooledExecutorBatch:
         received_state_ids: list[tuple[int, str]] = []
         lock = Lock()
 
-        def mock_process(row: dict, state_id: str) -> TransformResult:
+        def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
             with lock:
                 received_state_ids.append((row["idx"], state_id))
             return TransformResult.success(row)
@@ -152,7 +159,7 @@ class TestPooledExecutorBatch:
         current_concurrent = 0
         lock = Lock()
 
-        def mock_process(row: dict, state_id: str) -> TransformResult:
+        def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
             nonlocal max_concurrent, current_concurrent
             with lock:
                 current_concurrent += 1
@@ -208,5 +215,164 @@ class TestPooledExecutorStats:
         assert "peak_delay_ms" in stats["pool_stats"]
         assert "current_delay_ms" in stats["pool_stats"]
         assert "total_throttle_time_ms" in stats["pool_stats"]
+
+        executor.shutdown()
+
+
+class TestPooledExecutorCapacityHandling:
+    """Test capacity error handling with AIMD throttle and timeout."""
+
+    def test_capacity_error_triggers_throttle_and_retries(self) -> None:
+        """Capacity errors should trigger throttle and retry."""
+        config = PoolConfig(pool_size=2, recovery_step_ms=50)
+        executor = PooledExecutor(config)
+
+        call_count = 0
+        lock = Lock()
+
+        def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
+            nonlocal call_count
+            with lock:
+                call_count += 1
+                current_count = call_count
+
+            # First call raises capacity error, second succeeds
+            if current_count == 1:
+                raise CapacityError(429, "Rate limited")
+            return TransformResult.success(row)
+
+        contexts = [RowContext(row={"idx": 0}, state_id="state_0", row_index=0)]
+
+        results = executor.execute_batch(contexts, mock_process)
+
+        # Should have retried and succeeded
+        assert len(results) == 1
+        assert results[0].status == "success"
+        assert call_count == 2
+
+        # Throttle should have been triggered
+        stats = executor.get_stats()
+        assert stats["pool_stats"]["capacity_retries"] == 1
+
+        executor.shutdown()
+
+    def test_capacity_retry_respects_max_timeout(self) -> None:
+        """Capacity retries should stop after max_capacity_retry_seconds."""
+        config = PoolConfig(
+            pool_size=1,
+            max_dispatch_delay_ms=100,
+            max_capacity_retry_seconds=1,  # Only 1 second
+        )
+        executor = PooledExecutor(config)
+
+        call_count = 0
+        lock = Lock()
+
+        def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
+            nonlocal call_count
+            with lock:
+                call_count += 1
+            # Always fail with capacity error
+            raise CapacityError(503, "Service unavailable")
+
+        contexts = [RowContext(row={"idx": 0}, state_id="state_0", row_index=0)]
+
+        results = executor.execute_batch(contexts, mock_process)
+
+        # Should eventually fail after timeout
+        assert len(results) == 1
+        assert results[0].status == "error"
+        assert results[0].reason is not None
+        assert "capacity_retry_timeout" in results[0].reason["reason"]
+
+        # Should have made multiple attempts before giving up
+        assert call_count > 1
+
+        executor.shutdown()
+
+    def test_normal_error_not_retried(self) -> None:
+        """Non-capacity errors should not be retried."""
+        config = PoolConfig(pool_size=1)
+        executor = PooledExecutor(config)
+
+        def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
+            # Return error result (not raise CapacityError)
+            return TransformResult.error({"reason": "bad_request"})
+
+        contexts = [RowContext(row={"idx": 0}, state_id="state_0", row_index=0)]
+
+        results = executor.execute_batch(contexts, mock_process)
+
+        # Should return error without retry
+        assert len(results) == 1
+        assert results[0].status == "error"
+
+        executor.shutdown()
+
+    def test_capacity_retry_releases_semaphore_during_backoff(self) -> None:
+        """During capacity retry backoff, semaphore should be released.
+
+        This ensures other workers can make progress while one is sleeping.
+        CRITICAL: Without this, all workers hitting capacity errors would
+        deadlock the pool.
+        """
+        config = PoolConfig(
+            pool_size=2,
+            recovery_step_ms=50,
+            max_dispatch_delay_ms=100,
+        )
+        executor = PooledExecutor(config)
+
+        # Track concurrent execution during retry
+        row0_in_retry_sleep = threading.Event()
+        row1_completed = threading.Event()
+        execution_order: list[str] = []
+        lock = Lock()
+        row0_call_count = 0
+
+        def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
+            nonlocal row0_call_count
+            idx = row["idx"]
+            with lock:
+                execution_order.append(f"start_{idx}")
+
+            if idx == 0:
+                row0_call_count += 1
+                if row0_call_count == 1:
+                    row0_in_retry_sleep.set()  # Signal we're about to sleep
+                    raise CapacityError(429, "Rate limited")
+                # Second call succeeds
+                row1_completed.wait(timeout=2)  # Wait for row 1 to complete
+                with lock:
+                    execution_order.append(f"end_{idx}")
+                return TransformResult.success(row)
+            else:
+                # Row 1: Wait until row 0 is in retry sleep, then complete
+                row0_in_retry_sleep.wait(timeout=2)
+                time.sleep(0.05)  # Give row 0 time to release semaphore
+                with lock:
+                    execution_order.append(f"end_{idx}")
+                row1_completed.set()
+                return TransformResult.success(row)
+
+        contexts = [
+            RowContext(row={"idx": 0}, state_id="state_0", row_index=0),
+            RowContext(row={"idx": 1}, state_id="state_1", row_index=1),
+        ]
+
+        results = executor.execute_batch(contexts, mock_process)
+
+        # Both should succeed
+        assert len(results) == 2
+        assert all(r.status == "success" for r in results)
+
+        # Row 1 should have executed WHILE row 0 was in retry sleep
+        # If semaphore wasn't released, row 1 would be blocked
+        assert "end_1" in execution_order
+        end_1_idx = execution_order.index("end_1")
+        # end_1 should happen before end_0 (row 1 completes during row 0's retry)
+        assert "end_0" in execution_order
+        end_0_idx = execution_order.index("end_0")
+        assert end_1_idx < end_0_idx, f"Row 1 should complete before Row 0's retry succeeds. Order: {execution_order}"
 
         executor.shutdown()

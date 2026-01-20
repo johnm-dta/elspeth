@@ -21,6 +21,7 @@ from typing import Any
 from elspeth.contracts import TransformResult
 from elspeth.plugins.llm.aimd_throttle import AIMDThrottle
 from elspeth.plugins.llm.base import PoolConfig
+from elspeth.plugins.llm.capacity_errors import CapacityError
 from elspeth.plugins.llm.reorder_buffer import ReorderBuffer
 
 
@@ -218,11 +219,14 @@ class PooledExecutor:
         state_id: str,
         process_fn: Callable[[dict[str, Any], str], TransformResult],
     ) -> tuple[int, TransformResult]:
-        """Execute single row and handle throttle feedback.
+        """Execute single row with capacity error retry and timeout.
 
-        Throttle delay is applied HERE (inside the worker) rather than
-        in the submission loop. This ensures parallel dispatch isn't
-        serialized by throttle delays.
+        Capacity errors trigger AIMD throttle and are retried until
+        max_capacity_retry_seconds is exceeded. Normal errors/results
+        are returned as-is.
+
+        Uses holding_semaphore flag for defensive tracking - ensures we
+        only release what we hold, even in edge cases.
 
         Args:
             buffer_idx: Index in reorder buffer
@@ -233,16 +237,65 @@ class PooledExecutor:
         Returns:
             Tuple of (buffer_idx, result)
         """
-        try:
-            # Apply throttle delay INSIDE worker (after semaphore acquired)
-            delay_ms = self._throttle.current_delay_ms
-            if delay_ms > 0:
-                time.sleep(delay_ms / 1000)
-                self._throttle.record_throttle_wait(delay_ms)
+        start_time = time.monotonic()
+        max_time = start_time + self._max_capacity_retry_seconds
 
-            result = process_fn(row, state_id)
-            self._throttle.on_success()
-            return (buffer_idx, result)
+        # Track semaphore state for defensive tracking
+        # We enter holding the semaphore (acquired in execute_batch)
+        holding_semaphore = True
+
+        try:
+            while True:
+                # Apply throttle delay INSIDE worker (after semaphore acquired)
+                delay_ms = self._throttle.current_delay_ms
+                if delay_ms > 0:
+                    time.sleep(delay_ms / 1000)
+                    self._throttle.record_throttle_wait(delay_ms)
+
+                try:
+                    result = process_fn(row, state_id)
+                    self._throttle.on_success()
+                    return (buffer_idx, result)
+                except CapacityError as e:
+                    # Check if we've exceeded max retry time
+                    if time.monotonic() >= max_time:
+                        elapsed = time.monotonic() - start_time
+                        return (
+                            buffer_idx,
+                            TransformResult.error(
+                                {
+                                    "reason": "capacity_retry_timeout",
+                                    "error": str(e),
+                                    "status_code": e.status_code,
+                                    "elapsed_seconds": elapsed,
+                                    "max_seconds": self._max_capacity_retry_seconds,
+                                },
+                                retryable=False,
+                            ),
+                        )
+
+                    # Trigger throttle backoff
+                    self._throttle.on_capacity_error()
+
+                    # CRITICAL: Release semaphore BEFORE sleeping
+                    # This allows other workers to make progress while we wait
+                    self._semaphore.release()
+                    holding_semaphore = False
+
+                    # Wait throttle delay before retry
+                    retry_delay_ms = self._throttle.current_delay_ms
+                    if retry_delay_ms > 0:
+                        time.sleep(retry_delay_ms / 1000)
+                        self._throttle.record_throttle_wait(retry_delay_ms)
+
+                    # Re-acquire semaphore for retry
+                    self._semaphore.acquire()
+                    holding_semaphore = True
+
+                    # Retry (continue to top of loop)
         finally:
-            # Always release semaphore
-            self._semaphore.release()
+            # Release semaphore only if we're holding it
+            # This defensive check ensures correctness even if an unexpected
+            # exception occurs between release and re-acquire
+            if holding_semaphore:
+                self._semaphore.release()

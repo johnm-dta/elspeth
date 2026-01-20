@@ -79,9 +79,7 @@ class KeywordFilter(BaseTransform):
         self._on_error = cfg.on_error
 
         # Compile patterns at init - fail fast on invalid regex
-        self._compiled_patterns: list[tuple[str, re.Pattern[str]]] = [
-            (pattern, re.compile(pattern)) for pattern in cfg.blocked_patterns
-        ]
+        self._compiled_patterns: list[tuple[str, re.Pattern[str]]] = [(pattern, re.compile(pattern)) for pattern in cfg.blocked_patterns]
 
         # Create schema
         assert cfg.schema_config is not None

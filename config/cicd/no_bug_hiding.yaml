@@ -164,19 +164,19 @@ allow_hits:
   # names is intentional, not a bug-hiding pattern.
   # ============================================================
 
-  - key: "plugins/manager.py:R1:PluginManager:get_source_by_name:line=222"
+  - key: "plugins/manager.py:R1:PluginManager:get_source_by_name:line=230"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_transform_by_name:line=226"
+  - key: "plugins/manager.py:R1:PluginManager:get_transform_by_name:line=234"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/manager.py:R1:PluginManager:get_gate_by_name:line=230"
+  - key: "plugins/manager.py:R1:PluginManager:get_gate_by_name:line=238"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"
@@ -185,7 +185,7 @@ allow_hits:
   # NOTE: get_aggregation_by_name and get_coalesce_by_name DELETED
   # Aggregation and coalesce lookups are now engine-controlled (WP-06, WP-08)
 
-  - key: "plugins/manager.py:R1:PluginManager:get_sink_by_name:line=234"
+  - key: "plugins/manager.py:R1:PluginManager:get_sink_by_name:line=242"
     owner: "architecture"
     reason: "Intentional Optional API: returns None for unknown plugin names"
     safety: "Callers check return value - this is the documented contract"

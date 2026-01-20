@@ -262,3 +262,44 @@ class TestPluginSpecSchemaHashes:
         # Same schema = same hash (regardless of plugin)
         assert spec1.input_schema_hash is not None  # Ensure populated
         assert spec1.input_schema_hash == spec2.input_schema_hash
+
+
+class TestDiscoveryBasedRegistration:
+    """Test PluginManager with automatic discovery."""
+
+    def test_register_builtin_discovers_csv_source(self) -> None:
+        """Verify register_builtin_plugins finds CSVSource via discovery."""
+        from elspeth.plugins.manager import PluginManager
+
+        manager = PluginManager()
+        manager.register_builtin_plugins()
+
+        source = manager.get_source_by_name("csv")
+        assert source is not None
+        assert source.name == "csv"
+
+    def test_register_builtin_discovers_all_transforms(self) -> None:
+        """Verify register_builtin_plugins finds all transforms."""
+        from elspeth.plugins.manager import PluginManager
+
+        manager = PluginManager()
+        manager.register_builtin_plugins()
+
+        transforms = manager.get_transforms()
+        names = [t.name for t in transforms]
+
+        assert "passthrough" in names
+        assert "field_mapper" in names
+
+    def test_register_builtin_discovers_all_sinks(self) -> None:
+        """Verify register_builtin_plugins finds all sinks."""
+        from elspeth.plugins.manager import PluginManager
+
+        manager = PluginManager()
+        manager.register_builtin_plugins()
+
+        sinks = manager.get_sinks()
+        names = [s.name for s in sinks]
+
+        assert "csv" in names
+        assert "json" in names

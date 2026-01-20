@@ -202,35 +202,44 @@ class AzureContentSafety(BaseTransform):
             },
         )
         response.raise_for_status()
-        data = response.json()
 
         # Parse response into category -> severity mapping
-        result: dict[str, int] = {}
-        for item in data["categoriesAnalysis"]:
-            category = item["category"].lower().replace("selfharm", "self_harm")
-            result[category] = item["severity"]
-        return result
+        # Azure API responses are external data (Tier 3: Zero Trust) - wrap parsing
+        try:
+            data = response.json()
+            result: dict[str, int] = {}
+            for item in data["categoriesAnalysis"]:
+                category = item["category"].lower().replace("selfharm", "self_harm")
+                result[category] = item["severity"]
+            return result
+        except (KeyError, TypeError, ValueError) as e:
+            raise httpx.RequestError(f"Malformed API response: {e}") from e
 
     def _check_thresholds(
         self,
         analysis: dict[str, int],
     ) -> dict[str, dict[str, Any]] | None:
-        """Check if any category exceeds its threshold."""
+        """Check if any category exceeds its threshold.
+
+        Missing categories in the analysis default to severity 0 (safe).
+        This handles external API responses that may omit categories.
+        """
+        # External API data may not include all categories - default to 0 (safe)
         categories: dict[str, dict[str, Any]] = {
             "hate": {
-                "severity": analysis["hate"],
+                "severity": analysis.get("hate", 0),
                 "threshold": self._thresholds.hate,
             },
             "violence": {
-                "severity": analysis["violence"],
+                "severity": analysis.get("violence", 0),
                 "threshold": self._thresholds.violence,
             },
             "sexual": {
-                "severity": analysis["sexual"],
+                "severity": analysis.get("sexual", 0),
                 "threshold": self._thresholds.sexual,
             },
             "self_harm": {
-                "severity": analysis["self_harm"],
+                "severity": analysis.get("self_harm", 0),
                 "threshold": self._thresholds.self_harm,
             },
         }

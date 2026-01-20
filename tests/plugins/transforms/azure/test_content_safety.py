@@ -462,3 +462,102 @@ class TestAzureContentSafetyTransform:
         result = transform.process(row, ctx)
 
         assert result.status == "success"
+
+    def test_malformed_api_response_returns_error(self) -> None:
+        """Malformed API responses return retryable error result.
+
+        Azure API responses are external data (Tier 3: Zero Trust) and may
+        return unexpected structures. This should be handled gracefully.
+        """
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        # Mock a malformed response (missing categoriesAnalysis)
+        ctx = make_mock_context({"unexpectedField": "value"})
+
+        row = {"content": "test", "id": 1}
+        result = transform.process(row, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "api_error"
+        assert result.reason["error_type"] == "network_error"
+        assert "malformed" in result.reason["message"].lower()
+        assert result.retryable is True
+
+    def test_malformed_category_item_returns_error(self) -> None:
+        """Malformed category items in API response return error.
+
+        Each category item must have 'category' and 'severity' fields.
+        """
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        # Mock a response with malformed category items (missing severity)
+        ctx = make_mock_context(
+            {
+                "categoriesAnalysis": [
+                    {"category": "Hate"},  # Missing "severity"
+                ]
+            }
+        )
+
+        row = {"content": "test", "id": 1}
+        result = transform.process(row, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "api_error"
+        assert result.retryable is True
+
+    def test_missing_categories_treated_as_safe(self) -> None:
+        """Missing categories in API response default to severity 0 (safe).
+
+        If Azure returns fewer categories than expected, missing ones
+        are treated as having severity 0 to avoid false positives.
+        """
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        # Mock a response with only some categories
+        ctx = make_mock_context(
+            {
+                "categoriesAnalysis": [
+                    {"category": "Hate", "severity": 0},
+                    # Missing Violence, Sexual, SelfHarm
+                ]
+            }
+        )
+
+        row = {"content": "test", "id": 1}
+        result = transform.process(row, ctx)
+
+        # Should pass since missing categories default to 0, which is below threshold 2
+        assert result.status == "success"

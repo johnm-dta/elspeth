@@ -1,18 +1,70 @@
 # tests/plugins/llm/test_azure.py
 """Tests for Azure OpenAI LLM transform."""
 
-from unittest.mock import Mock
+from contextlib import contextmanager
+from typing import Any, Generator
+from unittest.mock import Mock, patch
 
 import pytest
 
 from elspeth.contracts import Determinism
-from elspeth.plugins.clients.llm import LLMClientError, LLMResponse, RateLimitError
+from elspeth.plugins.clients.llm import LLMClientError, RateLimitError
 from elspeth.plugins.config_base import PluginConfigError
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.azure import AzureLLMTransform, AzureOpenAIConfig
 
 # Common schema config for dynamic field handling (accepts any fields)
 DYNAMIC_SCHEMA = {"fields": "dynamic"}
+
+
+@contextmanager
+def mock_azure_openai_client(
+    content: str = "Response",
+    model: str = "my-gpt4o-deployment",
+    usage: dict[str, Any] | None = None,
+    side_effect: Exception | None = None,
+) -> Generator[Mock, None, None]:
+    """Context manager to mock openai.AzureOpenAI.
+
+    Creates a mock client that returns a properly structured response
+    from chat.completions.create().
+
+    Args:
+        content: Response content to return
+        model: Model name in response
+        usage: Token usage dict (defaults to prompt_tokens=10, completion_tokens=5)
+        side_effect: Exception to raise instead of returning response
+
+    Yields:
+        Mock client instance for assertions
+    """
+    if usage is None:
+        usage = {"prompt_tokens": 10, "completion_tokens": 5}
+
+    mock_usage = Mock()
+    mock_usage.prompt_tokens = usage.get("prompt_tokens", 0)
+    mock_usage.completion_tokens = usage.get("completion_tokens", 0)
+
+    mock_message = Mock()
+    mock_message.content = content
+
+    mock_choice = Mock()
+    mock_choice.message = mock_message
+
+    mock_response = Mock()
+    mock_response.choices = [mock_choice]
+    mock_response.model = model
+    mock_response.usage = mock_usage
+    mock_response.model_dump = Mock(return_value={"model": model})
+
+    with patch("openai.AzureOpenAI") as mock_azure_class:
+        mock_client = Mock()
+        if side_effect:
+            mock_client.chat.completions.create.side_effect = side_effect
+        else:
+            mock_client.chat.completions.create.return_value = mock_response
+        mock_azure_class.return_value = mock_client
+        yield mock_client
 
 
 class TestAzureOpenAIConfig:
@@ -26,7 +78,7 @@ class TestAzureOpenAIConfig:
                     "endpoint": "https://my-resource.openai.azure.com",
                     "api_key": "azure-api-key",
                     "model": "gpt-4",
-                    "template": "Analyze: {{ text }}",
+                    "template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                 }
             )  # Missing 'deployment_name'
@@ -39,7 +91,7 @@ class TestAzureOpenAIConfig:
                     "deployment_name": "my-gpt4o-deployment",
                     "api_key": "azure-api-key",
                     "model": "gpt-4",
-                    "template": "Analyze: {{ text }}",
+                    "template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                 }
             )  # Missing 'endpoint'
@@ -52,7 +104,7 @@ class TestAzureOpenAIConfig:
                     "deployment_name": "my-gpt4o-deployment",
                     "endpoint": "https://my-resource.openai.azure.com",
                     "model": "gpt-4",
-                    "template": "Analyze: {{ text }}",
+                    "template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                 }
             )  # Missing 'api_key'
@@ -79,7 +131,7 @@ class TestAzureOpenAIConfig:
                     "endpoint": "https://my-resource.openai.azure.com",
                     "api_key": "azure-api-key",
                     "model": "gpt-4",
-                    "template": "Analyze: {{ text }}",
+                    "template": "Analyze: {{ row.text }}",
                 }
             )  # Missing 'schema'
 
@@ -91,14 +143,14 @@ class TestAzureOpenAIConfig:
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
                 "model": "gpt-4",
-                "template": "Analyze: {{ text }}",
+                "template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
         assert config.deployment_name == "my-gpt4o-deployment"
         assert config.endpoint == "https://my-resource.openai.azure.com"
         assert config.api_key == "azure-api-key"
-        assert config.template == "Analyze: {{ text }}"
+        assert config.template == "Analyze: {{ row.text }}"
 
     def test_default_api_version(self) -> None:
         """Config has default api_version of 2024-10-21."""
@@ -108,7 +160,7 @@ class TestAzureOpenAIConfig:
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -122,7 +174,7 @@ class TestAzureOpenAIConfig:
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "api_version": "2023-12-01-preview",
             }
@@ -137,7 +189,7 @@ class TestAzureOpenAIConfig:
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -158,7 +210,7 @@ class TestAzureLLMTransformInit:
                 "deployment_name": "my-gpt4o-deployment",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -171,7 +223,7 @@ class TestAzureLLMTransformInit:
                 "deployment_name": "my-gpt4o-deployment",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "api_version": "2023-12-01-preview",
             }
@@ -188,21 +240,20 @@ class TestAzureLLMTransformInit:
                 "deployment_name": "my-gpt4o-deployment",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
-        # BaseLLMTransform stores model from config
         assert transform._model == "my-gpt4o-deployment"
 
     def test_azure_config_property(self) -> None:
-        """azure_config property returns correct values for executor."""
+        """azure_config property returns correct values."""
         transform = AzureLLMTransform(
             {
                 "deployment_name": "my-gpt4o-deployment",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "api_version": "2023-12-01-preview",
             }
@@ -210,9 +261,10 @@ class TestAzureLLMTransformInit:
 
         config = transform.azure_config
         assert config["endpoint"] == "https://my-resource.openai.azure.com"
-        assert config["api_key"] == "azure-api-key"
         assert config["api_version"] == "2023-12-01-preview"
         assert config["provider"] == "azure"
+        # api_key is NOT included in azure_config (security)
+        assert "api_key" not in config
 
     def test_deployment_name_property(self) -> None:
         """deployment_name property returns correct value."""
@@ -221,7 +273,7 @@ class TestAzureLLMTransformInit:
                 "deployment_name": "my-gpt4o-deployment",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -234,7 +286,7 @@ class TestAzureLLMTransformInit:
                 "deployment_name": "my-gpt4o-deployment",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -247,7 +299,7 @@ class TestAzureLLMTransformInit:
                 {
                     "endpoint": "https://my-resource.openai.azure.com",
                     "api_key": "azure-api-key",
-                    "template": "{{ text }}",
+                    "template": "{{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                 }
             )
@@ -256,15 +308,26 @@ class TestAzureLLMTransformInit:
 class TestAzureLLMTransformProcess:
     """Tests for AzureLLMTransform processing.
 
-    These tests verify that AzureLLMTransform inherits process() behavior
-    from BaseLLMTransform correctly. The tests mock the llm_client which
-    the executor would provide.
+    These tests verify that AzureLLMTransform creates its own AuditedLLMClient
+    and processes rows correctly. The tests mock openai.AzureOpenAI.
     """
 
     @pytest.fixture
-    def ctx(self) -> PluginContext:
-        """Create minimal plugin context."""
-        return PluginContext(run_id="test-run", config={})
+    def mock_recorder(self) -> Mock:
+        """Create mock LandscapeRecorder."""
+        recorder = Mock()
+        recorder.record_call = Mock()
+        return recorder
+
+    @pytest.fixture
+    def ctx(self, mock_recorder: Mock) -> PluginContext:
+        """Create plugin context with landscape and state_id."""
+        return PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_recorder,
+            state_id="test-state-id",
+        )
 
     @pytest.fixture
     def transform(self) -> AzureLLMTransform:
@@ -274,7 +337,7 @@ class TestAzureLLMTransformProcess:
                 "deployment_name": "my-gpt4o-deployment",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "Analyze: {{ text }}",
+                "template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -283,15 +346,12 @@ class TestAzureLLMTransformProcess:
         self, ctx: PluginContext, transform: AzureLLMTransform
     ) -> None:
         """Successful LLM call returns row with response."""
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.return_value = LLMResponse(
+        with mock_azure_openai_client(
             content="The analysis is positive.",
             model="my-gpt4o-deployment",
             usage={"prompt_tokens": 10, "completion_tokens": 25},
-            latency_ms=150.0,
-        )
-
-        result = transform.process({"text": "hello world"}, ctx)
+        ):
+            result = transform.process({"text": "hello world"}, ctx)
 
         assert result.status == "success"
         assert result.row is not None
@@ -302,33 +362,27 @@ class TestAzureLLMTransformProcess:
         }
         assert "llm_response_template_hash" in result.row
         assert "llm_response_variables_hash" in result.row
+        assert result.row["llm_response_model"] == "my-gpt4o-deployment"
         # Original data preserved
         assert result.row["text"] == "hello world"
 
-    def test_model_passed_to_llm_client_is_deployment_name(
+    def test_model_passed_to_azure_client_is_deployment_name(
         self, ctx: PluginContext, transform: AzureLLMTransform
     ) -> None:
-        """deployment_name is used as model in LLM client calls."""
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.return_value = LLMResponse(
-            content="Response",
-            model="my-gpt4o-deployment",
-            usage={},
-        )
+        """deployment_name is used as model in Azure client calls."""
+        with mock_azure_openai_client() as mock_client:
+            transform.process({"text": "hello"}, ctx)
 
-        transform.process({"text": "hello"}, ctx)
-
-        call_args = ctx.llm_client.chat_completion.call_args
-        assert call_args.kwargs["model"] == "my-gpt4o-deployment"
+            call_args = mock_client.chat.completions.create.call_args
+            assert call_args.kwargs["model"] == "my-gpt4o-deployment"
 
     def test_template_rendering_error_returns_transform_error(
         self, ctx: PluginContext, transform: AzureLLMTransform
     ) -> None:
         """Template rendering failure returns TransformResult.error()."""
-        ctx.llm_client = Mock()
-
-        # Missing required_field triggers template error
-        result = transform.process({"other_field": "value"}, ctx)
+        # Missing required 'text' field triggers template error
+        with mock_azure_openai_client():
+            result = transform.process({"other_field": "value"}, ctx)
 
         assert result.status == "error"
         assert result.reason is not None
@@ -339,10 +393,9 @@ class TestAzureLLMTransformProcess:
         self, ctx: PluginContext, transform: AzureLLMTransform
     ) -> None:
         """LLM client failure returns TransformResult.error()."""
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.side_effect = LLMClientError("API Error")
-
-        result = transform.process({"text": "hello"}, ctx)
+        # Mock the underlying client to raise an exception
+        with mock_azure_openai_client(side_effect=Exception("API Error")):
+            result = transform.process({"text": "hello"}, ctx)
 
         assert result.status == "error"
         assert result.reason is not None
@@ -354,87 +407,86 @@ class TestAzureLLMTransformProcess:
         self, ctx: PluginContext, transform: AzureLLMTransform
     ) -> None:
         """Rate limit errors marked retryable=True."""
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.side_effect = RateLimitError(
-            "Rate limit exceeded"
-        )
-
-        result = transform.process({"text": "hello"}, ctx)
+        # Rate limit errors contain "rate" or "429" in the message
+        with mock_azure_openai_client(side_effect=Exception("Rate limit exceeded 429")):
+            result = transform.process({"text": "hello"}, ctx)
 
         assert result.status == "error"
         assert result.reason is not None
         assert result.reason["reason"] == "rate_limited"
         assert result.retryable is True
 
-    def test_missing_llm_client_raises_runtime_error(
-        self, ctx: PluginContext, transform: AzureLLMTransform
+    def test_missing_landscape_raises_runtime_error(
+        self, transform: AzureLLMTransform
     ) -> None:
-        """Missing llm_client in context raises RuntimeError."""
-        ctx.llm_client = None
+        """Missing landscape in context raises RuntimeError."""
+        ctx = PluginContext(run_id="test-run", config={}, state_id="test-state")
+        ctx.landscape = None
 
-        with pytest.raises(RuntimeError, match="LLM client not available"):
+        with pytest.raises(RuntimeError, match="requires landscape recorder"):
             transform.process({"text": "hello"}, ctx)
 
-    def test_system_prompt_included_in_messages(self, ctx: PluginContext) -> None:
+    def test_missing_state_id_raises_runtime_error(
+        self, mock_recorder: Mock, transform: AzureLLMTransform
+    ) -> None:
+        """Missing state_id in context raises RuntimeError."""
+        ctx = PluginContext(
+            run_id="test-run", config={}, landscape=mock_recorder, state_id=None
+        )
+
+        with pytest.raises(RuntimeError, match="requires landscape recorder"):
+            transform.process({"text": "hello"}, ctx)
+
+    def test_system_prompt_included_in_messages(
+        self, ctx: PluginContext
+    ) -> None:
         """System prompt is included when configured."""
         transform = AzureLLMTransform(
             {
                 "deployment_name": "my-gpt4o-deployment",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "system_prompt": "You are a helpful assistant.",
             }
         )
 
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.return_value = LLMResponse(
-            content="Response",
-            model="my-gpt4o-deployment",
-            usage={},
-        )
+        with mock_azure_openai_client() as mock_client:
+            transform.process({"text": "hello"}, ctx)
 
-        transform.process({"text": "hello"}, ctx)
-
-        # Verify messages passed to client
-        call_args = ctx.llm_client.chat_completion.call_args
-        messages = call_args.kwargs["messages"]
-        assert len(messages) == 2
-        assert messages[0]["role"] == "system"
-        assert messages[0]["content"] == "You are a helpful assistant."
-        assert messages[1]["role"] == "user"
-        assert messages[1]["content"] == "hello"
+            # Verify messages passed to client
+            call_args = mock_client.chat.completions.create.call_args
+            messages = call_args.kwargs["messages"]
+            assert len(messages) == 2
+            assert messages[0]["role"] == "system"
+            assert messages[0]["content"] == "You are a helpful assistant."
+            assert messages[1]["role"] == "user"
+            assert messages[1]["content"] == "hello"
 
     def test_temperature_and_max_tokens_passed_to_client(
         self, ctx: PluginContext
     ) -> None:
-        """Temperature and max_tokens are passed to LLM client."""
+        """Temperature and max_tokens are passed to Azure client."""
         transform = AzureLLMTransform(
             {
                 "deployment_name": "my-gpt4o-deployment",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "temperature": 0.7,
                 "max_tokens": 500,
             }
         )
 
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.return_value = LLMResponse(
-            content="Response",
-            model="my-gpt4o-deployment",
-            usage={},
-        )
+        with mock_azure_openai_client() as mock_client:
+            transform.process({"text": "hello"}, ctx)
 
-        transform.process({"text": "hello"}, ctx)
-
-        call_args = ctx.llm_client.chat_completion.call_args
-        assert call_args.kwargs["model"] == "my-gpt4o-deployment"
-        assert call_args.kwargs["temperature"] == 0.7
-        assert call_args.kwargs["max_tokens"] == 500
+            call_args = mock_client.chat.completions.create.call_args
+            assert call_args.kwargs["model"] == "my-gpt4o-deployment"
+            assert call_args.kwargs["temperature"] == 0.7
+            assert call_args.kwargs["max_tokens"] == 500
 
     def test_custom_response_field(self, ctx: PluginContext) -> None:
         """Custom response_field name is used."""
@@ -443,20 +495,14 @@ class TestAzureLLMTransformProcess:
                 "deployment_name": "my-gpt4o-deployment",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "response_field": "analysis",
             }
         )
 
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.return_value = LLMResponse(
-            content="Result",
-            model="my-gpt4o-deployment",
-            usage={},
-        )
-
-        result = transform.process({"text": "hello"}, ctx)
+        with mock_azure_openai_client(content="Result"):
+            result = transform.process({"text": "hello"}, ctx)
 
         assert result.status == "success"
         assert result.row is not None
@@ -464,19 +510,63 @@ class TestAzureLLMTransformProcess:
         assert "analysis_usage" in result.row
         assert "analysis_template_hash" in result.row
         assert "analysis_variables_hash" in result.row
+        assert "analysis_model" in result.row
 
     def test_close_is_noop(self, transform: AzureLLMTransform) -> None:
         """close() does nothing but doesn't raise."""
         transform.close()  # Should not raise
+
+    def test_azure_client_created_with_correct_credentials(
+        self, ctx: PluginContext, transform: AzureLLMTransform
+    ) -> None:
+        """AzureOpenAI client is created with correct credentials."""
+        with patch("openai.AzureOpenAI") as mock_azure_class:
+            # Set up the mock to return a properly configured client
+            mock_client = Mock()
+            mock_usage = Mock()
+            mock_usage.prompt_tokens = 10
+            mock_usage.completion_tokens = 5
+            mock_message = Mock()
+            mock_message.content = "Response"
+            mock_choice = Mock()
+            mock_choice.message = mock_message
+            mock_response = Mock()
+            mock_response.choices = [mock_choice]
+            mock_response.model = "my-gpt4o-deployment"
+            mock_response.usage = mock_usage
+            mock_response.model_dump = Mock(return_value={})
+            mock_client.chat.completions.create.return_value = mock_response
+            mock_azure_class.return_value = mock_client
+
+            transform.process({"text": "hello"}, ctx)
+
+            # Verify AzureOpenAI was called with correct args
+            mock_azure_class.assert_called_once_with(
+                azure_endpoint="https://my-resource.openai.azure.com",
+                api_key="azure-api-key",
+                api_version="2024-10-21",
+            )
 
 
 class TestAzureLLMTransformIntegration:
     """Integration-style tests for Azure-specific edge cases."""
 
     @pytest.fixture
-    def ctx(self) -> PluginContext:
-        """Create minimal plugin context."""
-        return PluginContext(run_id="test-run", config={})
+    def mock_recorder(self) -> Mock:
+        """Create mock LandscapeRecorder."""
+        recorder = Mock()
+        recorder.record_call = Mock()
+        return recorder
+
+    @pytest.fixture
+    def ctx(self, mock_recorder: Mock) -> PluginContext:
+        """Create plugin context with landscape and state_id."""
+        return PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_recorder,
+            state_id="test-state-id",
+        )
 
     def test_azure_config_with_default_api_version(self, ctx: PluginContext) -> None:
         """azure_config uses default api_version when not specified."""
@@ -485,7 +575,7 @@ class TestAzureLLMTransformIntegration:
                 "deployment_name": "my-gpt4o-deployment",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -502,9 +592,9 @@ class TestAzureLLMTransformIntegration:
                 "api_key": "azure-api-key",
                 "template": """
                     Analyze the following data:
-                    Name: {{ name }}
-                    Score: {{ score }}
-                    Category: {{ category }}
+                    Name: {{ row.name }}
+                    Score: {{ row.score }}
+                    Category: {{ row.category }}
 
                     Provide a summary.
                 """,
@@ -512,46 +602,35 @@ class TestAzureLLMTransformIntegration:
             }
         )
 
-        ctx.llm_client = Mock()
-        ctx.llm_client.chat_completion.return_value = LLMResponse(
-            content="Summary text",
-            model="my-gpt4o-deployment",
-            usage={},
-        )
+        with mock_azure_openai_client(content="Summary text") as mock_client:
+            result = transform.process(
+                {"name": "Test Item", "score": 95, "category": "A"},
+                ctx,
+            )
 
-        result = transform.process(
-            {"name": "Test Item", "score": 95, "category": "A"},
-            ctx,
-        )
+            assert result.status == "success"
+            # Check the prompt was rendered correctly
+            call_args = mock_client.chat.completions.create.call_args
+            messages = call_args.kwargs["messages"]
+            user_message = messages[0]["content"]
+            assert "Test Item" in user_message
+            assert "95" in user_message
+            assert "A" in user_message
 
-        assert result.status == "success"
-        # Check the prompt was rendered correctly
-        call_args = ctx.llm_client.chat_completion.call_args
-        messages = call_args.kwargs["messages"]
-        user_message = messages[0]["content"]
-        assert "Test Item" in user_message
-        assert "95" in user_message
-        assert "A" in user_message
-
-    def test_retryable_llm_error_propagates_flag(self, ctx: PluginContext) -> None:
-        """LLMClientError retryable flag is propagated."""
+    def test_calls_are_recorded_to_landscape(self, ctx: PluginContext) -> None:
+        """LLM calls are recorded via AuditedLLMClient."""
         transform = AzureLLMTransform(
             {
                 "deployment_name": "my-gpt4o-deployment",
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
 
-        ctx.llm_client = Mock()
-        # Non-rate-limit but retryable error
-        ctx.llm_client.chat_completion.side_effect = LLMClientError(
-            "Server overloaded", retryable=True
-        )
+        with mock_azure_openai_client():
+            transform.process({"text": "hello"}, ctx)
 
-        result = transform.process({"text": "hello"}, ctx)
-
-        assert result.status == "error"
-        assert result.retryable is True
+        # Verify record_call was called (by AuditedLLMClient)
+        assert ctx.landscape.record_call.called

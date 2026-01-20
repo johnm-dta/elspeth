@@ -11,34 +11,36 @@ class TestPromptTemplate:
 
     def test_simple_variable_substitution(self) -> None:
         """Basic variable substitution works."""
-        template = PromptTemplate("Hello, {{ name }}!")
-        result = template.render(name="World")
+        template = PromptTemplate("Hello, {{ row.name }}!")
+        result = template.render({"name": "World"})
         assert result == "Hello, World!"
 
     def test_template_with_loop(self) -> None:
         """Jinja2 loops work."""
         template = PromptTemplate(
             """
-Analyze these items:
-{% for item in items %}
-- {{ item.name }}: {{ item.value }}
+Analyze these entries:
+{% for entry in row.entries %}
+- {{ entry.name }}: {{ entry.value }}
 {% endfor %}
 """.strip()
         )
         result = template.render(
-            items=[
-                {"name": "A", "value": 1},
-                {"name": "B", "value": 2},
-            ]
+            {
+                "entries": [
+                    {"name": "A", "value": 1},
+                    {"name": "B", "value": 2},
+                ]
+            }
         )
         assert "- A: 1" in result
         assert "- B: 2" in result
 
     def test_template_with_default_filter(self) -> None:
         """Jinja2 default filter works."""
-        template = PromptTemplate("Focus: {{ focus | default('general') }}")
-        assert template.render() == "Focus: general"
-        assert template.render(focus="quality") == "Focus: quality"
+        template = PromptTemplate("Focus: {{ row.focus | default('general') }}")
+        assert template.render({}) == "Focus: general"
+        assert template.render({"focus": "quality"}) == "Focus: quality"
 
     def test_template_hash_is_stable(self) -> None:
         """Same template string produces same hash."""
@@ -54,8 +56,8 @@ Analyze these items:
 
     def test_render_returns_metadata(self) -> None:
         """render() returns prompt and audit metadata."""
-        template = PromptTemplate("Analyze: {{ text }}")
-        result = template.render_with_metadata(text="sample")
+        template = PromptTemplate("Analyze: {{ row.text }}")
+        result = template.render_with_metadata({"text": "sample"})
 
         assert result.prompt == "Analyze: sample"
         assert result.template_hash is not None
@@ -64,9 +66,9 @@ Analyze these items:
 
     def test_undefined_variable_raises_error(self) -> None:
         """Missing required variable raises TemplateError."""
-        template = PromptTemplate("Hello, {{ name }}!")
+        template = PromptTemplate("Hello, {{ row.name }}!")
         with pytest.raises(TemplateError, match="name"):
-            template.render()  # No 'name' provided
+            template.render({})  # No 'name' provided in row
 
     def test_sandboxed_prevents_dangerous_operations(self) -> None:
         """Sandboxed environment blocks dangerous operations."""
@@ -74,7 +76,7 @@ Analyze these items:
         dangerous = PromptTemplate("{{ ''.__class__.__mro__ }}")
         # SecurityError is wrapped in TemplateError with "Sandbox violation" message
         with pytest.raises(TemplateError, match="Sandbox violation"):
-            dangerous.render()
+            dangerous.render({})
 
     def test_rendered_prompt_includes_source_metadata(self) -> None:
         """RenderedPrompt includes template and lookup source paths."""

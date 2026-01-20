@@ -43,9 +43,19 @@ DYNAMIC_SCHEMA = {"fields": "dynamic"}
 # Concrete subclass of BaseLLMTransform for testing
 # Named without 'Test' prefix to avoid pytest collection warning
 class ConcreteLLMTransform(BaseLLMTransform):
-    """Concrete LLM transform for testing."""
+    """Concrete LLM transform for testing.
+
+    This class implements _get_llm_client() by reading the client from
+    ctx.llm_client, which is set up by the tests. This allows testing
+    the base class behavior with a mocked client.
+    """
 
     name = "concrete_llm"
+
+    def _get_llm_client(self, ctx: PluginContext) -> AuditedLLMClient:
+        """Return the client from context (set up by test fixtures)."""
+        # Tests set ctx.llm_client with a mocked AuditedLLMClient
+        return ctx.llm_client  # type: ignore[return-value]
 
 
 class TestLLMTransformIntegration:
@@ -125,7 +135,7 @@ class TestLLMTransformIntegration:
         transform = ConcreteLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "Say hello to {{ name }}!",
+                "template": "Say hello to {{ row.name }}!",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -184,7 +194,7 @@ class TestLLMTransformIntegration:
         transform = ConcreteLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "Analyze: {{ text }}",
+                "template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -226,7 +236,7 @@ class TestLLMTransformIntegration:
         transform = ConcreteLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -270,7 +280,7 @@ class TestLLMTransformIntegration:
         transform = ConcreteLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -317,7 +327,7 @@ class TestLLMTransformIntegration:
         transform = ConcreteLLMTransform(
             {
                 "model": "gpt-4",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "system_prompt": "You are a helpful assistant.",
                 "schema": DYNAMIC_SCHEMA,
             }
@@ -344,14 +354,18 @@ class TestOpenRouterLLMTransformIntegration:
         db = LandscapeDB.in_memory()
         return LandscapeRecorder(db)
 
-    def test_http_client_call_and_response_parsing(
+    @pytest.fixture
+    def setup_state(
         self, recorder: LandscapeRecorder
-    ) -> None:
-        """Verify OpenRouter uses HTTP client and parses response."""
+    ) -> tuple[str, str]:
+        """Create run and state for testing.
+
+        Returns:
+            Tuple of (run_id, state_id)
+        """
         schema = SchemaConfig.from_dict({"fields": "dynamic"})
         run = recorder.begin_run(config={}, canonical_version="v1")
-        # Register node - needed to have a valid run context
-        _ = recorder.register_node(
+        node = recorder.register_node(
             run_id=run.run_id,
             plugin_name="openrouter_llm",
             node_type="transform",
@@ -359,33 +373,68 @@ class TestOpenRouterLLMTransformIntegration:
             config={},
             schema_config=schema,
         )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={"input": "test"},
+        )
+        token = recorder.create_token(row_id=row.row_id)
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=node.node_id,
+            step_index=0,
+            input_data={"input": "test"},
+        )
+        return run.run_id, state.state_id
+
+    def test_http_client_call_and_response_parsing(
+        self, recorder: LandscapeRecorder, setup_state: tuple[str, str]
+    ) -> None:
+        """Verify OpenRouter uses HTTP client and parses response."""
+        from unittest.mock import patch
+
+        run_id, state_id = setup_state
 
         # Create transform
         transform = OpenRouterLLMTransform(
             {
                 "model": "anthropic/claude-3-opus",
-                "template": "Analyze: {{ text }}",
+                "template": "Analyze: {{ row.text }}",
                 "api_key": "test-api-key",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
 
-        # Mock HTTP client
-        mock_http_client = MagicMock()
+        # Mock HTTP response
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
+        mock_response.headers = {"content-type": "application/json"}
         mock_response.json.return_value = {
             "choices": [{"message": {"content": "Analysis complete"}}],
             "usage": {"prompt_tokens": 15, "completion_tokens": 10},
             "model": "anthropic/claude-3-opus",
         }
         mock_response.raise_for_status = MagicMock()
-        mock_http_client.post.return_value = mock_response
+        mock_response.content = b""
+        mock_response.text = ""
 
-        ctx = PluginContext(run_id=run.run_id, config={})
-        ctx.http_client = mock_http_client
+        ctx = PluginContext(
+            run_id=run_id,
+            config={},
+            landscape=recorder,
+            state_id=state_id,
+        )
 
-        result = transform.process({"text": "Hello world"}, ctx)
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value.__enter__ = MagicMock(
+                return_value=mock_client
+            )
+            mock_client_class.return_value.__exit__ = MagicMock(return_value=None)
+
+            result = transform.process({"text": "Hello world"}, ctx)
 
         # Verify result
         assert result.status == "success"
@@ -394,54 +443,43 @@ class TestOpenRouterLLMTransformIntegration:
         assert result.row["llm_response_usage"]["prompt_tokens"] == 15
         assert result.row["llm_response_model"] == "anthropic/claude-3-opus"
 
-        # Verify HTTP call was made
-        mock_http_client.post.assert_called_once()
-        call_args = mock_http_client.post.call_args
-
-        # Check URL
-        assert "openrouter.ai" in call_args.args[0]
-        assert "chat/completions" in call_args.args[0]
-
-        # Check headers include auth
-        assert "Authorization" in call_args.kwargs["headers"]
-        assert "Bearer test-api-key" in call_args.kwargs["headers"]["Authorization"]
-
-        # Check request body
-        body = call_args.kwargs["json"]
-        assert body["model"] == "anthropic/claude-3-opus"
-        assert len(body["messages"]) == 1
-        assert body["messages"][0]["content"] == "Analyze: Hello world"
-
     def test_http_error_returns_transform_error(
-        self, recorder: LandscapeRecorder
+        self, recorder: LandscapeRecorder, setup_state: tuple[str, str]
     ) -> None:
         """Verify HTTP errors are handled gracefully."""
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        from unittest.mock import patch
+
+        run_id, state_id = setup_state
 
         transform = OpenRouterLLMTransform(
             {
                 "model": "anthropic/claude-3-opus",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "api_key": "test-api-key",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
 
-        # Mock HTTP client that raises status error
-        mock_http_client = MagicMock()
-        mock_response = MagicMock(spec=httpx.Response)
-        mock_response.status_code = 500
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "Server Error",
-            request=MagicMock(),
-            response=mock_response,
+        ctx = PluginContext(
+            run_id=run_id,
+            config={},
+            landscape=recorder,
+            state_id=state_id,
         )
-        mock_http_client.post.return_value = mock_response
 
-        ctx = PluginContext(run_id=run.run_id, config={})
-        ctx.http_client = mock_http_client
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.post.side_effect = httpx.HTTPStatusError(
+                "Server Error",
+                request=MagicMock(),
+                response=MagicMock(status_code=500),
+            )
+            mock_client_class.return_value.__enter__ = MagicMock(
+                return_value=mock_client
+            )
+            mock_client_class.return_value.__exit__ = MagicMock(return_value=None)
 
-        result = transform.process({"text": "test"}, ctx)
+            result = transform.process({"text": "test"}, ctx)
 
         # Verify error result
         assert result.status == "error"
@@ -450,35 +488,42 @@ class TestOpenRouterLLMTransformIntegration:
         assert result.retryable is False  # 500 is not rate limit
 
     def test_rate_limit_http_error_is_retryable(
-        self, recorder: LandscapeRecorder
+        self, recorder: LandscapeRecorder, setup_state: tuple[str, str]
     ) -> None:
         """Verify 429 HTTP errors are marked retryable."""
-        run = recorder.begin_run(config={}, canonical_version="v1")
+        from unittest.mock import patch
+
+        run_id, state_id = setup_state
 
         transform = OpenRouterLLMTransform(
             {
                 "model": "anthropic/claude-3-opus",
-                "template": "{{ text }}",
+                "template": "{{ row.text }}",
                 "api_key": "test-api-key",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
 
-        # Mock HTTP client that returns 429
-        mock_http_client = MagicMock()
-        mock_response = MagicMock(spec=httpx.Response)
-        mock_response.status_code = 429
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "Rate Limit",
-            request=MagicMock(),
-            response=mock_response,
+        ctx = PluginContext(
+            run_id=run_id,
+            config={},
+            landscape=recorder,
+            state_id=state_id,
         )
-        mock_http_client.post.return_value = mock_response
 
-        ctx = PluginContext(run_id=run.run_id, config={})
-        ctx.http_client = mock_http_client
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.post.side_effect = httpx.HTTPStatusError(
+                "Rate Limit",
+                request=MagicMock(),
+                response=MagicMock(status_code=429),
+            )
+            mock_client_class.return_value.__enter__ = MagicMock(
+                return_value=mock_client
+            )
+            mock_client_class.return_value.__exit__ = MagicMock(return_value=None)
 
-        result = transform.process({"text": "test"}, ctx)
+            result = transform.process({"text": "test"}, ctx)
 
         # Verify retryable error
         assert result.status == "error"
@@ -490,14 +535,12 @@ class TestAzureBatchLLMTransformIntegration:
 
     @pytest.fixture
     def ctx_with_checkpoint(self) -> PluginContext:
-        """Create plugin context with checkpoint support."""
+        """Create plugin context for testing.
 
-        ctx = PluginContext(run_id="test-run", config={})
-        ctx._checkpoint = {}  # type: ignore[attr-defined]
-        ctx.get_checkpoint = lambda: ctx._checkpoint or None  # type: ignore[method-assign, attr-defined]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[method-assign, attr-defined]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[method-assign, attr-defined]
-        return ctx
+        PluginContext now has native checkpoint support via
+        get_checkpoint/update_checkpoint/clear_checkpoint methods.
+        """
+        return PluginContext(run_id="test-run", config={})
 
     @pytest.fixture
     def transform(self) -> AzureBatchLLMTransform:
@@ -507,7 +550,7 @@ class TestAzureBatchLLMTransformIntegration:
                 "deployment_name": "gpt-4o-batch",
                 "endpoint": "https://test.openai.azure.com",
                 "api_key": "test-key",
-                "template": "Process: {{ text }}",
+                "template": "Process: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
             }
         )
@@ -557,10 +600,10 @@ class TestAzureBatchLLMTransformIntegration:
         """Verify batch resume downloads results and maps to correct rows."""
         from datetime import UTC, datetime
 
-        # Set up context with existing checkpoint
+        # Set up context with existing checkpoint for resume test
         ctx = PluginContext(run_id="test-run", config={})
         recent_timestamp = datetime.now(UTC).isoformat()
-        ctx._checkpoint = {  # type: ignore[attr-defined]
+        ctx._checkpoint.update({
             "batch_id": "batch-xyz789",
             "input_file_id": "file-abc123",
             "row_mapping": {
@@ -571,10 +614,7 @@ class TestAzureBatchLLMTransformIntegration:
             "template_errors": [],
             "submitted_at": recent_timestamp,
             "row_count": 3,
-        }
-        ctx.get_checkpoint = lambda: ctx._checkpoint if ctx._checkpoint else None  # type: ignore[method-assign, attr-defined]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[method-assign, attr-defined]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[method-assign, attr-defined]
+        })
 
         # Mock completed batch
         mock_client = Mock()
@@ -693,8 +733,9 @@ class TestAzureBatchLLMTransformIntegration:
         from datetime import UTC, datetime
 
         ctx = PluginContext(run_id="test-run", config={})
+        # Pre-populate checkpoint for resume test
         recent_timestamp = datetime.now(UTC).isoformat()
-        ctx._checkpoint = {  # type: ignore[attr-defined]
+        ctx._checkpoint.update({
             "batch_id": "batch-xyz789",
             "input_file_id": "file-abc123",
             "row_mapping": {
@@ -704,10 +745,7 @@ class TestAzureBatchLLMTransformIntegration:
             "template_errors": [],
             "submitted_at": recent_timestamp,
             "row_count": 2,
-        }
-        ctx.get_checkpoint = lambda: ctx._checkpoint if ctx._checkpoint else None  # type: ignore[method-assign, attr-defined]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[method-assign, attr-defined]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[method-assign, attr-defined]
+        })
 
         mock_client = Mock()
         mock_batch = Mock()

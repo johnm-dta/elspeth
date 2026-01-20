@@ -10,6 +10,7 @@ from pydantic import Field
 
 from elspeth.contracts import Determinism, TransformResult
 from elspeth.plugins.base import BaseTransform
+from elspeth.plugins.clients.http import AuditedHTTPClient
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.base import LLMConfig
 from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
@@ -98,7 +99,7 @@ class OpenRouterLLMTransform(BaseTransform):
         """
         # 1. Render template (THEIR DATA - wrap)
         try:
-            rendered = self._template.render_with_metadata(**row)
+            rendered = self._template.render_with_metadata(row)
         except TemplateError as e:
             return TransformResult.error(
                 {
@@ -123,23 +124,28 @@ class OpenRouterLLMTransform(BaseTransform):
             request_body["max_tokens"] = self._max_tokens
 
         # 3. Call via audited HTTP client (EXTERNAL - wrap)
-        if ctx.http_client is None:
-            # This is OUR BUG - executor should have provided client
-            raise RuntimeError("HTTP client not available in PluginContext")
+        # Create client using context's recorder and state_id
+        if ctx.landscape is None or ctx.state_id is None:
+            raise RuntimeError(
+                "OpenRouter transform requires landscape recorder and state_id. "
+                "Ensure transform is executed through the engine."
+            )
+
+        http_client = AuditedHTTPClient(
+            recorder=ctx.landscape,
+            state_id=ctx.state_id,
+            timeout=self._timeout,
+            base_url=self._base_url,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+        )
 
         try:
-            response = ctx.http_client.post(
-                f"{self._base_url}/chat/completions",
+            response = http_client.post(
+                "/chat/completions",
                 json=request_body,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=self._timeout,
+                headers={"Content-Type": "application/json"},
             )
             response.raise_for_status()
-            data = response.json()
-
         except httpx.HTTPStatusError as e:
             # HTTP error (4xx, 5xx) - check for rate limit
             is_rate_limit = e.response.status_code == 429
@@ -154,7 +160,23 @@ class OpenRouterLLMTransform(BaseTransform):
                 retryable=False,
             )
 
-        # 4. Extract content from response (EXTERNAL DATA - wrap)
+        # 4. Parse JSON response (EXTERNAL DATA - wrap)
+        # OpenRouter/proxy may return non-JSON (e.g., HTML error page) with HTTP 200
+        try:
+            data = response.json()
+        except (ValueError, TypeError) as e:
+            # JSONDecodeError is a subclass of ValueError
+            return TransformResult.error(
+                {
+                    "reason": "invalid_json_response",
+                    "error": f"Response is not valid JSON: {e}",
+                    "content_type": response.headers.get("content-type", "unknown"),
+                    "body_preview": response.text[:500] if response.text else None,
+                },
+                retryable=False,
+            )
+
+        # 5. Extract content from response (EXTERNAL DATA - wrap)
         # OpenRouter may return malformed responses: empty choices, error JSON
         # with HTTP 200, or unexpected structure from various providers
         try:

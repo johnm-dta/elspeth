@@ -222,6 +222,21 @@ Available variables:
 - `{{ run_id }}` - The unique run identifier
 - `{{ timestamp }}` - ISO format timestamp at write time
 
+## Pooled Safety Transforms
+
+Prompt Shield also supports pooled execution:
+
+```yaml
+- plugin: azure_prompt_shield
+  options:
+    endpoint: "${AZURE_CONTENT_SAFETY_ENDPOINT}"
+    api_key: "${AZURE_CONTENT_SAFETY_KEY}"
+    fields: text
+    pool_size: 5  # Process 5 rows concurrently
+```
+
+This significantly reduces pipeline latency when processing large batches.
+
 ## Audit Trail
 
 The pipeline records full audit data locally to `runs/audit.db`, including:

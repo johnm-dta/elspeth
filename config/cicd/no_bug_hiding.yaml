@@ -774,25 +774,25 @@ allow_hits:
   # severity 0 (safe) to avoid false positives.
   # ============================================================
 
-  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=231"
+  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=225"
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=235"
+  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=229"
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=239"
+  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=233"
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=243"
+  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=237"
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"

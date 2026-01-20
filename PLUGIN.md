@@ -36,9 +36,10 @@ uv run elspeth plugins list
 2. [Creating a Transform Plugin](#creating-a-transform-plugin)
 3. [Creating a Source Plugin](#creating-a-source-plugin)
 4. [Creating a Sink Plugin](#creating-a-sink-plugin)
-5. [Plugin Registration](#plugin-registration)
-6. [Schema Configuration](#schema-configuration)
-7. [Contract Testing](#contract-testing)
+5. [Creating a Gate Plugin](#creating-a-gate-plugin)
+6. [Plugin Registration](#plugin-registration)
+7. [Schema Configuration](#schema-configuration)
+8. [Contract Testing](#contract-testing)
 
 ---
 
@@ -515,12 +516,20 @@ class MySink(BaseSink):
 
 ---
 
-## About Gate Plugins
+## Creating a Gate Plugin
 
-Gates in ELSPETH are **config-driven** using the `gates:` YAML section with condition expressions. Custom gate plugins are rarely needed.
+Gates route rows based on conditions. ELSPETH supports two approaches:
+
+| Approach | Use When | Implementation |
+|----------|----------|----------------|
+| **Config Expression** | Simple field comparisons (`score > 0.8`) | YAML `condition` string |
+| **Plugin Gate** | Complex logic (ML models, external lookups, stateful routing) | `BaseGate` subclass |
+
+### Config Expression Gates (Simple Cases)
+
+For simple routing, use config-driven gates:
 
 ```yaml
-# Config-driven gate (preferred approach)
 gates:
   - name: quality_check
     condition: "row['score'] >= 0.8"
@@ -529,30 +538,156 @@ gates:
       "false": continue
 ```
 
-**When to use config-driven gates:**
-- Boolean conditions on field values
-- Threshold checks
-- Category routing
+### Plugin Gates (Complex Cases)
 
-**When you might need a custom gate plugin:**
-- Complex multi-field logic that's hard to express in a condition string
-- External lookups during routing decisions
-- Stateful routing based on accumulated data
-
-If you need custom gate logic, implement it as a **Transform** that returns routing decisions:
+For complex routing logic, create a `BaseGate` subclass:
 
 ```python
-class CustomRouter(BaseTransform):
-    """Custom routing logic as a transform."""
+# src/elspeth/plugins/transforms/my_gate.py
+"""Custom gate plugin for complex routing decisions."""
 
-    name = "custom_router"
+from typing import Any
 
-    def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
-        # Complex routing logic here
-        if self._should_route_to_special(row):
-            return TransformResult.route_to("special_sink", row)
-        return TransformResult.success(row)  # Continue to next node
+from elspeth.contracts import Determinism, PluginSchema, RoutingAction
+from elspeth.plugins.base import BaseGate
+from elspeth.plugins.context import PluginContext
+from elspeth.plugins.results import GateResult
+from elspeth.plugins.schema_factory import create_schema_from_config
+
+
+class MyGateConfig:
+    """Configuration for my gate."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.threshold = config.get("threshold", 0.7)
+        self.model_path = config.get("model_path")
+
+
+class MyGate(BaseGate):
+    """Route rows based on ML model predictions.
+
+    Use this gate when:
+    - Routing logic requires ML inference
+    - Multiple fields must be analyzed together
+    - External service calls are needed
+    - Stateful decisions (rate limiting, quotas)
+
+    Config options:
+        threshold: Prediction threshold (default: 0.7)
+        model_path: Path to ML model file
+
+    Example YAML:
+        gates:
+          - name: ml_router
+            plugin: my_gate
+            threshold: 0.8
+            model_path: /models/classifier.pkl
+            routes:
+              flagged: review_sink
+    """
+
+    name = "my_gate"
+    determinism = Determinism.EXTERNAL_CALL  # ML model is external
+    plugin_version = "1.0.0"
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+
+        cfg = MyGateConfig(config)
+        self._threshold = cfg.threshold
+        self._model_path = cfg.model_path
+        self._model = None  # Lazy load
+
+        # Gates typically pass through the same schema
+        schema_config = config.get("schema", {"fields": "dynamic"})
+        schema = create_schema_from_config(
+            schema_config,
+            "MyGateSchema",
+            allow_coercion=False,
+        )
+        self.input_schema = schema
+        self.output_schema = schema
+
+    def on_start(self, ctx: PluginContext) -> None:
+        """Load ML model at pipeline start."""
+        if self._model_path:
+            import pickle
+            with open(self._model_path, "rb") as f:
+                self._model = pickle.load(f)
+
+    def evaluate(
+        self, row: dict[str, Any], ctx: PluginContext
+    ) -> GateResult:
+        """Evaluate row and decide routing.
+
+        Args:
+            row: Input row (types validated by upstream)
+            ctx: Plugin context
+
+        Returns:
+            GateResult with routing decision
+        """
+        # Complex logic that can't be a config expression
+        if self._model:
+            features = self._extract_features(row)
+            score = self._model.predict_proba([features])[0][1]
+
+            if score > self._threshold:
+                # Optionally add metadata before routing
+                row["ml_score"] = score
+                return GateResult(
+                    row=row,
+                    action=RoutingAction.route("flagged"),
+                )
+
+        # Default: continue to next node
+        return GateResult(row=row, action=RoutingAction.continue_())
+
+    def _extract_features(self, row: dict[str, Any]) -> list[float]:
+        """Extract ML features from row."""
+        # Your feature extraction logic
+        return [row.get("feature1", 0), row.get("feature2", 0)]
+
+    def close(self) -> None:
+        """Release resources."""
+        self._model = None
 ```
+
+### GateResult Options
+
+```python
+from elspeth.contracts import RoutingAction
+from elspeth.plugins.results import GateResult
+
+# Continue to next node in pipeline
+GateResult(row=row, action=RoutingAction.continue_())
+
+# Route to named sink
+GateResult(row=row, action=RoutingAction.route("sink_name"))
+
+# Fork to multiple parallel paths
+GateResult(row=row, action=RoutingAction.fork(["path_a", "path_b"]))
+```
+
+### When to Use Each Approach
+
+| Scenario | Recommended |
+|----------|-------------|
+| `row['score'] > threshold` | Config expression |
+| Multiple conditions with AND/OR | Config expression |
+| ML model inference | Plugin gate |
+| External API validation | Plugin gate |
+| Rate limiting / quotas | Plugin gate |
+| Complex business rules | Plugin gate |
+
+### Registering Gate Plugins
+
+Gate plugins follow the same registration pattern as transforms:
+
+1. Add to `hookimpl.py` (see [Plugin Registration](#plugin-registration))
+2. Add to CLI registries if needed
+
+> **Note:** Built-in gate plugins are rare since most routing is simple enough for config expressions. Create a plugin gate only when expressions can't express your logic.
 
 ---
 

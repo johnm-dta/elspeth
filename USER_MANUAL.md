@@ -390,7 +390,16 @@ row_plugins:
 
 ### Gates Configuration
 
-Config-driven routing based on conditions.
+Gates route rows based on conditions. ELSPETH supports two approaches:
+
+| Approach | Use When |
+|----------|----------|
+| **Config Expression** | Simple field comparisons (most common) |
+| **Plugin Gate** | Complex logic requiring code (ML models, external APIs, stateful routing) |
+
+#### Config Expression Gates
+
+For simple routing, use condition expressions:
 
 ```yaml
 gates:
@@ -435,6 +444,21 @@ gates:
 |-------------|----------|
 | `continue` | Continue to next node in pipeline |
 | `<sink_name>` | Route directly to named sink |
+
+#### Plugin Gates (Advanced)
+
+For complex routing that can't be expressed in a condition string (ML models, external lookups, stateful decisions), use plugin gates:
+
+```yaml
+gates:
+  - name: ml_classifier
+    plugin: my_ml_gate         # References a BaseGate plugin
+    threshold: 0.8             # Plugin-specific config
+    routes:
+      flagged: review_sink     # Route labels match RoutingAction.route() calls
+```
+
+> **See:** `PLUGIN.md` for how to create custom gate plugins using `BaseGate`.
 
 ### Aggregations Configuration
 

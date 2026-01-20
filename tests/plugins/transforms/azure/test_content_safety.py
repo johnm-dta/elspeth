@@ -114,12 +114,7 @@ class TestAzureContentSafetyConfig:
             )
         # Should mention one of the missing fields or thresholds
         err_str = str(exc_info.value).lower()
-        assert (
-            "violence" in err_str
-            or "sexual" in err_str
-            or "self_harm" in err_str
-            or "thresholds" in err_str
-        )
+        assert "violence" in err_str or "sexual" in err_str or "self_harm" in err_str or "thresholds" in err_str
 
     def test_config_validates_threshold_range(self) -> None:
         """Thresholds must be 0-6."""
@@ -562,6 +557,77 @@ class TestAzureContentSafetyTransform:
         # Should pass since missing categories default to 0, which is below threshold 2
         assert result.status == "success"
 
+    def test_threshold_zero_with_severity_zero_passes(self) -> None:
+        """Threshold=0 with severity=0 should pass (not block safe content).
+
+        Per design doc: threshold=0 means "block severity > 0" not "block all".
+        This is the edge case where >= would incorrectly block safe content.
+        """
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        # Azure returns all safe (severity 0)
+        ctx = make_mock_context(
+            {
+                "categoriesAnalysis": [
+                    {"category": "Hate", "severity": 0},
+                    {"category": "Violence", "severity": 0},
+                    {"category": "Sexual", "severity": 0},
+                    {"category": "SelfHarm", "severity": 0},
+                ]
+            }
+        )
+
+        row = {"content": "completely safe content", "id": 1}
+        result = transform.process(row, ctx)
+
+        # Should pass - severity 0 is NOT > threshold 0
+        assert result.status == "success"
+        assert result.row == row
+
+    def test_threshold_zero_blocks_severity_one(self) -> None:
+        """Threshold=0 should block content with severity >= 1."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        # Azure returns self_harm severity 1 (above threshold 0)
+        ctx = make_mock_context(
+            {
+                "categoriesAnalysis": [
+                    {"category": "Hate", "severity": 0},
+                    {"category": "Violence", "severity": 0},
+                    {"category": "Sexual", "severity": 0},
+                    {"category": "SelfHarm", "severity": 1},
+                ]
+            }
+        )
+
+        row = {"content": "content with mild self-harm", "id": 1}
+        result = transform.process(row, ctx)
+
+        # Should block - severity 1 IS > threshold 0
+        assert result.status == "error"
+        assert result.reason["reason"] == "content_safety_violation"
+        assert result.reason["categories"]["self_harm"]["exceeded"] is True
+
     def test_missing_http_client_raises_error(self) -> None:
         """Missing http_client in context raises RuntimeError."""
         from elspeth.plugins.context import PluginContext
@@ -638,10 +704,7 @@ class TestAzureContentSafetyTransform:
         call_args = ctx.http_client.post.call_args
 
         # Check URL (trailing slash should be stripped)
-        expected_url = (
-            "https://test.cognitiveservices.azure.com/contentsafety/text:analyze"
-            "?api-version=2024-09-01"
-        )
+        expected_url = "https://test.cognitiveservices.azure.com/contentsafety/text:analyze?api-version=2024-09-01"
         assert call_args[0][0] == expected_url
 
         # Check headers

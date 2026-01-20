@@ -613,3 +613,199 @@ class TestAzureLLMTransformIntegration:
         # Verify record_call was called (by AuditedLLMClient)
         assert ctx.landscape is not None
         assert ctx.landscape.record_call.called  # type: ignore[attr-defined]
+
+
+class TestAzureLLMTransformPooledExecution:
+    """Tests for Azure LLM transform with pooled execution support."""
+
+    def test_pool_size_1_does_not_create_executor(self) -> None:
+        """pool_size=1 should not create executor (sequential mode)."""
+        transform = AzureLLMTransform(
+            {
+                "deployment_name": "my-gpt4o-deployment",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "azure-api-key",
+                "template": "{{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "pool_size": 1,  # Sequential
+            }
+        )
+
+        assert transform._executor is None
+        transform.close()
+
+    def test_pool_size_greater_than_1_creates_executor(self) -> None:
+        """pool_size > 1 should create pooled executor."""
+        transform = AzureLLMTransform(
+            {
+                "deployment_name": "my-gpt4o-deployment",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "azure-api-key",
+                "template": "{{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "pool_size": 5,
+            }
+        )
+
+        assert transform._executor is not None
+        assert transform._executor.pool_size == 5
+
+        transform.close()
+
+    def test_on_start_captures_recorder(self) -> None:
+        """on_start() should capture recorder reference for pooled execution."""
+        transform = AzureLLMTransform(
+            {
+                "deployment_name": "my-gpt4o-deployment",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "azure-api-key",
+                "template": "{{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "pool_size": 3,
+            }
+        )
+
+        assert transform._recorder is None
+
+        mock_recorder = Mock()
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_recorder,
+            state_id="test-state-id",
+        )
+        transform.on_start(ctx)
+
+        assert transform._recorder is mock_recorder
+
+        transform.close()
+
+    def test_close_shuts_down_executor(self) -> None:
+        """close() should shut down executor and clear recorder."""
+        transform = AzureLLMTransform(
+            {
+                "deployment_name": "my-gpt4o-deployment",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "azure-api-key",
+                "template": "{{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "pool_size": 3,
+            }
+        )
+
+        mock_recorder = Mock()
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_recorder,
+            state_id="test-state-id",
+        )
+        transform.on_start(ctx)
+
+        assert transform._executor is not None
+        assert transform._recorder is not None
+
+        transform.close()
+
+        assert transform._recorder is None
+        # Executor should be shut down (can't easily verify, but shouldn't raise)
+
+    def test_process_single_with_state_raises_capacity_error_on_rate_limit(self) -> None:
+        """_process_single_with_state should raise CapacityError on rate limits."""
+        from elspeth.plugins.clients.llm import RateLimitError
+        from elspeth.plugins.llm.capacity_errors import CapacityError
+
+        transform = AzureLLMTransform(
+            {
+                "deployment_name": "my-gpt4o-deployment",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "azure-api-key",
+                "template": "{{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "pool_size": 3,
+            }
+        )
+
+        mock_recorder = Mock()
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_recorder,
+            state_id="test-state-id",
+        )
+        transform.on_start(ctx)
+
+        # Mock Azure client to raise rate limit error
+        with patch("openai.AzureOpenAI") as mock_azure_class:
+            mock_client = Mock()
+            mock_client.chat.completions.create.side_effect = Exception("Rate limit exceeded")
+            mock_azure_class.return_value = mock_client
+
+            # Patch the AuditedLLMClient to raise RateLimitError
+            with patch(
+                "elspeth.plugins.clients.llm.AuditedLLMClient.chat_completion",
+                side_effect=RateLimitError("Rate limit exceeded"),
+            ):
+                with pytest.raises(CapacityError) as exc_info:
+                    transform._process_single_with_state({"text": "hello"}, "test-state")
+
+                assert exc_info.value.status_code == 429
+
+        transform.close()
+
+    def test_process_single_with_state_returns_error_on_llm_client_error(self) -> None:
+        """_process_single_with_state should return error on non-rate-limit failures."""
+        from elspeth.plugins.clients.llm import LLMClientError
+
+        transform = AzureLLMTransform(
+            {
+                "deployment_name": "my-gpt4o-deployment",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "azure-api-key",
+                "template": "{{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "pool_size": 3,
+            }
+        )
+
+        mock_recorder = Mock()
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_recorder,
+            state_id="test-state-id",
+        )
+        transform.on_start(ctx)
+
+        # Patch the AuditedLLMClient to raise LLMClientError
+        with patch(
+            "elspeth.plugins.clients.llm.AuditedLLMClient.chat_completion",
+            side_effect=LLMClientError("API error", retryable=False),
+        ):
+            result = transform._process_single_with_state({"text": "hello"}, "test-state")
+
+            assert result.status == "error"
+            assert result.reason is not None
+            assert result.reason["reason"] == "llm_call_failed"
+            assert result.retryable is False
+
+        transform.close()
+
+    def test_process_single_with_state_requires_recorder(self) -> None:
+        """_process_single_with_state should raise if recorder not set."""
+        transform = AzureLLMTransform(
+            {
+                "deployment_name": "my-gpt4o-deployment",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "azure-api-key",
+                "template": "{{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "pool_size": 3,
+            }
+        )
+
+        # Don't call on_start, so _recorder is None
+        with pytest.raises(RuntimeError, match="on_start was called"):
+            transform._process_single_with_state({"text": "hello"}, "test-state")
+
+        transform.close()

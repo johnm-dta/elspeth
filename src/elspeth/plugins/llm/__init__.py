@@ -3,6 +3,7 @@
 
 from elspeth.plugins.llm.azure import AzureLLMTransform, AzureOpenAIConfig
 from elspeth.plugins.llm.azure_batch import AzureBatchConfig, AzureBatchLLMTransform
+from elspeth.plugins.llm.azure_multi_query import AzureMultiQueryLLMTransform
 from elspeth.plugins.llm.base import BaseLLMTransform, LLMConfig
 from elspeth.plugins.llm.batch_errors import BatchPendingError
 from elspeth.plugins.llm.openrouter import OpenRouterConfig, OpenRouterLLMTransform
@@ -16,6 +17,7 @@ __all__ = [
     "AzureBatchConfig",
     "AzureBatchLLMTransform",
     "AzureLLMTransform",
+    "AzureMultiQueryLLMTransform",
     "AzureOpenAIConfig",
     "BaseLLMTransform",
     "BatchPendingError",

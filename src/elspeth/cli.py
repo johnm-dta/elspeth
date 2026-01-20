@@ -364,7 +364,7 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> Executi
 
     return {
         "run_id": result.run_id,
-        "status": result.status,
+        "status": result.status.value,  # Convert enum to string for TypedDict
         "rows_processed": result.rows_processed,
     }
 

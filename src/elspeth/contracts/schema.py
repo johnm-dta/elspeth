@@ -150,9 +150,13 @@ class SchemaConfig:
         if "fields" not in config:
             raise ValueError("'fields' key is required in schema config. Use 'fields: dynamic' or provide explicit field list.")
 
+        # Handle serialized dynamic schema (mode="dynamic" from to_dict())
+        if config.get("mode") == "dynamic":
+            return cls(mode=None, fields=None, is_dynamic=True)
+
         fields_value = config["fields"]
 
-        # Dynamic schema
+        # Dynamic schema (original input format: fields="dynamic")
         if fields_value == "dynamic":
             return cls(
                 mode=None,

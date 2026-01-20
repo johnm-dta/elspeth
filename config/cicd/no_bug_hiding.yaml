@@ -469,7 +469,13 @@ allow_hits:
     safety: "Graceful handling - validation error message still produced"
     expires: null  # Permanent - intentional design
 
-  - key: "contracts/data.py:R3:_type_name:line=189"
+  - key: "contracts/schema.py:R1:SchemaConfig:from_dict:line=154"
+    owner: "architecture"
+    reason: "Round-trip serialization: to_dict() outputs mode='dynamic', from_dict() must accept it"
+    safety: "Explicit check for serialized form before standard parsing - enables audit trail storage"
+    expires: null  # Permanent - intentional design
+
+  - key: "contracts/data.py:R3:_type_name:line=199"
     owner: "architecture"
     reason: "Type introspection: not all types have __name__ attribute"
     safety: "Graceful fallback to str() - error message still produced"
@@ -798,6 +804,7 @@ allow_hits:
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
     expires: null  # Permanent - intentional design
 
+
   # ============================================================
   # AZURE PROMPT SHIELD TRANSFORM
   # ============================================================
@@ -815,13 +822,13 @@ allow_hits:
   # polymorphism at a trust boundary.
   # ============================================================
 
-  - key: "plugins/discovery.py:R2:_discover_in_file:line=125"
+  - key: "plugins/discovery.py:R2:_discover_in_file:line=126"
     owner: "architecture"
     reason: "Trust boundary: scanning arbitrary classes that may or may not have 'name' attribute"
     safety: "Classes without valid name are skipped with warning log - discovery continues"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/discovery.py:R2:get_plugin_description:line=232"
+  - key: "plugins/discovery.py:R2:get_plugin_description:line=233"
     owner: "architecture"
     reason: "UI display fallback: generating human-readable description for classes without 'name' attr"
     safety: "Falls back to class __name__ for display - no control flow or audit impact"

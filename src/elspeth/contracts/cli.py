@@ -1,15 +1,15 @@
 # src/elspeth/contracts/cli.py
 """CLI-related type contracts."""
 
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 
-class ExecutionResult(TypedDict, total=False):
+class ExecutionResult(TypedDict):
     """Result from pipeline execution.
 
     Returned by _execute_pipeline() in cli.py.
 
-    Required fields (always present in practice):
+    Required fields:
         run_id: Unique identifier for this pipeline run.
         status: Execution status (e.g., "completed", "failed").
         rows_processed: Total number of rows processed.
@@ -23,6 +23,6 @@ class ExecutionResult(TypedDict, total=False):
     run_id: str
     status: str
     rows_processed: int
-    rows_succeeded: int
-    rows_failed: int
-    duration_seconds: float
+    rows_succeeded: NotRequired[int]
+    rows_failed: NotRequired[int]
+    duration_seconds: NotRequired[float]

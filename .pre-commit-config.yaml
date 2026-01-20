@@ -24,14 +24,14 @@ repos:
     hooks:
       - id: mypy
         name: mypy
-        entry: uv run mypy src/elspeth
+        entry: .venv/bin/mypy src/elspeth
         language: system
         types: [python]
         pass_filenames: false
 
       - id: no-bug-hiding
         name: No Bug-Hiding Patterns
-        entry: uv run python scripts/cicd/no_bug_hiding.py check --root src/elspeth
+        entry: .venv/bin/python scripts/cicd/no_bug_hiding.py check --root src/elspeth
         language: system
         types: [python]
         pass_filenames: false

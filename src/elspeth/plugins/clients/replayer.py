@@ -18,6 +18,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from elspeth.contracts import CallStatus
 from elspeth.core.canonical import stable_hash
 
 if TYPE_CHECKING:
@@ -98,9 +99,10 @@ class CallReplayer:
         """
         self._recorder = recorder
         self._source_run_id = source_run_id
-        # Cache: request_hash -> (response_data, latency_ms, was_error, error_data)
+        # Cache: (call_type, request_hash) -> (response_data, latency_ms, was_error, error_data)
         self._cache: dict[
-            str, tuple[dict[str, Any] | None, float | None, bool, dict[str, Any] | None]
+            tuple[str, str],
+            tuple[dict[str, Any] | None, float | None, bool, dict[str, Any] | None],
         ] = {}
 
     @property
@@ -129,10 +131,11 @@ class CallReplayer:
             ReplayMissError: If no matching recorded call is found
         """
         request_hash = stable_hash(request_data)
+        cache_key = (call_type, request_hash)
 
         # Check cache first
-        if request_hash in self._cache:
-            resp, latency, was_error, error = self._cache[request_hash]
+        if cache_key in self._cache:
+            resp, latency, was_error, error = self._cache[cache_key]
             return ReplayedCall(
                 response_data=resp or {},
                 original_latency_ms=latency,
@@ -160,10 +163,10 @@ class CallReplayer:
             error_data = json.loads(call.error_json)
 
         # Determine if this was an error call
-        was_error = call.status.value == "error"
+        was_error = call.status == CallStatus.ERROR
 
         # Cache for future lookups
-        self._cache[request_hash] = (
+        self._cache[cache_key] = (
             response_data,
             call.latency_ms,
             was_error,

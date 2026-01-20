@@ -3,6 +3,7 @@
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -298,3 +299,67 @@ class TestCallReplayer:
             call_type="http",
             request_hash=request_hash,
         )
+
+    def test_different_call_types_same_hash_are_cached_separately(self) -> None:
+        """Different call types with same request hash are cached separately."""
+        recorder = self._create_mock_recorder()
+        # Same request data for both call types
+        request_data = {"data": "same"}
+
+        # Set up mock to return different responses based on call_type
+        def find_call_side_effect(
+            run_id: str, call_type: str, request_hash: str
+        ) -> Call:
+            if call_type == "llm":
+                return Call(
+                    call_id="call_llm",
+                    state_id="state_123",
+                    call_index=0,
+                    call_type=CallType.LLM,
+                    status=CallStatus.SUCCESS,
+                    request_hash=request_hash,
+                    created_at=datetime.now(UTC),
+                    latency_ms=100.0,
+                )
+            else:
+                return Call(
+                    call_id="call_http",
+                    state_id="state_123",
+                    call_index=1,
+                    call_type=CallType.HTTP,
+                    status=CallStatus.SUCCESS,
+                    request_hash=request_hash,
+                    created_at=datetime.now(UTC),
+                    latency_ms=200.0,
+                )
+
+        def get_response_side_effect(call_id: str) -> dict[str, Any]:
+            if call_id == "call_llm":
+                return {"type": "llm_response"}
+            else:
+                return {"type": "http_response"}
+
+        recorder.find_call_by_request_hash.side_effect = find_call_side_effect
+        recorder.get_call_response_data.side_effect = get_response_side_effect
+
+        replayer = CallReplayer(recorder, source_run_id="run_abc123")
+
+        # Replay LLM call
+        llm_result = replayer.replay(call_type="llm", request_data=request_data)
+        assert llm_result.response_data["type"] == "llm_response"
+
+        # Replay HTTP call with same request data
+        http_result = replayer.replay(call_type="http", request_data=request_data)
+        assert http_result.response_data["type"] == "http_response"
+
+        # Both should be cached separately
+        assert replayer.cache_size() == 2
+
+        # Verify both database lookups happened (not returned from cache incorrectly)
+        assert recorder.find_call_by_request_hash.call_count == 2
+
+        # Replay LLM again - should use cache
+        llm_result2 = replayer.replay(call_type="llm", request_data=request_data)
+        assert llm_result2.response_data["type"] == "llm_response"
+        # No additional database lookup
+        assert recorder.find_call_by_request_hash.call_count == 2

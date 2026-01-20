@@ -728,3 +728,36 @@ allow_hits:
     reason: "Trust boundary: Azure API may not return all content categories"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
     expires: null  # Permanent - intentional design
+
+  # ============================================================
+  # AZURE PROMPT SHIELD TRANSFORM (Permanent)
+  # ============================================================
+  # AzurePromptShield detects jailbreak attempts and prompt injection
+  # using Azure's Prompt Shield API. API responses are external data
+  # (Tier 3: Zero Trust) and may not include all expected fields.
+  # Missing fields default to False (no attack) to avoid false positives.
+  # ============================================================
+
+  - key: "plugins/transforms/azure/prompt_shield.py:R1:AzurePromptShield:_analyze_prompt:line=189"
+    owner: "architecture"
+    reason: "Trust boundary: Azure API 'userPromptAnalysis' may be missing in response"
+    safety: "Graceful default to {} - missing field is treated as 'no attack'"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/transforms/azure/prompt_shield.py:R1:AzurePromptShield:_analyze_prompt:line=190"
+    owner: "architecture"
+    reason: "Trust boundary: Azure API 'attackDetected' may be missing in userPromptAnalysis"
+    safety: "Graceful default to False - missing field is treated as 'no attack'"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/transforms/azure/prompt_shield.py:R1:AzurePromptShield:_analyze_prompt:line=192"
+    owner: "architecture"
+    reason: "Trust boundary: Azure API 'documentsAnalysis' may be missing in response"
+    safety: "Graceful default to [] - missing field is treated as 'no attacks'"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/transforms/azure/prompt_shield.py:R1:AzurePromptShield:_analyze_prompt:line=193"
+    owner: "architecture"
+    reason: "Trust boundary: Azure API 'attackDetected' may be missing in document analysis"
+    safety: "Graceful default to False - missing field is treated as 'no attack'"
+    expires: null  # Permanent - intentional design

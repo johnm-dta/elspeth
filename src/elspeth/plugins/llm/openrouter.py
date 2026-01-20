@@ -154,8 +154,29 @@ class OpenRouterLLMTransform(BaseTransform):
                 retryable=False,
             )
 
-        # 4. Build output (OUR CODE - let crash if malformed)
-        content = data["choices"][0]["message"]["content"]
+        # 4. Extract content from response (EXTERNAL DATA - wrap)
+        # OpenRouter may return malformed responses: empty choices, error JSON
+        # with HTTP 200, or unexpected structure from various providers
+        try:
+            choices = data["choices"]
+            if not choices:
+                return TransformResult.error(
+                    {"reason": "empty_choices", "response": data},
+                    retryable=False,
+                )
+            content = choices[0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            return TransformResult.error(
+                {
+                    "reason": "malformed_response",
+                    "error": f"{type(e).__name__}: {e}",
+                    "response_keys": list(data.keys())
+                    if isinstance(data, dict)
+                    else None,
+                },
+                retryable=False,
+            )
+
         usage = data.get("usage", {})
 
         output = dict(row)

@@ -637,3 +637,87 @@ class TestOpenRouterLLMTransformIntegration:
         # Verify timeout was passed to the HTTP client
         call_kwargs = ctx.http_client.post.call_args.kwargs
         assert call_kwargs["timeout"] == 120.0
+
+    def test_empty_choices_returns_error(self, ctx: PluginContext) -> None:
+        """Empty choices array returns TransformResult.error()."""
+        transform = OpenRouterLLMTransform(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "template": "{{ text }}",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        ctx.http_client = Mock()
+        response = Mock(spec=httpx.Response)
+        response.status_code = 200
+        response.json.return_value = {
+            "choices": [],  # Empty choices
+            "model": "openai/gpt-4",
+        }
+        response.raise_for_status = Mock()
+        ctx.http_client.post.return_value = response
+
+        result = transform.process({"text": "hello"}, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "empty_choices"
+        assert result.retryable is False
+
+    def test_missing_choices_key_returns_error(self, ctx: PluginContext) -> None:
+        """Missing 'choices' key in response returns TransformResult.error()."""
+        transform = OpenRouterLLMTransform(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "template": "{{ text }}",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        ctx.http_client = Mock()
+        response = Mock(spec=httpx.Response)
+        response.status_code = 200
+        response.json.return_value = {
+            "error": {"message": "Invalid request"},  # Error payload with 200
+        }
+        response.raise_for_status = Mock()
+        ctx.http_client.post.return_value = response
+
+        result = transform.process({"text": "hello"}, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "malformed_response"
+        assert "KeyError" in result.reason["error"]
+        assert result.retryable is False
+
+    def test_malformed_choice_structure_returns_error(self, ctx: PluginContext) -> None:
+        """Malformed choice structure returns TransformResult.error()."""
+        transform = OpenRouterLLMTransform(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "template": "{{ text }}",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        ctx.http_client = Mock()
+        response = Mock(spec=httpx.Response)
+        response.status_code = 200
+        response.json.return_value = {
+            "choices": [{"wrong_key": "no message field"}],
+            "model": "openai/gpt-4",
+        }
+        response.raise_for_status = Mock()
+        ctx.http_client.post.return_value = response
+
+        result = transform.process({"text": "hello"}, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "malformed_response"
+        assert result.retryable is False

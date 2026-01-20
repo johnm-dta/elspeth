@@ -139,3 +139,54 @@ class TestTokenOutcomeDataclass:
             )
             assert outcome.outcome == row_outcome
             assert outcome.is_terminal == row_outcome.is_terminal
+
+
+class TestTokenOutcomesTableSchema:
+    """Test token_outcomes table definition."""
+
+    def test_table_exists_in_metadata(self) -> None:
+        from elspeth.core.landscape.schema import metadata, token_outcomes_table
+
+        assert token_outcomes_table is not None
+        assert "token_outcomes" in metadata.tables
+
+    def test_table_has_required_columns(self) -> None:
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        columns = {c.name for c in token_outcomes_table.columns}
+        required = {
+            "outcome_id",
+            "run_id",
+            "token_id",
+            "outcome",
+            "is_terminal",
+            "recorded_at",
+            "sink_name",
+            "batch_id",
+            "fork_group_id",
+            "join_group_id",
+            "expand_group_id",
+            "error_hash",
+            "context_json",
+        }
+        assert required.issubset(columns)
+
+    def test_outcome_id_is_primary_key(self) -> None:
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        pk_columns = [c.name for c in token_outcomes_table.primary_key.columns]
+        assert pk_columns == ["outcome_id"]
+
+    def test_run_id_has_foreign_key(self) -> None:
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        run_id_col = token_outcomes_table.c.run_id
+        fk_targets = [fk.target_fullname for fk in run_id_col.foreign_keys]
+        assert "runs.run_id" in fk_targets
+
+    def test_token_id_has_foreign_key(self) -> None:
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        token_id_col = token_outcomes_table.c.token_id
+        fk_targets = [fk.target_fullname for fk in token_id_col.foreign_keys]
+        assert "tokens.token_id" in fk_targets

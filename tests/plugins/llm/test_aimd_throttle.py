@@ -1,7 +1,7 @@
 # tests/plugins/llm/test_aimd_throttle.py
 """Tests for AIMD throttle state machine."""
 
-from elspeth.plugins.llm.aimd_throttle import AIMDThrottle, ThrottleConfig
+from elspeth.plugins.pooling import AIMDThrottle, ThrottleConfig
 
 
 class TestAIMDThrottleInit:

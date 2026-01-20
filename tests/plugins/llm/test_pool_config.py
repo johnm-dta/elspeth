@@ -4,7 +4,8 @@
 import pytest
 
 from elspeth.plugins.config_base import PluginConfigError
-from elspeth.plugins.llm.base import LLMConfig, PoolConfig
+from elspeth.plugins.llm.base import LLMConfig
+from elspeth.plugins.pooling import PoolConfig
 
 
 class TestPoolConfigDefaults:

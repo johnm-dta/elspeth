@@ -597,57 +597,57 @@ allow_hits:
   # ============================================================
 
   # --- _process_sequential() method (batch sequential fallback) ---
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_sequential:line=261"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_sequential:line=260"
     owner: "architecture"
     reason: "Trust boundary: HTTP response headers may not include content-type"
     safety: "Graceful default to 'unknown' - used for error reporting only"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_sequential:line=286"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_sequential:line=285"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API 'usage' field is optional in response"
     safety: "Graceful default to {} - usage is metadata, not critical for processing"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_sequential:line=296"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_sequential:line=295"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API may return different model than requested"
     safety: "Graceful fallback to requested model - audit still captures actual value"
     expires: null  # Permanent - intentional design
 
   # --- process() method ---
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=476"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=475"
     owner: "architecture"
     reason: "Trust boundary: HTTP response headers may not include content-type"
     safety: "Graceful default to 'unknown' - used for error reporting only"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=503"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=502"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API 'usage' field is optional in response"
     safety: "Graceful default to {} - usage is metadata, not critical for processing"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=513"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=512"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API may return different model than requested"
     safety: "Graceful fallback to requested model - audit still captures actual value"
     expires: null  # Permanent - intentional design
 
   # --- _process_single_with_state() method (pooled execution) ---
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=618"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=617"
     owner: "architecture"
     reason: "Trust boundary: HTTP response headers may not include content-type"
     safety: "Graceful default to 'unknown' - used for error reporting only"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=643"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=642"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API 'usage' field is optional in response"
     safety: "Graceful default to {} - usage is metadata, not critical for processing"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=653"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=652"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API may return different model than requested"
     safety: "Graceful fallback to requested model - audit still captures actual value"
@@ -774,13 +774,13 @@ allow_hits:
   # severity 0 (safe) to avoid false positives.
   # ============================================================
 
-  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=225"
+  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=241"
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=229"
+  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=245"
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
@@ -788,13 +788,13 @@ allow_hits:
 
   - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=233"
     owner: "architecture"
-    reason: "Trust boundary: Azure API may not return all content categories"
+    reason: "Trust boundary: Azure API may not return all content categories (hate)"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
     expires: null  # Permanent - intentional design
 
   - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=237"
     owner: "architecture"
-    reason: "Trust boundary: Azure API may not return all content categories"
+    reason: "Trust boundary: Azure API may not return all content categories (violence)"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
     expires: null  # Permanent - intentional design
 

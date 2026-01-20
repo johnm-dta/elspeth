@@ -1,11 +1,8 @@
 # tests/plugins/llm/test_capacity_errors.py
 """Tests for capacity error classification."""
 
-from elspeth.plugins.llm.capacity_errors import (
-    CAPACITY_ERROR_CODES,
-    CapacityError,
-    is_capacity_error,
-)
+from elspeth.plugins.pooling import CapacityError, is_capacity_error
+from elspeth.plugins.pooling.errors import CAPACITY_ERROR_CODES
 
 
 class TestCapacityErrorClassification:

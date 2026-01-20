@@ -14,9 +14,8 @@ from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.clients.http import AuditedHTTPClient
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.base import LLMConfig
-from elspeth.plugins.llm.capacity_errors import CapacityError, is_capacity_error
-from elspeth.plugins.llm.pooled_executor import PooledExecutor, RowContext
 from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
+from elspeth.plugins.pooling import CapacityError, PooledExecutor, RowContext, is_capacity_error
 from elspeth.plugins.schema_factory import create_schema_from_config
 
 if TYPE_CHECKING:

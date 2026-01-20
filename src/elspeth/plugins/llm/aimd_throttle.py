@@ -72,3 +72,21 @@ class AIMDThrottle:
         """Get current delay in milliseconds (thread-safe)."""
         with self._lock:
             return self._current_delay_ms
+
+    def on_capacity_error(self) -> None:
+        """Record capacity error - multiply delay (thread-safe).
+
+        If current delay is 0, bootstraps to recovery_step_ms.
+        Otherwise multiplies by backoff_multiplier, capped at max.
+        """
+        with self._lock:
+            if self._current_delay_ms == 0:
+                # Bootstrap: start with recovery_step as initial backoff
+                self._current_delay_ms = float(self._config.recovery_step_ms)
+            else:
+                # Multiplicative decrease
+                self._current_delay_ms *= self._config.backoff_multiplier
+
+            # Cap at maximum
+            if self._current_delay_ms > self._config.max_dispatch_delay_ms:
+                self._current_delay_ms = float(self._config.max_dispatch_delay_ms)

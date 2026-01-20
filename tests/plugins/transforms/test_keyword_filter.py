@@ -86,3 +86,57 @@ class TestKeywordFilterConfig:
                 }
             )
         assert "blocked_patterns" in str(exc_info.value).lower()
+
+
+class TestKeywordFilterInstantiation:
+    """Tests for KeywordFilter transform instantiation."""
+
+    def test_transform_has_required_attributes(self) -> None:
+        """Transform has all protocol-required attributes."""
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": ["content"],
+                "blocked_patterns": ["test"],
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        assert transform.name == "keyword_filter"
+        assert transform.determinism.value == "deterministic"
+        assert transform.plugin_version == "1.0.0"
+        assert transform.is_batch_aware is False
+        assert transform.creates_tokens is False
+        assert transform.input_schema is not None
+        assert transform.output_schema is not None
+
+    def test_transform_compiles_patterns_at_init(self) -> None:
+        """Transform compiles regex patterns at initialization."""
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": ["content"],
+                "blocked_patterns": [r"\bpassword\b", r"(?i)secret"],
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        # Patterns should be compiled (implementation detail, but important for perf)
+        assert len(transform._compiled_patterns) == 2
+
+    def test_transform_rejects_invalid_regex(self) -> None:
+        """Transform fails at init if regex pattern is invalid."""
+        import re
+
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        with pytest.raises(re.error):
+            KeywordFilter(
+                {
+                    "fields": ["content"],
+                    "blocked_patterns": ["[invalid(regex"],
+                    "schema": {"fields": "dynamic"},
+                }
+            )

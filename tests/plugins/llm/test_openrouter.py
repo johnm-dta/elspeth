@@ -923,6 +923,23 @@ class TestOpenRouterBatchProcessing:
     """Tests for batch-aware aggregation processing."""
 
     @pytest.fixture
+    def mock_recorder(self) -> Mock:
+        """Create a mock LandscapeRecorder."""
+        recorder = Mock()
+        recorder.record_call = Mock()
+        return recorder
+
+    @pytest.fixture
+    def ctx(self, mock_recorder: Mock) -> PluginContext:
+        """Create plugin context with landscape and state_id for batch processing."""
+        return PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_recorder,
+            state_id="test-state-id",
+        )
+
+    @pytest.fixture
     def batch_config(self) -> dict[str, Any]:
         """Config with pooling enabled for batch processing."""
         return {
@@ -941,3 +958,141 @@ class TestOpenRouterBatchProcessing:
     def test_is_batch_aware_is_true(self, batch_transform: OpenRouterLLMTransform) -> None:
         """Transform should declare batch awareness for aggregation."""
         assert batch_transform.is_batch_aware is True
+
+    def test_process_accepts_list_of_rows(
+        self,
+        batch_transform: OpenRouterLLMTransform,
+        ctx: PluginContext,
+        mock_recorder: Mock,
+    ) -> None:
+        """process() should accept list[dict] for batch aggregation."""
+        # Initialize transform with recorder reference
+        batch_transform.on_start(ctx)
+
+        # Mock successful responses for 3 rows
+        mock_response = _create_mock_response(
+            content="Sentiment: positive",
+            status_code=200,
+        )
+
+        rows = [
+            {"text": "I love this product!"},
+            {"text": "This is terrible."},
+            {"text": "It's okay I guess."},
+        ]
+
+        with mock_httpx_client(response=mock_response):
+            result = batch_transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.is_multi_row is True
+        assert result.rows is not None
+        assert len(result.rows) == 3
+        for output_row in result.rows:
+            assert "llm_response" in output_row
+
+    def test_batch_with_partial_failures(
+        self,
+        batch_transform: OpenRouterLLMTransform,
+        ctx: PluginContext,
+        mock_recorder: Mock,
+    ) -> None:
+        """Batch should continue even if some rows fail (per-row error tracking)."""
+        # Initialize transform with recorder reference
+        batch_transform.on_start(ctx)
+
+        rows = [
+            {"text": "Row 1"},
+            {"text": "FAIL"},  # Special marker to trigger failure
+            {"text": "Row 3"},
+        ]
+
+        # We need to mock at a lower level since batch uses PooledExecutor
+        # Mock the _process_single_with_state method to control individual row results
+        # Use row content to determine success/failure (not call order - concurrent!)
+        def mock_process_fn(row: dict[str, Any], state_id: str) -> Any:
+            from elspeth.contracts import TransformResult
+
+            if row.get("text") == "FAIL":
+                # This row should fail
+                return TransformResult.error({"reason": "api_call_failed", "error": "Bad Request"})
+            else:
+                # Success case
+                output = dict(row)
+                output["llm_response"] = "Result"
+                output["llm_response_usage"] = {}
+                output["llm_response_template_hash"] = "test-hash"
+                output["llm_response_variables_hash"] = "test-vars-hash"
+                output["llm_response_template_source"] = None
+                output["llm_response_lookup_hash"] = None
+                output["llm_response_lookup_source"] = None
+                output["llm_response_model"] = "anthropic/claude-3-haiku"
+                return TransformResult.success(output)
+
+        with patch.object(batch_transform, "_process_single_with_state", side_effect=mock_process_fn):
+            result = batch_transform.process(rows, ctx)
+
+        # Should still succeed overall with per-row errors
+        assert result.status == "success"
+        assert result.is_multi_row is True
+        assert result.rows is not None
+        assert len(result.rows) == 3
+
+        # Row 0 and 2 should have responses
+        assert result.rows[0]["llm_response"] is not None
+        assert result.rows[2]["llm_response"] is not None
+
+        # Row 1 should have error
+        assert result.rows[1]["llm_response"] is None
+        assert "llm_response_error" in result.rows[1]
+
+    def test_empty_batch_returns_success(
+        self,
+        batch_transform: OpenRouterLLMTransform,
+        ctx: PluginContext,
+    ) -> None:
+        """Empty batch should return success with metadata."""
+        result = batch_transform.process([], ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["batch_empty"] is True
+        assert result.row["row_count"] == 0
+
+    def test_batch_missing_landscape_raises_error(
+        self,
+        batch_transform: OpenRouterLLMTransform,
+    ) -> None:
+        """Batch processing without landscape should raise RuntimeError."""
+        ctx = PluginContext(run_id="test-run", config={}, landscape=None, state_id=None)
+        rows = [{"text": "test"}]
+
+        with pytest.raises(RuntimeError, match="requires landscape"):
+            batch_transform.process(rows, ctx)
+
+    def test_batch_all_rows_fail_returns_error(
+        self,
+        batch_transform: OpenRouterLLMTransform,
+        ctx: PluginContext,
+        mock_recorder: Mock,
+    ) -> None:
+        """When all rows fail, batch should return error."""
+        batch_transform.on_start(ctx)
+
+        rows = [
+            {"text": "Row 1"},
+            {"text": "Row 2"},
+        ]
+
+        def mock_fail_fn(row: dict[str, Any], state_id: str) -> Any:
+            from elspeth.contracts import TransformResult
+
+            return TransformResult.error({"reason": "api_call_failed", "error": "All failed"})
+
+        with patch.object(batch_transform, "_process_single_with_state", side_effect=mock_fail_fn):
+            result = batch_transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "all_rows_failed"
+        assert result.reason["row_count"] == 2

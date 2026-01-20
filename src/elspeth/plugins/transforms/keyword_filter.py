@@ -131,6 +131,7 @@ class KeywordFilter(BaseTransform):
                             "field": field_name,
                             "matched_pattern": pattern_str,
                             "match_context": context,
+                            "retryable": False,
                         }
                     )
 

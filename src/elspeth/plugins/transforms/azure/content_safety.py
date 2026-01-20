@@ -166,6 +166,7 @@ class AzureContentSafety(BaseTransform):
                         "reason": "content_safety_violation",
                         "field": field_name,
                         "categories": violation,
+                        "retryable": False,
                     }
                 )
 

@@ -136,6 +136,7 @@ class AzurePromptShield(BaseTransform):
                         "reason": "prompt_injection_detected",
                         "field": field_name,
                         "attacks": analysis,
+                        "retryable": False,
                     }
                 )
 

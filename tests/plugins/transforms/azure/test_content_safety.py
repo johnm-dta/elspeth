@@ -561,3 +561,94 @@ class TestAzureContentSafetyTransform:
 
         # Should pass since missing categories default to 0, which is below threshold 2
         assert result.status == "success"
+
+    def test_missing_http_client_raises_error(self) -> None:
+        """Missing http_client in context raises RuntimeError."""
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        ctx = Mock(spec=PluginContext, run_id="test-run")
+        ctx.http_client = None
+
+        row = {"content": "test", "id": 1}
+
+        with pytest.raises(RuntimeError, match="http_client"):
+            transform.process(row, ctx)
+
+    def test_close_is_noop(self) -> None:
+        """close() method is a no-op but should not raise."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        # Should not raise
+        transform.close()
+
+        # Can be called multiple times (idempotent)
+        transform.close()
+
+    def test_api_called_with_correct_endpoint_and_headers(self) -> None:
+        """API is called with correct endpoint, version, and headers."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com/",  # With trailing slash
+                "api_key": "my-secret-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        ctx = make_mock_context(
+            {
+                "categoriesAnalysis": [
+                    {"category": "Hate", "severity": 0},
+                    {"category": "Violence", "severity": 0},
+                    {"category": "Sexual", "severity": 0},
+                    {"category": "SelfHarm", "severity": 0},
+                ]
+            }
+        )
+
+        row = {"content": "test text", "id": 1}
+        transform.process(row, ctx)
+
+        # Verify API was called correctly
+        ctx.http_client.post.assert_called_once()
+        call_args = ctx.http_client.post.call_args
+
+        # Check URL (trailing slash should be stripped)
+        expected_url = (
+            "https://test.cognitiveservices.azure.com/contentsafety/text:analyze"
+            "?api-version=2024-09-01"
+        )
+        assert call_args[0][0] == expected_url
+
+        # Check headers
+        headers = call_args[1]["headers"]
+        assert headers["Ocp-Apim-Subscription-Key"] == "my-secret-key"
+        assert headers["Content-Type"] == "application/json"
+
+        # Check request body
+        json_body = call_args[1]["json"]
+        assert json_body == {"text": "test text"}

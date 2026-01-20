@@ -63,13 +63,9 @@ class PluginConfig(BaseModel):
                 config_copy["schema_config"] = SchemaConfig.from_dict(schema_dict)
             return cls.model_validate(config_copy)
         except ValidationError as e:
-            raise PluginConfigError(
-                f"Invalid configuration for {cls.__name__}: {e}"
-            ) from e
+            raise PluginConfigError(f"Invalid configuration for {cls.__name__}: {e}") from e
         except ValueError as e:
-            raise PluginConfigError(
-                f"Invalid configuration for {cls.__name__}: {e}"
-            ) from e
+            raise PluginConfigError(f"Invalid configuration for {cls.__name__}: {e}") from e
 
 
 class DataPluginConfig(PluginConfig):
@@ -168,7 +164,5 @@ class TransformDataConfig(DataPluginConfig):
     def validate_on_error(cls, v: str | None) -> str | None:
         """Ensure on_error is not empty string."""
         if v is not None and not v.strip():
-            raise ValueError(
-                "on_error must be a sink name, 'discard', or omitted entirely"
-            )
+            raise ValueError("on_error must be a sink name, 'discard', or omitted entirely")
         return v.strip() if v else None

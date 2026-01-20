@@ -155,10 +155,7 @@ landscape:
         # Read output and verify the transform was applied
         output_content = output_file.read_text()
         # If transform ran, we should have 'new_name' column, not 'old_name'
-        assert "new_name" in output_content, (
-            f"Field mapper should have renamed 'old_name' to 'new_name'. "
-            f"Output was: {output_content}"
-        )
+        assert "new_name" in output_content, f"Field mapper should have renamed 'old_name' to 'new_name'. Output was: {output_content}"
 
 
 class TestPurgeCommand:

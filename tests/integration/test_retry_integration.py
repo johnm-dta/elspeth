@@ -236,11 +236,7 @@ class TestRetryAuditTrail:
 
         # Query node_states for this node - should have 3 records
         with db.engine.connect() as conn:
-            stmt = (
-                select(node_states_table)
-                .where(node_states_table.c.node_id == node_id)
-                .order_by(node_states_table.c.attempt)
-            )
+            stmt = select(node_states_table).where(node_states_table.c.node_id == node_id).order_by(node_states_table.c.attempt)
             rows = list(conn.execute(stmt))
 
         # Verify we have 3 node_state records (attempt 0, 1, 2)
@@ -343,11 +339,7 @@ class TestRetryAuditTrail:
 
         # Query node_states for this node - should have 2 records
         with db.engine.connect() as conn:
-            stmt = (
-                select(node_states_table)
-                .where(node_states_table.c.node_id == node_id)
-                .order_by(node_states_table.c.attempt)
-            )
+            stmt = select(node_states_table).where(node_states_table.c.node_id == node_id).order_by(node_states_table.c.attempt)
             rows = list(conn.execute(stmt))
 
         # Verify we have 2 node_state records (attempt 0, 1)
@@ -366,9 +358,7 @@ class TestRetryAuditTrail:
 
         # Verify error_json is populated for both attempts
         errors = [row.error_json for row in rows]
-        assert all(
-            e is not None for e in errors
-        ), "All failed states should have error_json"
+        assert all(e is not None for e in errors), "All failed states should have error_json"
 
         # Verify all records reference the same token
         token_ids = [row.token_id for row in rows]
@@ -431,9 +421,7 @@ class TestRetryAuditTrail:
 
         # Query node_states - should have exactly 1 record
         with db.engine.connect() as conn:
-            stmt = select(node_states_table).where(
-                node_states_table.c.node_id == node_id
-            )
+            stmt = select(node_states_table).where(node_states_table.c.node_id == node_id)
             rows = list(conn.execute(stmt))
 
         assert len(rows) == 1, f"Expected 1 node_state, got {len(rows)}"

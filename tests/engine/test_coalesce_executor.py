@@ -35,9 +35,7 @@ def run(recorder: LandscapeRecorder) -> Run:
 
 
 @pytest.fixture
-def executor_setup(
-    recorder: LandscapeRecorder, run: Run
-) -> tuple[LandscapeRecorder, SpanFactory, "TokenManager", str]:
+def executor_setup(recorder: LandscapeRecorder, run: Run) -> tuple[LandscapeRecorder, SpanFactory, "TokenManager", str]:
     """Common setup for executor tests - reduces boilerplate.
 
     Returns:
@@ -53,9 +51,7 @@ def executor_setup(
 class TestCoalesceExecutorInit:
     """Test CoalesceExecutor initialization."""
 
-    def test_executor_initializes(
-        self, executor_setup: tuple[LandscapeRecorder, SpanFactory, Any, str]
-    ) -> None:
+    def test_executor_initializes(self, executor_setup: tuple[LandscapeRecorder, SpanFactory, Any, str]) -> None:
         """Executor should initialize with recorder and span factory."""
         from elspeth.engine.coalesce_executor import CoalesceExecutor
 
@@ -710,9 +706,7 @@ class TestCoalesceAuditMetadata:
 class TestCoalesceIntegration:
     """Integration tests for full fork -> process -> coalesce flow."""
 
-    def test_fork_process_coalesce_full_flow(
-        self, recorder: LandscapeRecorder, run: Run
-    ) -> None:
+    def test_fork_process_coalesce_full_flow(self, recorder: LandscapeRecorder, run: Run) -> None:
         """Full flow: fork -> different transforms -> coalesce."""
         from elspeth.contracts import NodeType, TokenInfo
         from elspeth.engine.coalesce_executor import CoalesceExecutor

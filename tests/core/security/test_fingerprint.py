@@ -40,9 +40,7 @@ class TestSecretFingerprint:
         result = secret_fingerprint("test", key=b"key")
         assert len(result) == 64
 
-    def test_fingerprint_without_key_uses_env_var(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_fingerprint_without_key_uses_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When key not provided, uses ELSPETH_FINGERPRINT_KEY env var."""
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "env-key-value")
 
@@ -51,9 +49,7 @@ class TestSecretFingerprint:
         # Should not raise, should use env key
         assert len(result) == 64
 
-    def test_fingerprint_without_key_raises_if_env_missing(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_fingerprint_without_key_raises_if_env_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Raises ValueError if no key provided and env var missing."""
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
 

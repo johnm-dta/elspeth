@@ -37,9 +37,7 @@ runs_table = Table(
     Column("status", String(32), nullable=False),
     # Export tracking - separate from run status so export failures
     # don't mask successful pipeline completion
-    Column(
-        "export_status", String(32)
-    ),  # pending, completed, failed, None if not configured
+    Column("export_status", String(32)),  # pending, completed, failed, None if not configured
     Column("export_error", Text),  # Error message if export failed
     Column("exported_at", DateTime(timezone=True)),  # When export completed
     Column("export_format", String(16)),  # csv, json
@@ -56,9 +54,7 @@ nodes_table = Table(
     Column("plugin_name", String(128), nullable=False),
     Column("node_type", String(32), nullable=False),
     Column("plugin_version", String(32), nullable=False),
-    Column(
-        "determinism", String(32), nullable=False
-    ),  # deterministic, seeded, nondeterministic (from Determinism enum)
+    Column("determinism", String(32), nullable=False),  # deterministic, seeded, nondeterministic (from Determinism enum)
     Column("config_hash", String(64), nullable=False),
     Column("config_json", Text, nullable=False),
     Column("schema_hash", String(64)),
@@ -108,13 +104,9 @@ tokens_table = Table(
     Column("row_id", String(64), ForeignKey("rows.row_id"), nullable=False),
     Column("fork_group_id", String(64)),
     Column("join_group_id", String(64)),
-    Column(
-        "expand_group_id", String(32), nullable=True, index=True
-    ),  # For deaggregation
+    Column("expand_group_id", String(32), nullable=True, index=True),  # For deaggregation
     Column("branch_name", String(64)),
-    Column(
-        "step_in_pipeline", Integer
-    ),  # Step where this token was created (fork/coalesce/expand)
+    Column("step_in_pipeline", Integer),  # Step where this token was created (fork/coalesce/expand)
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
@@ -223,9 +215,7 @@ batches_table = Table(
     metadata,
     Column("batch_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column(
-        "aggregation_node_id", String(64), ForeignKey("nodes.node_id"), nullable=False
-    ),
+    Column("aggregation_node_id", String(64), ForeignKey("nodes.node_id"), nullable=False),
     Column("aggregation_state_id", String(64), ForeignKey("node_states.state_id")),
     Column("trigger_reason", String(128)),
     Column("trigger_type", String(32)),  # TriggerType enum value

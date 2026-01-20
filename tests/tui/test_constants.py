@@ -37,9 +37,7 @@ class TestWidgetIDs:
             # CSS IDs must not contain spaces
             assert " " not in value, f"{attr} contains spaces"
             # CSS IDs should start with a letter or hyphen
-            assert (
-                value[0].isalpha() or value[0] == "-"
-            ), f"{attr} does not start with letter or hyphen"
+            assert value[0].isalpha() or value[0] == "-", f"{attr} does not start with letter or hyphen"
 
 
 class TestWidgetIDsIntegration:

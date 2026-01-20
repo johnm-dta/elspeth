@@ -87,27 +87,30 @@ class BaseTransform(ABC):
         """
         ...
 
-    def close(self) -> None:  # noqa: B027
+    def close(self) -> None:  # noqa: B027 - optional override, not abstract
         """Clean up resources after pipeline completion.
 
         Called once after all rows have been processed. Override for closing
         connections, flushing buffers, or releasing external resources.
         """
+        pass
 
     # === Lifecycle Hooks (Phase 3) ===
     # These are intentionally empty - optional hooks for subclasses to override
 
-    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
         """Called at the start of each run.
 
         Override for per-run initialization.
         """
+        pass
 
-    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
         """Called at the end of each run.
 
         Override for cleanup.
         """
+        pass
 
 
 class BaseGate(ABC):
@@ -160,20 +163,23 @@ class BaseGate(ABC):
         """
         ...
 
-    def close(self) -> None:  # noqa: B027
+    def close(self) -> None:  # noqa: B027 - optional override, not abstract
         """Clean up resources after pipeline completion.
 
         Called once after all rows have been processed. Override for closing
         connections, flushing buffers, or releasing external resources.
         """
+        pass
 
     # === Lifecycle Hooks (Phase 3) ===
 
-    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
         """Called at start of run."""
+        pass
 
-    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
         """Called at end of run."""
+        pass
 
 
 # NOTE: BaseAggregation was DELETED in aggregation structural cleanup.
@@ -253,11 +259,13 @@ class BaseSink(ABC):
 
     # === Lifecycle Hooks (Phase 3) ===
 
-    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
         """Called at start of run."""
+        pass
 
-    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
         """Called at end of run (before close)."""
+        pass
 
 
 class BaseSource(ABC):
@@ -312,8 +320,10 @@ class BaseSource(ABC):
 
     # === Lifecycle Hooks (Phase 3) ===
 
-    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
         """Called before load()."""
+        pass
 
-    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
         """Called after load() completes (before close)."""
+        pass

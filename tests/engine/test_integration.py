@@ -17,53 +17,21 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
+from elspeth.contracts import RoutingMode, SourceRow
 from elspeth.core.config import GateSettings
 from elspeth.plugins.base import BaseTransform
+from tests.conftest import (
+    _TestSchema,
+    _TestSinkBase,
+    _TestSourceBase,
+    as_source,
+    as_transform,
+)
 
 if TYPE_CHECKING:
     from elspeth.contracts.results import ArtifactDescriptor, TransformResult
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
-
-
-# ============================================================================
-# Test Fixture Base Classes
-# ============================================================================
-# These provide the required protocol attributes so inline test classes
-# don't need to repeat them.
-
-
-class _TestSchema(PluginSchema):
-    """Minimal schema for test fixtures."""
-
-    pass
-
-
-class _TestSourceBase:
-    """Base class providing SourceProtocol required attributes.
-
-    Note: output_schema is NOT provided here because child classes override it
-    with their own schemas, and mypy's type invariance would flag that as a conflict.
-    Each test class must provide its own output_schema.
-    """
-
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-
-class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes."""
-
-    input_schema = _TestSchema  # Required by protocol
-    idempotent = True
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0"
-
-    def flush(self) -> None:
-        pass
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
@@ -125,9 +93,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
         for route_label, target in gate_config.routes.items():
             route_resolution_map[(node_id, route_label)] = target
             if target not in ("continue", "fork") and target in sink_ids:
-                graph.add_edge(
-                    node_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE
-                )
+                graph.add_edge(node_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE)
 
         # Handle fork paths
         if gate_config.fork_to:
@@ -258,9 +224,7 @@ class TestEngineIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory://output", size_bytes=100, content_hash="abc123"
-                )
+                return ArtifactDescriptor.for_file(path="memory://output", size_bytes=100, content_hash="abc123")
 
             def close(self) -> None:
                 pass
@@ -271,7 +235,7 @@ class TestEngineIntegration:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -382,9 +346,7 @@ class TestEngineIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory://out", size_bytes=len(rows), content_hash="hash"
-                )
+                return ArtifactDescriptor.for_file(path="memory://out", size_bytes=len(rows), content_hash="hash")
 
             def close(self) -> None:
                 pass
@@ -396,7 +358,7 @@ class TestEngineIntegration:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[t1, t2],
             sinks={"default": sink},
         )
@@ -412,14 +374,8 @@ class TestEngineIntegration:
 
         # Get all nodes to identify transforms and sinks
         nodes = recorder.get_nodes(result.run_id)
-        transform_node_ids = {
-            n.node_id
-            for n in nodes
-            if n.node_type in (NodeType.TRANSFORM.value, "transform")
-        }
-        sink_node_ids = {
-            n.node_id for n in nodes if n.node_type in (NodeType.SINK.value, "sink")
-        }
+        transform_node_ids = {n.node_id for n in nodes if n.node_type in (NodeType.TRANSFORM.value, "transform")}
+        sink_node_ids = {n.node_id for n in nodes if n.node_type in (NodeType.SINK.value, "sink")}
 
         # Get all rows
         rows = recorder.get_rows(result.run_id)
@@ -428,35 +384,25 @@ class TestEngineIntegration:
         for row in rows:
             # Every row must have at least one token
             tokens = recorder.get_tokens(row.row_id)
-            assert (
-                len(tokens) >= 1
-            ), f"Row {row.row_id} has no tokens - audit spine broken"
+            assert len(tokens) >= 1, f"Row {row.row_id} has no tokens - audit spine broken"
 
             for token in tokens:
                 # Every token must have node_states
                 states = recorder.get_node_states_for_token(token.token_id)
-                assert (
-                    len(states) > 0
-                ), f"Token {token.token_id} has no node_states - audit spine broken"
+                assert len(states) > 0, f"Token {token.token_id} has no node_states - audit spine broken"
 
                 # Verify token has states at BOTH transforms
                 state_node_ids = {s.node_id for s in states}
                 for transform_id in transform_node_ids:
-                    assert (
-                        transform_id in state_node_ids
-                    ), f"Token {token.token_id} missing state at transform {transform_id}"
+                    assert transform_id in state_node_ids, f"Token {token.token_id} missing state at transform {transform_id}"
 
                 # Verify token has state at sink
                 sink_states = [s for s in states if s.node_id in sink_node_ids]
-                assert (
-                    len(sink_states) >= 1
-                ), f"Token {token.token_id} never reached a sink - audit spine broken"
+                assert len(sink_states) >= 1, f"Token {token.token_id} never reached a sink - audit spine broken"
 
                 # All states must be completed
                 for state in states:
-                    assert (
-                        state.status == "completed"
-                    ), f"Token {token.token_id} has non-completed state: {state.status}"
+                    assert state.status == "completed", f"Token {token.token_id} has non-completed state: {state.status}"
 
         # Verify artifacts exist
         artifacts = recorder.get_artifacts(result.run_id)
@@ -534,7 +480,7 @@ class TestEngineIntegration:
         even_sink = CollectSink("even_sink")
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": default_sink, "even": even_sink},
             gates=[even_odd_gate],
@@ -559,9 +505,7 @@ class TestEngineIntegration:
         assert len(gate_nodes) == 1
         gate_node = gate_nodes[0]
 
-        sink_node_ids = {
-            n.node_id for n in nodes if n.node_type in (NodeType.SINK.value, "sink")
-        }
+        sink_node_ids = {n.node_id for n in nodes if n.node_type in (NodeType.SINK.value, "sink")}
 
         # Check every row/token
         rows = recorder.get_rows(result.run_id)
@@ -586,9 +530,7 @@ class TestEngineIntegration:
 
                 # Token must reach a sink
                 sink_states = [s for s in states if s.node_id in sink_node_ids]
-                assert (
-                    len(sink_states) >= 1
-                ), f"Token {token.token_id} never reached sink"
+                assert len(sink_states) >= 1, f"Token {token.token_id} never reached sink"
 
         # 2 tokens were routed (even numbers)
         assert routed_count == 2
@@ -650,9 +592,7 @@ class TestNoSilentAuditLoss:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -671,7 +611,7 @@ class TestNoSilentAuditLoss:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": sink},  # Note: "phantom" is NOT configured
             gates=[misrouting_gate],
@@ -763,9 +703,7 @@ class TestNoSilentAuditLoss:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -775,7 +713,7 @@ class TestNoSilentAuditLoss:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -854,7 +792,7 @@ class TestNoSilentAuditLoss:
         sink = ExplodingSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -928,9 +866,7 @@ class TestAuditTrailCompleteness:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -940,7 +876,7 @@ class TestAuditTrailCompleteness:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -1018,14 +954,12 @@ class TestAuditTrailCompleteness:
             routes={"true": "high", "false": "continue"},
         )
 
-        source = ListSource(
-            [{"value": 10}, {"value": 60}, {"value": 30}, {"value": 90}]
-        )
+        source = ListSource([{"value": 10}, {"value": 60}, {"value": 30}, {"value": 90}])
         default_sink = CollectSink("default_output")
         high_sink = CollectSink("high_output")
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": default_sink, "high": high_sink},
             gates=[split_gate],
@@ -1199,9 +1133,7 @@ class TestForkIntegration:
             all_results.extend(results)
 
         # Count outcomes
-        completed_count = sum(
-            1 for r in all_results if r.outcome == RowOutcome.COMPLETED
-        )
+        completed_count = sum(1 for r in all_results if r.outcome == RowOutcome.COMPLETED)
         forked_count = sum(1 for r in all_results if r.outcome == RowOutcome.FORKED)
 
         # Verify:
@@ -1211,19 +1143,13 @@ class TestForkIntegration:
         assert completed_count == 4, f"Expected 4 COMPLETED, got {completed_count}"
 
         # Collect the COMPLETED tokens (these are what would go to sink)
-        completed_tokens = [
-            r.token for r in all_results if r.outcome == RowOutcome.COMPLETED
-        ]
+        completed_tokens = [r.token for r in all_results if r.outcome == RowOutcome.COMPLETED]
         assert len(completed_tokens) == 4
 
         # Verify correct values: each source value appears twice (once per fork path)
         values = [t.row_data["value"] for t in completed_tokens]
-        assert (
-            values.count(1) == 2
-        ), f"Expected value 1 to appear 2 times, got {values.count(1)}"
-        assert (
-            values.count(2) == 2
-        ), f"Expected value 2 to appear 2 times, got {values.count(2)}"
+        assert values.count(1) == 2, f"Expected value 1 to appear 2 times, got {values.count(1)}"
+        assert values.count(2) == 2, f"Expected value 2 to appear 2 times, got {values.count(2)}"
 
         # Verify audit trail completeness
         rows = recorder.get_rows(run_id)
@@ -1234,9 +1160,7 @@ class TestForkIntegration:
         for row in rows:
             tokens = recorder.get_tokens(row.row_id)
             total_tokens += len(tokens)
-        assert (
-            total_tokens == 6
-        ), f"Expected 6 tokens (2 parents + 4 children), got {total_tokens}"
+        assert total_tokens == 6, f"Expected 6 tokens (2 parents + 4 children), got {total_tokens}"
 
         # Verify routing events were recorded for fork operations
         routing_event_count = 0
@@ -1249,9 +1173,7 @@ class TestForkIntegration:
                     routing_event_count += len(events)
 
         # Each fork creates 2 routing events (one per path), 2 rows x 2 events = 4
-        assert (
-            routing_event_count == 4
-        ), f"Expected 4 routing events, got {routing_event_count}"
+        assert routing_event_count == 4, f"Expected 4 routing events, got {routing_event_count}"
 
         # Complete the run
         recorder.complete_run(run_id, status="completed")
@@ -1273,17 +1195,13 @@ class TestAggregationIntegrationDeleted:
         """BaseAggregation should be deleted (aggregation is structural)."""
         import elspeth.plugins.base as base
 
-        assert not hasattr(
-            base, "BaseAggregation"
-        ), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
+        assert not hasattr(base, "BaseAggregation"), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
 
     def test_aggregation_protocol_deleted(self) -> None:
         """AggregationProtocol should be deleted (aggregation is structural)."""
         import elspeth.plugins.protocols as protocols
 
-        assert not hasattr(
-            protocols, "AggregationProtocol"
-        ), "AggregationProtocol should be deleted - aggregation is structural"
+        assert not hasattr(protocols, "AggregationProtocol"), "AggregationProtocol should be deleted - aggregation is structural"
 
 
 class TestForkCoalescePipelineIntegration:
@@ -1541,12 +1459,8 @@ class TestForkCoalescePipelineIntegration:
 
         # Verify fork created 2 children
         assert len(gate_outcome.child_tokens) == 2
-        sentiment_token = next(
-            t for t in gate_outcome.child_tokens if t.branch_name == "sentiment"
-        )
-        entity_token = next(
-            t for t in gate_outcome.child_tokens if t.branch_name == "entities"
-        )
+        sentiment_token = next(t for t in gate_outcome.child_tokens if t.branch_name == "sentiment")
+        entity_token = next(t for t in gate_outcome.child_tokens if t.branch_name == "entities")
 
         # Step 2: Process each branch through its transform
         from elspeth.engine.executors import TransformExecutor
@@ -1554,16 +1468,15 @@ class TestForkCoalescePipelineIntegration:
         transform_executor = TransformExecutor(recorder, span_factory)
 
         # Process sentiment branch
-        sentiment_result, sentiment_token_updated, _ = (
-            transform_executor.execute_transform(
-                transform=sentiment,
-                token=sentiment_token,
-                ctx=ctx,
-                step_in_pipeline=2,
-            )
+        sentiment_result, sentiment_token_updated, _ = transform_executor.execute_transform(
+            transform=as_transform(sentiment),
+            token=sentiment_token,
+            ctx=ctx,
+            step_in_pipeline=2,
         )
         assert sentiment_result.status == "success"
         # Update token with transformed data while preserving branch_name
+        assert sentiment_result.row is not None
         sentiment_token_processed = TokenInfo(
             row_id=sentiment_token_updated.row_id,
             token_id=sentiment_token_updated.token_id,
@@ -1573,13 +1486,14 @@ class TestForkCoalescePipelineIntegration:
 
         # Process entity branch
         entity_result, entity_token_updated, _ = transform_executor.execute_transform(
-            transform=entity,
+            transform=as_transform(entity),
             token=entity_token,
             ctx=ctx,
             step_in_pipeline=2,
         )
         assert entity_result.status == "success"
         # Update token with transformed data while preserving branch_name
+        assert entity_result.row is not None
         entity_token_processed = TokenInfo(
             row_id=entity_token_updated.row_id,
             token_id=entity_token_updated.token_id,
@@ -1621,8 +1535,7 @@ class TestForkCoalescePipelineIntegration:
 
         # CRITICAL VERIFICATION: Sink received 1 merged row, not 2 fork children
         assert len(sink.rows_written) == 1, (
-            f"Expected 1 merged row, got {len(sink.rows_written)}. "
-            "Fork children should be coalesced before sink."
+            f"Expected 1 merged row, got {len(sink.rows_written)}. Fork children should be coalesced before sink."
         )
 
         # Verify the single row contains merged data
@@ -1855,9 +1768,7 @@ class TestForkCoalescePipelineIntegration:
                     merged_tokens.append(outcome.merged_token)
 
         # All 3 rows should have merged
-        assert (
-            len(merged_tokens) == 3
-        ), f"Expected 3 merged tokens, got {len(merged_tokens)}"
+        assert len(merged_tokens) == 3, f"Expected 3 merged tokens, got {len(merged_tokens)}"
 
         # Write to sink
         sink_executor = SinkExecutor(recorder, span_factory, run_id)
@@ -2152,28 +2063,21 @@ class TestComplexDAGIntegration:
         )
 
         # Verify fork created 2 child tokens
-        assert (
-            len(gate_outcome.child_tokens) == 2
-        ), f"Fork should create 2 children, got {len(gate_outcome.child_tokens)}"
+        assert len(gate_outcome.child_tokens) == 2, f"Fork should create 2 children, got {len(gate_outcome.child_tokens)}"
 
-        sentiment_token = next(
-            t for t in gate_outcome.child_tokens if t.branch_name == "sentiment_path"
-        )
-        entity_token = next(
-            t for t in gate_outcome.child_tokens if t.branch_name == "entity_path"
-        )
+        sentiment_token = next(t for t in gate_outcome.child_tokens if t.branch_name == "sentiment_path")
+        entity_token = next(t for t in gate_outcome.child_tokens if t.branch_name == "entity_path")
 
         # Step 3: Execute transforms on each branch
         # Sentiment branch
-        sentiment_result, sentiment_token_updated, _ = (
-            transform_executor.execute_transform(
-                transform=sentiment_transform,
-                token=sentiment_token,
-                ctx=ctx,
-                step_in_pipeline=2,
-            )
+        sentiment_result, sentiment_token_updated, _ = transform_executor.execute_transform(
+            transform=as_transform(sentiment_transform),
+            token=sentiment_token,
+            ctx=ctx,
+            step_in_pipeline=2,
         )
         assert sentiment_result.status == "success"
+        assert sentiment_result.row is not None
         sentiment_token_processed = TokenInfo(
             row_id=sentiment_token_updated.row_id,
             token_id=sentiment_token_updated.token_id,
@@ -2183,12 +2087,13 @@ class TestComplexDAGIntegration:
 
         # Entity branch
         entity_result, entity_token_updated, _ = transform_executor.execute_transform(
-            transform=entity_transform,
+            transform=as_transform(entity_transform),
             token=entity_token,
             ctx=ctx,
             step_in_pipeline=2,
         )
         assert entity_result.status == "success"
+        assert entity_result.row is not None
         entity_token_processed = TokenInfo(
             row_id=entity_token_updated.row_id,
             token_id=entity_token_updated.token_id,
@@ -2219,12 +2124,8 @@ class TestComplexDAGIntegration:
         # Verify merged data contains fields from BOTH branches
         merged_data = outcome2.merged_token.row_data
         assert "text" in merged_data, "Merged data should preserve original text"
-        assert (
-            "sentiment" in merged_data
-        ), "Merged data should have sentiment from branch A"
-        assert (
-            "entities" in merged_data
-        ), "Merged data should have entities from branch B"
+        assert "sentiment" in merged_data, "Merged data should have sentiment from branch A"
+        assert "entities" in merged_data, "Merged data should have entities from branch B"
         assert merged_data["text"] == "ACME reported good earnings"
         assert merged_data["sentiment"] == "positive"
         assert merged_data["entities"] == ["ACME"]
@@ -2239,8 +2140,7 @@ class TestComplexDAGIntegration:
 
         # Verify sink received exactly 1 merged row (not 2 separate branch outputs)
         assert len(sink.rows_written) == 1, (
-            f"Expected 1 merged row, got {len(sink.rows_written)}. "
-            "Diamond DAG should merge branches before sink."
+            f"Expected 1 merged row, got {len(sink.rows_written)}. Diamond DAG should merge branches before sink."
         )
 
         # Verify the written row contains the merged fields
@@ -2262,9 +2162,7 @@ class TestComplexDAGIntegration:
 
         all_tokens = recorder.get_tokens(rows[0].row_id)
         # 1 initial + 2 fork children + 1 merged = 4 tokens
-        assert (
-            len(all_tokens) == 4
-        ), f"Expected 4 tokens (initial + 2 fork + 1 merged), got {len(all_tokens)}"
+        assert len(all_tokens) == 4, f"Expected 4 tokens (initial + 2 fork + 1 merged), got {len(all_tokens)}"
 
         # Verify all nodes were visited
         nodes = recorder.get_nodes(run_id)
@@ -2289,9 +2187,7 @@ class TestComplexDAGIntegration:
         """
         import elspeth.plugins.base as base
 
-        assert not hasattr(
-            base, "BaseAggregation"
-        ), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
+        assert not hasattr(base, "BaseAggregation"), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
 
     def test_run_result_captures_all_metrics(self) -> None:
         """RunResult captures metrics for all pipeline operations.
@@ -2364,12 +2260,8 @@ class TestComplexDAGIntegration:
 
             def process(self, row: dict[str, Any], ctx: Any) -> TransformResult:
                 if row["value"] % 3 == 0:
-                    return TransformResult.error(
-                        {"reason": "divisible_by_3", "value": row["value"]}
-                    )
-                return TransformResult.success(
-                    {"value": row["value"], "processed": True}
-                )
+                    return TransformResult.error({"reason": "divisible_by_3", "value": row["value"]})
+                return TransformResult.success({"value": row["value"], "processed": True})
 
         class CollectSink(_TestSinkBase):
             """Sink that collects written rows."""
@@ -2439,7 +2331,7 @@ class TestComplexDAGIntegration:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": default_sink, "routed": routed_sink},
             gates=[routing_gate],
@@ -2467,9 +2359,7 @@ class TestComplexDAGIntegration:
         # Verify expected metric values
         # ================================================================
         # 10 rows processed (values 1-10)
-        assert (
-            result.rows_processed == 10
-        ), f"Expected 10 rows_processed, got {result.rows_processed}"
+        assert result.rows_processed == 10, f"Expected 10 rows_processed, got {result.rows_processed}"
 
         # Pipeline flow:
         # 1. Transform processes all 10 rows FIRST
@@ -2480,24 +2370,16 @@ class TestComplexDAGIntegration:
         #    - Values < 8: 1, 2, 4, 5, 7 -> SUCCEEDED to "default" sink
 
         # Quarantined: 3, 6, 9 (3 rows failed at transform)
-        assert (
-            result.rows_quarantined == 3
-        ), f"Expected 3 rows_quarantined (3, 6, 9), got {result.rows_quarantined}"
+        assert result.rows_quarantined == 3, f"Expected 3 rows_quarantined (3, 6, 9), got {result.rows_quarantined}"
 
         # Routed: 8, 10 (2 rows that passed transform and got routed by gate)
-        assert (
-            result.rows_routed == 2
-        ), f"Expected 2 rows_routed (8, 10), got {result.rows_routed}"
+        assert result.rows_routed == 2, f"Expected 2 rows_routed (8, 10), got {result.rows_routed}"
 
         # Succeeded: 1, 2, 4, 5, 7 (5 rows that reached default sink)
-        assert (
-            result.rows_succeeded == 5
-        ), f"Expected 5 rows_succeeded (1, 2, 4, 5, 7), got {result.rows_succeeded}"
+        assert result.rows_succeeded == 5, f"Expected 5 rows_succeeded (1, 2, 4, 5, 7), got {result.rows_succeeded}"
 
         # Failed: 0 (no exceptions, only TransformResult.error with discard)
-        assert (
-            result.rows_failed == 0
-        ), f"Expected 0 rows_failed (errors become quarantined), got {result.rows_failed}"
+        assert result.rows_failed == 0, f"Expected 0 rows_failed (errors become quarantined), got {result.rows_failed}"
 
         # ================================================================
         # Verify consistency: succeeded + quarantined <= processed
@@ -2539,9 +2421,7 @@ class TestComplexDAGIntegration:
         # ================================================================
         # Verify no forking in this pipeline (rows_forked should be 0)
         # ================================================================
-        assert (
-            result.rows_forked == 0
-        ), f"Expected 0 rows_forked (no fork gates), got {result.rows_forked}"
+        assert result.rows_forked == 0, f"Expected 0 rows_forked (no fork gates), got {result.rows_forked}"
 
 
 class TestRetryIntegration:
@@ -2620,9 +2500,7 @@ class TestRetryIntegration:
 
                 if attempt_counts[row_value] < 3:
                     # Raise ConnectionError - this is retryable
-                    raise ConnectionError(
-                        f"Transient failure attempt {attempt_counts[row_value]}"
-                    )
+                    raise ConnectionError(f"Transient failure attempt {attempt_counts[row_value]}")
 
                 return TransformResult.success({"value": row_value, "processed": True})
 
@@ -2640,9 +2518,7 @@ class TestRetryIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory://output", size_bytes=100, content_hash="retry_test"
-                )
+                return ArtifactDescriptor.for_file(path="memory://output", size_bytes=100, content_hash="retry_test")
 
             def close(self) -> None:
                 pass
@@ -2653,7 +2529,7 @@ class TestRetryIntegration:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -2673,9 +2549,7 @@ class TestRetryIntegration:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph(config), settings=settings
-        )
+        result = orchestrator.run(config, graph=_build_test_graph(config), settings=settings)
 
         # Verify run completed successfully
         assert result.status == RunStatus.COMPLETED
@@ -2704,9 +2578,7 @@ class TestRetryIntegration:
             states = list(conn.execute(stmt))
 
         # Should have 3 attempts per row = 6 node_states
-        assert (
-            len(states) == 6
-        ), f"Expected 6 node_states (3 per row), got {len(states)}"
+        assert len(states) == 6, f"Expected 6 node_states (3 per row), got {len(states)}"
 
         # Verify attempt numbers: each row has attempts 0, 1, 2
         # Group by token_id and check attempts
@@ -2715,15 +2587,11 @@ class TestRetryIntegration:
             attempts_by_token[state.token_id].append(state.attempt)
 
         for token_id, attempts in attempts_by_token.items():
-            assert (
-                sorted(attempts) == [0, 1, 2]
-            ), f"Token {token_id} should have attempts [0, 1, 2], got {sorted(attempts)}"
+            assert sorted(attempts) == [0, 1, 2], f"Token {token_id} should have attempts [0, 1, 2], got {sorted(attempts)}"
 
         # Verify final attempts are successful
         final_states = [s for s in states if s.attempt == 2]
-        assert all(
-            s.status == "completed" for s in final_states
-        ), "All final attempts should be 'completed'"
+        assert all(s.status == "completed" for s in final_states), "All final attempts should be 'completed'"
 
     def test_permanent_failure_quarantines_after_max_retries(self) -> None:
         """Transform that always fails should quarantine row after max retries.
@@ -2792,9 +2660,7 @@ class TestRetryIntegration:
 
                 if row_value == 1:
                     # Always fail with ConnectionError (retryable)
-                    raise ConnectionError(
-                        f"Permanent failure for value=1, attempt {attempt_counts[row_value]}"
-                    )
+                    raise ConnectionError(f"Permanent failure for value=1, attempt {attempt_counts[row_value]}")
 
                 return TransformResult.success({"value": row_value, "processed": True})
 
@@ -2827,7 +2693,7 @@ class TestRetryIntegration:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -2847,9 +2713,7 @@ class TestRetryIntegration:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph(config), settings=settings
-        )
+        result = orchestrator.run(config, graph=_build_test_graph(config), settings=settings)
 
         # Run completes (partial success)
         assert result.status == RunStatus.COMPLETED
@@ -2857,20 +2721,12 @@ class TestRetryIntegration:
 
         # Row with value=1 failed after max retries (3 attempts)
         # Row with value=2 succeeded
-        assert (
-            result.rows_failed == 1
-        ), f"Expected 1 failed row, got {result.rows_failed}"
-        assert (
-            result.rows_succeeded == 1
-        ), f"Expected 1 succeeded row, got {result.rows_succeeded}"
+        assert result.rows_failed == 1, f"Expected 1 failed row, got {result.rows_failed}"
+        assert result.rows_succeeded == 1, f"Expected 1 succeeded row, got {result.rows_succeeded}"
 
         # Verify attempt counts
-        assert (
-            attempt_counts[1] == 3
-        ), f"value=1 should have 3 attempts, got {attempt_counts[1]}"
-        assert (
-            attempt_counts[2] == 1
-        ), f"value=2 should have 1 attempt, got {attempt_counts[2]}"
+        assert attempt_counts[1] == 3, f"value=1 should have 3 attempts, got {attempt_counts[1]}"
+        assert attempt_counts[2] == 1, f"value=2 should have 1 attempt, got {attempt_counts[2]}"
 
         # Sink only received the successful row
         assert len(sink.results) == 1
@@ -3033,38 +2889,24 @@ class TestExplainQuery:
 
         # Must link back to source row
         assert lineage.source_row is not None, "source_row must be present"
-        assert (
-            lineage.source_row.row_id == token.row_id
-        ), "source_row.row_id must match token's row_id"
-        assert (
-            lineage.source_row.source_node_id == source_node.node_id
-        ), "source_row must track source node"
-        assert (
-            lineage.source_row.row_index == 0
-        ), "source_row.row_index must match original"
+        assert lineage.source_row.row_id == token.row_id, "source_row.row_id must match token's row_id"
+        assert lineage.source_row.source_node_id == source_node.node_id, "source_row must track source node"
+        assert lineage.source_row.row_index == 0, "source_row.row_index must match original"
 
         # Must have node_states covering transform AND sink
-        assert (
-            len(lineage.node_states) == 2
-        ), f"Expected 2 node_states (transform + sink), got {len(lineage.node_states)}"
+        assert len(lineage.node_states) == 2, f"Expected 2 node_states (transform + sink), got {len(lineage.node_states)}"
 
         node_ids_in_states = {s.node_id for s in lineage.node_states}
-        assert (
-            transform_node.node_id in node_ids_in_states
-        ), "node_states must include transform"
+        assert transform_node.node_id in node_ids_in_states, "node_states must include transform"
         assert sink_node.node_id in node_ids_in_states, "node_states must include sink"
 
         # All states must be completed
         for state in lineage.node_states:
-            assert (
-                state.status == "completed"
-            ), f"All states should be completed, got {state.status}"
+            assert state.status == "completed", f"All states should be completed, got {state.status}"
 
         # Verify states are in step_index order
         step_indices = [s.step_index for s in lineage.node_states]
-        assert step_indices == sorted(
-            step_indices
-        ), "node_states should be ordered by step_index"
+        assert step_indices == sorted(step_indices), "node_states should be ordered by step_index"
 
     def test_explain_for_aggregated_row(self) -> None:
         """Explain traces aggregated output back to all input rows.
@@ -3160,28 +3002,23 @@ class TestExplainQuery:
 
         # Verify batch_members links aggregation to all input tokens
         batch_members = recorder.get_batch_members(batch.batch_id)
-        assert (
-            len(batch_members) == 3
-        ), f"Expected 3 batch members, got {len(batch_members)}"
+        assert len(batch_members) == 3, f"Expected 3 batch members, got {len(batch_members)}"
 
         # Verify each batch member maps to a distinct token
         member_token_ids = {m.token_id for m in batch_members}
         input_token_ids = {t.token_id for t in input_tokens}
         assert member_token_ids == input_token_ids, (
-            "batch_members should link to all input tokens. "
-            f"Expected {input_token_ids}, got {member_token_ids}"
+            f"batch_members should link to all input tokens. Expected {input_token_ids}, got {member_token_ids}"
         )
 
         # Verify we can trace from each batch member back to its source row
         for member in batch_members:
-            token = recorder.get_token(member.token_id)
-            assert token is not None, f"Token {member.token_id} should exist"
+            token_info = recorder.get_token(member.token_id)
+            assert token_info is not None, f"Token {member.token_id} should exist"
 
-            row = recorder.get_row(token.row_id)
-            assert row is not None, f"Row {token.row_id} should exist"
-            assert (
-                row.source_node_id == source_node.node_id
-            ), "Row should trace to source node"
+            row = recorder.get_row(token_info.row_id)
+            assert row is not None, f"Row {token_info.row_id} should exist"
+            assert row.source_node_id == source_node.node_id, "Row should trace to source node"
 
     def test_explain_for_coalesced_row(self) -> None:
         """Explain traces coalesced output back through branches to fork point.
@@ -3360,41 +3197,28 @@ class TestExplainQuery:
 
         # Must trace to original source row
         assert lineage.source_row is not None, "source_row must be present"
-        assert (
-            lineage.source_row.row_id == parent_token.row_id
-        ), "source_row should trace to original row before fork"
-        assert (
-            lineage.source_row.source_node_id == source_node.node_id
-        ), "source_row should trace to source node"
+        assert lineage.source_row.row_id == parent_token.row_id, "source_row should trace to original row before fork"
+        assert lineage.source_row.source_node_id == source_node.node_id, "source_row should trace to source node"
 
         # Must have parent tokens (the forked children that were merged)
-        assert (
-            len(lineage.parent_tokens) == 2
-        ), f"Coalesced token should have 2 parent tokens, got {len(lineage.parent_tokens)}"
+        assert len(lineage.parent_tokens) == 2, f"Coalesced token should have 2 parent tokens, got {len(lineage.parent_tokens)}"
 
         parent_token_ids = {p.token_id for p in lineage.parent_tokens}
         expected_parent_ids = {token_a.token_id, token_b.token_id}
         assert parent_token_ids == expected_parent_ids, (
-            f"parent_tokens should be the forked children. "
-            f"Expected {expected_parent_ids}, got {parent_token_ids}"
+            f"parent_tokens should be the forked children. Expected {expected_parent_ids}, got {parent_token_ids}"
         )
 
         # Verify we can trace further back from parent tokens to the original fork
         for parent in lineage.parent_tokens:
             # Get the parent's parent (should be the original pre-fork token)
             grandparents = recorder.get_token_parents(parent.token_id)
-            assert (
-                len(grandparents) == 1
-            ), f"Forked child should have exactly 1 parent, got {len(grandparents)}"
-            assert (
-                grandparents[0].parent_token_id == parent_token.token_id
-            ), "Forked child's parent should be the original token"
+            assert len(grandparents) == 1, f"Forked child should have exactly 1 parent, got {len(grandparents)}"
+            assert grandparents[0].parent_token_id == parent_token.token_id, "Forked child's parent should be the original token"
 
         # Verify node_states show the path through coalesce and sink
         state_node_ids = {s.node_id for s in lineage.node_states}
-        assert (
-            coalesce_node.node_id in state_node_ids
-        ), "node_states should include coalesce"
+        assert coalesce_node.node_id in state_node_ids, "node_states should include coalesce"
         assert sink_node.node_id in state_node_ids, "node_states should include sink"
 
 
@@ -3476,9 +3300,7 @@ class TestErrorRecovery:
 
             def process(self, row: dict[str, Any], ctx: Any) -> TransformResult:
                 if row["value"] % 2 == 0:
-                    return TransformResult.error(
-                        {"message": "Even values fail", "value": row["value"]}
-                    )
+                    return TransformResult.error({"message": "Even values fail", "value": row["value"]})
                 return TransformResult.success(row)
 
         class CollectSink(_TestSinkBase):
@@ -3514,7 +3336,7 @@ class TestErrorRecovery:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -3523,31 +3345,17 @@ class TestErrorRecovery:
         result = orchestrator.run(config, graph=_build_test_graph(config))
 
         # Pipeline completes despite failures
-        assert (
-            result.status == RunStatus.COMPLETED
-        ), f"Expected COMPLETED, got {result.status}"
-        assert (
-            result.rows_processed == 10
-        ), f"Expected 10 rows processed, got {result.rows_processed}"
-        assert (
-            result.rows_succeeded == 5
-        ), f"Expected 5 succeeded (odd values), got {result.rows_succeeded}"
-        assert (
-            result.rows_quarantined == 5
-        ), f"Expected 5 quarantined (even values), got {result.rows_quarantined}"
-        assert (
-            result.rows_failed == 0
-        ), f"Expected 0 failed (errors are quarantined), got {result.rows_failed}"
+        assert result.status == RunStatus.COMPLETED, f"Expected COMPLETED, got {result.status}"
+        assert result.rows_processed == 10, f"Expected 10 rows processed, got {result.rows_processed}"
+        assert result.rows_succeeded == 5, f"Expected 5 succeeded (odd values), got {result.rows_succeeded}"
+        assert result.rows_quarantined == 5, f"Expected 5 quarantined (even values), got {result.rows_quarantined}"
+        assert result.rows_failed == 0, f"Expected 0 failed (errors are quarantined), got {result.rows_failed}"
 
         # Sink received only successful rows (odd values)
-        assert (
-            len(sink.results) == 5
-        ), f"Expected 5 results in sink, got {len(sink.results)}"
+        assert len(sink.results) == 5, f"Expected 5 results in sink, got {len(sink.results)}"
         result_values = {r["value"] for r in sink.results}
         expected_values = {1, 3, 5, 7, 9}
-        assert (
-            result_values == expected_values
-        ), f"Expected odd values {expected_values}, got {result_values}"
+        assert result_values == expected_values, f"Expected odd values {expected_values}, got {result_values}"
 
     def test_quarantined_rows_have_audit_trail(self) -> None:
         """Quarantined rows must have complete audit trail.
@@ -3612,9 +3420,7 @@ class TestErrorRecovery:
 
             def process(self, row: dict[str, Any], ctx: Any) -> TransformResult:
                 if row["value"] % 2 == 0:
-                    return TransformResult.error(
-                        {"message": "Even values fail", "value": row["value"]}
-                    )
+                    return TransformResult.error({"message": "Even values fail", "value": row["value"]})
                 return TransformResult.success(row)
 
         class CollectSink(_TestSinkBase):
@@ -3650,7 +3456,7 @@ class TestErrorRecovery:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -3683,46 +3489,29 @@ class TestErrorRecovery:
         failed_states = [s for s in states if s.status == "failed"]
         completed_states = [s for s in states if s.status == "completed"]
 
-        assert (
-            len(failed_states) == 2
-        ), f"Expected 2 failed states (quarantined rows), got {len(failed_states)}"
-        assert (
-            len(completed_states) == 2
-        ), f"Expected 2 completed states (succeeded rows), got {len(completed_states)}"
+        assert len(failed_states) == 2, f"Expected 2 failed states (quarantined rows), got {len(failed_states)}"
+        assert len(completed_states) == 2, f"Expected 2 completed states (succeeded rows), got {len(completed_states)}"
 
         # Verify each failed state has complete audit trail
         for failed_state in failed_states:
             # Must have error_json populated
-            assert (
-                failed_state.error_json is not None
-            ), f"Failed state for token {failed_state.token_id} missing error_json"
+            assert failed_state.error_json is not None, f"Failed state for token {failed_state.token_id} missing error_json"
 
             # error_json should be valid JSON with the error details we provided
             error_data = json.loads(failed_state.error_json)
-            assert (
-                "message" in error_data
-            ), f"error_json missing 'message' field: {error_data}"
-            assert (
-                error_data["message"] == "Even values fail"
-            ), f"Unexpected error message: {error_data['message']}"
-            assert (
-                "value" in error_data
-            ), f"error_json missing 'value' field: {error_data}"
+            assert "message" in error_data, f"error_json missing 'message' field: {error_data}"
+            assert error_data["message"] == "Even values fail", f"Unexpected error message: {error_data['message']}"
+            assert "value" in error_data, f"error_json missing 'value' field: {error_data}"
             # The value should be even (0 or 2)
-            assert (
-                error_data["value"] % 2 == 0
-            ), f"Expected even value in error, got {error_data['value']}"
+            assert error_data["value"] % 2 == 0, f"Expected even value in error, got {error_data['value']}"
 
             # Must identify which node (transform) failed
             assert failed_state.node_id == transform_node.node_id, (
-                f"Failed state node_id mismatch: {failed_state.node_id} != "
-                f"{transform_node.node_id}"
+                f"Failed state node_id mismatch: {failed_state.node_id} != {transform_node.node_id}"
             )
 
             # Must have token_id linking back to the row
             assert failed_state.token_id is not None, "Failed state missing token_id"
 
             # Must have duration_ms (processing was attempted)
-            assert (
-                failed_state.duration_ms is not None
-            ), "Failed state missing duration_ms"
+            assert failed_state.duration_ms is not None, "Failed state missing duration_ms"

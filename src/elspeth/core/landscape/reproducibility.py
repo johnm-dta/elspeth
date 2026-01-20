@@ -86,11 +86,7 @@ def set_run_grade(db: "LandscapeDB", run_id: str, grade: ReproducibilityGrade) -
         grade: ReproducibilityGrade to set
     """
     with db.connection() as conn:
-        conn.execute(
-            runs_table.update()
-            .where(runs_table.c.run_id == run_id)
-            .values(reproducibility_grade=grade.value)
-        )
+        conn.execute(runs_table.update().where(runs_table.c.run_id == run_id).values(reproducibility_grade=grade.value))
 
 
 def update_grade_after_purge(db: "LandscapeDB", run_id: str) -> None:
@@ -107,9 +103,7 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str) -> None:
         run_id: Run ID to potentially degrade
     """
     # Use single connection for transactional safety (read-modify-write)
-    query = select(runs_table.c.reproducibility_grade).where(
-        runs_table.c.run_id == run_id
-    )
+    query = select(runs_table.c.reproducibility_grade).where(runs_table.c.run_id == run_id)
 
     with db.connection() as conn:
         result = conn.execute(query)
@@ -123,9 +117,7 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str) -> None:
         # Tier 1 (Landscape) validation - crash on corrupt audit data
         # Per Data Manifesto: "Bad data in the audit trail = crash immediately"
         if current_grade is None:
-            raise ValueError(
-                f"NULL reproducibility_grade for run {run_id} - audit data corruption"
-            )
+            raise ValueError(f"NULL reproducibility_grade for run {run_id} - audit data corruption")
 
         try:
             grade_enum = ReproducibilityGrade(current_grade)
@@ -140,7 +132,5 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str) -> None:
             conn.execute(
                 runs_table.update()
                 .where(runs_table.c.run_id == run_id)
-                .values(
-                    reproducibility_grade=ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
-                )
+                .values(reproducibility_grade=ReproducibilityGrade.ATTRIBUTABLE_ONLY.value)
             )

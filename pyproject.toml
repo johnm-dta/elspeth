@@ -82,6 +82,9 @@ dev = [
 
 llm = [
     # Phase 6: LLM plugin pack
+    "jinja2>=3.1",
+    "httpx>=0.27",
+    "openai>=1.0",
     "litellm>=1.30",
 ]
 
@@ -89,6 +92,7 @@ azure = [
     # Phase 7: Azure plugin pack
     "azure-storage-blob>=12.19",
     "azure-identity>=1.15",
+    "jinja2>=3.1",  # Used by AzureBlobSink for path templating
 ]
 
 all = [
@@ -114,7 +118,7 @@ packages = ["src/elspeth"]
 # === Ruff Configuration ===
 [tool.ruff]
 target-version = "py311"
-line-length = 88
+line-length = 140
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -133,6 +137,7 @@ select = [
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
+    "SIM108", # ternary operator - prefer explicit if/else for readability with comments
 ]
 
 [tool.ruff.lint.isort]
@@ -143,6 +148,9 @@ known-first-party = ["elspeth"]
 "scripts/**/*.py" = ["T20"]  # Allow print in CLI scripts
 "alembic/**/*.py" = ["E402"]  # Alembic env.py has imports after config setup
 "vulture_whitelist.py" = ["B018", "F821"]  # Vulture whitelist uses bare names
+# Package __init__ files use categorical __all__ grouping for readability
+"src/elspeth/contracts/__init__.py" = ["RUF022"]
+"src/elspeth/plugins/__init__.py" = ["RUF022"]
 
 # === Mypy Configuration ===
 [tool.mypy]
@@ -166,6 +174,7 @@ module = [
     "textual.*",
     "opentelemetry.*",
     "hypothesis.*",
+    "azure.*",
 ]
 ignore_missing_imports = true
 

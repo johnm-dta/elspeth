@@ -47,10 +47,7 @@ def _normalize_value(obj: Any) -> Any:
     # Check for NaN/Infinity FIRST (before type coercion)
     if isinstance(obj, float | np.floating):
         if math.isnan(obj) or math.isinf(obj):
-            raise ValueError(
-                f"Cannot canonicalize non-finite float: {obj}. "
-                "Use None for missing values, not NaN."
-            )
+            raise ValueError(f"Cannot canonicalize non-finite float: {obj}. Use None for missing values, not NaN.")
         if isinstance(obj, np.floating):
             return float(obj)
         return obj

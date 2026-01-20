@@ -34,7 +34,7 @@ class TestNodeIdProtocol:
             name = "test"
             output_schema = TestSchema
 
-            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
+            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:  # type: ignore[override]
                 yield {}
 
             def close(self) -> None:
@@ -71,9 +71,7 @@ class TestNodeIdProtocol:
             input_schema = TestSchema
             output_schema = TestSchema
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
         transform = TestTransform({})
@@ -120,17 +118,13 @@ class TestNodeIdProtocol:
         """AggregationProtocol should be deleted (aggregation is structural)."""
         import elspeth.plugins.protocols as protocols
 
-        assert not hasattr(
-            protocols, "AggregationProtocol"
-        ), "AggregationProtocol should be deleted - aggregation is structural"
+        assert not hasattr(protocols, "AggregationProtocol"), "AggregationProtocol should be deleted - aggregation is structural"
 
     def test_base_aggregation_deleted(self) -> None:
         """BaseAggregation should be deleted (aggregation is structural)."""
         import elspeth.plugins.base as base
 
-        assert not hasattr(
-            base, "BaseAggregation"
-        ), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
+        assert not hasattr(base, "BaseAggregation"), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
 
     def test_coalesce_protocol_has_node_id(self) -> None:
         """CoalesceProtocol defines node_id attribute."""
@@ -163,7 +157,7 @@ class TestNodeIdProtocol:
             name = "test"
             input_schema = TestSchema
 
-            def write(self, row: dict[str, Any], ctx: PluginContext) -> None:
+            def write(self, row: dict[str, Any], ctx: PluginContext) -> None:  # type: ignore[override]
                 pass
 
             def flush(self) -> None:

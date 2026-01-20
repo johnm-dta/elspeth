@@ -14,6 +14,7 @@ from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.results import TransformResult
+from tests.conftest import as_sink, as_source
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
@@ -55,9 +56,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
             if hasattr(t, "evaluate"):
                 gate_id = f"transform_{i}"
                 if gate_id != prev:  # Don't duplicate edge
-                    graph.add_edge(
-                        gate_id, node_id, label=sink_name, mode=RoutingMode.MOVE
-                    )
+                    graph.add_edge(gate_id, node_id, label=sink_name, mode=RoutingMode.MOVE)
 
     # Populate internal ID maps
     graph._sink_id_map = sink_ids
@@ -201,9 +200,9 @@ class TestOrchestratorCleanup:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform_1, transform_2],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -211,13 +210,9 @@ class TestOrchestratorCleanup:
 
         # Verify close() was called on all transforms
         assert transform_1.close_called, "transform_1.close() was not called"
-        assert (
-            transform_1.close_call_count == 1
-        ), "transform_1.close() called multiple times"
+        assert transform_1.close_call_count == 1, "transform_1.close() called multiple times"
         assert transform_2.close_called, "transform_2.close() was not called"
-        assert (
-            transform_2.close_call_count == 1
-        ), "transform_2.close() called multiple times"
+        assert transform_2.close_call_count == 1, "transform_2.close() called multiple times"
 
     def test_transforms_closed_on_failure(self) -> None:
         """All transforms should have close() called even if run fails."""
@@ -231,9 +226,9 @@ class TestOrchestratorCleanup:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform_1, transform_2],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -242,12 +237,8 @@ class TestOrchestratorCleanup:
             orchestrator.run(config, graph=_build_test_graph(config))
 
         # Verify close() was called on all transforms even though run failed
-        assert (
-            transform_1.close_called
-        ), "transform_1.close() was not called after failure"
-        assert (
-            transform_2.close_called
-        ), "transform_2.close() was not called after failure"
+        assert transform_1.close_called, "transform_1.close() was not called after failure"
+        assert transform_2.close_called, "transform_2.close() was not called after failure"
 
     def test_cleanup_handles_missing_close_method(self) -> None:
         """Cleanup should handle transforms that use default close() method.
@@ -277,9 +268,9 @@ class TestOrchestratorCleanup:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -306,9 +297,9 @@ class TestOrchestratorCleanup:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform_1, transform_2],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -318,6 +309,4 @@ class TestOrchestratorCleanup:
         assert result.status == "completed"
         # Both close() methods should have been called
         assert transform_1.close_called, "failing transform's close() was not called"
-        assert (
-            transform_2.close_called
-        ), "second transform's close() was not called despite first failing"
+        assert transform_2.close_called, "second transform's close() was not called despite first failing"

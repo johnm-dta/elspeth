@@ -51,13 +51,9 @@ class TestRunCommand:
         settings_file.write_text(yaml.dump(settings))
         return settings_file
 
-    def test_run_executes_pipeline(
-        self, pipeline_settings: Path, tmp_path: Path
-    ) -> None:
+    def test_run_executes_pipeline(self, pipeline_settings: Path, tmp_path: Path) -> None:
         """run --execute executes pipeline and creates output."""
-        result = runner.invoke(
-            app, ["run", "--settings", str(pipeline_settings), "--execute"]
-        )
+        result = runner.invoke(app, ["run", "--settings", str(pipeline_settings), "--execute"])
         assert result.exit_code == 0
 
         # Check output was created
@@ -66,9 +62,7 @@ class TestRunCommand:
 
     def test_run_shows_summary(self, pipeline_settings: Path) -> None:
         """run --execute shows execution summary."""
-        result = runner.invoke(
-            app, ["run", "--settings", str(pipeline_settings), "--execute"]
-        )
+        result = runner.invoke(app, ["run", "--settings", str(pipeline_settings), "--execute"])
         assert result.exit_code == 0
         # Use result.output to include both stdout and stderr
         assert "completed" in result.output.lower() or "rows" in result.output.lower()
@@ -86,9 +80,7 @@ class TestRunCommand:
 
     def test_run_dry_run_mode(self, pipeline_settings: Path) -> None:
         """run --dry-run validates without executing."""
-        result = runner.invoke(
-            app, ["run", "--settings", str(pipeline_settings), "--dry-run"]
-        )
+        result = runner.invoke(app, ["run", "--settings", str(pipeline_settings), "--dry-run"])
         assert result.exit_code == 0
         assert "dry" in result.output.lower() or "would" in result.output.lower()
 

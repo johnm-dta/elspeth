@@ -104,16 +104,12 @@ class TransformContractTestBase(ABC):
         assert hasattr(transform, "plugin_version")
         assert isinstance(transform.plugin_version, str)
 
-    def test_transform_has_batch_awareness_flag(
-        self, transform: TransformProtocol
-    ) -> None:
+    def test_transform_has_batch_awareness_flag(self, transform: TransformProtocol) -> None:
         """Contract: Transform MUST have 'is_batch_aware' attribute."""
         assert hasattr(transform, "is_batch_aware")
         assert isinstance(transform.is_batch_aware, bool)
 
-    def test_transform_has_creates_tokens_flag(
-        self, transform: TransformProtocol
-    ) -> None:
+    def test_transform_has_creates_tokens_flag(self, transform: TransformProtocol) -> None:
         """Contract: Transform MUST have 'creates_tokens' attribute."""
         assert hasattr(transform, "creates_tokens")
         assert isinstance(transform.creates_tokens, bool)
@@ -130,9 +126,7 @@ class TransformContractTestBase(ABC):
     ) -> None:
         """Contract: process() MUST return TransformResult."""
         result = transform.process(valid_input, ctx)
-        assert isinstance(
-            result, TransformResult
-        ), f"process() returned {type(result).__name__}, expected TransformResult"
+        assert isinstance(result, TransformResult), f"process() returned {type(result).__name__}, expected TransformResult"
 
     def test_success_result_has_status(
         self,
@@ -155,8 +149,7 @@ class TransformContractTestBase(ABC):
         result = transform.process(valid_input, ctx)
         if result.status == "success":
             assert result.has_output_data, (
-                "Success TransformResult has no output data. "
-                "Use TransformResult.success(row) or TransformResult.success_multi(rows)."
+                "Success TransformResult has no output data. Use TransformResult.success(row) or TransformResult.success_multi(rows)."
             )
 
     def test_success_single_row_is_dict(
@@ -168,9 +161,7 @@ class TransformContractTestBase(ABC):
         """Contract: Success single-row output MUST be a dict."""
         result = transform.process(valid_input, ctx)
         if result.status == "success" and result.row is not None:
-            assert isinstance(
-                result.row, dict
-            ), f"TransformResult.row is {type(result.row).__name__}, expected dict"
+            assert isinstance(result.row, dict), f"TransformResult.row is {type(result.row).__name__}, expected dict"
 
     def test_success_multi_row_is_list(
         self,
@@ -181,13 +172,9 @@ class TransformContractTestBase(ABC):
         """Contract: Success multi-row output MUST be a list of dicts."""
         result = transform.process(valid_input, ctx)
         if result.status == "success" and result.rows is not None:
-            assert isinstance(
-                result.rows, list
-            ), f"TransformResult.rows is {type(result.rows).__name__}, expected list"
+            assert isinstance(result.rows, list), f"TransformResult.rows is {type(result.rows).__name__}, expected list"
             for i, row in enumerate(result.rows):
-                assert isinstance(
-                    row, dict
-                ), f"TransformResult.rows[{i}] is {type(row).__name__}, expected dict"
+                assert isinstance(row, dict), f"TransformResult.rows[{i}] is {type(row).__name__}, expected dict"
 
     # =========================================================================
     # Lifecycle Contracts
@@ -237,12 +224,8 @@ class TransformContractPropertyTestBase(TransformContractTestBase):
     Adds Hypothesis property tests for stronger contract guarantees.
     """
 
-    @given(
-        extra_field=st.text(min_size=1, max_size=20).filter(lambda s: s.isidentifier())
-    )
-    @settings(
-        max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture]
-    )
+    @given(extra_field=st.text(min_size=1, max_size=20).filter(lambda s: s.isidentifier()))
+    @settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_process_handles_extra_fields_gracefully(
         self,
         transform: TransformProtocol,
@@ -274,15 +257,8 @@ class TransformContractPropertyTestBase(TransformContractTestBase):
             result1 = transform.process(valid_input, ctx)
             result2 = transform.process(valid_input, ctx)
 
-            if (
-                result1.status == "success"
-                and result2.status == "success"
-                and result1.row is not None
-                and result2.row is not None
-            ):
-                assert (
-                    result1.row == result2.row
-                ), "Deterministic transform produced different outputs"
+            if result1.status == "success" and result2.status == "success" and result1.row is not None and result2.row is not None:
+                assert result1.row == result2.row, "Deterministic transform produced different outputs"
 
 
 class TransformErrorContractTestBase(TransformContractTestBase):
@@ -307,9 +283,7 @@ class TransformErrorContractTestBase(TransformContractTestBase):
         result = transform.process(error_input, ctx)
         if result.status == "error":
             assert result.reason is not None, "Error TransformResult has None reason"
-            assert isinstance(
-                result.reason, dict
-            ), f"TransformResult.reason is {type(result.reason).__name__}, expected dict"
+            assert isinstance(result.reason, dict), f"TransformResult.reason is {type(result.reason).__name__}, expected dict"
 
     def test_error_result_has_no_output_data(
         self,

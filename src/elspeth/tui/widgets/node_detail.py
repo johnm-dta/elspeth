@@ -108,9 +108,7 @@ class NodeDetailPanel:
                 logger.warning(
                     "Failed to parse error_json from Landscape",
                     state_id=self._state.get("state_id"),
-                    error_json_preview=error_json[:200]
-                    if len(error_json) > 200
-                    else error_json,
+                    error_json_preview=error_json[:200] if len(error_json) > 200 else error_json,
                     decode_error=str(e),
                 )
                 lines.append(f"  {error_json}")

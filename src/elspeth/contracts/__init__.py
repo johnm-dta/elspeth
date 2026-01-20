@@ -23,6 +23,7 @@ from elspeth.contracts.enums import (
     RoutingKind,
     RoutingMode,
     RowOutcome,
+    RunMode,
     RunStatus,
     TriggerType,
 )
@@ -89,7 +90,7 @@ from elspeth.contracts.config import (
 from elspeth.contracts.engine import RetryPolicy
 from elspeth.contracts.cli import ExecutionResult
 
-__all__ = [
+__all__ = [  # Grouped by category for readability
     # audit
     "Artifact",
     # errors
@@ -141,6 +142,7 @@ __all__ = [
     "RoutingKind",
     "RoutingMode",
     "RowOutcome",
+    "RunMode",
     "RunStatus",
     "TriggerType",
     # identity

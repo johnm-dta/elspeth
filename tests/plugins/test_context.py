@@ -47,6 +47,90 @@ class TestPluginContext:
         assert ctx.get("missing", default="default") == "default"
 
 
+class TestCheckpointAPI:
+    """Tests for checkpoint API used by batch transforms."""
+
+    def test_checkpoint_methods_exist(self) -> None:
+        """PluginContext has checkpoint methods."""
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="run-001", config={})
+        assert hasattr(ctx, "get_checkpoint")
+        assert hasattr(ctx, "update_checkpoint")
+        assert hasattr(ctx, "clear_checkpoint")
+
+    def test_get_checkpoint_returns_none_when_empty(self) -> None:
+        """Empty checkpoint returns None (not empty dict)."""
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="run-001", config={})
+        assert ctx.get_checkpoint() is None
+
+    def test_update_checkpoint_stores_data(self) -> None:
+        """update_checkpoint stores data accessible via get_checkpoint."""
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="run-001", config={})
+        ctx.update_checkpoint({"batch_id": "batch-123", "row_count": 5})
+
+        checkpoint = ctx.get_checkpoint()
+        assert checkpoint is not None
+        assert checkpoint["batch_id"] == "batch-123"
+        assert checkpoint["row_count"] == 5
+
+    def test_update_checkpoint_merges_data(self) -> None:
+        """Multiple update_checkpoint calls merge data."""
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="run-001", config={})
+        ctx.update_checkpoint({"batch_id": "batch-123"})
+        ctx.update_checkpoint({"status": "submitted"})
+
+        checkpoint = ctx.get_checkpoint()
+        assert checkpoint is not None
+        assert checkpoint["batch_id"] == "batch-123"
+        assert checkpoint["status"] == "submitted"
+
+    def test_clear_checkpoint_removes_all_data(self) -> None:
+        """clear_checkpoint removes all checkpoint data."""
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="run-001", config={})
+        ctx.update_checkpoint({"batch_id": "batch-123"})
+        assert ctx.get_checkpoint() is not None
+
+        ctx.clear_checkpoint()
+        assert ctx.get_checkpoint() is None
+
+    def test_checkpoint_typical_batch_workflow(self) -> None:
+        """Checkpoint API supports typical batch transform workflow."""
+        from elspeth.plugins.context import PluginContext
+
+        ctx = PluginContext(run_id="run-001", config={})
+
+        # Phase 1: Submit - no existing checkpoint
+        assert ctx.get_checkpoint() is None
+
+        # Save checkpoint after batch submission
+        ctx.update_checkpoint(
+            {
+                "batch_id": "batch-xyz789",
+                "input_file_id": "file-abc123",
+                "row_mapping": {"row-0": 0, "row-1": 1},
+                "submitted_at": "2024-01-01T00:00:00Z",
+            }
+        )
+
+        # Phase 2: Resume - checkpoint exists
+        checkpoint = ctx.get_checkpoint()
+        assert checkpoint is not None
+        assert checkpoint["batch_id"] == "batch-xyz789"
+
+        # After completion, clear checkpoint
+        ctx.clear_checkpoint()
+        assert ctx.get_checkpoint() is None
+
+
 class TestValidationErrorRecording:
     """Tests for recording validation errors from sources."""
 
@@ -76,9 +160,7 @@ class TestValidationErrorRecording:
         assert token.row_id is not None
         assert token.node_id == "source_node"
 
-    def test_record_validation_error_without_landscape_logs_warning(
-        self, caplog: "pytest.LogCaptureFixture"
-    ) -> None:
+    def test_record_validation_error_without_landscape_logs_warning(self, caplog: "pytest.LogCaptureFixture") -> None:
         """record_validation_error logs warning when no landscape configured."""
         import logging
 
@@ -237,9 +319,7 @@ class TestRouteToSink:
         assert hasattr(ctx, "route_to_sink")
         assert callable(ctx.route_to_sink)
 
-    def test_route_to_sink_logs_action(
-        self, caplog: "pytest.LogCaptureFixture"
-    ) -> None:
+    def test_route_to_sink_logs_action(self, caplog: "pytest.LogCaptureFixture") -> None:
         """route_to_sink logs the routing action."""
         import logging
 
@@ -315,9 +395,7 @@ class TestTransformErrorRecording:
         assert token.destination == "error_sink"
         assert token.error_id is None  # No landscape
 
-    def test_record_transform_error_without_landscape_logs_warning(
-        self, caplog: "pytest.LogCaptureFixture"
-    ) -> None:
+    def test_record_transform_error_without_landscape_logs_warning(self, caplog: "pytest.LogCaptureFixture") -> None:
         """record_transform_error logs warning when no landscape configured."""
         import logging
 

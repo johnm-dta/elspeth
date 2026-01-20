@@ -17,56 +17,13 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
+from elspeth.contracts import PluginSchema, RoutingMode, SourceRow
 from elspeth.core.config import GateSettings
+from tests.conftest import _TestSinkBase, _TestSourceBase, as_source
 
 if TYPE_CHECKING:
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
-
-
-# ============================================================================
-# Test Fixture Base Classes
-# ============================================================================
-
-
-class _TestSchema(PluginSchema):
-    """Minimal schema for test fixtures."""
-
-    pass
-
-
-class _TestSourceBase:
-    """Base class providing SourceProtocol required attributes."""
-
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-    def on_start(self, ctx: Any) -> None:
-        pass
-
-    def on_complete(self, ctx: Any) -> None:
-        pass
-
-
-class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes."""
-
-    input_schema = _TestSchema
-    idempotent = True
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0"
-
-    def flush(self) -> None:
-        pass
-
-    def on_start(self, ctx: Any) -> None:
-        pass
-
-    def on_complete(self, ctx: Any) -> None:
-        pass
 
 
 def _build_test_graph_with_config_gates(
@@ -127,9 +84,7 @@ def _build_test_graph_with_config_gates(
         for route_label, target in gate_config.routes.items():
             route_resolution_map[(node_id, route_label)] = target
             if target not in ("continue", "fork") and target in sink_ids:
-                graph.add_edge(
-                    node_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE
-                )
+                graph.add_edge(node_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE)
 
         prev = node_id
 
@@ -193,9 +148,7 @@ class TestCompositeConditions:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -220,16 +173,14 @@ class TestCompositeConditions:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"match": match_sink, "no_match": no_match_sink},
             gates=[gate],
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 4
@@ -274,9 +225,7 @@ class TestCompositeConditions:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -298,16 +247,14 @@ class TestCompositeConditions:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": pass_sink, "fail": fail_sink},
             gates=[gate],
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 3
@@ -349,9 +296,7 @@ class TestCompositeConditions:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -374,16 +319,14 @@ class TestCompositeConditions:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": allowed_sink, "blocked": blocked_sink},
             gates=[gate],
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 4
@@ -427,9 +370,7 @@ class TestCompositeConditions:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -451,16 +392,14 @@ class TestCompositeConditions:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": missing_optional_sink, "has_optional": has_optional_sink},
             gates=[gate],
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 3
@@ -566,9 +505,7 @@ class TestRouteLabelResolution:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -606,7 +543,7 @@ class TestRouteLabelResolution:
         standard_sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"premium_sink": premium_sink, "standard_sink": standard_sink},
             gates=settings.gates,
@@ -754,9 +691,7 @@ class TestForkCreatesChildTokens:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -786,7 +721,7 @@ class TestForkCreatesChildTokens:
         graph = ExecutionGraph.from_config(settings)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"path_a": path_a_sink, "path_b": path_b_sink},
             gates=settings.gates,
@@ -799,12 +734,8 @@ class TestForkCreatesChildTokens:
         assert result.rows_forked == 1
 
         # CRITICAL: Each sink gets exactly one row (the fork child for that branch)
-        assert (
-            len(path_a_sink.results) == 1
-        ), f"path_a should get 1 row, got {len(path_a_sink.results)}"
-        assert (
-            len(path_b_sink.results) == 1
-        ), f"path_b should get 1 row, got {len(path_b_sink.results)}"
+        assert len(path_a_sink.results) == 1, f"path_a should get 1 row, got {len(path_a_sink.results)}"
+        assert len(path_b_sink.results) == 1, f"path_b should get 1 row, got {len(path_b_sink.results)}"
 
         # Both should have the same value (forked from same parent)
         assert path_a_sink.results[0]["value"] == 42
@@ -857,9 +788,7 @@ class TestForkCreatesChildTokens:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -890,7 +819,7 @@ class TestForkCreatesChildTokens:
         graph = ExecutionGraph.from_config(settings)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": default_sink, "alerts": alerts_sink},
             gates=settings.gates,
@@ -903,14 +832,10 @@ class TestForkCreatesChildTokens:
         assert result.rows_forked == 1
 
         # "alerts" child -> alerts_sink (branch matches sink)
-        assert (
-            len(alerts_sink.results) == 1
-        ), f"alerts sink should get 1 row, got {len(alerts_sink.results)}"
+        assert len(alerts_sink.results) == 1, f"alerts sink should get 1 row, got {len(alerts_sink.results)}"
 
         # "stats" child -> default_sink (no matching sink, falls back)
-        assert (
-            len(default_sink.results) == 1
-        ), f"default sink should get 1 row (stats fallback), got {len(default_sink.results)}"
+        assert len(default_sink.results) == 1, f"default sink should get 1 row (stats fallback), got {len(default_sink.results)}"
 
         # Both should have the same value (forked from same parent)
         assert alerts_sink.results[0]["value"] == 99
@@ -964,9 +889,7 @@ class TestForkCreatesChildTokens:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -996,7 +919,7 @@ class TestForkCreatesChildTokens:
         graph = ExecutionGraph.from_config(settings)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"analysis": analysis_sink, "archive": archive_sink},
             gates=settings.gates,
@@ -1009,17 +932,11 @@ class TestForkCreatesChildTokens:
         assert result.rows_processed == 3
 
         # CRITICAL: rows_forked counts parent rows that forked
-        assert (
-            result.rows_forked == 3
-        ), f"Expected 3 forked rows, got {result.rows_forked}"
+        assert result.rows_forked == 3, f"Expected 3 forked rows, got {result.rows_forked}"
 
         # Each sink should receive 3 rows (one child per source row)
-        assert (
-            len(analysis_sink.results) == 3
-        ), f"analysis should get 3 rows, got {len(analysis_sink.results)}"
-        assert (
-            len(archive_sink.results) == 3
-        ), f"archive should get 3 rows, got {len(archive_sink.results)}"
+        assert len(analysis_sink.results) == 3, f"analysis should get 3 rows, got {len(analysis_sink.results)}"
+        assert len(archive_sink.results) == 3, f"archive should get 3 rows, got {len(archive_sink.results)}"
 
         # Verify all values are preserved
         analysis_values = {r["value"] for r in analysis_sink.results}
@@ -1207,9 +1124,7 @@ class TestEndToEndPipeline:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -1232,7 +1147,7 @@ class TestEndToEndPipeline:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": high_conf_sink, "low_conf": low_conf_sink},
             gates=[gate],
@@ -1326,9 +1241,7 @@ class TestEndToEndPipeline:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -1343,19 +1256,17 @@ class TestEndToEndPipeline:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": sink, "reject": CollectSink()},
             gates=[gate],
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         # Query Landscape for registered nodes
-        with db._engine.connect() as conn:
+        with db.engine.connect() as conn:
             from sqlalchemy import text
 
             nodes = conn.execute(
@@ -1418,9 +1329,7 @@ class TestEndToEndPipeline:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -1437,16 +1346,14 @@ class TestEndToEndPipeline:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": default_sink, "urgent": urgent_sink},
             gates=[gate],
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 2
@@ -1458,7 +1365,7 @@ class TestEndToEndPipeline:
         assert default_sink.results[0]["priority"] == 2
 
         # Query the database to verify audit trail completeness
-        with db._engine.connect() as conn:
+        with db.engine.connect() as conn:
             # 1. Find the gate node
             gate_node = conn.execute(
                 text("""
@@ -1516,21 +1423,15 @@ class TestEndToEndPipeline:
             # We expect 1 routing event for the "true" -> "urgent" route
             # The "false" -> "continue" route doesn't generate a routing event
             # because it just continues to next node
-            assert (
-                len(routing_events) == 1
-            ), f"Expected 1 routing event for routed token, got {len(routing_events)}"
+            assert len(routing_events) == 1, f"Expected 1 routing event for routed token, got {len(routing_events)}"
 
             routing_event = routing_events[0]
             edge_label = routing_event[4]
-            assert (
-                edge_label == "true"
-            ), f"Edge label should be 'true', got {edge_label}"
+            assert edge_label == "true", f"Edge label should be 'true', got {edge_label}"
 
             # The routing event should have a reason_hash (metadata was recorded)
             reason_hash = routing_event[3]
-            assert (
-                reason_hash is not None
-            ), "Routing event should have reason_hash for audit trail"
+            assert reason_hash is not None, "Routing event should have reason_hash for audit trail"
 
             # 4. Verify the edge points to the urgent sink
             to_node_id = routing_event[5]
@@ -1643,7 +1544,7 @@ class TestGateRuntimeErrors:
         assert "nonexistent" in str(exc_info.value)
 
         # Verify the failure was recorded in the audit trail
-        with db._engine.connect() as conn:
+        with db.engine.connect() as conn:
             from sqlalchemy import text
 
             states = conn.execute(
@@ -1663,9 +1564,7 @@ class TestGateRuntimeErrors:
             import json
 
             error = json.loads(error_json)
-            assert (
-                error["type"] == "KeyError"
-            ), f"Expected KeyError, got {error['type']}"
+            assert error["type"] == "KeyError", f"Expected KeyError, got {error['type']}"
 
     def test_optional_field_with_get_succeeds(self) -> None:
         """Gate using row.get() for optional field should succeed safely.
@@ -1805,7 +1704,7 @@ class TestGateRuntimeErrors:
         assert outcome_low.result.action.reason["result"] == "false"
 
         # Verify all node states are completed (not failed)
-        with db._engine.connect() as conn:
+        with db.engine.connect() as conn:
             from sqlalchemy import text
 
             states = conn.execute(

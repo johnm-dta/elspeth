@@ -264,7 +264,7 @@ class TestPluginConfigWithSchema:
             path: str
 
         # Should fail without schema - from_dict wraps in PluginConfigError
-        with pytest.raises(PluginConfigError, match="require.*schema"):
+        with pytest.raises(PluginConfigError, match=r"require.*schema"):
             SourceConfig.from_dict({"path": "data.csv"})
 
         # Should succeed with schema
@@ -292,7 +292,9 @@ class TestPluginConfigWithSchema:
                 },
             }
         )
+        assert config.schema_config is not None
         assert config.schema_config.mode == "strict"
+        assert config.schema_config.fields is not None  # strict mode has fields
         assert len(config.schema_config.fields) == 2
 
 
@@ -304,7 +306,7 @@ class TestSourceDataConfig:
         from elspeth.plugins.config_base import SourceDataConfig
 
         with pytest.raises(ValidationError) as exc_info:
-            SourceDataConfig(
+            SourceDataConfig(  # type: ignore[call-arg]  # testing missing required arg
                 path="data.csv",
                 schema_config=None,  # Will fail DataPluginConfig validation too
             )
@@ -321,9 +323,7 @@ class TestSourceDataConfig:
 
         config = SourceDataConfig(
             path="data.csv",
-            schema_config=SchemaConfig.from_dict(
-                {"fields": ["id: int", "name: str"], "mode": "strict"}
-            ),
+            schema_config=SchemaConfig.from_dict({"fields": ["id: int", "name: str"], "mode": "strict"}),
             on_validation_failure="quarantine_sink",
         )
 
@@ -336,9 +336,7 @@ class TestSourceDataConfig:
 
         config = SourceDataConfig(
             path="data.csv",
-            schema_config=SchemaConfig.from_dict(
-                {"fields": ["id: int"], "mode": "free"}
-            ),
+            schema_config=SchemaConfig.from_dict({"fields": ["id: int"], "mode": "free"}),
             on_validation_failure="discard",
         )
 
@@ -352,9 +350,7 @@ class TestSourceDataConfig:
         with pytest.raises(ValidationError):
             SourceDataConfig(
                 path="data.csv",
-                schema_config=SchemaConfig.from_dict(
-                    {"fields": ["id: int"], "mode": "strict"}
-                ),
+                schema_config=SchemaConfig.from_dict({"fields": ["id: int"], "mode": "strict"}),
                 on_validation_failure="",
             )
 
@@ -365,9 +361,7 @@ class TestSourceDataConfig:
 
         config = SourceDataConfig(
             path="data/input.csv",
-            schema_config=SchemaConfig.from_dict(
-                {"fields": ["name: str"], "mode": "strict"}
-            ),
+            schema_config=SchemaConfig.from_dict({"fields": ["name: str"], "mode": "strict"}),
             on_validation_failure="bad_rows",
         )
 
@@ -396,9 +390,7 @@ class TestTransformDataConfig:
         from elspeth.plugins.config_base import TransformDataConfig
 
         config = TransformDataConfig(
-            schema_config=SchemaConfig.from_dict(
-                {"mode": "strict", "fields": ["id: int"]}
-            ),
+            schema_config=SchemaConfig.from_dict({"mode": "strict", "fields": ["id: int"]}),
             on_error="failed_transforms",
         )
 
@@ -410,9 +402,7 @@ class TestTransformDataConfig:
         from elspeth.plugins.config_base import TransformDataConfig
 
         config = TransformDataConfig(
-            schema_config=SchemaConfig.from_dict(
-                {"mode": "strict", "fields": ["id: int"]}
-            ),
+            schema_config=SchemaConfig.from_dict({"mode": "strict", "fields": ["id: int"]}),
             on_error="discard",
         )
 
@@ -425,9 +415,7 @@ class TestTransformDataConfig:
 
         with pytest.raises(ValidationError):
             TransformDataConfig(
-                schema_config=SchemaConfig.from_dict(
-                    {"mode": "strict", "fields": ["id: int"]}
-                ),
+                schema_config=SchemaConfig.from_dict({"mode": "strict", "fields": ["id: int"]}),
                 on_error="",
             )
 

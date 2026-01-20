@@ -29,6 +29,7 @@ from elspeth.engine.expression_parser import ExpressionParser
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.triggers import TriggerEvaluator
 from elspeth.plugins.context import PluginContext
+from elspeth.plugins.llm.batch_errors import BatchPendingError
 from elspeth.plugins.protocols import (
     GateProtocol,
     SinkProtocol,
@@ -60,8 +61,7 @@ class MissingEdgeError(Exception):
         self.node_id = node_id
         self.label = label
         super().__init__(
-            f"No edge registered from node {node_id} with label '{label}'. "
-            "Audit trail would be incomplete - refusing to proceed."
+            f"No edge registered from node {node_id} with label '{label}'. Audit trail would be incomplete - refusing to proceed."
         )
 
 
@@ -163,6 +163,12 @@ class TransformExecutor:
             input_data=token.row_data,
             attempt=attempt,
         )
+
+        # Set state_id and node_id on context for external call recording
+        # and batch checkpoint lookup (node_id required for _batch_checkpoints keying)
+        ctx.state_id = state.state_id
+        ctx.node_id = transform.node_id
+        ctx._call_index = 0  # Reset call index for this state
 
         # Execute with timing and span
         with self._spans.transform_span(transform.name, input_hash=input_hash):
@@ -546,8 +552,7 @@ class GateExecutor:
                 error=error,
             )
             raise ValueError(
-                f"Gate '{gate_config.name}' condition returned '{route_label}' "
-                f"which is not in routes: {list(gate_config.routes.keys())}"
+                f"Gate '{gate_config.name}' condition returned '{route_label}' which is not in routes: {list(gate_config.routes.keys())}"
             )
 
         destination = gate_config.routes[route_label]
@@ -563,9 +568,7 @@ class GateExecutor:
 
         elif destination == "fork":
             # Fork to multiple paths - fork_to guaranteed by GateSettings.validate_fork_consistency()
-            assert (
-                gate_config.fork_to is not None
-            )  # Pydantic validation guarantees this
+            assert gate_config.fork_to is not None  # Pydantic validation guarantees this
 
             if token_manager is None:
                 error = {
@@ -603,9 +606,7 @@ class GateExecutor:
         else:
             # Route to a named sink
             sink_name = destination
-            action = RoutingAction.route(
-                route_label, mode=RoutingMode.MOVE, reason=reason
-            )
+            action = RoutingAction.route(route_label, mode=RoutingMode.MOVE, reason=reason)
 
             # Record routing event
             self._record_routing(
@@ -812,9 +813,7 @@ class AggregationExecutor:
         """
         return list(self._buffer_tokens.get(node_id, []))
 
-    def _get_buffered_data(
-        self, node_id: str
-    ) -> tuple[list[dict[str, Any]], list[TokenInfo]]:
+    def _get_buffered_data(self, node_id: str) -> tuple[list[dict[str, Any]], list[TokenInfo]]:
         """Internal: Get buffered rows and tokens without clearing.
 
         IMPORTANT: This method does NOT record audit trail. Production code
@@ -897,12 +896,25 @@ class AggregationExecutor:
             attempt=0,
         )
 
+        # Set state_id and node_id on context for external call recording
+        # and batch checkpoint lookup (node_id required for _batch_checkpoints keying)
+        ctx.state_id = state.state_id
+        ctx.node_id = node_id
+        ctx._call_index = 0  # Reset call index for this state
+
         # Step 3: Execute with timing and span
         with self._spans.transform_span(transform.name, input_hash=input_hash):
             start = time.perf_counter()
             try:
                 result = transform.process(buffered_rows, ctx)  # type: ignore[arg-type]
                 duration_ms = (time.perf_counter() - start) * 1000
+            except BatchPendingError:
+                # BatchPendingError is a CONTROL-FLOW SIGNAL, not an error.
+                # The batch has been submitted but isn't complete yet.
+                # DO NOT mark as failed, DO NOT reset batch state.
+                # Re-raise for orchestrator to schedule retry.
+                # The batch remains in "executing" status, checkpoint is preserved.
+                raise
             except Exception as e:
                 duration_ms = (time.perf_counter() - start) * 1000
 
@@ -966,9 +978,7 @@ class AggregationExecutor:
         else:
             # Transform returned error status
             error_info: ExecutionError = {
-                "exception": str(result.reason)
-                if result.reason
-                else "Transform returned error",
+                "exception": str(result.reason) if result.reason else "Transform returned error",
                 "type": "TransformError",
             }
             self._recorder.complete_node_state(

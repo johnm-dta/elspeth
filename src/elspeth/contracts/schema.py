@@ -77,8 +77,7 @@ class FieldDefinition:
                 # Check for invalid type
                 if type_part not in SUPPORTED_TYPES:
                     raise ValueError(
-                        f"Unknown type '{type_part}' in field spec '{spec}'. "
-                        f"Supported types: {', '.join(sorted(SUPPORTED_TYPES))}"
+                        f"Unknown type '{type_part}' in field spec '{spec}'. Supported types: {', '.join(sorted(SUPPORTED_TYPES))}"
                     )
 
                 # Check for invalid field name (hyphens, dots, etc.)
@@ -90,10 +89,7 @@ class FieldDefinition:
                         f"Use '{name_part.replace('-', '_').replace('.', '_')}' instead."
                     )
 
-            raise ValueError(
-                f"Invalid field spec '{spec}'. "
-                f"Expected format: 'field_name: type' or 'field_name: type?'"
-            )
+            raise ValueError(f"Invalid field spec '{spec}'. Expected format: 'field_name: type' or 'field_name: type?'")
 
         name, field_type, optional_marker = match.groups()
 
@@ -152,10 +148,7 @@ class SchemaConfig:
             ValueError: If config is invalid
         """
         if "fields" not in config:
-            raise ValueError(
-                "'fields' key is required in schema config. "
-                "Use 'fields: dynamic' or provide explicit field list."
-            )
+            raise ValueError("'fields' key is required in schema config. Use 'fields: dynamic' or provide explicit field list.")
 
         fields_value = config["fields"]
 
@@ -177,21 +170,14 @@ class SchemaConfig:
 
         mode = config["mode"]
         if mode not in ("strict", "free"):
-            raise ValueError(
-                f"Invalid schema mode '{mode}'. " f"Expected 'strict' or 'free'."
-            )
+            raise ValueError(f"Invalid schema mode '{mode}'. Expected 'strict' or 'free'.")
 
         # Parse field list
         if not isinstance(fields_value, list):
-            raise ValueError(
-                f"Schema fields must be a list, got {type(fields_value).__name__}"
-            )
+            raise ValueError(f"Schema fields must be a list, got {type(fields_value).__name__}")
 
         if len(fields_value) == 0:
-            raise ValueError(
-                "Schema must define at least one field. "
-                "Use 'fields: dynamic' to accept any fields."
-            )
+            raise ValueError("Schema must define at least one field. Use 'fields: dynamic' to accept any fields.")
 
         parsed_fields = tuple(FieldDefinition.parse(f) for f in fields_value)
 
@@ -199,9 +185,7 @@ class SchemaConfig:
         names = [f.name for f in parsed_fields]
         if len(names) != len(set(names)):
             duplicates = [n for n in names if names.count(n) > 1]
-            raise ValueError(
-                f"Duplicate field names in schema: {', '.join(sorted(set(duplicates)))}"
-            )
+            raise ValueError(f"Duplicate field names in schema: {', '.join(sorted(set(duplicates)))}")
 
         return cls(
             mode=mode,

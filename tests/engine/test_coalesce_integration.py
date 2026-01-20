@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
+from elspeth.contracts import RoutingMode, SourceRow
 from elspeth.core.config import (
     CoalesceSettings,
     DatasourceSettings,
@@ -30,37 +30,13 @@ from elspeth.core.landscape import LandscapeDB
 from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.base import BaseTransform
-
-# =============================================================================
-# Test Fixtures - Inline Plugin Implementations
-# =============================================================================
-
-
-class _TestSchema(PluginSchema):
-    """Minimal schema for test fixtures."""
-
-    pass
-
-
-class _TestSourceBase:
-    """Base class providing SourceProtocol required attributes."""
-
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-
-class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes."""
-
-    input_schema = _TestSchema
-    idempotent = True
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-    def flush(self) -> None:
-        pass
+from tests.conftest import (
+    _TestSchema,
+    _TestSinkBase,
+    _TestSourceBase,
+    as_sink,
+    as_source,
+)
 
 
 class ListSource(_TestSourceBase):
@@ -318,9 +294,9 @@ class TestForkCoalescePipeline:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"output": sink},
+            sinks={"output": as_sink(sink)},
             gates=settings.gates,
             coalesce_settings=settings.coalesce,
             aggregation_settings={},
@@ -379,9 +355,9 @@ class TestForkCoalescePipeline:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"output": sink},
+            sinks={"output": as_sink(sink)},
             gates=settings.gates,
             coalesce_settings=settings.coalesce,
             aggregation_settings={},
@@ -467,9 +443,9 @@ class TestForkCoalescePipeline:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"output": sink},
+            sinks={"output": as_sink(sink)},
             gates=settings.gates,
             coalesce_settings=settings.coalesce,
             aggregation_settings={},
@@ -530,9 +506,9 @@ class TestForkCoalescePipeline:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"output": sink},
+            sinks={"output": as_sink(sink)},
             gates=settings.gates,
             coalesce_settings=settings.coalesce,
             aggregation_settings={},
@@ -600,9 +576,9 @@ class TestCoalesceAuditTrail:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"output": sink},
+            sinks={"output": as_sink(sink)},
             gates=settings.gates,
             coalesce_settings=settings.coalesce,
             aggregation_settings={},
@@ -623,20 +599,14 @@ class TestCoalesceAuditTrail:
 
         with db.connection() as conn:
             # Find coalesce node
-            nodes_result = conn.execute(
-                nodes_table.select().where(nodes_table.c.node_type == "coalesce")
-            ).fetchall()
+            nodes_result = conn.execute(nodes_table.select().where(nodes_table.c.node_type == "coalesce")).fetchall()
 
             assert len(nodes_result) == 1
             coalesce_node = nodes_result[0]
             assert "merge_results" in coalesce_node.plugin_name
 
             # Find node states for coalesce
-            states_result = conn.execute(
-                node_states_table.select().where(
-                    node_states_table.c.node_id == coalesce_node.node_id
-                )
-            ).fetchall()
+            states_result = conn.execute(node_states_table.select().where(node_states_table.c.node_id == coalesce_node.node_id)).fetchall()
 
             # Should have 2 node states (one for each consumed token from path_a and path_b)
             assert len(states_result) == 2

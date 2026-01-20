@@ -82,16 +82,12 @@ class TestLandscapeExport:
         settings_file.write_text(yaml.dump(config))
         return settings_file
 
-    def test_run_with_export_creates_audit_file(
-        self, export_settings_yaml: Path, tmp_path: Path
-    ) -> None:
+    def test_run_with_export_creates_audit_file(self, export_settings_yaml: Path, tmp_path: Path) -> None:
         """Running pipeline with export enabled should create audit JSON."""
         from elspeth.cli import app
 
         # Run pipeline with --execute flag
-        result = runner.invoke(
-            app, ["run", "-s", str(export_settings_yaml), "--execute"]
-        )
+        result = runner.invoke(app, ["run", "-s", str(export_settings_yaml), "--execute"])
         assert result.exit_code == 0, f"CLI failed: {result.stdout}"
         assert "completed" in result.stdout.lower()
 
@@ -110,15 +106,11 @@ class TestLandscapeExport:
         assert "run" in record_types, "Missing run record"
         assert "row" in record_types, "Missing row records"
 
-    def test_export_contains_all_record_types(
-        self, export_settings_yaml: Path, tmp_path: Path
-    ) -> None:
+    def test_export_contains_all_record_types(self, export_settings_yaml: Path, tmp_path: Path) -> None:
         """Export should contain run, node, row, token, and node_state records."""
         from elspeth.cli import app
 
-        result = runner.invoke(
-            app, ["run", "-s", str(export_settings_yaml), "--execute"]
-        )
+        result = runner.invoke(app, ["run", "-s", str(export_settings_yaml), "--execute"])
         assert result.exit_code == 0, f"CLI failed: {result.stdout}"
 
         # Read audit JSON
@@ -134,15 +126,11 @@ class TestLandscapeExport:
         assert "row" in record_types, "Missing 'row' record type"
         assert "token" in record_types, "Missing 'token' record type"
 
-    def test_export_run_record_has_required_fields(
-        self, export_settings_yaml: Path, tmp_path: Path
-    ) -> None:
+    def test_export_run_record_has_required_fields(self, export_settings_yaml: Path, tmp_path: Path) -> None:
         """Run record should have run_id, status, and timestamps."""
         from elspeth.cli import app
 
-        result = runner.invoke(
-            app, ["run", "-s", str(export_settings_yaml), "--execute"]
-        )
+        result = runner.invoke(app, ["run", "-s", str(export_settings_yaml), "--execute"])
         assert result.exit_code == 0, f"CLI failed: {result.stdout}"
 
         # Find run record
@@ -207,22 +195,16 @@ class TestLandscapeExport:
         settings_file.write_text(yaml.dump(config))
         return settings_file
 
-    def test_export_disabled_does_not_create_file(
-        self, export_disabled_settings: Path, tmp_path: Path
-    ) -> None:
+    def test_export_disabled_does_not_create_file(self, export_disabled_settings: Path, tmp_path: Path) -> None:
         """When export is disabled, audit file should not be created."""
         from elspeth.cli import app
 
-        result = runner.invoke(
-            app, ["run", "-s", str(export_disabled_settings), "--execute"]
-        )
+        result = runner.invoke(app, ["run", "-s", str(export_disabled_settings), "--execute"])
         assert result.exit_code == 0, f"CLI failed: {result.stdout}"
 
         # Audit export should NOT be created
         audit_json = tmp_path / "audit_export.json"
-        assert (
-            not audit_json.exists()
-        ), "Audit file should not exist when export disabled"
+        assert not audit_json.exists(), "Audit file should not exist when export disabled"
 
 
 class TestSignedExportDeterminism:
@@ -309,9 +291,7 @@ class TestSignedExportDeterminism:
             final_hashes.append(manifest["final_hash"])
 
         # Both exports must produce the same final hash
-        assert (
-            final_hashes[0] == final_hashes[1]
-        ), f"Non-deterministic export! Hash 1: {final_hashes[0]}, Hash 2: {final_hashes[1]}"
+        assert final_hashes[0] == final_hashes[1], f"Non-deterministic export! Hash 1: {final_hashes[0]}, Hash 2: {final_hashes[1]}"
 
     def test_signed_export_all_records_have_signatures(self, tmp_path: Path) -> None:
         """All exported records should have HMAC signatures when signing enabled."""
@@ -375,16 +355,10 @@ class TestSignedExportDeterminism:
 
         # Every record must have a signature
         for record in records:
-            assert (
-                "signature" in record
-            ), f"Missing signature: {record.get('record_type')}"
-            assert (
-                len(record["signature"]) == 64
-            ), "Signature should be 64-char hex (SHA256)"
+            assert "signature" in record, f"Missing signature: {record.get('record_type')}"
+            assert len(record["signature"]) == 64, "Signature should be 64-char hex (SHA256)"
 
-    def test_different_signing_keys_produce_different_hashes(
-        self, tmp_path: Path
-    ) -> None:
+    def test_different_signing_keys_produce_different_hashes(self, tmp_path: Path) -> None:
         """Different signing keys should produce different final hashes.
 
         This verifies the signature actually depends on the key, not just the data.
@@ -454,6 +428,4 @@ class TestSignedExportDeterminism:
             final_hashes.append(manifest["final_hash"])
 
         # Different keys must produce different hashes
-        assert (
-            final_hashes[0] != final_hashes[1]
-        ), "Different keys produced same hash - signature not key-dependent!"
+        assert final_hashes[0] != final_hashes[1], "Different keys produced same hash - signature not key-dependent!"

@@ -321,12 +321,8 @@ class LandscapeExporter:
                 "attempt": batch.attempt,
                 "status": batch.status,
                 "trigger_reason": batch.trigger_reason,
-                "created_at": (
-                    batch.created_at.isoformat() if batch.created_at else None
-                ),
-                "completed_at": (
-                    batch.completed_at.isoformat() if batch.completed_at else None
-                ),
+                "created_at": (batch.created_at.isoformat() if batch.created_at else None),
+                "completed_at": (batch.completed_at.isoformat() if batch.completed_at else None),
             }
 
             # Batch members

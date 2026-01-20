@@ -263,7 +263,7 @@ class SourceRow:
 
     ALL rows from sources MUST be wrapped in SourceRow:
     - Valid rows: SourceRow.valid(row_dict)
-    - Invalid rows: SourceRow.quarantined(row_dict, error, destination)
+    - Invalid rows: SourceRow.quarantined(row_data, error, destination)
 
     This makes source outcomes first-class engine concepts:
     - All rows get proper token_id for lineage
@@ -285,7 +285,10 @@ class SourceRow:
             # else: don't yield, row is intentionally discarded
     """
 
-    row: dict[str, Any]
+    # Note: row is Any (not dict) because quarantined rows from external data
+    # may not be dicts (e.g., JSON arrays containing primitives like numbers).
+    # Valid rows are always dicts (they passed schema validation).
+    row: Any
     is_quarantined: bool
     quarantine_error: str | None = None
     quarantine_destination: str | None = None
@@ -302,14 +305,15 @@ class SourceRow:
     @classmethod
     def quarantined(
         cls,
-        row: dict[str, Any],
+        row: Any,
         error: str,
         destination: str,
     ) -> "SourceRow":
         """Create a quarantined row result.
 
         Args:
-            row: The original row data (before validation)
+            row: The original row data (before validation). May be non-dict
+                 for malformed external data (e.g., JSON primitives).
             error: The validation error message
             destination: The sink name to route this row to
         """

@@ -128,9 +128,7 @@ retry:
         assert settings.datasource.options == {"path": "input.csv"}
         assert settings.retry.max_attempts == 5
 
-    def test_load_with_env_override(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_load_with_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from elspeth.core.config import load_settings
 
         config_file = tmp_path / "settings.yaml"
@@ -240,7 +238,7 @@ class TestRowPluginSettings:
         from elspeth.core.config import RowPluginSettings
 
         with pytest.raises(ValidationError):
-            RowPluginSettings(options={})
+            RowPluginSettings(options={})  # type: ignore[call-arg]
 
 
 class TestSinkSettings:
@@ -314,9 +312,7 @@ class TestLandscapeSettings:
         """LandscapeSettings has enabled, backend, url."""
         from elspeth.core.config import LandscapeSettings
 
-        ls = LandscapeSettings(
-            enabled=True, backend="sqlite", url="sqlite:///./runs/audit.db"
-        )
+        ls = LandscapeSettings(enabled=True, backend="sqlite", url="sqlite:///./runs/audit.db")
         assert ls.enabled is True
         assert ls.backend == "sqlite"
         assert ls.url == "sqlite:///./runs/audit.db"
@@ -489,9 +485,7 @@ class TestExportSinkValidation:
                 },
             )
 
-        assert "export.sink 'nonexistent_sink' not found in sinks" in str(
-            exc_info.value
-        )
+        assert "export.sink 'nonexistent_sink' not found in sinks" in str(exc_info.value)
 
     def test_export_sink_not_required_when_disabled(self) -> None:
         """If export.enabled=False, sink can be None."""
@@ -525,9 +519,7 @@ class TestExportSinkValidation:
                 },
             )
 
-        assert "landscape.export.sink is required when export is enabled" in str(
-            exc_info.value
-        )
+        assert "landscape.export.sink is required when export is enabled" in str(exc_info.value)
 
     def test_export_sink_valid_reference(self) -> None:
         """If export.sink references a valid sink, no error."""
@@ -1548,9 +1540,7 @@ class TestElspethSettingsWithCoalesce:
         )
 
         settings = ElspethSettings(
-            datasource=DatasourceSettings(
-                plugin="csv_local", options={"path": "test.csv"}
-            ),
+            datasource=DatasourceSettings(plugin="csv_local", options={"path": "test.csv"}),
             sinks={"default": SinkSettings(plugin="csv", options={"path": "out.csv"})},
             output_sink="default",
             coalesce=[
@@ -1603,12 +1593,15 @@ class TestElspethSettingsWithCoalesce:
 
 
 class TestSecretFieldFingerprinting:
-    """Test that secret fields are fingerprinted during config load."""
+    """Test that secret fields are preserved at load time and fingerprinted for audit.
 
-    def test_api_key_is_fingerprinted(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """API keys in config should be fingerprinted, not stored raw."""
+    IMPORTANT: Secrets are kept in ElspethSettings for runtime use (transforms
+    need actual credentials). Fingerprinting happens only in resolve_config()
+    when creating the audit copy for Landscape storage.
+    """
+
+    def test_api_key_preserved_at_load_time(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """API keys in config should be preserved for runtime use."""
         from elspeth.core.config import load_settings
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
@@ -1630,18 +1623,44 @@ output_sink: output
 
         settings = load_settings(config_file)
 
-        # API key should be removed (not stored raw)
-        assert "api_key" not in settings.datasource.options
+        # API key should be preserved for runtime (transforms need it!)
+        assert "api_key" in settings.datasource.options
+        assert settings.datasource.options["api_key"] == "sk-secret-key-12345"
+
+    def test_api_key_is_fingerprinted_in_resolve_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """API keys should be fingerprinted when creating audit copy."""
+        from elspeth.core.config import load_settings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: http_source
+  options:
+    api_key: sk-secret-key-12345
+    url: https://api.example.com
+sinks:
+  output:
+    plugin: csv_sink
+    options:
+      path: output.csv
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+        audit_config = resolve_config(settings)
+
+        # API key should be removed in audit copy
+        assert "api_key" not in audit_config["datasource"]["options"]
         # Should have a 64-char hex fingerprint
-        fingerprint = settings.datasource.options.get("api_key_fingerprint")
+        fingerprint = audit_config["datasource"]["options"].get("api_key_fingerprint")
         assert fingerprint is not None
         assert len(fingerprint) == 64
         assert all(c in "0123456789abcdef" for c in fingerprint)
 
-    def test_token_is_fingerprinted(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Token fields should be fingerprinted."""
+    def test_token_preserved_at_load_time(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Token fields should be preserved for runtime use."""
         from elspeth.core.config import load_settings
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
@@ -1660,13 +1679,35 @@ output_sink: output
 
         settings = load_settings(config_file)
 
-        assert "token" not in settings.datasource.options
-        assert "token_fingerprint" in settings.datasource.options
+        assert "token" in settings.datasource.options
+        assert settings.datasource.options["token"] == "bearer-token-xyz"
 
-    def test_secret_suffix_is_fingerprinted(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Fields ending in _secret should be fingerprinted."""
+    def test_token_is_fingerprinted_in_resolve_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Token fields should be fingerprinted in audit copy."""
+        from elspeth.core.config import load_settings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: webhook_source
+  options:
+    token: bearer-token-xyz
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+        audit_config = resolve_config(settings)
+
+        assert "token" not in audit_config["datasource"]["options"]
+        assert "token_fingerprint" in audit_config["datasource"]["options"]
+
+    def test_secret_suffix_preserved_at_load_time(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fields ending in _secret should be preserved for runtime."""
         from elspeth.core.config import load_settings
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
@@ -1685,13 +1726,35 @@ output_sink: output
 
         settings = load_settings(config_file)
 
-        assert "database_secret" not in settings.datasource.options
-        assert "database_secret_fingerprint" in settings.datasource.options
+        assert "database_secret" in settings.datasource.options
+        assert settings.datasource.options["database_secret"] == "my-db-password"
 
-    def test_sink_options_are_fingerprinted(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Secret fields in sink options should also be fingerprinted."""
+    def test_secret_suffix_is_fingerprinted_in_resolve_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fields ending in _secret should be fingerprinted in audit copy."""
+        from elspeth.core.config import load_settings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: custom_source
+  options:
+    database_secret: my-db-password
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+        audit_config = resolve_config(settings)
+
+        assert "database_secret" not in audit_config["datasource"]["options"]
+        assert "database_secret_fingerprint" in audit_config["datasource"]["options"]
+
+    def test_sink_options_preserved_at_load_time(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Secret fields in sink options should be preserved for runtime."""
         from elspeth.core.config import load_settings
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
@@ -1710,12 +1773,34 @@ output_sink: output
 
         settings = load_settings(config_file)
 
-        assert "password" not in settings.sinks["output"].options
-        assert "password_fingerprint" in settings.sinks["output"].options
+        assert "password" in settings.sinks["output"].options
+        assert settings.sinks["output"].options["password"] == "super-secret-password"
 
-    def test_non_secret_fields_preserved(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sink_options_are_fingerprinted_in_resolve_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Secret fields in sink options should be fingerprinted in audit copy."""
+        from elspeth.core.config import load_settings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv_source
+sinks:
+  output:
+    plugin: database_sink
+    options:
+      password: super-secret-password
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+        audit_config = resolve_config(settings)
+
+        assert "password" not in audit_config["sinks"]["output"]["options"]
+        assert "password_fingerprint" in audit_config["sinks"]["output"]["options"]
+
+    def test_non_secret_fields_preserved(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-secret fields should remain unchanged."""
         from elspeth.core.config import load_settings
 
@@ -1742,10 +1827,8 @@ output_sink: output
         assert settings.datasource.options["path"] == "input.csv"
         assert settings.datasource.options["delimiter"] == ","
 
-    def test_row_plugin_options_are_fingerprinted(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Secret fields in row_plugins options should be fingerprinted."""
+    def test_row_plugin_options_preserved_at_load_time(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Secret fields in row_plugins options should be preserved for runtime."""
         from elspeth.core.config import load_settings
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
@@ -1767,16 +1850,44 @@ row_plugins:
 
         settings = load_settings(config_file)
 
-        assert "api_key" not in settings.row_plugins[0].options
-        assert "api_key_fingerprint" in settings.row_plugins[0].options
+        # Secrets preserved for runtime
+        assert "api_key" in settings.row_plugins[0].options
+        assert settings.row_plugins[0].options["api_key"] == "openai-key-123"
         # Non-secret field preserved
         assert settings.row_plugins[0].options["model"] == "gpt-4"
 
+    def test_row_plugin_options_are_fingerprinted_in_resolve_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Secret fields in row_plugins options should be fingerprinted in audit copy."""
+        from elspeth.core.config import load_settings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv_source
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+row_plugins:
+  - plugin: llm_transform
+    options:
+      api_key: openai-key-123
+      model: gpt-4
+""")
+
+        settings = load_settings(config_file)
+        audit_config = resolve_config(settings)
+
+        assert "api_key" not in audit_config["row_plugins"][0]["options"]
+        assert "api_key_fingerprint" in audit_config["row_plugins"][0]["options"]
+        # Non-secret field preserved
+        assert audit_config["row_plugins"][0]["options"]["model"] == "gpt-4"
+
     # === Tests for recursive/nested fingerprinting ===
 
-    def test_nested_secrets_are_fingerprinted(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_nested_secrets_are_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Secrets in nested dicts should be fingerprinted."""
         from elspeth.core.config import _fingerprint_secrets
 
@@ -1802,9 +1913,7 @@ row_plugins:
         assert "token" not in result["auth"]["nested"]
         assert "token_fingerprint" in result["auth"]["nested"]
 
-    def test_secrets_in_lists_are_fingerprinted(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_secrets_in_lists_are_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Secrets inside list elements should be fingerprinted."""
         from elspeth.core.config import _fingerprint_secrets
 
@@ -1825,9 +1934,7 @@ row_plugins:
 
     # === Tests for fail-closed behavior ===
 
-    def test_missing_key_raises_error_on_fingerprint(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_missing_key_raises_error_on_fingerprint(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Missing fingerprint key should raise SecretFingerprintError."""
         from elspeth.core.config import SecretFingerprintError, _fingerprint_secrets
 
@@ -1842,11 +1949,14 @@ row_plugins:
         assert "ELSPETH_FINGERPRINT_KEY" in str(exc_info.value)
         assert "api_key" in str(exc_info.value)
 
-    def test_missing_key_raises_error_on_load_settings(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """load_settings should raise SecretFingerprintError when key missing."""
-        from elspeth.core.config import SecretFingerprintError, load_settings
+    def test_load_settings_allows_secrets_without_fingerprint_key(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """load_settings should allow secrets without fingerprint key (for runtime).
+
+        Secrets are preserved at load time for transforms to use. The
+        fingerprint key is only required when calling resolve_config()
+        to create the audit copy.
+        """
+        from elspeth.core.config import load_settings
 
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
         monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
@@ -1863,15 +1973,42 @@ sinks:
 output_sink: output
 """)
 
+        # load_settings succeeds even without fingerprint key
+        settings = load_settings(config_file)
+        assert settings.datasource.options["api_key"] == "sk-secret-key"
+
+    def test_missing_key_raises_error_on_resolve_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """resolve_config should raise SecretFingerprintError when key missing."""
+        from elspeth.core.config import (
+            SecretFingerprintError,
+            load_settings,
+            resolve_config,
+        )
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: http_source
+  options:
+    api_key: sk-secret-key
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+
         with pytest.raises(SecretFingerprintError) as exc_info:
-            load_settings(config_file)
+            resolve_config(settings)
 
         assert "ELSPETH_FINGERPRINT_KEY" in str(exc_info.value)
 
-    def test_dev_mode_redacts_without_fingerprint(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """ELSPETH_ALLOW_RAW_SECRETS=true should redact without crashing."""
+    def test_dev_mode_keeps_secrets_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ELSPETH_ALLOW_RAW_SECRETS=true should keep secrets as-is for dev use."""
         from elspeth.core.config import _fingerprint_secrets
 
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
@@ -1881,13 +2018,12 @@ output_sink: output
 
         result = _fingerprint_secrets(options, fail_if_no_key=False)
 
-        assert "api_key" not in result
-        assert result.get("api_key_redacted") == "[REDACTED]"
+        # In dev mode, secrets are kept unchanged so plugins can use them
+        assert result.get("api_key") == "sk-secret"
+        assert "api_key_redacted" not in result
 
-    def test_dev_mode_allows_load_settings(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """ELSPETH_ALLOW_RAW_SECRETS=true should allow load without fingerprint key."""
+    def test_dev_mode_allows_load_settings(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ELSPETH_ALLOW_RAW_SECRETS=true should allow load and keep secrets as-is."""
         from elspeth.core.config import load_settings
 
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
@@ -1907,8 +2043,9 @@ output_sink: output
 
         settings = load_settings(config_file)
 
-        assert "api_key" not in settings.datasource.options
-        assert settings.datasource.options.get("api_key_redacted") == "[REDACTED]"
+        # In dev mode, secrets are kept unchanged so plugins can use them
+        assert settings.datasource.options.get("api_key") == "sk-secret-key"
+        assert "api_key_redacted" not in settings.datasource.options
 
     # === Tests for DSN password handling ===
 
@@ -1928,9 +2065,7 @@ output_sink: output
         assert len(fingerprint) == 64  # SHA256 hex
         assert had_password is True
 
-    def test_dsn_without_password_unchanged(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_dsn_without_password_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """DSN without password should pass through."""
         from elspeth.core.config import _sanitize_dsn
 
@@ -1943,9 +2078,7 @@ output_sink: output
         assert fingerprint is None
         assert had_password is False
 
-    def test_dsn_password_raises_without_key(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_dsn_password_raises_without_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """DSN with password should raise when no fingerprint key."""
         from elspeth.core.config import SecretFingerprintError, _sanitize_dsn
 
@@ -1959,9 +2092,7 @@ output_sink: output
 
         assert "ELSPETH_FINGERPRINT_KEY" in str(exc_info.value)
 
-    def test_dsn_password_redacted_in_dev_mode(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_dsn_password_redacted_in_dev_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """DSN password should be removed (not fingerprinted) in dev mode."""
         from elspeth.core.config import _sanitize_dsn
 
@@ -1974,46 +2105,471 @@ output_sink: output
         assert fingerprint is None
         assert had_password is True
 
-    def test_landscape_url_password_fingerprinted(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """landscape.url password should be fingerprinted."""
-        from elspeth.core.config import _fingerprint_config_options
+    def test_landscape_url_password_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """landscape.url password should be fingerprinted in audit copy."""
+        from elspeth.core.config import _fingerprint_config_for_audit
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
 
-        raw_config = {
+        config_dict = {
             "landscape": {"url": "postgresql://user:mysecret@host/db"},
             "datasource": {"plugin": "csv", "options": {}},
             "sinks": {"output": {"plugin": "csv_sink"}},
             "output_sink": "output",
         }
 
-        result = _fingerprint_config_options(raw_config)
+        result = _fingerprint_config_for_audit(config_dict)
 
         assert "mysecret" not in result["landscape"]["url"]
         assert "***" not in result["landscape"]["url"]
         assert "url_password_fingerprint" in result["landscape"]
         assert len(result["landscape"]["url_password_fingerprint"]) == 64
 
-    def test_landscape_url_password_redacted_in_dev_mode(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_landscape_url_password_redacted_in_dev_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """landscape.url password should be redacted (with flag) in dev mode."""
-        from elspeth.core.config import _fingerprint_config_options
+        from elspeth.core.config import _fingerprint_config_for_audit
 
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
         monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
 
-        raw_config = {
+        config_dict = {
             "landscape": {"url": "postgresql://user:mysecret@host/db"},
             "datasource": {"plugin": "csv", "options": {}},
             "sinks": {"output": {"plugin": "csv_sink"}},
             "output_sink": "output",
         }
 
-        result = _fingerprint_config_options(raw_config)
+        result = _fingerprint_config_for_audit(config_dict)
 
         assert "mysecret" not in result["landscape"]["url"]
         assert "url_password_fingerprint" not in result["landscape"]
         assert result["landscape"]["url_password_redacted"] is True
+
+
+class TestRunModeSettings:
+    """Tests for run_mode configuration."""
+
+    def test_run_mode_defaults_to_live(self) -> None:
+        """Default run_mode should be 'live'."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import ElspethSettings
+
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+        )
+
+        assert settings.run_mode == RunMode.LIVE
+
+    def test_run_mode_accepts_all_valid_modes(self) -> None:
+        """All valid run_mode values should be accepted."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import ElspethSettings
+
+        # Test live mode
+        settings_live = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            run_mode="live",
+        )
+        assert settings_live.run_mode == RunMode.LIVE
+
+        # Test replay mode (with required source run ID)
+        settings_replay = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            run_mode="replay",
+            replay_source_run_id="run-abc123",
+        )
+        assert settings_replay.run_mode == RunMode.REPLAY
+
+        # Test verify mode (with required source run ID)
+        settings_verify = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            run_mode="verify",
+            replay_source_run_id="run-abc123",
+        )
+        assert settings_verify.run_mode == RunMode.VERIFY
+
+    def test_replay_mode_requires_source_run_id(self) -> None:
+        """Replay mode requires replay_source_run_id."""
+        from elspeth.core.config import ElspethSettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            ElspethSettings(
+                datasource={"plugin": "csv"},
+                sinks={"output": {"plugin": "csv"}},
+                output_sink="output",
+                run_mode="replay",
+                # Missing replay_source_run_id
+            )
+
+        assert "replay_source_run_id is required" in str(exc_info.value)
+        assert "replay" in str(exc_info.value)
+
+    def test_verify_mode_requires_source_run_id(self) -> None:
+        """Verify mode requires replay_source_run_id."""
+        from elspeth.core.config import ElspethSettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            ElspethSettings(
+                datasource={"plugin": "csv"},
+                sinks={"output": {"plugin": "csv"}},
+                output_sink="output",
+                run_mode="verify",
+                # Missing replay_source_run_id
+            )
+
+        assert "replay_source_run_id is required" in str(exc_info.value)
+        assert "verify" in str(exc_info.value)
+
+    def test_live_mode_ignores_source_run_id(self) -> None:
+        """Live mode doesn't require replay_source_run_id."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import ElspethSettings
+
+        # Should not raise - live mode doesn't require source run ID
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            run_mode="live",
+            # No replay_source_run_id
+        )
+
+        assert settings.run_mode == RunMode.LIVE
+        assert settings.replay_source_run_id is None
+
+    def test_live_mode_accepts_source_run_id(self) -> None:
+        """Live mode accepts but ignores replay_source_run_id if provided."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import ElspethSettings
+
+        # Should not raise - live mode ignores source run ID
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            run_mode="live",
+            replay_source_run_id="run-abc123",  # Provided but not required
+        )
+
+        assert settings.run_mode == RunMode.LIVE
+        assert settings.replay_source_run_id == "run-abc123"
+
+    def test_run_mode_invalid_value_rejected(self) -> None:
+        """Invalid run_mode values should be rejected."""
+        from elspeth.core.config import ElspethSettings
+
+        with pytest.raises(ValidationError):
+            ElspethSettings(
+                datasource={"plugin": "csv"},
+                sinks={"output": {"plugin": "csv"}},
+                output_sink="output",
+                run_mode="invalid_mode",
+            )
+
+    def test_run_mode_settings_frozen(self) -> None:
+        """RunMode settings are immutable."""
+        from elspeth.core.config import ElspethSettings
+
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+        )
+
+        with pytest.raises(ValidationError):
+            settings.run_mode = "replay"  # type: ignore[misc,assignment]
+
+    def test_resolve_config_includes_run_mode(self) -> None:
+        """resolve_config includes run_mode settings."""
+        from elspeth.core.config import ElspethSettings, resolve_config
+
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            run_mode="replay",
+            replay_source_run_id="run-abc123",
+        )
+
+        resolved = resolve_config(settings)
+
+        assert "run_mode" in resolved
+        assert resolved["run_mode"] == "replay"
+        assert "replay_source_run_id" in resolved
+        assert resolved["replay_source_run_id"] == "run-abc123"
+
+
+class TestExpandTemplateFiles:
+    """Tests for _expand_template_files function."""
+
+    def test_expand_template_file_not_found(self, tmp_path: Path) -> None:
+        """Missing template file raises TemplateFileError."""
+        from elspeth.core.config import TemplateFileError, _expand_template_files
+
+        settings_path = tmp_path / "settings.yaml"
+        config = {"template_file": "prompts/missing.j2"}
+
+        with pytest.raises(TemplateFileError, match="not found"):
+            _expand_template_files(config, settings_path)
+
+    def test_expand_template_file_with_inline_raises(self, tmp_path: Path) -> None:
+        """Cannot specify both template and template_file."""
+        from elspeth.core.config import TemplateFileError, _expand_template_files
+
+        settings_path = tmp_path / "settings.yaml"
+        config = {
+            "template": "inline template",
+            "template_file": "prompts/test.j2",
+        }
+
+        with pytest.raises(TemplateFileError, match="Cannot specify both"):
+            _expand_template_files(config, settings_path)
+
+    def test_expand_lookup_file_invalid_yaml(self, tmp_path: Path) -> None:
+        """Invalid YAML in lookup file raises TemplateFileError."""
+        from elspeth.core.config import TemplateFileError, _expand_template_files
+
+        lookup_file = tmp_path / "bad.yaml"
+        lookup_file.write_text("invalid: yaml: content: [")
+
+        settings_path = tmp_path / "settings.yaml"
+        config = {
+            "template": "test",
+            "lookup_file": "bad.yaml",
+        }
+
+        with pytest.raises(TemplateFileError, match="Invalid YAML"):
+            _expand_template_files(config, settings_path)
+
+    def test_expand_template_file(self, tmp_path: Path) -> None:
+        """template_file is expanded to template content at config time."""
+        from elspeth.core.config import _expand_template_files
+
+        # Create template file
+        template_file = tmp_path / "prompts" / "test.j2"
+        template_file.parent.mkdir(parents=True)
+        template_file.write_text("Hello, {{ row.name }}!")
+
+        # Create settings file path (for relative resolution)
+        settings_path = tmp_path / "settings.yaml"
+
+        config = {
+            "template_file": "prompts/test.j2",
+        }
+
+        expanded = _expand_template_files(config, settings_path)
+
+        assert "template" in expanded
+        assert expanded["template"] == "Hello, {{ row.name }}!"
+        assert expanded["template_source"] == "prompts/test.j2"
+        assert "template_file" not in expanded  # Original key removed
+
+    def test_expand_lookup_file_with_inline_raises(self, tmp_path: Path) -> None:
+        """Cannot specify both lookup and lookup_file."""
+        from elspeth.core.config import TemplateFileError, _expand_template_files
+
+        settings_path = tmp_path / "settings.yaml"
+        config = {
+            "template": "test",
+            "lookup": {"existing": "data"},
+            "lookup_file": "prompts/lookups.yaml",
+        }
+
+        with pytest.raises(TemplateFileError, match="Cannot specify both"):
+            _expand_template_files(config, settings_path)
+
+    def test_expand_lookup_file(self, tmp_path: Path) -> None:
+        """lookup_file is expanded to parsed YAML at config time."""
+        from elspeth.core.config import _expand_template_files
+
+        # Create lookup file
+        lookup_file = tmp_path / "prompts" / "lookups.yaml"
+        lookup_file.parent.mkdir(parents=True, exist_ok=True)
+        lookup_file.write_text("categories:\n  - Electronics\n  - Clothing\n")
+
+        settings_path = tmp_path / "settings.yaml"
+
+        config = {
+            "template": "{{ lookup.categories }}",
+            "lookup_file": "prompts/lookups.yaml",
+        }
+
+        expanded = _expand_template_files(config, settings_path)
+
+        assert expanded["lookup"] == {"categories": ["Electronics", "Clothing"]}
+        assert expanded["lookup_source"] == "prompts/lookups.yaml"
+        assert "lookup_file" not in expanded
+
+    def test_expand_template_and_lookup_files(self, tmp_path: Path) -> None:
+        """Both template_file and lookup_file expand together."""
+        from elspeth.core.config import _expand_template_files
+
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+
+        (prompts_dir / "classify.j2").write_text("Category: {{ lookup.cats[row.id] }}")
+        (prompts_dir / "lookups.yaml").write_text("cats:\n  0: A\n  1: B\n")
+
+        settings_path = tmp_path / "settings.yaml"
+
+        config = {
+            "template_file": "prompts/classify.j2",
+            "lookup_file": "prompts/lookups.yaml",
+        }
+
+        expanded = _expand_template_files(config, settings_path)
+
+        assert expanded["template"] == "Category: {{ lookup.cats[row.id] }}"
+        assert expanded["template_source"] == "prompts/classify.j2"
+        assert expanded["lookup"] == {"cats": {0: "A", 1: "B"}}
+        assert expanded["lookup_source"] == "prompts/lookups.yaml"
+
+
+class TestLoadSettingsWithRunMode:
+    """Tests for loading YAML with run_mode configuration."""
+
+    def test_load_settings_with_live_mode(self, tmp_path: Path) -> None:
+        """Load YAML with live mode (default)."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+output_sink: output
+run_mode: live
+""")
+        settings = load_settings(config_file)
+
+        assert settings.run_mode == RunMode.LIVE
+        assert settings.replay_source_run_id is None
+
+    def test_load_settings_with_replay_mode(self, tmp_path: Path) -> None:
+        """Load YAML with replay mode."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+output_sink: output
+run_mode: replay
+replay_source_run_id: run-abc123
+""")
+        settings = load_settings(config_file)
+
+        assert settings.run_mode == RunMode.REPLAY
+        assert settings.replay_source_run_id == "run-abc123"
+
+    def test_load_settings_with_verify_mode(self, tmp_path: Path) -> None:
+        """Load YAML with verify mode."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+output_sink: output
+run_mode: verify
+replay_source_run_id: run-xyz789
+""")
+        settings = load_settings(config_file)
+
+        assert settings.run_mode == RunMode.VERIFY
+        assert settings.replay_source_run_id == "run-xyz789"
+
+    def test_load_settings_replay_without_source_run_id_fails(self, tmp_path: Path) -> None:
+        """Loading replay mode without source_run_id should fail."""
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+output_sink: output
+run_mode: replay
+""")
+        with pytest.raises(ValidationError) as exc_info:
+            load_settings(config_file)
+
+        assert "replay_source_run_id is required" in str(exc_info.value)
+
+
+class TestLoadSettingsTemplateFileExpansion:
+    """Tests for template file expansion during load_settings."""
+
+    def test_load_settings_expands_template_files(self, tmp_path: Path) -> None:
+        """load_settings expands template_file in row_plugins."""
+        from elspeth.core.config import load_settings
+
+        # Create directory structure
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+        (prompts_dir / "test.j2").write_text("Hello {{ row.name }}")
+        (prompts_dir / "lookups.yaml").write_text("greetings:\n  - Hello\n")
+
+        # Create settings file
+        settings_file = tmp_path / "settings.yaml"
+        settings_file.write_text("""
+datasource:
+  plugin: csv_local
+  options:
+    path: test.csv
+
+sinks:
+  output:
+    plugin: csv_local
+    options:
+      path: out.csv
+
+output_sink: output
+
+row_plugins:
+  - plugin: openrouter_llm
+    options:
+      model: test
+      template_file: prompts/test.j2
+      lookup_file: prompts/lookups.yaml
+      schema:
+        fields: dynamic
+""")
+
+        settings = load_settings(settings_file)
+
+        # Check that files were expanded
+        plugin_opts = settings.row_plugins[0].options
+        assert plugin_opts["template"] == "Hello {{ row.name }}"
+        assert plugin_opts["template_source"] == "prompts/test.j2"
+        assert plugin_opts["lookup"] == {"greetings": ["Hello"]}
+        assert plugin_opts["lookup_source"] == "prompts/lookups.yaml"

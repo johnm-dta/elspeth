@@ -10,7 +10,10 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
+import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from elspeth.contracts.enums import RunMode
 
 # Compiled regex for validating route destination identifiers
 _IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -97,14 +100,8 @@ class TriggerConfig(BaseModel):
     @model_validator(mode="after")
     def validate_at_least_one_trigger(self) -> "TriggerConfig":
         """At least one trigger must be configured."""
-        if (
-            self.count is None
-            and self.timeout_seconds is None
-            and self.condition is None
-        ):
-            raise ValueError(
-                "at least one trigger must be configured (count, timeout_seconds, or condition)"
-            )
+        if self.count is None and self.timeout_seconds is None and self.condition is None:
+            raise ValueError("at least one trigger must be configured (count, timeout_seconds, or condition)")
         return self
 
     @property
@@ -186,12 +183,8 @@ class GateSettings(BaseModel):
     model_config = {"frozen": True}
 
     name: str = Field(description="Gate identifier (unique within pipeline)")
-    condition: str = Field(
-        description="Expression to evaluate (validated by ExpressionParser)"
-    )
-    routes: dict[str, str] = Field(
-        description="Maps route labels to destinations ('continue' or sink name)"
-    )
+    condition: str = Field(description="Expression to evaluate (validated by ExpressionParser)")
+    routes: dict[str, str] = Field(description="Maps route labels to destinations ('continue' or sink name)")
     fork_to: list[str] | None = Field(
         default=None,
         description="List of paths for fork operations",
@@ -229,18 +222,12 @@ class GateSettings(BaseModel):
         for label, destination in v.items():
             # Check route label is not reserved
             if label in _RESERVED_EDGE_LABELS:
-                raise ValueError(
-                    f"Route label '{label}' is reserved and cannot be used. "
-                    f"Reserved labels: {sorted(_RESERVED_EDGE_LABELS)}"
-                )
+                raise ValueError(f"Route label '{label}' is reserved and cannot be used. Reserved labels: {sorted(_RESERVED_EDGE_LABELS)}")
 
             if destination in ("continue", "fork"):
                 continue
             if not _IDENTIFIER_PATTERN.match(destination):
-                raise ValueError(
-                    f"Route destination '{destination}' for label '{label}' "
-                    "must be 'continue', 'fork', or a valid identifier"
-                )
+                raise ValueError(f"Route destination '{destination}' for label '{label}' must be 'continue', 'fork', or a valid identifier")
         return v
 
     @field_validator("fork_to")
@@ -256,10 +243,7 @@ class GateSettings(BaseModel):
 
         for branch in v:
             if branch in _RESERVED_EDGE_LABELS:
-                raise ValueError(
-                    f"Fork branch '{branch}' is reserved and cannot be used. "
-                    f"Reserved labels: {sorted(_RESERVED_EDGE_LABELS)}"
-                )
+                raise ValueError(f"Fork branch '{branch}' is reserved and cannot be used. Reserved labels: {sorted(_RESERVED_EDGE_LABELS)}")
         return v
 
     @model_validator(mode="after")
@@ -294,21 +278,13 @@ class GateSettings(BaseModel):
                 extra = route_labels - expected_labels
 
                 # Build helpful error message
-                msg_parts = [
-                    f"Gate '{self.name}' has a boolean condition "
-                    f"({self.condition!r}) but route labels don't match."
-                ]
+                msg_parts = [f"Gate '{self.name}' has a boolean condition ({self.condition!r}) but route labels don't match."]
 
                 if extra:
-                    msg_parts.append(
-                        f"Found labels {sorted(extra)!r} but boolean expressions "
-                        "evaluate to True/False, not these values."
-                    )
+                    msg_parts.append(f"Found labels {sorted(extra)!r} but boolean expressions evaluate to True/False, not these values.")
                 if missing:
                     msg_parts.append(f"Missing required labels: {sorted(missing)!r}.")
-                msg_parts.append(
-                    'Use routes: {"true": <destination>, "false": <destination>}'
-                )
+                msg_parts.append('Use routes: {"true": <destination>, "false": <destination>}')
 
                 raise ValueError(" ".join(msg_parts))
 
@@ -375,35 +351,23 @@ class CoalesceSettings(BaseModel):
     def validate_policy_requirements(self) -> "CoalesceSettings":
         """Validate policy-specific requirements."""
         if self.policy == "quorum" and self.quorum_count is None:
+            raise ValueError(f"Coalesce '{self.name}': quorum policy requires quorum_count")
+        if self.policy == "quorum" and self.quorum_count is not None and self.quorum_count > len(self.branches):
             raise ValueError(
-                f"Coalesce '{self.name}': quorum policy requires quorum_count"
-            )
-        if (
-            self.policy == "quorum"
-            and self.quorum_count is not None
-            and self.quorum_count > len(self.branches)
-        ):
-            raise ValueError(
-                f"Coalesce '{self.name}': quorum_count ({self.quorum_count}) "
-                f"cannot exceed number of branches ({len(self.branches)})"
+                f"Coalesce '{self.name}': quorum_count ({self.quorum_count}) cannot exceed number of branches ({len(self.branches)})"
             )
         if self.policy == "best_effort" and self.timeout_seconds is None:
-            raise ValueError(
-                f"Coalesce '{self.name}': best_effort policy requires timeout_seconds"
-            )
+            raise ValueError(f"Coalesce '{self.name}': best_effort policy requires timeout_seconds")
         return self
 
     @model_validator(mode="after")
     def validate_merge_requirements(self) -> "CoalesceSettings":
         """Validate merge strategy requirements."""
         if self.merge == "select" and self.select_branch is None:
-            raise ValueError(
-                f"Coalesce '{self.name}': select merge strategy requires select_branch"
-            )
+            raise ValueError(f"Coalesce '{self.name}': select merge strategy requires select_branch")
         if self.select_branch is not None and self.select_branch not in self.branches:
             raise ValueError(
-                f"Coalesce '{self.name}': select_branch '{self.select_branch}' "
-                f"must be one of the expected branches: {self.branches}"
+                f"Coalesce '{self.name}': select_branch '{self.select_branch}' must be one of the expected branches: {self.branches}"
             )
         return self
 
@@ -525,9 +489,7 @@ class ServiceRateLimit(BaseModel):
     model_config = {"frozen": True}
 
     requests_per_second: int = Field(gt=0, description="Maximum requests per second")
-    requests_per_minute: int | None = Field(
-        default=None, gt=0, description="Maximum requests per minute"
-    )
+    requests_per_minute: int | None = Field(default=None, gt=0, description="Maximum requests per minute")
 
 
 class RateLimitSettings(BaseModel):
@@ -548,21 +510,11 @@ class RateLimitSettings(BaseModel):
 
     model_config = {"frozen": True}
 
-    enabled: bool = Field(
-        default=True, description="Enable rate limiting for external calls"
-    )
-    default_requests_per_second: int = Field(
-        default=10, gt=0, description="Default rate limit for unconfigured services"
-    )
-    default_requests_per_minute: int | None = Field(
-        default=None, gt=0, description="Optional per-minute rate limit"
-    )
-    persistence_path: str | None = Field(
-        default=None, description="SQLite path for cross-process limits"
-    )
-    services: dict[str, ServiceRateLimit] = Field(
-        default_factory=dict, description="Per-service rate limit configurations"
-    )
+    enabled: bool = Field(default=True, description="Enable rate limiting for external calls")
+    default_requests_per_second: int = Field(default=10, gt=0, description="Default rate limit for unconfigured services")
+    default_requests_per_minute: int | None = Field(default=None, gt=0, description="Optional per-minute rate limit")
+    persistence_path: str | None = Field(default=None, description="SQLite path for cross-process limits")
+    services: dict[str, ServiceRateLimit] = Field(default_factory=dict, description="Per-service rate limit configurations")
 
     def get_service_config(self, service_name: str) -> ServiceRateLimit:
         """Get rate limit config for a service, with fallback to defaults."""
@@ -587,9 +539,7 @@ class CheckpointSettings(BaseModel):
 
     enabled: bool = True
     frequency: Literal["every_row", "every_n", "aggregation_only"] = "every_row"
-    checkpoint_interval: int | None = Field(
-        default=None, gt=0
-    )  # Required if frequency == "every_n"
+    checkpoint_interval: int | None = Field(default=None, gt=0)  # Required if frequency == "every_n"
     aggregation_boundaries: bool = True  # Always checkpoint at aggregation flush
 
     @model_validator(mode="after")
@@ -605,15 +555,9 @@ class RetrySettings(BaseModel):
     model_config = {"frozen": True}
 
     max_attempts: int = Field(default=3, gt=0, description="Maximum retry attempts")
-    initial_delay_seconds: float = Field(
-        default=1.0, gt=0, description="Initial backoff delay"
-    )
-    max_delay_seconds: float = Field(
-        default=60.0, gt=0, description="Maximum backoff delay"
-    )
-    exponential_base: float = Field(
-        default=2.0, gt=1.0, description="Exponential backoff base"
-    )
+    initial_delay_seconds: float = Field(default=1.0, gt=0, description="Initial backoff delay")
+    max_delay_seconds: float = Field(default=60.0, gt=0, description="Maximum backoff delay")
+    exponential_base: float = Field(default=2.0, gt=1.0, description="Exponential backoff base")
 
 
 class PayloadStoreSettings(BaseModel):
@@ -626,9 +570,7 @@ class PayloadStoreSettings(BaseModel):
         default=Path(".elspeth/payloads"),
         description="Base path for filesystem backend",
     )
-    retention_days: int = Field(
-        default=90, gt=0, description="Payload retention in days"
-    )
+    retention_days: int = Field(default=90, gt=0, description="Payload retention in days")
 
 
 class ElspethSettings(BaseModel):
@@ -649,6 +591,16 @@ class ElspethSettings(BaseModel):
     )
     output_sink: str = Field(
         description="Default sink for rows that complete the pipeline",
+    )
+
+    # Run mode configuration
+    run_mode: RunMode = Field(
+        default=RunMode.LIVE,
+        description="Execution mode: live (real calls), replay (use recorded), verify (compare)",
+    )
+    replay_source_run_id: str | None = Field(
+        default=None,
+        description="Run ID to replay/verify against (required for replay/verify modes)",
     )
 
     # Optional - transform chain
@@ -705,10 +657,7 @@ class ElspethSettings(BaseModel):
     def validate_output_sink_exists(self) -> "ElspethSettings":
         """Ensure output_sink references a defined sink."""
         if self.output_sink not in self.sinks:
-            raise ValueError(
-                f"output_sink '{self.output_sink}' not found in sinks. "
-                f"Available sinks: {list(self.sinks.keys())}"
-            )
+            raise ValueError(f"output_sink '{self.output_sink}' not found in sinks. Available sinks: {list(self.sinks.keys())}")
         return self
 
     @model_validator(mode="after")
@@ -716,13 +665,10 @@ class ElspethSettings(BaseModel):
         """Ensure export.sink references a defined sink when enabled."""
         if self.landscape.export.enabled:
             if self.landscape.export.sink is None:
-                raise ValueError(
-                    "landscape.export.sink is required when export is enabled"
-                )
+                raise ValueError("landscape.export.sink is required when export is enabled")
             if self.landscape.export.sink not in self.sinks:
                 raise ValueError(
-                    f"landscape.export.sink '{self.landscape.export.sink}' not found in sinks. "
-                    f"Available sinks: {list(self.sinks.keys())}"
+                    f"landscape.export.sink '{self.landscape.export.sink}' not found in sinks. Available sinks: {list(self.sinks.keys())}"
                 )
         return self
 
@@ -735,21 +681,73 @@ class ElspethSettings(BaseModel):
             raise ValueError(f"Duplicate aggregation name(s): {set(duplicates)}")
         return self
 
+    @model_validator(mode="after")
+    def validate_replay_source_run_id(self) -> "ElspethSettings":
+        """Ensure replay_source_run_id is set when mode requires it.
+
+        Replay and verify modes need a source run ID to replay/compare against.
+        Live mode does not require (and ignores) replay_source_run_id.
+        """
+        if self.run_mode in (RunMode.REPLAY, RunMode.VERIFY) and not self.replay_source_run_id:
+            raise ValueError(f"replay_source_run_id is required when run_mode is '{self.run_mode.value}'")
+        return self
+
     @field_validator("sinks")
     @classmethod
-    def validate_sinks_not_empty(
-        cls, v: dict[str, SinkSettings]
-    ) -> dict[str, SinkSettings]:
+    def validate_sinks_not_empty(cls, v: dict[str, SinkSettings]) -> dict[str, SinkSettings]:
         """At least one sink is required."""
         if not v:
             raise ValueError("At least one sink is required")
         return v
 
 
+# Regex pattern for ${VAR} or ${VAR:-default} syntax
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _expand_env_vars(config: dict[str, Any]) -> dict[str, Any]:
+    """Recursively expand ${VAR} and ${VAR:-default} patterns in config values.
+
+    Args:
+        config: Configuration dict (may contain nested structures)
+
+    Returns:
+        New dict with environment variables expanded
+    """
+    import os
+
+    def _expand_string(value: str) -> str:
+        """Expand ${VAR} patterns in a string."""
+
+        def replacer(match: re.Match[str]) -> str:
+            var_name = match.group(1)
+            default = match.group(2)  # None if no default specified
+            env_value = os.environ.get(var_name)
+            if env_value is not None:
+                return env_value
+            if default is not None:
+                return default
+            # No env var and no default - keep original (will likely cause error)
+            return match.group(0)
+
+        return _ENV_VAR_PATTERN.sub(replacer, value)
+
+    def _expand_value(value: Any) -> Any:
+        """Expand env vars in a single value."""
+        if isinstance(value, str):
+            return _expand_string(value)
+        elif isinstance(value, dict):
+            return {k: _expand_value(v) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [_expand_value(item) for item in value]
+        else:
+            return value
+
+    return {k: _expand_value(v) for k, v in config.items()}
+
+
 # Secret field names that should be fingerprinted (exact matches)
-_SECRET_FIELD_NAMES = frozenset(
-    {"api_key", "token", "password", "secret", "credential"}
-)
+_SECRET_FIELD_NAMES = frozenset({"api_key", "token", "password", "secret", "credential"})
 
 # Secret field suffixes that should be fingerprinted
 _SECRET_FIELD_SUFFIXES = ("_secret", "_key", "_token", "_password", "_credential")
@@ -757,9 +755,7 @@ _SECRET_FIELD_SUFFIXES = ("_secret", "_key", "_token", "_password", "_credential
 
 def _is_secret_field(field_name: str) -> bool:
     """Check if a field name represents a secret that should be fingerprinted."""
-    return field_name in _SECRET_FIELD_NAMES or field_name.endswith(
-        _SECRET_FIELD_SUFFIXES
-    )
+    return field_name in _SECRET_FIELD_NAMES or field_name.endswith(_SECRET_FIELD_SUFFIXES)
 
 
 def _fingerprint_secrets(
@@ -813,15 +809,15 @@ def _fingerprint_secrets(
                     "(not recommended for production)."
                 )
             else:
-                # Dev mode: redact without fingerprint
-                return f"{key}_redacted", "[REDACTED]", True
+                # Dev mode: keep original value (user explicitly opted in)
+                return key, value, False
         else:
             return key, value, False
 
     def _recurse(d: dict[str, Any]) -> dict[str, Any]:
         result = {}
         for key, value in d.items():
-            new_key, new_value, was_secret = _process_value(key, value)
+            new_key, new_value, _was_secret = _process_value(key, value)
             result[new_key] = new_value
         return result
 
@@ -905,8 +901,54 @@ def _sanitize_dsn(
     return str(sanitized), password_fingerprint, True
 
 
-def _fingerprint_config_options(raw_config: dict[str, Any]) -> dict[str, Any]:
-    """Walk config and fingerprint secrets in all plugin options.
+def _expand_config_templates(
+    raw_config: dict[str, Any],
+    settings_path: Path | None = None,
+) -> dict[str, Any]:
+    """Expand template_file and lookup_file references in config.
+
+    This function is called at load time to expand file references into
+    their contents. Secrets are NOT fingerprinted here - that happens
+    in resolve_config() when creating the audit copy.
+
+    Args:
+        raw_config: Raw config dict from Dynaconf
+        settings_path: Path to settings file for resolving relative template paths
+
+    Returns:
+        Config with template files expanded (secrets still present)
+
+    Raises:
+        TemplateFileError: If template/lookup files not found or invalid
+    """
+    if settings_path is None:
+        return raw_config
+
+    config = dict(raw_config)
+
+    # === Row plugin options - expand template files ===
+    if "row_plugins" in config and isinstance(config["row_plugins"], list):
+        plugins = []
+        for plugin_config in config["row_plugins"]:
+            if isinstance(plugin_config, dict):
+                plugin = dict(plugin_config)
+                if "options" in plugin and isinstance(plugin["options"], dict):
+                    plugin["options"] = _expand_template_files(plugin["options"], settings_path)
+                plugins.append(plugin)
+            else:
+                plugins.append(plugin_config)
+        config["row_plugins"] = plugins
+
+    return config
+
+
+def _fingerprint_config_for_audit(
+    config_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Fingerprint secrets in config for audit storage.
+
+    Called by resolve_config() to create a copy safe for audit storage.
+    The original config (with secrets) is untouched.
 
     Processes:
     - datasource.options
@@ -916,26 +958,28 @@ def _fingerprint_config_options(raw_config: dict[str, Any]) -> dict[str, Any]:
     - landscape.url (DSN password)
 
     Args:
-        raw_config: Raw config dict from Dynaconf
+        config_dict: Config dict to fingerprint (will be copied)
 
     Returns:
-        Config with secrets fingerprinted
+        Deep copy with secrets fingerprinted
 
     Raises:
         SecretFingerprintError: If secrets found but no fingerprint key
                                 and ELSPETH_ALLOW_RAW_SECRETS is not set
     """
+    import copy
     import os
 
     # Check dev mode override
     allow_raw = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS", "").lower() == "true"
     fail_if_no_key = not allow_raw
 
-    config = dict(raw_config)
+    # Deep copy to avoid mutating the original
+    config = copy.deepcopy(config_dict)
 
     # === Landscape URL (DSN password) ===
     if "landscape" in config and isinstance(config["landscape"], dict):
-        landscape = dict(config["landscape"])
+        landscape = config["landscape"]
         if "url" in landscape and isinstance(landscape["url"], str):
             # _sanitize_dsn returns (sanitized_url, fingerprint, had_password)
             sanitized_url, password_fp, had_password = _sanitize_dsn(
@@ -948,63 +992,94 @@ def _fingerprint_config_options(raw_config: dict[str, Any]) -> dict[str, Any]:
             elif had_password and not fail_if_no_key:
                 # Dev mode: password was removed but not fingerprinted
                 landscape["url_password_redacted"] = True
-        config["landscape"] = landscape
 
     # === Datasource options ===
     if "datasource" in config and isinstance(config["datasource"], dict):
-        ds = dict(config["datasource"])
+        ds = config["datasource"]
         if "options" in ds and isinstance(ds["options"], dict):
-            ds["options"] = _fingerprint_secrets(
-                ds["options"], fail_if_no_key=fail_if_no_key
-            )
-        config["datasource"] = ds
+            ds["options"] = _fingerprint_secrets(ds["options"], fail_if_no_key=fail_if_no_key)
 
     # === Sink options ===
     if "sinks" in config and isinstance(config["sinks"], dict):
-        sinks = {}
-        for name, sink_config in config["sinks"].items():
-            if isinstance(sink_config, dict):
-                sink = dict(sink_config)
-                if "options" in sink and isinstance(sink["options"], dict):
-                    sink["options"] = _fingerprint_secrets(
-                        sink["options"], fail_if_no_key=fail_if_no_key
-                    )
-                sinks[name] = sink
-            else:
-                sinks[name] = sink_config
-        config["sinks"] = sinks
+        for sink in config["sinks"].values():
+            if isinstance(sink, dict) and "options" in sink and isinstance(sink["options"], dict):
+                sink["options"] = _fingerprint_secrets(sink["options"], fail_if_no_key=fail_if_no_key)
 
     # === Row plugin options ===
     if "row_plugins" in config and isinstance(config["row_plugins"], list):
-        plugins = []
-        for plugin_config in config["row_plugins"]:
-            if isinstance(plugin_config, dict):
-                plugin = dict(plugin_config)
-                if "options" in plugin and isinstance(plugin["options"], dict):
-                    plugin["options"] = _fingerprint_secrets(
-                        plugin["options"], fail_if_no_key=fail_if_no_key
-                    )
-                plugins.append(plugin)
-            else:
-                plugins.append(plugin_config)
-        config["row_plugins"] = plugins
+        for plugin in config["row_plugins"]:
+            if isinstance(plugin, dict) and "options" in plugin and isinstance(plugin["options"], dict):
+                plugin["options"] = _fingerprint_secrets(plugin["options"], fail_if_no_key=fail_if_no_key)
 
     # === Aggregation options ===
     if "aggregations" in config and isinstance(config["aggregations"], list):
-        aggs = []
-        for agg_config in config["aggregations"]:
-            if isinstance(agg_config, dict):
-                agg = dict(agg_config)
-                if "options" in agg and isinstance(agg["options"], dict):
-                    agg["options"] = _fingerprint_secrets(
-                        agg["options"], fail_if_no_key=fail_if_no_key
-                    )
-                aggs.append(agg)
-            else:
-                aggs.append(agg_config)
-        config["aggregations"] = aggs
+        for agg in config["aggregations"]:
+            if isinstance(agg, dict) and "options" in agg and isinstance(agg["options"], dict):
+                agg["options"] = _fingerprint_secrets(agg["options"], fail_if_no_key=fail_if_no_key)
 
     return config
+
+
+class TemplateFileError(Exception):
+    """Error loading template or lookup file."""
+
+
+def _expand_template_files(
+    options: dict[str, Any],
+    settings_path: Path,
+) -> dict[str, Any]:
+    """Expand template_file and lookup_file to loaded content.
+
+    Args:
+        options: Plugin options dict
+        settings_path: Path to settings file for resolving relative paths
+
+    Returns:
+        New dict with files loaded and paths recorded
+
+    Raises:
+        TemplateFileError: If files not found or invalid
+    """
+    result = dict(options)
+
+    # Handle template_file
+    if "template_file" in result:
+        if "template" in result:
+            raise TemplateFileError("Cannot specify both 'template' and 'template_file'")
+        template_file = result.pop("template_file")
+        template_path = Path(template_file)
+        if not template_path.is_absolute():
+            template_path = (settings_path.parent / template_path).resolve()
+
+        if not template_path.exists():
+            raise TemplateFileError(f"Template file not found: {template_path}")
+
+        result["template"] = template_path.read_text(encoding="utf-8")
+        result["template_source"] = template_file
+
+    # Handle lookup_file
+    if "lookup_file" in result:
+        if "lookup" in result:
+            raise TemplateFileError("Cannot specify both 'lookup' and 'lookup_file'")
+        lookup_file = result.pop("lookup_file")
+        lookup_path = Path(lookup_file)
+        if not lookup_path.is_absolute():
+            lookup_path = (settings_path.parent / lookup_path).resolve()
+
+        if not lookup_path.exists():
+            raise TemplateFileError(f"Lookup file not found: {lookup_path}")
+
+        try:
+            loaded = yaml.safe_load(lookup_path.read_text(encoding="utf-8"))
+            # Coerce None (empty file) to {} so it gets a distinct hash from "no lookup"
+            # This ensures empty lookup files are auditable as "intentionally empty"
+            result["lookup"] = loaded if loaded is not None else {}
+        except yaml.YAMLError as e:
+            raise TemplateFileError(f"Invalid YAML in lookup file: {e}") from e
+
+        result["lookup_source"] = lookup_file
+
+    return result
 
 
 def load_settings(config_path: Path) -> ElspethSettings:
@@ -1045,14 +1120,15 @@ def load_settings(config_path: Path) -> ElspethSettings:
     # Dynaconf returns uppercase keys; convert to lowercase for Pydantic
     # Also filter out internal Dynaconf settings
     internal_keys = {"LOAD_DOTENV", "ENVIRONMENTS", "SETTINGS_FILES"}
-    raw_config = {
-        k.lower(): v
-        for k, v in dynaconf_settings.as_dict().items()
-        if k not in internal_keys
-    }
+    raw_config = {k.lower(): v for k, v in dynaconf_settings.as_dict().items() if k not in internal_keys}
 
-    # Fingerprint secrets in plugin options before validation
-    raw_config = _fingerprint_config_options(raw_config)
+    # Expand ${VAR} and ${VAR:-default} patterns in config values
+    raw_config = _expand_env_vars(raw_config)
+
+    # Expand template files in plugin options before validation
+    # NOTE: Secrets are NOT fingerprinted here - they stay available for runtime.
+    # Fingerprinting happens in resolve_config() when creating the audit copy.
+    raw_config = _expand_config_templates(raw_config, settings_path=config_path)
 
     return ElspethSettings(**raw_config)
 
@@ -1063,10 +1139,16 @@ def resolve_config(settings: ElspethSettings) -> dict[str, Any]:
     This is the resolved configuration that gets stored in Landscape
     for reproducibility. It includes all settings (explicit + defaults).
 
+    IMPORTANT: This function fingerprints secrets before returning.
+    The returned dict is safe for audit storage but should NOT be used
+    for runtime operations that need actual secret values.
+
     Args:
         settings: Validated ElspethSettings instance
 
     Returns:
-        Dict representation suitable for JSON serialization
+        Dict representation suitable for JSON serialization (secrets fingerprinted)
     """
-    return settings.model_dump(mode="json")
+    config_dict = settings.model_dump(mode="json")
+    # Fingerprint secrets for audit storage
+    return _fingerprint_config_for_audit(config_dict)

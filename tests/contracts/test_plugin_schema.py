@@ -59,4 +59,6 @@ class TestPluginSchemaNotInOldLocation:
         """Importing from plugins.schemas should fail - module deleted."""
 
         with pytest.raises(ModuleNotFoundError):
-            from elspeth.plugins.schemas import PluginSchema  # noqa: F401
+            from elspeth.plugins.schemas import (
+                PluginSchema,  # type: ignore[import-not-found]  # noqa: F401
+            )

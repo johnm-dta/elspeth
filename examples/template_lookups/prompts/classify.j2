@@ -1,0 +1,44 @@
+You are a customer support analyst. Classify the following support ticket.
+
+## Ticket Information
+
+**Ticket ID:** {{ row.ticket_id }}
+**Category:** {{ lookup.categories[row.category_id].name }} ({{ lookup.categories[row.category_id].description }})
+**Assigned Team:** {{ lookup.categories[row.category_id].team }}
+**SLA:** {{ lookup.categories[row.category_id].sla_hours }} hours
+
+**Priority Level:** {{ lookup.priorities[row.priority_id].level }} ({{ row.priority_id }})
+**Handling Instructions:** {{ lookup.priorities[row.priority_id].instructions }}
+**Expected Tone:** {{ lookup.priorities[row.priority_id].tone }}
+
+## Ticket Content
+
+**Subject:** {{ row.subject }}
+
+**Body:**
+{{ row.body }}
+
+## Your Task
+
+Analyze this ticket and provide:
+
+1. **Sentiment** - Choose one: {% for label in lookup.sentiment_labels %}{{ label }}{% if not loop.last %}, {% endif %}{% endfor %}
+
+2. **Urgency** - Choose one: {% for label in lookup.urgency_labels %}{{ label }}{% if not loop.last %}, {% endif %}{% endfor %}
+
+3. **Summary** - One sentence summary of the customer's issue
+
+4. **Suggested Response Opening** - Use the appropriate template:
+{% for sentiment, template in lookup.response_templates.items() %}
+   - If {{ sentiment }}: "{{ template }}"
+{% endfor %}
+
+Respond in JSON format:
+```json
+{
+  "sentiment": "<sentiment>",
+  "urgency": "<urgency>",
+  "summary": "<summary>",
+  "response_opening": "<opening line>"
+}
+```

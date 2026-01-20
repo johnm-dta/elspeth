@@ -135,9 +135,7 @@ class TestCheckpointRecoveryIntegration:
         assert resume_point.aggregation_state["count"] == 2
         assert resume_point.aggregation_state["sum"] == 300
 
-    def test_checkpoint_cleanup_after_completion(
-        self, test_env: dict[str, Any]
-    ) -> None:
+    def test_checkpoint_cleanup_after_completion(self, test_env: dict[str, Any]) -> None:
         """Verify checkpoints are cleaned up after successful run."""
         checkpoint_mgr = test_env["checkpoint_manager"]
         db = test_env["db"]
@@ -156,9 +154,7 @@ class TestCheckpointRecoveryIntegration:
         remaining = checkpoint_mgr.get_checkpoints(run_id)
         assert len(remaining) == 0
 
-    def test_recovery_respects_checkpoint_boundary(
-        self, test_env: dict[str, Any]
-    ) -> None:
+    def test_recovery_respects_checkpoint_boundary(self, test_env: dict[str, Any]) -> None:
         """Verify recovery resumes from correct checkpoint position."""
         checkpoint_mgr = test_env["checkpoint_manager"]
         recovery_mgr = test_env["recovery_manager"]
@@ -176,9 +172,7 @@ class TestCheckpointRecoveryIntegration:
         assert resume_point.node_id == checkpoint.node_id
         assert resume_point.sequence_number == checkpoint.sequence_number
 
-    def test_multiple_runs_independent_checkpoints(
-        self, test_env: dict[str, Any]
-    ) -> None:
+    def test_multiple_runs_independent_checkpoints(self, test_env: dict[str, Any]) -> None:
         """Verify checkpoints are isolated per run."""
         checkpoint_mgr = test_env["checkpoint_manager"]
         db = test_env["db"]
@@ -278,9 +272,7 @@ class TestCheckpointRecoveryIntegration:
 
         return run_id
 
-    def test_full_resume_processes_remaining_rows(
-        self, test_env: dict[str, Any]
-    ) -> None:
+    def test_full_resume_processes_remaining_rows(self, test_env: dict[str, Any]) -> None:
         """Complete cycle: run -> crash simulation -> resume -> all rows processed."""
         import json
 
@@ -458,9 +450,7 @@ class TestCheckpointRecoveryIntegration:
         # Build graph using add_node() API
         graph = ExecutionGraph()
         graph.add_node("src", node_type="source", plugin_name="null", config={})
-        graph.add_node(
-            "xform", node_type="transform", plugin_name="passthrough", config={}
-        )
+        graph.add_node("xform", node_type="transform", plugin_name="passthrough", config={})
         graph.add_node("sink", node_type="sink", plugin_name="csv", config={})
         graph.add_edge("src", "xform", label="continue")
         graph.add_edge("xform", "sink", label="continue")

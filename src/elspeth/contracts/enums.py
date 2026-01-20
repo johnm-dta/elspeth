@@ -203,3 +203,19 @@ class CallStatus(str, Enum):
 
     SUCCESS = "success"
     ERROR = "error"
+
+
+class RunMode(str, Enum):
+    """Pipeline execution mode for live/replay/verify behavior.
+
+    Uses (str, Enum) for database serialization to runs.run_mode.
+
+    Values:
+        LIVE: Make real API calls, record everything
+        REPLAY: Use recorded responses, skip live calls
+        VERIFY: Make real calls, compare to recorded
+    """
+
+    LIVE = "live"
+    REPLAY = "replay"
+    VERIFY = "verify"

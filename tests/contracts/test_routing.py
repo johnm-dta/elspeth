@@ -72,9 +72,7 @@ class TestRoutingAction:
         """fork_to_paths can include audit reason."""
         from elspeth.contracts import RoutingAction
 
-        action = RoutingAction.fork_to_paths(
-            ["a", "b"], reason={"strategy": "parallel"}
-        )
+        action = RoutingAction.fork_to_paths(["a", "b"], reason={"strategy": "parallel"})
         assert dict(action.reason) == {"strategy": "parallel"}
 
     def test_reason_is_immutable(self) -> None:

@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
+from elspeth.contracts import PluginSchema, RoutingMode, SourceRow
 from elspeth.core.checkpoint import CheckpointManager
 from elspeth.core.config import CheckpointSettings
 from elspeth.core.dag import ExecutionGraph
@@ -33,37 +33,12 @@ from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.results import TransformResult
-
-# ============================================================================
-# Test Fixture Base Classes
-# ============================================================================
-
-
-class _TestSchema(PluginSchema):
-    """Minimal schema for test fixtures."""
-
-    pass
-
-
-class _TestSourceBase:
-    """Base class providing SourceProtocol required attributes."""
-
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-
-class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes."""
-
-    input_schema = _TestSchema
-    idempotent = True
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0"
-
-    def flush(self) -> None:
-        pass
+from tests.conftest import (
+    _TestSinkBase,
+    _TestSourceBase,
+    as_sink,
+    as_source,
+)
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
@@ -118,12 +93,11 @@ def _get_latest_run_id(db: LandscapeDB) -> str:
     from elspeth.core.landscape.schema import runs_table
 
     with db.engine.connect() as conn:
-        result = conn.execute(
-            select(runs_table.c.run_id).order_by(desc(runs_table.c.started_at))
-        ).fetchone()
+        result = conn.execute(select(runs_table.c.run_id).order_by(desc(runs_table.c.started_at))).fetchone()
         if result is None:
             raise ValueError("No runs found in database")
-        return result.run_id
+        run_id: str = result.run_id
+        return run_id
 
 
 # ============================================================================
@@ -134,9 +108,7 @@ def _get_latest_run_id(db: LandscapeDB) -> str:
 class TestCheckpointDurability:
     """Tests that checkpoints represent durable sink output."""
 
-    def test_successful_run_creates_checkpoints_for_all_rows(
-        self, tmp_path: Path
-    ) -> None:
+    def test_successful_run_creates_checkpoints_for_all_rows(self, tmp_path: Path) -> None:
         """A successful run should create checkpoints for all rows written.
 
         Checkpoints are created AFTER the sink write completes. For a successful
@@ -175,9 +147,7 @@ class TestCheckpointDurability:
 
             name = "tracking_sink"
 
-            def __init__(
-                self, checkpoint_mgr: CheckpointManager, db_ref: LandscapeDB
-            ) -> None:
+            def __init__(self, checkpoint_mgr: CheckpointManager, db_ref: LandscapeDB) -> None:
                 self._checkpoint_mgr = checkpoint_mgr
                 self._db_ref = db_ref
                 self.results: list[dict[str, Any]] = []
@@ -194,9 +164,7 @@ class TestCheckpointDurability:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash="abc123"
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
             def close(self) -> None:
                 pass
@@ -217,9 +185,9 @@ class TestCheckpointDurability:
         sink = TrackingSink(checkpoint_manager, db)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -238,9 +206,7 @@ class TestCheckpointDurability:
         # on_complete is called after sink write completes
         # At that point, checkpoints should exist for all written rows
         assert len(checkpoint_count_during_write) == 1
-        assert (
-            checkpoint_count_during_write[0] == 5
-        ), f"Expected 5 checkpoints after write, got {checkpoint_count_during_write[0]}"
+        assert checkpoint_count_during_write[0] == 5, f"Expected 5 checkpoints after write, got {checkpoint_count_during_write[0]}"
 
         # After successful completion, checkpoints are deleted
         run_id = _get_latest_run_id(db)
@@ -316,9 +282,7 @@ class TestCheckpointDurability:
                 self.results.extend(rows)
                 # Track writes during resume for assertion
                 written_during_resume.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash="abc123"
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
             def close(self) -> None:
                 pass
@@ -429,9 +393,7 @@ class TestCheckpointDurability:
         # Recovery should identify 3 unprocessed rows (rows 2, 3, 4)
         recovery = RecoveryManager(db, checkpoint_manager)
         unprocessed_row_ids = recovery.get_unprocessed_rows(run_id)
-        assert (
-            len(unprocessed_row_ids) == 3
-        ), f"Expected 3 unprocessed rows, got {len(unprocessed_row_ids)}"
+        assert len(unprocessed_row_ids) == 3, f"Expected 3 unprocessed rows, got {len(unprocessed_row_ids)}"
 
         # Verify can_resume returns True
         resume_check = recovery.can_resume(run_id)
@@ -448,9 +410,9 @@ class TestCheckpointDurability:
         sink = TrackingSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -471,9 +433,7 @@ class TestCheckpointDurability:
         )
 
         # --- Phase 4: Verify correct recovery behavior ---
-        assert (
-            result.status == "completed"
-        ), f"Resume failed with status: {result.status}"
+        assert result.status == "completed", f"Resume failed with status: {result.status}"
 
         # CRITICAL: Only 3 rows should have been reprocessed (rows 2, 3, 4)
         assert result.rows_processed == 3, (
@@ -482,9 +442,7 @@ class TestCheckpointDurability:
         )
 
         # Verify the correct rows were written (values 2, 3, 4)
-        assert (
-            len(written_during_resume) == 3
-        ), f"Expected 3 rows written during resume, got {len(written_during_resume)}"
+        assert len(written_during_resume) == 3, f"Expected 3 rows written during resume, got {len(written_during_resume)}"
 
         # Extract values and verify they are the unwritten rows
         written_values = sorted([r["value"] for r in written_during_resume])
@@ -563,9 +521,9 @@ class TestCheckpointDurability:
         sink = FailingSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -633,9 +591,7 @@ class TestCheckpointDurability:
         class CapturingSink(_TestSinkBase):
             name = "capturing_sink"
 
-            def __init__(
-                self, checkpoint_mgr: CheckpointManager, db_ref: LandscapeDB
-            ) -> None:
+            def __init__(self, checkpoint_mgr: CheckpointManager, db_ref: LandscapeDB) -> None:
                 self._checkpoint_mgr = checkpoint_mgr
                 self._db_ref = db_ref
                 self.results: list[dict[str, Any]] = []
@@ -651,9 +607,7 @@ class TestCheckpointDurability:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash="abc123"
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
             def close(self) -> None:
                 pass
@@ -663,9 +617,9 @@ class TestCheckpointDurability:
         sink = CapturingSink(checkpoint_manager, db)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         graph = _build_test_graph(config)
@@ -690,8 +644,7 @@ class TestCheckpointDurability:
             "Checkpoints must reference the sink node, not the last transform."
         )
         assert checkpoint.node_id != transform_node_id, (
-            "Checkpoint node_id should NOT be the transform node. "
-            "Checkpoints represent durable output, not processing completion."
+            "Checkpoint node_id should NOT be the transform node. Checkpoints represent durable output, not processing completion."
         )
 
     def test_no_checkpoint_until_sink_write_completes(self, tmp_path: Path) -> None:
@@ -733,9 +686,7 @@ class TestCheckpointDurability:
 
             name = "timing_sink"
 
-            def __init__(
-                self, checkpoint_mgr: CheckpointManager, db_ref: LandscapeDB
-            ) -> None:
+            def __init__(self, checkpoint_mgr: CheckpointManager, db_ref: LandscapeDB) -> None:
                 self._checkpoint_mgr = checkpoint_mgr
                 self._db_ref = db_ref
                 self.results: list[dict[str, Any]] = []
@@ -756,9 +707,7 @@ class TestCheckpointDurability:
                 checkpoints_before_write.append(len(cps))
 
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash="abc123"
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
             def close(self) -> None:
                 pass
@@ -779,9 +728,9 @@ class TestCheckpointDurability:
         sink = TimingSink(checkpoint_manager, db)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -801,9 +750,7 @@ class TestCheckpointDurability:
         )
 
         assert len(checkpoints_after_write) == 1, "Expected one on_complete call"
-        assert (
-            checkpoints_after_write[0] == 3
-        ), f"Expected 3 checkpoints after write, got {checkpoints_after_write[0]}"
+        assert checkpoints_after_write[0] == 3, f"Expected 3 checkpoints after write, got {checkpoints_after_write[0]}"
 
 
 class TestCheckpointTimingInvariants:
@@ -818,9 +765,7 @@ class TestCheckpointTimingInvariants:
         db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
         checkpoint_manager = CheckpointManager(db)
         # Checkpoint every 2 rows
-        checkpoint_settings = CheckpointSettings(
-            enabled=True, frequency="every_n", checkpoint_interval=2
-        )
+        checkpoint_settings = CheckpointSettings(enabled=True, frequency="every_n", checkpoint_interval=2)
 
         captured_checkpoints: list[Any] = []
 
@@ -847,9 +792,7 @@ class TestCheckpointTimingInvariants:
         class CapturingSink(_TestSinkBase):
             name = "capturing_sink"
 
-            def __init__(
-                self, checkpoint_mgr: CheckpointManager, db_ref: LandscapeDB
-            ) -> None:
+            def __init__(self, checkpoint_mgr: CheckpointManager, db_ref: LandscapeDB) -> None:
                 self._checkpoint_mgr = checkpoint_mgr
                 self._db_ref = db_ref
                 self.results: list[dict[str, Any]] = []
@@ -865,9 +808,7 @@ class TestCheckpointTimingInvariants:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash="abc123"
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
             def close(self) -> None:
                 pass
@@ -889,9 +830,9 @@ class TestCheckpointTimingInvariants:
         sink = CapturingSink(checkpoint_manager, db)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -913,13 +854,9 @@ class TestCheckpointTimingInvariants:
 
         # All checkpoint node_ids should be sinks
         for cp in captured_checkpoints:
-            assert cp.node_id.startswith(
-                "sink_"
-            ), f"Checkpoint node_id should be a sink, got '{cp.node_id}'"
+            assert cp.node_id.startswith("sink_"), f"Checkpoint node_id should be a sink, got '{cp.node_id}'"
 
-    def test_checkpointing_disabled_creates_no_checkpoints(
-        self, tmp_path: Path
-    ) -> None:
+    def test_checkpointing_disabled_creates_no_checkpoints(self, tmp_path: Path) -> None:
         """When checkpointing is disabled, no checkpoints should be created."""
         db = LandscapeDB(f"sqlite:///{tmp_path}/test.db")
         checkpoint_manager = CheckpointManager(db)
@@ -959,9 +896,7 @@ class TestCheckpointTimingInvariants:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash="abc123"
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
             def close(self) -> None:
                 pass
@@ -982,9 +917,9 @@ class TestCheckpointTimingInvariants:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -1041,9 +976,7 @@ class TestCheckpointTimingInvariants:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash="abc123"
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
 
             def close(self) -> None:
                 pass
@@ -1064,9 +997,9 @@ class TestCheckpointTimingInvariants:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         # No checkpoint_manager, but settings enabled - should not crash

@@ -93,9 +93,7 @@ class TestRateLimiterValidation:
         """None requests_per_minute is accepted (no per-minute limit)."""
         from elspeth.core.rate_limit import RateLimiter
 
-        with RateLimiter(
-            name="test", requests_per_second=10, requests_per_minute=None
-        ) as limiter:
+        with RateLimiter(name="test", requests_per_second=10, requests_per_minute=None) as limiter:
             assert limiter._requests_per_minute is None
 
 
@@ -453,7 +451,7 @@ class TestExcepthookSuppression:
         limiter_module._original_excepthook = lambda args: original_called.append(True)
 
         try:
-            _custom_excepthook(MockArgs())
+            _custom_excepthook(MockArgs())  # type: ignore[arg-type]
             # Original hook should have been called
             assert len(original_called) == 1
         finally:
@@ -488,12 +486,10 @@ class TestExcepthookSuppression:
             import elspeth.core.rate_limit.limiter as limiter_module
 
             original_hook = limiter_module._original_excepthook
-            limiter_module._original_excepthook = lambda args: original_called.append(
-                True
-            )
+            limiter_module._original_excepthook = lambda args: original_called.append(True)
 
             try:
-                _custom_excepthook(MockArgsValueError())
+                _custom_excepthook(MockArgsValueError())  # type: ignore[arg-type]
                 # Original hook should have been called (not suppressed)
                 assert len(original_called) == 1
             finally:
@@ -532,7 +528,7 @@ class TestExcepthookSuppression:
         limiter_module._original_excepthook = lambda args: original_called.append(True)
 
         try:
-            _custom_excepthook(MockArgs())
+            _custom_excepthook(MockArgs())  # type: ignore[arg-type]
             # Original hook should NOT have been called (suppressed)
             assert len(original_called) == 0
 

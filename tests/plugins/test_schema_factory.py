@@ -1,4 +1,11 @@
-"""Tests for schema factory - creates Pydantic models from config."""
+"""Tests for schema factory - creates Pydantic models from config.
+
+Note: These tests create dynamic schemas at runtime and access their fields.
+Mypy cannot know about dynamically-created attributes, so we use type: ignore
+for attribute access on generated schema instances.
+"""
+
+# mypy: disable-error-code="attr-defined"
 
 import pytest
 from pydantic import ValidationError
@@ -269,9 +276,7 @@ class TestCoercionControl:
             }
         )
         # Transforms/sinks: allow_coercion=False
-        Schema = create_schema_from_config(
-            config, "TransformSchema", allow_coercion=False
-        )
+        Schema = create_schema_from_config(config, "TransformSchema", allow_coercion=False)
 
         # Should REJECT string, not coerce
         with pytest.raises(ValidationError, match="int"):
@@ -288,9 +293,7 @@ class TestCoercionControl:
                 "fields": ["value: float"],
             }
         )
-        Schema = create_schema_from_config(
-            config, "TransformSchema", allow_coercion=False
-        )
+        Schema = create_schema_from_config(config, "TransformSchema", allow_coercion=False)
 
         with pytest.raises(ValidationError, match="float"):
             Schema(value="3.14")
@@ -306,9 +309,7 @@ class TestCoercionControl:
                 "fields": ["count: int", "value: float", "name: str"],
             }
         )
-        Schema = create_schema_from_config(
-            config, "TransformSchema", allow_coercion=False
-        )
+        Schema = create_schema_from_config(config, "TransformSchema", allow_coercion=False)
 
         # Correct types work fine
         instance = Schema(count=42, value=3.14, name="Alice")
@@ -327,9 +328,7 @@ class TestCoercionControl:
                 "fields": ["value: float"],
             }
         )
-        Schema = create_schema_from_config(
-            config, "TransformSchema", allow_coercion=False
-        )
+        Schema = create_schema_from_config(config, "TransformSchema", allow_coercion=False)
 
         # int -> float is always safe (widening, not coercion)
         instance = Schema(value=42)
@@ -341,9 +340,7 @@ class TestCoercionControl:
         from elspeth.plugins.schema_factory import create_schema_from_config
 
         config = SchemaConfig.from_dict({"fields": "dynamic"})
-        Schema = create_schema_from_config(
-            config, "DynamicSchema", allow_coercion=False
-        )
+        Schema = create_schema_from_config(config, "DynamicSchema", allow_coercion=False)
 
         # Dynamic accepts anything - no type checking
         instance = Schema(foo="bar", count="42", value="3.14")

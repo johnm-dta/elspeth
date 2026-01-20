@@ -24,9 +24,7 @@ class BatchStatsConfig(TransformDataConfig):
     Requires a numeric field to aggregate and optionally a group_by field.
     """
 
-    value_field: str = Field(
-        description="Name of the numeric field to aggregate (sum/mean)"
-    )
+    value_field: str = Field(description="Name of the numeric field to aggregate (sum/mean)")
     group_by: str | None = Field(
         default=None,
         description="Optional field to include in output for grouping context",
@@ -112,9 +110,7 @@ class BatchStats(BaseTransform):
         """
         if not rows:
             # Empty batch - should not happen in normal operation
-            return TransformResult.success(
-                {"count": 0, "sum": 0, "mean": None, "batch_empty": True}
-            )
+            return TransformResult.success({"count": 0, "sum": 0, "mean": None, "batch_empty": True})
 
         # Extract numeric values, skipping non-convertible ones
         # (Their data can have non-numeric values - this is expected, not a bug)

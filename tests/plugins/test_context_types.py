@@ -39,9 +39,7 @@ class TestPluginContextTypes:
         fields = {f.name: f for f in dataclasses.fields(PluginContext)}
         landscape_field = fields.get("landscape")
 
-        assert (
-            landscape_field is not None
-        ), "PluginContext should have a 'landscape' field"
+        assert landscape_field is not None, "PluginContext should have a 'landscape' field"
 
         # The type annotation should reference the real LandscapeRecorder
         # After the fix, __annotations__ should contain 'LandscapeRecorder | None'
@@ -69,13 +67,8 @@ class TestPluginContextTypes:
         for name in local_items:
             obj = getattr(context_module, name)
             # Check if it's a class named LandscapeRecorder defined in this module
-            is_local_recorder = (
-                isinstance(obj, type)
-                and name == "LandscapeRecorder"
-                and obj.__module__ == "elspeth.plugins.context"
-            )
+            is_local_recorder = isinstance(obj, type) and name == "LandscapeRecorder" and obj.__module__ == "elspeth.plugins.context"
             if is_local_recorder:
                 raise AssertionError(
-                    "context.py should not define its own LandscapeRecorder stub. "
-                    "It should import from elspeth.core.landscape.recorder"
+                    "context.py should not define its own LandscapeRecorder stub. It should import from elspeth.core.landscape.recorder"
                 )

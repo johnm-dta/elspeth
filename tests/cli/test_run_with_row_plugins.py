@@ -32,9 +32,7 @@ class TestRunWithTransforms:
         return tmp_path / "output.csv"
 
     @pytest.fixture
-    def settings_with_passthrough(
-        self, tmp_path: Path, sample_csv: Path, output_csv: Path
-    ) -> Path:
+    def settings_with_passthrough(self, tmp_path: Path, sample_csv: Path, output_csv: Path) -> Path:
         """Config with passthrough transform."""
         config = {
             "datasource": {
@@ -66,9 +64,7 @@ class TestRunWithTransforms:
         return settings_file
 
     @pytest.fixture
-    def settings_with_field_mapper(
-        self, tmp_path: Path, sample_csv: Path, output_csv: Path
-    ) -> Path:
+    def settings_with_field_mapper(self, tmp_path: Path, sample_csv: Path, output_csv: Path) -> Path:
         """Config with field_mapper transform that renames columns."""
         config = {
             "datasource": {
@@ -103,9 +99,7 @@ class TestRunWithTransforms:
         return settings_file
 
     @pytest.fixture
-    def settings_with_chained_transforms(
-        self, tmp_path: Path, sample_csv: Path, output_csv: Path
-    ) -> Path:
+    def settings_with_chained_transforms(self, tmp_path: Path, sample_csv: Path, output_csv: Path) -> Path:
         """Config with multiple transforms chained together."""
         config = {
             "datasource": {
@@ -144,9 +138,7 @@ class TestRunWithTransforms:
         settings_file.write_text(yaml.dump(config))
         return settings_file
 
-    def test_run_with_passthrough_preserves_data(
-        self, settings_with_passthrough: Path, output_csv: Path
-    ) -> None:
+    def test_run_with_passthrough_preserves_data(self, settings_with_passthrough: Path, output_csv: Path) -> None:
         """Passthrough transform preserves all input data."""
         from elspeth.cli import app
 
@@ -161,15 +153,11 @@ class TestRunWithTransforms:
         assert "45" in output_content
         assert "90" in output_content
 
-    def test_run_with_field_mapper_renames_columns(
-        self, settings_with_field_mapper: Path, output_csv: Path
-    ) -> None:
+    def test_run_with_field_mapper_renames_columns(self, settings_with_field_mapper: Path, output_csv: Path) -> None:
         """Field mapper transform renames columns correctly."""
         from elspeth.cli import app
 
-        result = runner.invoke(
-            app, ["run", "-s", str(settings_with_field_mapper), "-x"]
-        )
+        result = runner.invoke(app, ["run", "-s", str(settings_with_field_mapper), "-x"])
         assert result.exit_code == 0, f"Failed with: {result.output}"
 
         output_content = output_csv.read_text()
@@ -180,15 +168,11 @@ class TestRunWithTransforms:
         assert "alice" in output_content
         assert "75" in output_content
 
-    def test_run_with_chained_transforms(
-        self, settings_with_chained_transforms: Path, output_csv: Path
-    ) -> None:
+    def test_run_with_chained_transforms(self, settings_with_chained_transforms: Path, output_csv: Path) -> None:
         """Multiple transforms in chain all execute in order."""
         from elspeth.cli import app
 
-        result = runner.invoke(
-            app, ["run", "-s", str(settings_with_chained_transforms), "-x"]
-        )
+        result = runner.invoke(app, ["run", "-s", str(settings_with_chained_transforms), "-x"])
         assert result.exit_code == 0, f"Failed with: {result.output}"
 
         output_content = output_csv.read_text()

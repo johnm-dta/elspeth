@@ -134,13 +134,9 @@ def _row_to_node_state(row: Any) -> NodeState:
         # Completed states must have output_hash, completed_at, duration_ms
         # Validate required fields - None indicates audit integrity violation
         if row.output_hash is None:
-            raise ValueError(
-                f"COMPLETED state {row.state_id} has NULL output_hash - audit integrity violation"
-            )
+            raise ValueError(f"COMPLETED state {row.state_id} has NULL output_hash - audit integrity violation")
         if row.duration_ms is None:
-            raise ValueError(
-                f"COMPLETED state {row.state_id} has NULL duration_ms - audit integrity violation"
-            )
+            raise ValueError(f"COMPLETED state {row.state_id} has NULL duration_ms - audit integrity violation")
         return NodeStateCompleted(
             state_id=row.state_id,
             token_id=row.token_id,
@@ -160,9 +156,7 @@ def _row_to_node_state(row: Any) -> NodeState:
         # Failed states must have duration_ms (error_json and output_hash are optional)
         # Validate required fields - None indicates audit integrity violation
         if row.duration_ms is None:
-            raise ValueError(
-                f"FAILED state {row.state_id} has NULL duration_ms - audit integrity violation"
-            )
+            raise ValueError(f"FAILED state {row.state_id} has NULL duration_ms - audit integrity violation")
         return NodeStateFailed(
             state_id=row.state_id,
             token_id=row.token_id,
@@ -318,9 +312,7 @@ class LandscapeRecorder:
             Run model or None if not found
         """
         with self._db.connection() as conn:
-            result = conn.execute(
-                select(runs_table).where(runs_table.c.run_id == run_id)
-            )
+            result = conn.execute(select(runs_table).where(runs_table.c.run_id == run_id))
             row = result.fetchone()
 
         if row is None:
@@ -417,11 +409,7 @@ class LandscapeRecorder:
             updates["export_sink"] = export_sink
 
         with self._db.connection() as conn:
-            conn.execute(
-                runs_table.update()
-                .where(runs_table.c.run_id == run_id)
-                .values(**updates)
-            )
+            conn.execute(runs_table.update().where(runs_table.c.run_id == run_id).values(**updates))
 
     # === Node and Edge Registration ===
 
@@ -619,9 +607,7 @@ class LandscapeRecorder:
             Node model or None if not found
         """
         with self._db.connection() as conn:
-            result = conn.execute(
-                select(nodes_table).where(nodes_table.c.node_id == node_id)
-            )
+            result = conn.execute(select(nodes_table).where(nodes_table.c.node_id == node_id))
             row = result.fetchone()
 
         if row is None:
@@ -660,11 +646,7 @@ class LandscapeRecorder:
             List of Edge models for this run, ordered by created_at then edge_id
             for deterministic export signatures.
         """
-        query = (
-            select(edges_table)
-            .where(edges_table.c.run_id == run_id)
-            .order_by(edges_table.c.created_at, edges_table.c.edge_id)
-        )
+        query = select(edges_table).where(edges_table.c.run_id == run_id).order_by(edges_table.c.created_at, edges_table.c.edge_id)
 
         with self._db.connection() as conn:
             result = conn.execute(query)
@@ -1099,9 +1081,7 @@ class LandscapeRecorder:
         result = self.get_node_state(state_id)
         assert result is not None, f"NodeState {state_id} not found after update"
         # Type narrowing: result is guaranteed to be Completed or Failed
-        assert not isinstance(
-            result, NodeStateOpen
-        ), "State should be terminal after completion"
+        assert not isinstance(result, NodeStateOpen), "State should be terminal after completion"
         return result
 
     def get_node_state(self, state_id: str) -> NodeState | None:
@@ -1114,11 +1094,7 @@ class LandscapeRecorder:
             NodeState (union of Open, Completed, or Failed) or None
         """
         with self._db.connection() as conn:
-            result = conn.execute(
-                select(node_states_table).where(
-                    node_states_table.c.state_id == state_id
-                )
-            )
+            result = conn.execute(select(node_states_table).where(node_states_table.c.state_id == state_id))
             row = result.fetchone()
 
         if row is None:
@@ -1356,11 +1332,7 @@ class LandscapeRecorder:
             updates["completed_at"] = _now()
 
         with self._db.connection() as conn:
-            conn.execute(
-                batches_table.update()
-                .where(batches_table.c.batch_id == batch_id)
-                .values(**updates)
-            )
+            conn.execute(batches_table.update().where(batches_table.c.batch_id == batch_id).values(**updates))
 
     def complete_batch(
         self,
@@ -1409,9 +1381,7 @@ class LandscapeRecorder:
             Batch model or None
         """
         with self._db.connection() as conn:
-            result = conn.execute(
-                select(batches_table).where(batches_table.c.batch_id == batch_id)
-            )
+            result = conn.execute(select(batches_table).where(batches_table.c.batch_id == batch_id))
             row = result.fetchone()
 
         if row is None:
@@ -1525,9 +1495,7 @@ class LandscapeRecorder:
         """
         with self._db.connection() as conn:
             result = conn.execute(
-                select(batch_members_table)
-                .where(batch_members_table.c.batch_id == batch_id)
-                .order_by(batch_members_table.c.ordinal)
+                select(batch_members_table).where(batch_members_table.c.batch_id == batch_id).order_by(batch_members_table.c.ordinal)
             )
             rows = result.fetchall()
 
@@ -1559,9 +1527,7 @@ class LandscapeRecorder:
         if original is None:
             raise ValueError(f"Batch not found: {batch_id}")
         if original.status != BatchStatus.FAILED:
-            raise ValueError(
-                f"Can only retry failed batches, got status: {original.status}"
-            )
+            raise ValueError(f"Can only retry failed batches, got status: {original.status}")
 
         # Create new batch with incremented attempt
         new_batch = self.create_batch(
@@ -1692,11 +1658,7 @@ class LandscapeRecorder:
         Returns:
             List of Row models, ordered by row_index
         """
-        query = (
-            select(rows_table)
-            .where(rows_table.c.run_id == run_id)
-            .order_by(rows_table.c.row_index)
-        )
+        query = select(rows_table).where(rows_table.c.run_id == run_id).order_by(rows_table.c.row_index)
 
         with self._db.connection() as conn:
             result = conn.execute(query)
@@ -1725,11 +1687,7 @@ class LandscapeRecorder:
             List of Token models, ordered by created_at then token_id
             for deterministic export signatures.
         """
-        query = (
-            select(tokens_table)
-            .where(tokens_table.c.row_id == row_id)
-            .order_by(tokens_table.c.created_at, tokens_table.c.token_id)
-        )
+        query = select(tokens_table).where(tokens_table.c.row_id == row_id).order_by(tokens_table.c.created_at, tokens_table.c.token_id)
 
         with self._db.connection() as conn:
             result = conn.execute(query)
@@ -1758,11 +1716,7 @@ class LandscapeRecorder:
         Returns:
             List of NodeState models (discriminated union), ordered by step_index
         """
-        query = (
-            select(node_states_table)
-            .where(node_states_table.c.token_id == token_id)
-            .order_by(node_states_table.c.step_index)
-        )
+        query = select(node_states_table).where(node_states_table.c.token_id == token_id).order_by(node_states_table.c.step_index)
 
         with self._db.connection() as conn:
             result = conn.execute(query)
@@ -1867,11 +1821,7 @@ class LandscapeRecorder:
         Returns:
             List of TokenParent models (ordered by ordinal)
         """
-        query = (
-            select(token_parents_table)
-            .where(token_parents_table.c.token_id == token_id)
-            .order_by(token_parents_table.c.ordinal)
-        )
+        query = select(token_parents_table).where(token_parents_table.c.token_id == token_id).order_by(token_parents_table.c.ordinal)
 
         with self._db.connection() as conn:
             result = conn.execute(query)
@@ -1930,11 +1880,7 @@ class LandscapeRecorder:
         Returns:
             List of Call models, ordered by call_index
         """
-        query = (
-            select(calls_table)
-            .where(calls_table.c.state_id == state_id)
-            .order_by(calls_table.c.call_index)
-        )
+        query = select(calls_table).where(calls_table.c.state_id == state_id).order_by(calls_table.c.call_index)
 
         with self._db.connection() as conn:
             result = conn.execute(query)
@@ -2000,9 +1946,19 @@ class LandscapeRecorder:
         request_hash = stable_hash(request_data)
 
         # Hash response (optional - None for errors without response)
-        response_hash = (
-            stable_hash(response_data) if response_data is not None else None
-        )
+        response_hash = stable_hash(response_data) if response_data is not None else None
+
+        # Auto-persist request to payload store if available and ref not provided
+        # This enables replay/verify modes to retrieve the original request
+        if request_ref is None and self._payload_store is not None:
+            request_bytes = canonical_json(request_data).encode("utf-8")
+            request_ref = self._payload_store.store(request_bytes)
+
+        # Auto-persist response to payload store if available and ref not provided
+        # This enables replay/verify modes to retrieve the original response
+        if response_data is not None and response_ref is None and self._payload_store is not None:
+            response_bytes = canonical_json(response_data).encode("utf-8")
+            response_ref = self._payload_store.store(response_bytes)
 
         # Serialize error if present
         error_json = canonical_json(error) if error is not None else None
@@ -2226,9 +2182,7 @@ class LandscapeRecorder:
 
     # === Error Query Methods ===
 
-    def get_validation_errors_for_row(
-        self, run_id: str, row_hash: str
-    ) -> list[ValidationErrorRecord]:
+    def get_validation_errors_for_row(self, run_id: str, row_hash: str) -> list[ValidationErrorRecord]:
         """Get validation errors for a row by its hash.
 
         Validation errors are keyed by row_hash since quarantined rows
@@ -2275,9 +2229,7 @@ class LandscapeRecorder:
             List of ValidationErrorRecord models, ordered by created_at
         """
         query = (
-            select(validation_errors_table)
-            .where(validation_errors_table.c.run_id == run_id)
-            .order_by(validation_errors_table.c.created_at)
+            select(validation_errors_table).where(validation_errors_table.c.run_id == run_id).order_by(validation_errors_table.c.created_at)
         )
 
         with self._db.connection() as conn:
@@ -2299,9 +2251,7 @@ class LandscapeRecorder:
             for r in rows
         ]
 
-    def get_transform_errors_for_token(
-        self, token_id: str
-    ) -> list[TransformErrorRecord]:
+    def get_transform_errors_for_token(self, token_id: str) -> list[TransformErrorRecord]:
         """Get transform errors for a specific token.
 
         Args:
@@ -2343,9 +2293,7 @@ class LandscapeRecorder:
             List of TransformErrorRecord models, ordered by created_at
         """
         query = (
-            select(transform_errors_table)
-            .where(transform_errors_table.c.run_id == run_id)
-            .order_by(transform_errors_table.c.created_at)
+            select(transform_errors_table).where(transform_errors_table.c.run_id == run_id).order_by(transform_errors_table.c.created_at)
         )
 
         with self._db.connection() as conn:
@@ -2366,3 +2314,107 @@ class LandscapeRecorder:
             )
             for r in rows
         ]
+
+    # === Call Lookup Methods (for Replay Mode) ===
+
+    def find_call_by_request_hash(
+        self,
+        run_id: str,
+        call_type: str,
+        request_hash: str,
+    ) -> Call | None:
+        """Find a call by its request hash within a run.
+
+        Used for replay mode to look up previously recorded calls by
+        the hash of their request data.
+
+        Args:
+            run_id: Run ID to search within
+            call_type: Type of call (llm, http, etc.)
+            request_hash: SHA-256 hash of the canonical request data
+
+        Returns:
+            Call model if found, None otherwise
+
+        Note:
+            If multiple calls match (same request made twice), returns
+            the first one chronologically (ordered by created_at).
+        """
+        # Need to join through node_states to get to run_id
+        query = (
+            select(calls_table)
+            .join(
+                node_states_table,
+                calls_table.c.state_id == node_states_table.c.state_id,
+            )
+            .join(nodes_table, node_states_table.c.node_id == nodes_table.c.node_id)
+            .where(nodes_table.c.run_id == run_id)
+            .where(calls_table.c.call_type == call_type)
+            .where(calls_table.c.request_hash == request_hash)
+            .order_by(calls_table.c.created_at)
+            .limit(1)
+        )
+
+        with self._db.connection() as conn:
+            result = conn.execute(query)
+            row = result.fetchone()
+
+        if row is None:
+            return None
+
+        return Call(
+            call_id=row.call_id,
+            state_id=row.state_id,
+            call_index=row.call_index,
+            call_type=CallType(row.call_type),
+            status=CallStatus(row.status),
+            request_hash=row.request_hash,
+            request_ref=row.request_ref,
+            response_hash=row.response_hash,
+            response_ref=row.response_ref,
+            error_json=row.error_json,
+            latency_ms=row.latency_ms,
+            created_at=row.created_at,
+        )
+
+    def get_call_response_data(self, call_id: str) -> dict[str, Any] | None:
+        """Retrieve the response data for a call.
+
+        Fetches response data from the payload store if response_ref is set,
+        otherwise returns None.
+
+        Args:
+            call_id: The call ID to get response data for
+
+        Returns:
+            Response data dict if available, None if no response was recorded
+            or if payload store is not configured
+
+        Note:
+            Returns None if:
+            - Call not found
+            - No response_ref set on the call (error calls may not have response)
+            - Payload store not configured
+            - Response data has been purged from payload store
+        """
+        # Get the call record first
+        with self._db.connection() as conn:
+            result = conn.execute(select(calls_table).where(calls_table.c.call_id == call_id))
+            row = result.fetchone()
+
+        if row is None:
+            return None
+
+        if row.response_ref is None:
+            return None
+
+        if self._payload_store is None:
+            return None
+
+        try:
+            payload_bytes = self._payload_store.retrieve(row.response_ref)
+            data: dict[str, Any] = json.loads(payload_bytes.decode("utf-8"))
+            return data
+        except KeyError:
+            # Payload has been purged
+            return None

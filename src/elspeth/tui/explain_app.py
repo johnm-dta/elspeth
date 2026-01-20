@@ -4,7 +4,7 @@
 Provides interactive lineage exploration.
 """
 
-from typing import Any
+from typing import Any, ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -39,7 +39,7 @@ class ExplainApp(App[None]):
     }}
     """
 
-    BINDINGS = [  # noqa: RUF012 - Textual pattern
+    BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
         Binding("?", "help", "Help"),

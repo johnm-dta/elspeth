@@ -45,9 +45,7 @@ class TestRoutingAction:
 
         action = RoutingAction.route("suspicious", reason={"confidence": 0.95})
         assert action.kind == "route"
-        assert action.destinations == (
-            "suspicious",
-        )  # Tuple - route label, not sink name
+        assert action.destinations == ("suspicious",)  # Tuple - route label, not sink name
         assert action.reason["confidence"] == 0.95  # Access via mapping
 
     def test_fork_to_paths(self) -> None:
@@ -130,9 +128,7 @@ class TestGateResult:
             action=RoutingAction.route("suspicious", reason={"score": 0.9}),
         )
         assert result.action.kind == "route"
-        assert result.action.destinations == (
-            "suspicious",
-        )  # Route label, not sink name
+        assert result.action.destinations == ("suspicious",)  # Route label, not sink name
 
     def test_has_audit_fields(self) -> None:
         """Phase 3 integration: audit fields must exist."""
@@ -154,17 +150,13 @@ class TestAcceptResultDeleted:
         """AcceptResult should be deleted from plugins.results."""
         import elspeth.plugins.results as results
 
-        assert not hasattr(
-            results, "AcceptResult"
-        ), "AcceptResult should be deleted - aggregation is structural"
+        assert not hasattr(results, "AcceptResult"), "AcceptResult should be deleted - aggregation is structural"
 
     def test_accept_result_not_exported_from_plugins(self) -> None:
         """AcceptResult should NOT be exported from elspeth.plugins."""
         import elspeth.plugins as plugins
 
-        assert not hasattr(
-            plugins, "AcceptResult"
-        ), "AcceptResult should not be exported - aggregation is structural"
+        assert not hasattr(plugins, "AcceptResult"), "AcceptResult should not be exported - aggregation is structural"
 
 
 class TestRoutingActionEnums:
@@ -332,9 +324,7 @@ class TestPluginsPublicAPI:
         """AggregationProtocol should NOT be exported (aggregation is structural)."""
         import elspeth.plugins as plugins
 
-        assert not hasattr(
-            plugins, "AggregationProtocol"
-        ), "AggregationProtocol should be deleted"
+        assert not hasattr(plugins, "AggregationProtocol"), "AggregationProtocol should be deleted"
 
     def test_base_classes_importable(self) -> None:
         from elspeth.plugins import (
@@ -354,9 +344,7 @@ class TestPluginsPublicAPI:
         """BaseAggregation should NOT be exported (aggregation is structural)."""
         import elspeth.plugins as plugins
 
-        assert not hasattr(
-            plugins, "BaseAggregation"
-        ), "BaseAggregation should be deleted"
+        assert not hasattr(plugins, "BaseAggregation"), "BaseAggregation should be deleted"
 
     def test_manager_importable(self) -> None:
         from elspeth.plugins import PluginManager

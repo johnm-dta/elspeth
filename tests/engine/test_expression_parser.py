@@ -65,9 +65,7 @@ class TestExpressionParserBooleanOperations:
         assert parser.evaluate({"status": "inactive", "balance": 0}) is False
 
     def test_or_operator(self) -> None:
-        parser = ExpressionParser(
-            "row['status'] == 'active' or row['override'] == True"
-        )
+        parser = ExpressionParser("row['status'] == 'active' or row['override'] == True")
         assert parser.evaluate({"status": "active", "override": False}) is True
         assert parser.evaluate({"status": "inactive", "override": True}) is True
         assert parser.evaluate({"status": "inactive", "override": False}) is False
@@ -78,10 +76,7 @@ class TestExpressionParserBooleanOperations:
         assert parser.evaluate({"disabled": True}) is False
 
     def test_complex_boolean_expression(self) -> None:
-        parser = ExpressionParser(
-            "(row['status'] == 'active' or row['status'] == 'pending') "
-            "and row['score'] >= 0.5"
-        )
+        parser = ExpressionParser("(row['status'] == 'active' or row['status'] == 'pending') and row['score'] >= 0.5")
         assert parser.evaluate({"status": "active", "score": 0.7}) is True
         assert parser.evaluate({"status": "pending", "score": 0.6}) is True
         assert parser.evaluate({"status": "active", "score": 0.3}) is False
@@ -197,9 +192,7 @@ class TestExpressionParserTernary:
         assert parser.evaluate({"score": 0.5}) == "low"
 
     def test_ternary_in_comparison(self) -> None:
-        parser = ExpressionParser(
-            "(row.get('priority', 'normal') if row.get('urgent') else 'low') == 'high'"
-        )
+        parser = ExpressionParser("(row.get('priority', 'normal') if row.get('urgent') else 'low') == 'high'")
         assert parser.evaluate({"urgent": True, "priority": "high"}) is True
         assert parser.evaluate({"urgent": False, "priority": "high"}) is False
 
@@ -391,9 +384,7 @@ class TestExpressionParserEdgeCases:
         assert parser.evaluate({"a": 1, "b": 2, "c": 4}) is False
 
     def test_multiple_or_conditions(self) -> None:
-        parser = ExpressionParser(
-            "row['status'] == 'a' or row['status'] == 'b' or row['status'] == 'c'"
-        )
+        parser = ExpressionParser("row['status'] == 'a' or row['status'] == 'b' or row['status'] == 'c'")
         assert parser.evaluate({"status": "b"}) is True
         assert parser.evaluate({"status": "d"}) is False
 
@@ -409,18 +400,14 @@ class TestExpressionParserRealWorldExamples:
 
     def test_status_routing_gate(self) -> None:
         """Route based on status field."""
-        parser = ExpressionParser(
-            "row['status'] in ['approved', 'verified'] and row.get('errors') is None"
-        )
+        parser = ExpressionParser("row['status'] in ['approved', 'verified'] and row.get('errors') is None")
         assert parser.evaluate({"status": "approved", "data": "..."}) is True
         assert parser.evaluate({"status": "approved", "errors": ["err"]}) is False
         assert parser.evaluate({"status": "pending", "data": "..."}) is False
 
     def test_multi_field_validation_gate(self) -> None:
         """Validate multiple required fields present."""
-        parser = ExpressionParser(
-            "row.get('name') is not None and row.get('email') is not None"
-        )
+        parser = ExpressionParser("row.get('name') is not None and row.get('email') is not None")
         assert parser.evaluate({"name": "John", "email": "john@example.com"}) is True
         assert parser.evaluate({"name": "John"}) is False
 
@@ -434,8 +421,7 @@ class TestExpressionParserRealWorldExamples:
     def test_category_with_score_gate(self) -> None:
         """Route high-confidence items in specific categories."""
         parser = ExpressionParser(
-            "(row['category'] == 'urgent' and row['score'] >= 0.9) or "
-            "(row['category'] == 'normal' and row['score'] >= 0.7)"
+            "(row['category'] == 'urgent' and row['score'] >= 0.9) or (row['category'] == 'normal' and row['score'] >= 0.7)"
         )
         assert parser.evaluate({"category": "urgent", "score": 0.95}) is True
         assert parser.evaluate({"category": "urgent", "score": 0.8}) is False
@@ -455,9 +441,7 @@ class TestExpressionParserRealWorldExamples:
 
 # Strategy for generating random character strings
 random_chars = st.text(
-    alphabet=st.sampled_from(
-        string.ascii_letters + string.digits + string.punctuation + " \t\n\r"
-    ),
+    alphabet=st.sampled_from(string.ascii_letters + string.digits + string.punctuation + " \t\n\r"),
     min_size=0,
     max_size=500,
 )
@@ -708,9 +692,7 @@ class TestExpressionParserFuzz:
             pass
         except Exception as e:
             # Any other exception is a parser bug - fail the test
-            pytest.fail(
-                f"Unexpected exception {type(e).__name__} for input {expression!r}: {e}"
-            )
+            pytest.fail(f"Unexpected exception {type(e).__name__} for input {expression!r}: {e}")
 
     @given(expression=random_chars)
     @settings(max_examples=200, deadline=None)
@@ -754,9 +736,7 @@ class TestExpressionParserFuzz:
         suffix=random_chars,
     )
     @settings(max_examples=200, deadline=None)
-    def test_valid_expression_with_garbage(
-        self, prefix: str, valid_expr: str, suffix: str
-    ) -> None:
+    def test_valid_expression_with_garbage(self, prefix: str, valid_expr: str, suffix: str) -> None:
         """Valid expressions surrounded by garbage should not crash."""
         expression = prefix + valid_expr + suffix
         self._assert_safe_parse(expression)
@@ -771,11 +751,7 @@ class TestExpressionParserFuzz:
 
         # Character pools for generating inputs
         all_chars = (
-            string.ascii_letters
-            + string.digits
-            + string.punctuation
-            + " \t\n\r"
-            + "\x00\x01\x02\x03"  # Null and control chars
+            string.ascii_letters + string.digits + string.punctuation + " \t\n\r" + "\x00\x01\x02\x03"  # Null and control chars
         )
 
         dangerous_fragments = [
@@ -831,9 +807,7 @@ class TestExpressionParserFuzz:
             # Intersperse with random chars
             parts = []
             for frag in fragments:
-                parts.append(
-                    "".join(rng.choice(all_chars) for _ in range(rng.randint(0, 10)))
-                )
+                parts.append("".join(rng.choice(all_chars) for _ in range(rng.randint(0, 10))))
                 parts.append(frag)
             expression = "".join(parts)
             self._assert_safe_parse(expression)

@@ -88,9 +88,7 @@ class TestDeaggregationPipeline:
         config_file.write_text(yaml.dump(config))
         return config_file
 
-    def test_explodes_orders_into_items(
-        self, pipeline_config: Path, tmp_path: Path
-    ) -> None:
+    def test_explodes_orders_into_items(self, pipeline_config: Path, tmp_path: Path) -> None:
         """3 orders with 2+1+3 items should produce 6 output rows."""
         from elspeth.cli import app
 
@@ -135,9 +133,7 @@ class TestDeaggregationPipeline:
             sorted_items = sorted(items, key=lambda x: x["item_index"])
             indices = [item["item_index"] for item in sorted_items]
             expected = list(range(len(items)))
-            assert (
-                indices == expected
-            ), f"Order {order_id} has non-sequential indices: {indices}"
+            assert indices == expected, f"Order {order_id} has non-sequential indices: {indices}"
 
 
 class TestDeaggregationAuditTrail:
@@ -166,9 +162,7 @@ class TestDeaggregationAuditTrail:
         return input_file
 
     @pytest.fixture
-    def run_pipeline(
-        self, tmp_path: Path, input_data: Path
-    ) -> tuple[str, "LandscapeDB"]:
+    def run_pipeline(self, tmp_path: Path, input_data: Path) -> tuple[str, "LandscapeDB"]:
         """Run pipeline and return run_id and database for verification.
 
         Returns:
@@ -254,9 +248,7 @@ class TestDeaggregationAuditTrail:
 
         return (result.run_id, db)
 
-    def test_records_token_expansion(
-        self, run_pipeline: tuple[str, "LandscapeDB"]
-    ) -> None:
+    def test_records_token_expansion(self, run_pipeline: tuple[str, "LandscapeDB"]) -> None:
         """9 tokens created: 3 source tokens + 6 expanded tokens."""
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
@@ -276,9 +268,7 @@ class TestDeaggregationAuditTrail:
         # 3 source tokens + 6 expanded tokens = 9 total
         assert len(all_tokens) == 9, f"Expected 9 tokens, got {len(all_tokens)}"
 
-    def test_records_parent_relationships(
-        self, run_pipeline: tuple[str, "LandscapeDB"]
-    ) -> None:
+    def test_records_parent_relationships(self, run_pipeline: tuple[str, "LandscapeDB"]) -> None:
         """6 parent relationships in token_parents (one per expanded token)."""
         from elspeth.core.landscape.recorder import LandscapeRecorder
 
@@ -318,9 +308,7 @@ class TestDeaggregationAuditTrail:
                     tokens_with_expand_group += 1
 
         # 6 expanded tokens should have expand_group_id
-        assert (
-            tokens_with_expand_group == 6
-        ), f"Expected 6 tokens with expand_group_id, got {tokens_with_expand_group}"
+        assert tokens_with_expand_group == 6, f"Expected 6 tokens with expand_group_id, got {tokens_with_expand_group}"
 
 
 class TestSourceSchemaValidation:
@@ -338,9 +326,7 @@ class TestSourceSchemaValidation:
         input_file.write_text(json.dumps(data))
         return input_file
 
-    def test_invalid_row_quarantined_at_source(
-        self, tmp_path: Path, valid_and_invalid_input: Path
-    ) -> None:
+    def test_invalid_row_quarantined_at_source(self, tmp_path: Path, valid_and_invalid_input: Path) -> None:
         """Missing items field causes quarantine at source, not transform crash.
 
         This test demonstrates the three-tier trust model:

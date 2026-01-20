@@ -13,51 +13,19 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, SourceRow
+from elspeth.contracts import PluginSchema, SourceRow
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.results import TransformResult
+from tests.conftest import (
+    _TestSinkBase,
+    _TestSourceBase,
+    as_sink,
+    as_source,
+)
 
 if TYPE_CHECKING:
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
-
-
-# ============================================================================
-# Test Fixture Base Classes
-# ============================================================================
-
-
-class _TestSchema(PluginSchema):
-    """Minimal schema for test fixtures."""
-
-    pass
-
-
-class _TestSourceBase:
-    """Base class providing SourceProtocol required attributes."""
-
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-    def on_start(self, ctx: Any) -> None:
-        pass
-
-    def close(self) -> None:
-        pass
-
-
-class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes."""
-
-    input_schema = _TestSchema
-    idempotent = True
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0"
-
-    def flush(self) -> None:
-        pass
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
@@ -109,9 +77,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
         output_sink = ""
 
     if output_sink:
-        graph.add_edge(
-            prev, sink_ids[output_sink], label="continue", mode=RoutingMode.MOVE
-        )
+        graph.add_edge(prev, sink_ids[output_sink], label="continue", mode=RoutingMode.MOVE)
 
     # Populate internal ID maps
     graph._sink_id_map = sink_ids
@@ -189,9 +155,7 @@ class TestTransformErrorSinkValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -201,9 +165,9 @@ class TestTransformErrorSinkValidation:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -269,9 +233,7 @@ class TestTransformErrorSinkValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -281,9 +243,12 @@ class TestTransformErrorSinkValidation:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink, "error_archive": sink},  # Two sinks available
+            sinks={
+                "default": as_sink(sink),
+                "error_archive": as_sink(sink),
+            },  # Two sinks available
         )
 
         orchestrator = Orchestrator(db)
@@ -350,9 +315,7 @@ class TestTransformErrorSinkValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -362,9 +325,9 @@ class TestTransformErrorSinkValidation:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -423,9 +386,7 @@ class TestTransformErrorSinkValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -435,9 +396,9 @@ class TestTransformErrorSinkValidation:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -496,9 +457,7 @@ class TestTransformErrorSinkValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -509,11 +468,11 @@ class TestTransformErrorSinkValidation:
         error_sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={
-                "default": default_sink,
-                "error_sink": error_sink,  # Valid target for on_error
+                "default": as_sink(default_sink),
+                "error_sink": as_sink(error_sink),  # Valid target for on_error
             },
         )
 
@@ -590,9 +549,7 @@ class TestTransformErrorSinkValidation:
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 call_tracking["sink_write_called"] = True
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -602,9 +559,9 @@ class TestTransformErrorSinkValidation:
         sink = TrackingSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -614,12 +571,6 @@ class TestTransformErrorSinkValidation:
             orchestrator.run(config, graph=_build_test_graph(config))
 
         # Verify NOTHING was processed - validation caught error before processing started
-        assert not call_tracking[
-            "source_load_called"
-        ], "source.load() should NOT be called"
-        assert not call_tracking[
-            "transform_process_called"
-        ], "transform.process() should NOT be called"
-        assert not call_tracking[
-            "sink_write_called"
-        ], "sink.write() should NOT be called"
+        assert not call_tracking["source_load_called"], "source.load() should NOT be called"
+        assert not call_tracking["transform_process_called"], "transform.process() should NOT be called"
+        assert not call_tracking["sink_write_called"], "sink.write() should NOT be called"

@@ -805,3 +805,18 @@ allow_hits:
   # Malformed API responses raise errors (not silently pass content).
   # No allowlist entries needed - direct field access with try/except.
   # ============================================================
+
+  # ============================================================
+  # PLUGIN DISCOVERY TRUST BOUNDARY (Permanent)
+  # ============================================================
+  # Dynamic plugin discovery scans arbitrary Python files to find classes
+  # that inherit from plugin base classes. We can't know at compile time
+  # which classes have a `name` attribute - this is legitimate framework
+  # polymorphism at a trust boundary.
+  # ============================================================
+
+  - key: "plugins/discovery.py:R2:_discover_in_file:line=129"
+    owner: "architecture"
+    reason: "Trust boundary: scanning arbitrary classes that may or may not have 'name' attribute"
+    safety: "Classes without valid name are skipped with warning log - discovery continues"
+    expires: null  # Permanent - intentional design

@@ -885,6 +885,15 @@ class RowProcessor:
                         child_items,
                     )
 
+        # Record COMPLETED outcome in audit trail (AUD-001)
+        # Note: sink_name is determined by orchestrator based on routing,
+        # so we record without sink_name here - the sink write records that.
+        self._recorder.record_token_outcome(
+            run_id=self._run_id,
+            token_id=current_token.token_id,
+            outcome=RowOutcome.COMPLETED,
+        )
+
         return (
             RowResult(
                 token=current_token,

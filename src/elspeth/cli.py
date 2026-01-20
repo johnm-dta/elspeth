@@ -235,9 +235,12 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> Executi
     from elspeth.plugins.sources.csv_source import CSVSource
     from elspeth.plugins.sources.json_source import JSONSource
     from elspeth.plugins.transforms import FieldMapper, PassThrough
+    from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+    from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
     from elspeth.plugins.transforms.batch_replicate import BatchReplicate
     from elspeth.plugins.transforms.batch_stats import BatchStats
     from elspeth.plugins.transforms.json_explode import JSONExplode
+    from elspeth.plugins.transforms.keyword_filter import KeywordFilter
 
     # Plugin registries
     TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
@@ -245,6 +248,9 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> Executi
         "field_mapper": FieldMapper,
         "batch_stats": BatchStats,
         "json_explode": JSONExplode,
+        "keyword_filter": KeywordFilter,
+        "azure_content_safety": AzureContentSafety,
+        "azure_prompt_shield": AzurePromptShield,
         "batch_replicate": BatchReplicate,
         "openrouter_llm": OpenRouterLLMTransform,
         "azure_llm": AzureLLMTransform,
@@ -422,6 +428,18 @@ PLUGIN_REGISTRY: dict[str, list[PluginInfo]] = {
         PluginInfo(name="passthrough", description="Pass rows through unchanged"),
         PluginInfo(name="field_mapper", description="Rename, select, and reorganize fields"),
         PluginInfo(name="json_explode", description="Explode array field into multiple rows"),
+        PluginInfo(
+            name="keyword_filter",
+            description="Filter rows containing blocked content patterns",
+        ),
+        PluginInfo(
+            name="azure_content_safety",
+            description="Azure Content Safety API for hate, violence, sexual, self-harm detection",
+        ),
+        PluginInfo(
+            name="azure_prompt_shield",
+            description="Azure Prompt Shield API for jailbreak and prompt injection detection",
+        ),
     ],
     "sink": [
         PluginInfo(name="csv", description="Write rows to CSV files"),
@@ -620,9 +638,12 @@ def _build_resume_pipeline_config(
     from elspeth.plugins.sinks.json_sink import JSONSink
     from elspeth.plugins.sources.null_source import NullSource
     from elspeth.plugins.transforms import FieldMapper, PassThrough
+    from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+    from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
     from elspeth.plugins.transforms.batch_replicate import BatchReplicate
     from elspeth.plugins.transforms.batch_stats import BatchStats
     from elspeth.plugins.transforms.json_explode import JSONExplode
+    from elspeth.plugins.transforms.keyword_filter import KeywordFilter
 
     # Plugin registries (same as _execute_pipeline)
     TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
@@ -630,6 +651,9 @@ def _build_resume_pipeline_config(
         "field_mapper": FieldMapper,
         "batch_stats": BatchStats,
         "json_explode": JSONExplode,
+        "keyword_filter": KeywordFilter,
+        "azure_content_safety": AzureContentSafety,
+        "azure_prompt_shield": AzurePromptShield,
         "batch_replicate": BatchReplicate,
         "openrouter_llm": OpenRouterLLMTransform,
         "azure_llm": AzureLLMTransform,

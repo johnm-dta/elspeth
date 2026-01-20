@@ -33,10 +33,9 @@ RUN uv venv /opt/venv && \
 COPY src/ ./src/
 COPY README.md ./
 
-# Build wheel and install it
+# Build wheel and install with all optional dependencies (LLM, Azure)
 RUN . /opt/venv/bin/activate && \
-    uv pip install ".[all]" --no-deps && \
-    uv pip install .
+    uv pip install ".[all]"
 
 # =============================================================================
 # Stage 2: Runtime

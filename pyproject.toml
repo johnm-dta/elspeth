@@ -26,6 +26,7 @@ dependencies = [
     "dynaconf>=3.2",
     "pydantic>=2.6",
     "python-dotenv>=1.0",  # Load .env files for secrets
+    "pyyaml>=6.0",  # YAML parsing for configuration files
 
     # Plugin system
     "pluggy>=1.4",

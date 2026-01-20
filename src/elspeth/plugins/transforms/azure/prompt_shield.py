@@ -24,7 +24,7 @@ from elspeth.contracts import CallStatus, CallType, Determinism
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.config_base import TransformDataConfig
 from elspeth.plugins.context import PluginContext
-from elspeth.plugins.pooling import CapacityError, PoolConfig, PooledExecutor, RowContext
+from elspeth.plugins.pooling import CapacityError, PoolConfig, PooledExecutor, RowContext, is_capacity_error
 from elspeth.plugins.results import TransformResult
 from elspeth.plugins.schema_factory import create_schema_from_config
 
@@ -219,16 +219,16 @@ class AzurePromptShield(BaseTransform):
             try:
                 analysis = self._analyze_prompt(value, ctx.state_id)
             except httpx.HTTPStatusError as e:
-                is_rate_limit = e.response.status_code == 429
+                is_capacity = is_capacity_error(e.response.status_code)
                 return TransformResult.error(
                     {
                         "reason": "api_error",
-                        "error_type": "rate_limited" if is_rate_limit else "http_error",
+                        "error_type": "capacity_error" if is_capacity else "http_error",
                         "status_code": e.response.status_code,
                         "message": str(e),
-                        "retryable": is_rate_limit,
+                        "retryable": is_capacity,
                     },
-                    retryable=is_rate_limit,
+                    retryable=is_capacity,
                 )
             except httpx.RequestError as e:
                 return TransformResult.error(
@@ -330,15 +330,15 @@ class AzurePromptShield(BaseTransform):
             try:
                 analysis = self._analyze_prompt(value, state_id)
             except httpx.HTTPStatusError as e:
-                is_rate_limit = e.response.status_code == 429
-                if is_rate_limit:
-                    # Convert to CapacityError for pooled executor retry
-                    raise CapacityError(429, str(e)) from e
+                status_code = e.response.status_code
+                if is_capacity_error(status_code):
+                    # Convert to CapacityError for pooled executor retry (429/503/529)
+                    raise CapacityError(status_code, str(e)) from e
                 return TransformResult.error(
                     {
                         "reason": "api_error",
                         "error_type": "http_error",
-                        "status_code": e.response.status_code,
+                        "status_code": status_code,
                         "message": str(e),
                         "retryable": False,
                     },

@@ -79,6 +79,7 @@ dev = [
     # Type stubs
     "pandas-stubs>=2.2",
     "types-networkx>=3.2",
+    "types-PyYAML>=6.0",
     # Mutation testing (Phase 3)
     "mutmut>=2.4",
 ]

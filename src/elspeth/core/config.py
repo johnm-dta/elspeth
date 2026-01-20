@@ -12,6 +12,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from elspeth.contracts.enums import RunMode
+
 # Compiled regex for validating route destination identifiers
 _IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
@@ -651,6 +653,16 @@ class ElspethSettings(BaseModel):
         description="Default sink for rows that complete the pipeline",
     )
 
+    # Run mode configuration
+    run_mode: RunMode = Field(
+        default=RunMode.LIVE,
+        description="Execution mode: live (real calls), replay (use recorded), verify (compare)",
+    )
+    replay_source_run_id: str | None = Field(
+        default=None,
+        description="Run ID to replay/verify against (required for replay/verify modes)",
+    )
+
     # Optional - transform chain
     row_plugins: list[RowPluginSettings] = Field(
         default_factory=list,
@@ -733,6 +745,22 @@ class ElspethSettings(BaseModel):
         duplicates = [name for name in names if names.count(name) > 1]
         if duplicates:
             raise ValueError(f"Duplicate aggregation name(s): {set(duplicates)}")
+        return self
+
+    @model_validator(mode="after")
+    def validate_replay_source_run_id(self) -> "ElspethSettings":
+        """Ensure replay_source_run_id is set when mode requires it.
+
+        Replay and verify modes need a source run ID to replay/compare against.
+        Live mode does not require (and ignores) replay_source_run_id.
+        """
+        if (
+            self.run_mode in (RunMode.REPLAY, RunMode.VERIFY)
+            and not self.replay_source_run_id
+        ):
+            raise ValueError(
+                f"replay_source_run_id is required when run_mode is '{self.run_mode.value}'"
+            )
         return self
 
     @field_validator("sinks")

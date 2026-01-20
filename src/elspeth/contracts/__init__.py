@@ -23,6 +23,7 @@ from elspeth.contracts.enums import (
     RoutingKind,
     RoutingMode,
     RowOutcome,
+    RunMode,
     RunStatus,
     TriggerType,
 )
@@ -141,6 +142,7 @@ __all__ = [
     "RoutingKind",
     "RoutingMode",
     "RowOutcome",
+    "RunMode",
     "RunStatus",
     "TriggerType",
     # identity

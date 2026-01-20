@@ -2017,3 +2017,259 @@ output_sink: output
         assert "mysecret" not in result["landscape"]["url"]
         assert "url_password_fingerprint" not in result["landscape"]
         assert result["landscape"]["url_password_redacted"] is True
+
+
+class TestRunModeSettings:
+    """Tests for run_mode configuration."""
+
+    def test_run_mode_defaults_to_live(self) -> None:
+        """Default run_mode should be 'live'."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import ElspethSettings
+
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+        )
+
+        assert settings.run_mode == RunMode.LIVE
+
+    def test_run_mode_accepts_all_valid_modes(self) -> None:
+        """All valid run_mode values should be accepted."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import ElspethSettings
+
+        # Test live mode
+        settings_live = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            run_mode="live",
+        )
+        assert settings_live.run_mode == RunMode.LIVE
+
+        # Test replay mode (with required source run ID)
+        settings_replay = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            run_mode="replay",
+            replay_source_run_id="run-abc123",
+        )
+        assert settings_replay.run_mode == RunMode.REPLAY
+
+        # Test verify mode (with required source run ID)
+        settings_verify = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            run_mode="verify",
+            replay_source_run_id="run-abc123",
+        )
+        assert settings_verify.run_mode == RunMode.VERIFY
+
+    def test_replay_mode_requires_source_run_id(self) -> None:
+        """Replay mode requires replay_source_run_id."""
+        from elspeth.core.config import ElspethSettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            ElspethSettings(
+                datasource={"plugin": "csv"},
+                sinks={"output": {"plugin": "csv"}},
+                output_sink="output",
+                run_mode="replay",
+                # Missing replay_source_run_id
+            )
+
+        assert "replay_source_run_id is required" in str(exc_info.value)
+        assert "replay" in str(exc_info.value)
+
+    def test_verify_mode_requires_source_run_id(self) -> None:
+        """Verify mode requires replay_source_run_id."""
+        from elspeth.core.config import ElspethSettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            ElspethSettings(
+                datasource={"plugin": "csv"},
+                sinks={"output": {"plugin": "csv"}},
+                output_sink="output",
+                run_mode="verify",
+                # Missing replay_source_run_id
+            )
+
+        assert "replay_source_run_id is required" in str(exc_info.value)
+        assert "verify" in str(exc_info.value)
+
+    def test_live_mode_ignores_source_run_id(self) -> None:
+        """Live mode doesn't require replay_source_run_id."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import ElspethSettings
+
+        # Should not raise - live mode doesn't require source run ID
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            run_mode="live",
+            # No replay_source_run_id
+        )
+
+        assert settings.run_mode == RunMode.LIVE
+        assert settings.replay_source_run_id is None
+
+    def test_live_mode_accepts_source_run_id(self) -> None:
+        """Live mode accepts but ignores replay_source_run_id if provided."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import ElspethSettings
+
+        # Should not raise - live mode ignores source run ID
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            run_mode="live",
+            replay_source_run_id="run-abc123",  # Provided but not required
+        )
+
+        assert settings.run_mode == RunMode.LIVE
+        assert settings.replay_source_run_id == "run-abc123"
+
+    def test_run_mode_invalid_value_rejected(self) -> None:
+        """Invalid run_mode values should be rejected."""
+        from elspeth.core.config import ElspethSettings
+
+        with pytest.raises(ValidationError):
+            ElspethSettings(
+                datasource={"plugin": "csv"},
+                sinks={"output": {"plugin": "csv"}},
+                output_sink="output",
+                run_mode="invalid_mode",
+            )
+
+    def test_run_mode_settings_frozen(self) -> None:
+        """RunMode settings are immutable."""
+        from elspeth.core.config import ElspethSettings
+
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+        )
+
+        with pytest.raises(ValidationError):
+            settings.run_mode = "replay"  # type: ignore[misc]
+
+    def test_resolve_config_includes_run_mode(self) -> None:
+        """resolve_config includes run_mode settings."""
+        from elspeth.core.config import ElspethSettings, resolve_config
+
+        settings = ElspethSettings(
+            datasource={"plugin": "csv"},
+            sinks={"output": {"plugin": "csv"}},
+            output_sink="output",
+            run_mode="replay",
+            replay_source_run_id="run-abc123",
+        )
+
+        resolved = resolve_config(settings)
+
+        assert "run_mode" in resolved
+        assert resolved["run_mode"] == "replay"
+        assert "replay_source_run_id" in resolved
+        assert resolved["replay_source_run_id"] == "run-abc123"
+
+
+class TestLoadSettingsWithRunMode:
+    """Tests for loading YAML with run_mode configuration."""
+
+    def test_load_settings_with_live_mode(self, tmp_path: Path) -> None:
+        """Load YAML with live mode (default)."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+output_sink: output
+run_mode: live
+""")
+        settings = load_settings(config_file)
+
+        assert settings.run_mode == RunMode.LIVE
+        assert settings.replay_source_run_id is None
+
+    def test_load_settings_with_replay_mode(self, tmp_path: Path) -> None:
+        """Load YAML with replay mode."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+output_sink: output
+run_mode: replay
+replay_source_run_id: run-abc123
+""")
+        settings = load_settings(config_file)
+
+        assert settings.run_mode == RunMode.REPLAY
+        assert settings.replay_source_run_id == "run-abc123"
+
+    def test_load_settings_with_verify_mode(self, tmp_path: Path) -> None:
+        """Load YAML with verify mode."""
+        from elspeth.contracts.enums import RunMode
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+output_sink: output
+run_mode: verify
+replay_source_run_id: run-xyz789
+""")
+        settings = load_settings(config_file)
+
+        assert settings.run_mode == RunMode.VERIFY
+        assert settings.replay_source_run_id == "run-xyz789"
+
+    def test_load_settings_replay_without_source_run_id_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """Loading replay mode without source_run_id should fail."""
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv
+
+sinks:
+  output:
+    plugin: csv
+
+output_sink: output
+run_mode: replay
+""")
+        with pytest.raises(ValidationError) as exc_info:
+            load_settings(config_file)
+
+        assert "replay_source_run_id is required" in str(exc_info.value)

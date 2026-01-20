@@ -545,7 +545,7 @@ allow_hits:
   # ELSPETH_ALLOW_RAW_SECRETS is not required - absence means "production mode".
   # ============================================================
 
-  - key: "core/config.py:R1:_fingerprint_config_options:line=931"
+  - key: "core/config.py:R1:_fingerprint_config_options:line=959"
     owner: "architecture"
     reason: "Optional env var: ELSPETH_ALLOW_RAW_SECRETS is not required in production"
     safety: "Missing env var = empty string = False = production mode (fail-closed)"

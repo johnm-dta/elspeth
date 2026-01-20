@@ -12,6 +12,21 @@
 
 ---
 
+## Code Review Findings (Addressed in This Plan)
+
+The following issues from code review have been addressed:
+
+| Issue | Resolution |
+|-------|------------|
+| **Critical:** No `state_id` per-row in pooled execution | Added `RowContext` dataclass to pass `state_id` per row (Task 9) |
+| **Critical:** Infinite retry with no escape | Added `max_capacity_retry_seconds` config (Task 7) |
+| Hypothesis test uses `random.shuffle` | Fixed to use `st.permutations()` (Task 12) |
+| Wrong class name `AzureOpenAILLMTransform` | Fixed to `AzureLLMTransform` (Task 13) |
+| Module exports internal classes | Only export public API, keep internals private (Task 13) |
+| Missing timing in reorder buffer | Added `submit_timestamp`/`complete_timestamp` (Task 6) |
+
+---
+
 ## Task 1: AIMD Throttle State Machine
 
 **Files:**
@@ -87,6 +102,10 @@ from threading import Lock
 @dataclass(frozen=True)
 class ThrottleConfig:
     """Configuration for AIMD throttle behavior.
+
+    Note: This is a runtime dataclass, not a Pydantic model, because it's
+    internal state configuration built from validated PoolConfig, not
+    user-provided YAML config.
 
     Attributes:
         min_dispatch_delay_ms: Floor for delay between dispatches (default: 0)
@@ -400,6 +419,17 @@ class TestAIMDThrottleStats:
         assert stats["peak_delay_ms"] == 200
         assert stats["current_delay_ms"] == 100
 
+    def test_stats_track_total_throttle_time(self) -> None:
+        """Stats should track total time spent throttled."""
+        throttle = AIMDThrottle()
+
+        # Record some throttle time manually (simulating waits)
+        throttle.record_throttle_wait(100.0)
+        throttle.record_throttle_wait(50.0)
+
+        stats = throttle.get_stats()
+        assert stats["total_throttle_time_ms"] == 150.0
+
     def test_stats_reset(self) -> None:
         """Stats can be reset."""
         throttle = AIMDThrottle()
@@ -430,6 +460,7 @@ Expected: FAIL with "AttributeError: 'AIMDThrottle' object has no attribute 'get
         self._capacity_retries = 0
         self._successes = 0
         self._peak_delay_ms: float = 0.0
+        self._total_throttle_time_ms: float = 0.0
 
 # Update on_capacity_error to track stats (add inside the lock):
             self._capacity_retries += 1
@@ -440,11 +471,21 @@ Expected: FAIL with "AttributeError: 'AIMDThrottle' object has no attribute 'get
             self._successes += 1
 
 # Add new methods:
+    def record_throttle_wait(self, wait_ms: float) -> None:
+        """Record time spent waiting due to throttle (thread-safe).
+
+        Args:
+            wait_ms: Milliseconds spent waiting
+        """
+        with self._lock:
+            self._total_throttle_time_ms += wait_ms
+
     def get_stats(self) -> dict[str, float | int]:
         """Get throttle statistics for audit trail (thread-safe).
 
         Returns:
-            Dict with capacity_retries, successes, peak_delay_ms, current_delay_ms
+            Dict with capacity_retries, successes, peak_delay_ms, current_delay_ms,
+            total_throttle_time_ms
         """
         with self._lock:
             return {
@@ -452,6 +493,7 @@ Expected: FAIL with "AttributeError: 'AIMDThrottle' object has no attribute 'get
                 "successes": self._successes,
                 "peak_delay_ms": self._peak_delay_ms,
                 "current_delay_ms": self._current_delay_ms,
+                "total_throttle_time_ms": self._total_throttle_time_ms,
             }
 
     def reset_stats(self) -> None:
@@ -463,6 +505,7 @@ Expected: FAIL with "AttributeError: 'AIMDThrottle' object has no attribute 'get
             self._capacity_retries = 0
             self._successes = 0
             self._peak_delay_ms = self._current_delay_ms
+            self._total_throttle_time_ms = 0.0
 ```
 
 ### Step 4: Run test to verify it passes
@@ -567,7 +610,7 @@ Expected: FAIL with "ModuleNotFoundError"
 """Capacity error classification for LLM API calls.
 
 Capacity errors are transient overload conditions that should be retried
-indefinitely with AIMD throttling. They are distinct from "normal" errors
+with AIMD throttling. They are distinct from "normal" errors
 (auth failures, malformed requests) which use standard retry limits.
 
 HTTP Status Codes:
@@ -580,7 +623,7 @@ from __future__ import annotations
 
 
 # HTTP status codes that indicate capacity/rate limiting
-# These trigger AIMD throttle and infinite retry
+# These trigger AIMD throttle and capacity retry
 CAPACITY_ERROR_CODES: frozenset[int] = frozenset({429, 503, 529})
 
 
@@ -588,7 +631,7 @@ def is_capacity_error(status_code: int) -> bool:
     """Check if HTTP status code indicates a capacity error.
 
     Capacity errors are transient overload conditions that should trigger
-    AIMD throttle backoff and be retried indefinitely.
+    AIMD throttle backoff and be retried with increasing delays.
 
     Args:
         status_code: HTTP status code
@@ -603,7 +646,8 @@ class CapacityError(Exception):
     """Exception for capacity/rate limit errors.
 
     Raised when an LLM API call fails due to capacity limits.
-    These errors should NEVER cause row failure - they are always retried.
+    These errors trigger AIMD throttle and are retried until
+    max_capacity_retry_seconds is exceeded.
 
     Attributes:
         status_code: HTTP status code that triggered this error
@@ -636,13 +680,13 @@ git commit -m "feat(llm): add capacity error classification"
 
 ---
 
-## Task 6: Reorder Buffer
+## Task 6: Reorder Buffer with Timing
 
 **Files:**
 - Create: `src/elspeth/plugins/llm/reorder_buffer.py`
 - Test: `tests/plugins/llm/test_reorder_buffer.py`
 
-Buffer that maintains strict submission order regardless of completion order.
+Buffer that maintains strict submission order with timing for audit.
 
 ### Step 1: Write failing test for buffer
 
@@ -650,11 +694,11 @@ Buffer that maintains strict submission order regardless of completion order.
 # tests/plugins/llm/test_reorder_buffer.py
 """Tests for reorder buffer that maintains submission order."""
 
-import pytest
-from concurrent.futures import Future
-from unittest.mock import MagicMock
+import time
 
-from elspeth.plugins.llm.reorder_buffer import ReorderBuffer
+import pytest
+
+from elspeth.plugins.llm.reorder_buffer import ReorderBuffer, BufferEntry
 
 
 class TestReorderBufferBasic:
@@ -675,7 +719,8 @@ class TestReorderBufferBasic:
         buffer.complete(idx, "result_0")
 
         results = buffer.get_ready_results()
-        assert results == ["result_0"]
+        assert len(results) == 1
+        assert results[0].result == "result_0"
         assert buffer.pending_count == 0
 
 
@@ -695,18 +740,26 @@ class TestReorderBufferOrdering:
         assert buffer.get_ready_results() == []  # Can't emit yet
 
         buffer.complete(0, "result_0")
-        assert buffer.get_ready_results() == ["result_0"]  # 0 ready, 1 blocks 2
+        ready = buffer.get_ready_results()
+        assert len(ready) == 1
+        assert ready[0].result == "result_0"
 
         buffer.complete(4, "result_4")
         assert buffer.get_ready_results() == []  # Still waiting for 1
 
         buffer.complete(1, "result_1")
         # Now 1 and 2 can be emitted
-        assert buffer.get_ready_results() == ["result_1", "result_2"]
+        ready = buffer.get_ready_results()
+        assert len(ready) == 2
+        assert ready[0].result == "result_1"
+        assert ready[1].result == "result_2"
 
         buffer.complete(3, "result_3")
         # Now 3 and 4 can be emitted
-        assert buffer.get_ready_results() == ["result_3", "result_4"]
+        ready = buffer.get_ready_results()
+        assert len(ready) == 2
+        assert ready[0].result == "result_3"
+        assert ready[1].result == "result_4"
 
         assert buffer.pending_count == 0
 
@@ -717,9 +770,69 @@ class TestReorderBufferOrdering:
         for i in range(3):
             idx = buffer.submit()
             buffer.complete(idx, f"result_{i}")
-            assert buffer.get_ready_results() == [f"result_{i}"]
+            ready = buffer.get_ready_results()
+            assert len(ready) == 1
+            assert ready[0].result == f"result_{i}"
 
         assert buffer.pending_count == 0
+
+
+class TestReorderBufferTiming:
+    """Test timing metadata for audit trail."""
+
+    def test_entry_has_submit_timestamp(self) -> None:
+        """Buffer entries should record submit timestamp."""
+        buffer = ReorderBuffer[str]()
+
+        before = time.perf_counter()
+        idx = buffer.submit()
+        after = time.perf_counter()
+
+        buffer.complete(idx, "result")
+        ready = buffer.get_ready_results()
+
+        assert len(ready) == 1
+        assert before <= ready[0].submit_timestamp <= after
+
+    def test_entry_has_complete_timestamp(self) -> None:
+        """Buffer entries should record complete timestamp."""
+        buffer = ReorderBuffer[str]()
+
+        idx = buffer.submit()
+        time.sleep(0.01)  # Small delay
+
+        before = time.perf_counter()
+        buffer.complete(idx, "result")
+        after = time.perf_counter()
+
+        ready = buffer.get_ready_results()
+
+        assert len(ready) == 1
+        assert before <= ready[0].complete_timestamp <= after
+        # Complete should be after submit
+        assert ready[0].complete_timestamp > ready[0].submit_timestamp
+
+    def test_entry_tracks_buffer_wait_time(self) -> None:
+        """Entry should track time spent waiting in buffer."""
+        buffer = ReorderBuffer[str]()
+
+        # Submit two items
+        idx0 = buffer.submit()
+        idx1 = buffer.submit()
+
+        # Complete second first (will wait in buffer)
+        buffer.complete(idx1, "result_1")
+        time.sleep(0.02)  # Wait while 1 is buffered
+
+        # Complete first (releases both)
+        buffer.complete(idx0, "result_0")
+        ready = buffer.get_ready_results()
+
+        assert len(ready) == 2
+        # First item shouldn't have waited much
+        assert ready[0].buffer_wait_ms < 50
+        # Second item waited while first was pending
+        assert ready[1].buffer_wait_ms >= 15  # At least 20ms minus some tolerance
 ```
 
 ### Step 2: Run test to verify it fails
@@ -727,18 +840,20 @@ class TestReorderBufferOrdering:
 Run: `pytest tests/plugins/llm/test_reorder_buffer.py -v`
 Expected: FAIL with "ModuleNotFoundError"
 
-### Step 3: Implement reorder buffer
+### Step 3: Implement reorder buffer with timing
 
 ```python
 # src/elspeth/plugins/llm/reorder_buffer.py
-"""Reorder buffer for maintaining strict submission order.
+"""Reorder buffer for maintaining strict submission order with timing.
 
 Results may complete out of order (due to varying API latencies),
-but are emitted in the exact order they were submitted.
+but are emitted in the exact order they were submitted. Timing
+metadata is captured for audit trail.
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from threading import Lock
 from typing import Generic, TypeVar
@@ -747,17 +862,43 @@ T = TypeVar("T")
 
 
 @dataclass
-class _BufferEntry(Generic[T]):
-    """Entry in the reorder buffer."""
+class BufferEntry(Generic[T]):
+    """Entry emitted from the reorder buffer with timing metadata.
+
+    Attributes:
+        submit_index: Order in which item was submitted (0-indexed)
+        complete_index: Order in which item completed (may differ from submit)
+        result: The actual result value
+        submit_timestamp: time.perf_counter() when submitted
+        complete_timestamp: time.perf_counter() when completed
+        buffer_wait_ms: Time spent waiting in buffer after completion
+    """
 
     submit_index: int
+    complete_index: int
+    result: T
+    submit_timestamp: float
+    complete_timestamp: float
+    buffer_wait_ms: float
+
+
+@dataclass
+class _InternalEntry(Generic[T]):
+    """Internal entry in the reorder buffer."""
+
+    submit_index: int
+    submit_timestamp: float
     complete_index: int | None = None
+    complete_timestamp: float | None = None
     result: T | None = None
     is_complete: bool = False
 
 
 class ReorderBuffer(Generic[T]):
     """Thread-safe buffer that reorders results to match submission order.
+
+    Captures timing metadata for each entry to support audit trail
+    requirements.
 
     Usage:
         buffer = ReorderBuffer[TransformResult]()
@@ -770,13 +911,15 @@ class ReorderBuffer(Generic[T]):
         # Complete with result (may be out of order)
         buffer.complete(idx, result)
 
-        # Get results in submission order
+        # Get results in submission order with timing
         ready = buffer.get_ready_results()
+        for entry in ready:
+            print(f"Result: {entry.result}, waited {entry.buffer_wait_ms}ms")
     """
 
     def __init__(self) -> None:
         """Initialize empty buffer."""
-        self._entries: dict[int, _BufferEntry[T]] = {}
+        self._entries: dict[int, _InternalEntry[T]] = {}
         self._next_submit: int = 0
         self._next_emit: int = 0
         self._complete_counter: int = 0
@@ -796,7 +939,10 @@ class ReorderBuffer(Generic[T]):
         """
         with self._lock:
             idx = self._next_submit
-            self._entries[idx] = _BufferEntry(submit_index=idx)
+            self._entries[idx] = _InternalEntry(
+                submit_index=idx,
+                submit_timestamp=time.perf_counter(),
+            )
             self._next_submit += 1
             return idx
 
@@ -821,10 +967,11 @@ class ReorderBuffer(Generic[T]):
 
             entry.result = result
             entry.complete_index = self._complete_counter
+            entry.complete_timestamp = time.perf_counter()
             entry.is_complete = True
             self._complete_counter += 1
 
-    def get_ready_results(self) -> list[T]:
+    def get_ready_results(self) -> list[BufferEntry[T]]:
         """Get all results that are ready to emit in order (thread-safe).
 
         Returns results that are:
@@ -832,10 +979,11 @@ class ReorderBuffer(Generic[T]):
         2. All previous indices are also complete
 
         Returns:
-            List of results in submission order (may be empty)
+            List of BufferEntry in submission order (may be empty)
         """
         with self._lock:
-            ready: list[T] = []
+            ready: list[BufferEntry[T]] = []
+            now = time.perf_counter()
 
             while self._next_emit in self._entries:
                 entry = self._entries[self._next_emit]
@@ -843,7 +991,19 @@ class ReorderBuffer(Generic[T]):
                     break
 
                 # Entry is complete and all previous are emitted
-                ready.append(entry.result)  # type: ignore[arg-type]
+                # Calculate buffer wait time (time between completion and emission)
+                buffer_wait_ms = (now - entry.complete_timestamp) * 1000  # type: ignore[operator]
+
+                ready.append(
+                    BufferEntry(
+                        submit_index=entry.submit_index,
+                        complete_index=entry.complete_index,  # type: ignore[arg-type]
+                        result=entry.result,  # type: ignore[arg-type]
+                        submit_timestamp=entry.submit_timestamp,
+                        complete_timestamp=entry.complete_timestamp,  # type: ignore[arg-type]
+                        buffer_wait_ms=buffer_wait_ms,
+                    )
+                )
                 del self._entries[self._next_emit]
                 self._next_emit += 1
 
@@ -859,18 +1019,18 @@ Expected: PASS
 
 ```bash
 git add src/elspeth/plugins/llm/reorder_buffer.py tests/plugins/llm/test_reorder_buffer.py
-git commit -m "feat(llm): add reorder buffer for strict output ordering"
+git commit -m "feat(llm): add reorder buffer with timing for audit"
 ```
 
 ---
 
-## Task 7: Pool Configuration Schema
+## Task 7: Pool Configuration Schema with Max Retry Timeout
 
 **Files:**
 - Modify: `src/elspeth/plugins/llm/base.py`
 - Test: `tests/plugins/llm/test_pool_config.py`
 
-Add pool configuration fields to LLMConfig.
+Add pool configuration fields to LLMConfig including max retry timeout.
 
 ### Step 1: Write failing test for config
 
@@ -928,6 +1088,8 @@ class TestPoolConfigExplicit:
         assert config.pool_config.max_dispatch_delay_ms == 5000
         assert config.pool_config.backoff_multiplier == 2.0
         assert config.pool_config.recovery_step_ms == 50
+        # Max retry timeout default (1 hour)
+        assert config.pool_config.max_capacity_retry_seconds == 3600
 
     def test_custom_aimd_settings(self) -> None:
         """Custom AIMD settings should be applied."""
@@ -940,6 +1102,7 @@ class TestPoolConfigExplicit:
             "max_dispatch_delay_ms": 1000,
             "backoff_multiplier": 3.0,
             "recovery_step_ms": 25,
+            "max_capacity_retry_seconds": 1800,  # 30 minutes
         })
 
         assert config.pool_config is not None
@@ -948,6 +1111,7 @@ class TestPoolConfigExplicit:
         assert config.pool_config.max_dispatch_delay_ms == 1000
         assert config.pool_config.backoff_multiplier == 3.0
         assert config.pool_config.recovery_step_ms == 25
+        assert config.pool_config.max_capacity_retry_seconds == 1800
 
 
 class TestPoolConfigValidation:
@@ -973,6 +1137,17 @@ class TestPoolConfigValidation:
                 "pool_size": 10,
                 "backoff_multiplier": 0.5,
             })
+
+    def test_max_capacity_retry_seconds_must_be_positive(self) -> None:
+        """max_capacity_retry_seconds must be > 0."""
+        with pytest.raises(Exception):
+            LLMConfig.from_dict({
+                "model": "gpt-4",
+                "template": "{{ row.text }}",
+                "schema": {"fields": "dynamic"},
+                "pool_size": 10,
+                "max_capacity_retry_seconds": 0,
+            })
 ```
 
 ### Step 2: Run test to verify it fails
@@ -994,6 +1169,10 @@ class PoolConfig(BaseModel):
 
     When pool_size > 1, requests are dispatched in parallel with
     AIMD throttling for adaptive rate control.
+
+    Note: This is an internal model built from flat LLMConfig fields,
+    not directly exposed in YAML. Users configure flat fields like
+    `pool_size: 10` on the transform config.
     """
 
     model_config = {"extra": "forbid"}
@@ -1013,6 +1192,11 @@ class PoolConfig(BaseModel):
     recovery_step_ms: int = Field(
         50, ge=0, description="Subtract from delay on success"
     )
+    max_capacity_retry_seconds: int = Field(
+        3600,  # 1 hour default
+        gt=0,
+        description="Max seconds to retry capacity errors per row before failing",
+    )
 
     def to_throttle_config(self) -> ThrottleConfig:
         """Convert to ThrottleConfig for AIMD throttle."""
@@ -1031,6 +1215,9 @@ class PoolConfig(BaseModel):
     max_dispatch_delay_ms: int = Field(5000, ge=0)
     backoff_multiplier: float = Field(2.0, gt=1.0)
     recovery_step_ms: int = Field(50, ge=0)
+    max_capacity_retry_seconds: int = Field(
+        3600, gt=0, description="Max seconds to retry capacity errors per row"
+    )
 
     @property
     def pool_config(self) -> PoolConfig | None:
@@ -1046,6 +1233,7 @@ class PoolConfig(BaseModel):
             max_dispatch_delay_ms=self.max_dispatch_delay_ms,
             backoff_multiplier=self.backoff_multiplier,
             recovery_step_ms=self.recovery_step_ms,
+            max_capacity_retry_seconds=self.max_capacity_retry_seconds,
         )
 ```
 
@@ -1058,7 +1246,7 @@ Expected: PASS
 
 ```bash
 git add src/elspeth/plugins/llm/base.py tests/plugins/llm/test_pool_config.py
-git commit -m "feat(llm): add pool configuration to LLMConfig"
+git commit -m "feat(llm): add pool configuration with max retry timeout"
 ```
 
 ---
@@ -1076,6 +1264,8 @@ Create the main executor class structure.
 ```python
 # tests/plugins/llm/test_pooled_executor.py
 """Tests for PooledExecutor parallel request handling."""
+
+from typing import Any
 
 import pytest
 from unittest.mock import MagicMock
@@ -1097,6 +1287,8 @@ class TestPooledExecutorInit:
         assert executor.pool_size == 10
         assert executor.pending_count == 0
 
+        executor.shutdown()
+
     def test_creates_throttle_from_config(self) -> None:
         """Executor should create AIMD throttle from config."""
         config = PoolConfig(
@@ -1109,6 +1301,8 @@ class TestPooledExecutorInit:
 
         assert executor._throttle.config.backoff_multiplier == 3.0
         assert executor._throttle.config.recovery_step_ms == 100
+
+        executor.shutdown()
 
 
 class TestPooledExecutorShutdown:
@@ -1141,21 +1335,41 @@ Manages concurrent requests while:
 - Applying AIMD throttle delays between dispatches
 - Reordering results to match submission order
 - Tracking statistics for audit trail
+- Enforcing max retry timeout for capacity errors
 """
 
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from threading import Semaphore
 from typing import TYPE_CHECKING, Any, Callable
 
 from elspeth.contracts import TransformResult
 from elspeth.plugins.llm.aimd_throttle import AIMDThrottle
 from elspeth.plugins.llm.base import PoolConfig
-from elspeth.plugins.llm.reorder_buffer import ReorderBuffer
+from elspeth.plugins.llm.reorder_buffer import ReorderBuffer, BufferEntry
 
 if TYPE_CHECKING:
-    from elspeth.plugins.context import PluginContext
+    pass
+
+
+@dataclass
+class RowContext:
+    """Context for processing a single row in the pool.
+
+    This allows each row to have its own state_id for audit trail,
+    solving the "single state_id for all parallel rows" problem.
+
+    Attributes:
+        row: The row data to process
+        state_id: Unique state ID for this row's audit trail
+        row_index: Original index for ordering
+    """
+
+    row: dict[str, Any]
+    state_id: str
+    row_index: int
 
 
 class PooledExecutor:
@@ -1165,6 +1379,7 @@ class PooledExecutor:
     - Semaphore-controlled dispatch (max pool_size in flight)
     - AIMD throttle for adaptive rate limiting
     - Reorder buffer for strict submission order output
+    - Max retry timeout for capacity errors
 
     The executor is synchronous from the caller's perspective -
     execute_batch() blocks until all results are ready in order.
@@ -1172,15 +1387,20 @@ class PooledExecutor:
     Usage:
         executor = PooledExecutor(pool_config)
 
-        # Process batch of rows
+        # Prepare row contexts with per-row state IDs
+        contexts = [
+            RowContext(row=row, state_id=state_id, row_index=i)
+            for i, (row, state_id) in enumerate(zip(rows, state_ids))
+        ]
+
+        # Process batch
         results = executor.execute_batch(
-            rows=[row1, row2, ...],
-            process_fn=lambda row, ctx: transform.process_single(row, ctx),
-            ctx=plugin_context,
+            contexts=contexts,
+            process_fn=lambda row, state_id: transform.process_single(row, state_id),
         )
 
         # Results are in submission order
-        assert len(results) == len(rows)
+        assert len(results) == len(contexts)
 
         # Get stats for audit
         stats = executor.get_stats()
@@ -1194,6 +1414,7 @@ class PooledExecutor:
         """
         self._config = config
         self._pool_size = config.pool_size
+        self._max_capacity_retry_seconds = config.max_capacity_retry_seconds
 
         # Thread pool for concurrent execution
         self._thread_pool = ThreadPoolExecutor(max_workers=config.pool_size)
@@ -1238,12 +1459,14 @@ class PooledExecutor:
         return {
             "pool_config": {
                 "pool_size": self._pool_size,
+                "max_capacity_retry_seconds": self._max_capacity_retry_seconds,
             },
             "pool_stats": {
                 "capacity_retries": throttle_stats["capacity_retries"],
                 "successes": throttle_stats["successes"],
                 "peak_delay_ms": throttle_stats["peak_delay_ms"],
                 "current_delay_ms": throttle_stats["current_delay_ms"],
+                "total_throttle_time_ms": throttle_stats["total_throttle_time_ms"],
             },
         }
 ```
@@ -1257,18 +1480,18 @@ Expected: PASS
 
 ```bash
 git add src/elspeth/plugins/llm/pooled_executor.py tests/plugins/llm/test_pooled_executor.py
-git commit -m "feat(llm): add PooledExecutor core structure"
+git commit -m "feat(llm): add PooledExecutor core structure with RowContext"
 ```
 
 ---
 
-## Task 9: PooledExecutor Batch Execution
+## Task 9: PooledExecutor Batch Execution with Per-Row State
 
 **Files:**
 - Modify: `src/elspeth/plugins/llm/pooled_executor.py`
 - Modify: `tests/plugins/llm/test_pooled_executor.py`
 
-Implement the main execute_batch method.
+Implement the main execute_batch method with per-row state_id handling.
 
 ### Step 1: Write failing test for batch execution
 
@@ -1276,7 +1499,7 @@ Implement the main execute_batch method.
 # Add to tests/plugins/llm/test_pooled_executor.py
 
 import time
-from concurrent.futures import Future
+from threading import Lock
 
 class TestPooledExecutorBatch:
     """Test batch execution with ordering."""
@@ -1288,24 +1511,57 @@ class TestPooledExecutorBatch:
 
         # Mock process function with varying delays
         call_order: list[int] = []
+        lock = Lock()
 
-        def mock_process(row: dict, ctx: Any) -> TransformResult:
+        def mock_process(row: dict, state_id: str) -> TransformResult:
             idx = row["idx"]
-            call_order.append(idx)
+            with lock:
+                call_order.append(idx)
             # Varying delays to cause out-of-order completion
             time.sleep(0.01 * (3 - idx))  # idx 0 slowest, idx 2 fastest
             return TransformResult.success({"idx": idx, "result": f"done_{idx}"})
 
-        rows = [{"idx": i} for i in range(3)]
-        ctx = MagicMock()
+        contexts = [
+            RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i)
+            for i in range(3)
+        ]
 
-        results = executor.execute_batch(rows, mock_process, ctx)
+        results = executor.execute_batch(contexts, mock_process)
 
         # Results must be in submission order
         assert len(results) == 3
         assert results[0].row["idx"] == 0
         assert results[1].row["idx"] == 1
         assert results[2].row["idx"] == 2
+
+        executor.shutdown()
+
+    def test_execute_batch_passes_state_id_per_row(self) -> None:
+        """Each row should receive its own state_id."""
+        config = PoolConfig(pool_size=2)
+        executor = PooledExecutor(config)
+
+        received_state_ids: list[tuple[int, str]] = []
+        lock = Lock()
+
+        def mock_process(row: dict, state_id: str) -> TransformResult:
+            with lock:
+                received_state_ids.append((row["idx"], state_id))
+            return TransformResult.success(row)
+
+        contexts = [
+            RowContext(row={"idx": i}, state_id=f"unique_state_{i}", row_index=i)
+            for i in range(3)
+        ]
+
+        executor.execute_batch(contexts, mock_process)
+
+        # Verify each row got its own state_id
+        assert len(received_state_ids) == 3
+        state_id_map = {idx: sid for idx, sid in received_state_ids}
+        assert state_id_map[0] == "unique_state_0"
+        assert state_id_map[1] == "unique_state_1"
+        assert state_id_map[2] == "unique_state_2"
 
         executor.shutdown()
 
@@ -1316,9 +1572,9 @@ class TestPooledExecutorBatch:
 
         max_concurrent = 0
         current_concurrent = 0
-        lock = __import__("threading").Lock()
+        lock = Lock()
 
-        def mock_process(row: dict, ctx: Any) -> TransformResult:
+        def mock_process(row: dict, state_id: str) -> TransformResult:
             nonlocal max_concurrent, current_concurrent
             with lock:
                 current_concurrent += 1
@@ -1332,10 +1588,12 @@ class TestPooledExecutorBatch:
 
             return TransformResult.success(row)
 
-        rows = [{"idx": i} for i in range(5)]
-        ctx = MagicMock()
+        contexts = [
+            RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i)
+            for i in range(5)
+        ]
 
-        results = executor.execute_batch(rows, mock_process, ctx)
+        results = executor.execute_batch(contexts, mock_process)
 
         assert len(results) == 5
         assert max_concurrent <= 2  # Never exceeded pool_size
@@ -1358,9 +1616,8 @@ from concurrent.futures import Future, as_completed
 
     def execute_batch(
         self,
-        rows: list[dict[str, Any]],
-        process_fn: Callable[[dict[str, Any], PluginContext], TransformResult],
-        ctx: PluginContext,
+        contexts: list[RowContext],
+        process_fn: Callable[[dict[str, Any], str], TransformResult],
     ) -> list[TransformResult]:
         """Execute batch of rows with parallel processing.
 
@@ -1368,22 +1625,23 @@ from concurrent.futures import Future, as_completed
         applies AIMD throttle delays, and returns results in
         submission order.
 
+        Each row is processed with its own state_id for audit trail.
+
         Args:
-            rows: List of row dicts to process
-            process_fn: Function that processes a single row
-            ctx: Plugin context for the process function
+            contexts: List of RowContext with row data and state_ids
+            process_fn: Function that processes a single row with state_id
 
         Returns:
-            List of TransformResults in same order as input rows
+            List of TransformResults in same order as input contexts
         """
-        if not rows:
+        if not contexts:
             return []
 
         # Track futures by their buffer index
         futures: dict[Future[tuple[int, TransformResult]], int] = {}
 
         # Submit all rows
-        for row in rows:
+        for ctx in contexts:
             # Reserve slot in reorder buffer
             buffer_idx = self._buffer.submit()
 
@@ -1391,6 +1649,7 @@ from concurrent.futures import Future, as_completed
             delay_ms = self._throttle.current_delay_ms
             if delay_ms > 0:
                 time.sleep(delay_ms / 1000)
+                self._throttle.record_throttle_wait(delay_ms)
 
             # Acquire semaphore (blocks if pool is full)
             self._semaphore.acquire()
@@ -1399,9 +1658,9 @@ from concurrent.futures import Future, as_completed
             future = self._thread_pool.submit(
                 self._execute_single,
                 buffer_idx,
-                row,
+                ctx.row,
+                ctx.state_id,
                 process_fn,
-                ctx,
             )
             futures[future] = buffer_idx
 
@@ -1416,7 +1675,8 @@ from concurrent.futures import Future, as_completed
 
             # Collect any ready results
             ready = self._buffer.get_ready_results()
-            results.extend(ready)
+            for entry in ready:
+                results.append(entry.result)
 
         return results
 
@@ -1424,22 +1684,22 @@ from concurrent.futures import Future, as_completed
         self,
         buffer_idx: int,
         row: dict[str, Any],
-        process_fn: Callable[[dict[str, Any], PluginContext], TransformResult],
-        ctx: PluginContext,
+        state_id: str,
+        process_fn: Callable[[dict[str, Any], str], TransformResult],
     ) -> tuple[int, TransformResult]:
         """Execute single row and handle throttle feedback.
 
         Args:
             buffer_idx: Index in reorder buffer
             row: Row to process
+            state_id: State ID for audit trail
             process_fn: Processing function
-            ctx: Plugin context
 
         Returns:
             Tuple of (buffer_idx, result)
         """
         try:
-            result = process_fn(row, ctx)
+            result = process_fn(row, state_id)
             self._throttle.on_success()
             return (buffer_idx, result)
         finally:
@@ -1456,18 +1716,18 @@ Expected: PASS
 
 ```bash
 git add src/elspeth/plugins/llm/pooled_executor.py tests/plugins/llm/test_pooled_executor.py
-git commit -m "feat(llm): add PooledExecutor batch execution"
+git commit -m "feat(llm): add PooledExecutor batch execution with per-row state"
 ```
 
 ---
 
-## Task 10: PooledExecutor Capacity Error Handling
+## Task 10: PooledExecutor Capacity Error Handling with Timeout
 
 **Files:**
 - Modify: `src/elspeth/plugins/llm/pooled_executor.py`
 - Modify: `tests/plugins/llm/test_pooled_executor.py`
 
-Add capacity error detection and infinite retry with throttle.
+Add capacity error detection with max retry timeout.
 
 ### Step 1: Write failing test for capacity handling
 
@@ -1477,7 +1737,7 @@ Add capacity error detection and infinite retry with throttle.
 from elspeth.plugins.llm.capacity_errors import CapacityError
 
 class TestPooledExecutorCapacityHandling:
-    """Test capacity error handling with AIMD throttle."""
+    """Test capacity error handling with AIMD throttle and timeout."""
 
     def test_capacity_error_triggers_throttle_and_retries(self) -> None:
         """Capacity errors should trigger throttle and retry."""
@@ -1485,20 +1745,22 @@ class TestPooledExecutorCapacityHandling:
         executor = PooledExecutor(config)
 
         call_count = 0
+        lock = Lock()
 
-        def mock_process(row: dict, ctx: Any) -> TransformResult:
+        def mock_process(row: dict, state_id: str) -> TransformResult:
             nonlocal call_count
-            call_count += 1
+            with lock:
+                call_count += 1
+                current_count = call_count
 
             # First call raises capacity error, second succeeds
-            if call_count == 1:
+            if current_count == 1:
                 raise CapacityError(429, "Rate limited")
             return TransformResult.success(row)
 
-        rows = [{"idx": 0}]
-        ctx = MagicMock()
+        contexts = [RowContext(row={"idx": 0}, state_id="state_0", row_index=0)]
 
-        results = executor.execute_batch(rows, mock_process, ctx)
+        results = executor.execute_batch(contexts, mock_process)
 
         # Should have retried and succeeded
         assert len(results) == 1
@@ -1511,48 +1773,54 @@ class TestPooledExecutorCapacityHandling:
 
         executor.shutdown()
 
-    def test_capacity_errors_never_fail_row(self) -> None:
-        """Rows should never fail due to capacity errors."""
-        config = PoolConfig(pool_size=1, max_dispatch_delay_ms=100)
+    def test_capacity_retry_respects_max_timeout(self) -> None:
+        """Capacity retries should stop after max_capacity_retry_seconds."""
+        config = PoolConfig(
+            pool_size=1,
+            max_dispatch_delay_ms=100,
+            max_capacity_retry_seconds=1,  # Only 1 second
+        )
         executor = PooledExecutor(config)
 
         call_count = 0
+        lock = Lock()
 
-        def mock_process(row: dict, ctx: Any) -> TransformResult:
+        def mock_process(row: dict, state_id: str) -> TransformResult:
             nonlocal call_count
-            call_count += 1
+            with lock:
+                call_count += 1
+            # Always fail with capacity error
+            raise CapacityError(503, "Service unavailable")
 
-            # Fail 3 times with capacity error, then succeed
-            if call_count <= 3:
-                raise CapacityError(503, "Service unavailable")
-            return TransformResult.success(row)
+        contexts = [RowContext(row={"idx": 0}, state_id="state_0", row_index=0)]
 
-        rows = [{"idx": 0}]
-        ctx = MagicMock()
+        results = executor.execute_batch(contexts, mock_process)
 
-        results = executor.execute_batch(rows, mock_process, ctx)
-
+        # Should eventually fail after timeout
         assert len(results) == 1
-        assert results[0].status == "success"
-        assert call_count == 4
+        assert results[0].status == "error"
+        assert results[0].reason is not None
+        assert "capacity_retry_timeout" in results[0].reason["reason"]
+
+        # Should have made multiple attempts before giving up
+        assert call_count > 1
 
         executor.shutdown()
 
-    def test_normal_error_not_infinitely_retried(self) -> None:
-        """Non-capacity errors should not be infinitely retried."""
+    def test_normal_error_not_retried(self) -> None:
+        """Non-capacity errors should not be retried."""
         config = PoolConfig(pool_size=1)
         executor = PooledExecutor(config)
 
-        def mock_process(row: dict, ctx: Any) -> TransformResult:
+        def mock_process(row: dict, state_id: str) -> TransformResult:
             # Return error result (not raise CapacityError)
             return TransformResult.error({"reason": "bad_request"})
 
-        rows = [{"idx": 0}]
-        ctx = MagicMock()
+        contexts = [RowContext(row={"idx": 0}, state_id="state_0", row_index=0)]
 
-        results = executor.execute_batch(rows, mock_process, ctx)
+        results = executor.execute_batch(contexts, mock_process)
 
-        # Should return error without infinite retry
+        # Should return error without retry
         assert len(results) == 1
         assert results[0].status == "error"
 
@@ -1564,7 +1832,7 @@ class TestPooledExecutorCapacityHandling:
 Run: `pytest tests/plugins/llm/test_pooled_executor.py::TestPooledExecutorCapacityHandling -v`
 Expected: FAIL - capacity errors not handled
 
-### Step 3: Add capacity error handling
+### Step 3: Add capacity error handling with timeout
 
 ```python
 # Modify _execute_single in src/elspeth/plugins/llm/pooled_executor.py
@@ -1576,21 +1844,42 @@ from elspeth.plugins.llm.capacity_errors import CapacityError
         self,
         buffer_idx: int,
         row: dict[str, Any],
-        process_fn: Callable[[dict[str, Any], PluginContext], TransformResult],
-        ctx: PluginContext,
+        state_id: str,
+        process_fn: Callable[[dict[str, Any], str], TransformResult],
     ) -> tuple[int, TransformResult]:
-        """Execute single row with capacity error retry.
+        """Execute single row with capacity error retry and timeout.
 
-        Capacity errors trigger AIMD throttle and infinite retry.
-        Normal errors/results are returned as-is.
+        Capacity errors trigger AIMD throttle and are retried until
+        max_capacity_retry_seconds is exceeded. Normal errors/results
+        are returned as-is.
         """
+        start_time = time.monotonic()
+        max_time = start_time + self._max_capacity_retry_seconds
+
         try:
             while True:
                 try:
-                    result = process_fn(row, ctx)
+                    result = process_fn(row, state_id)
                     self._throttle.on_success()
                     return (buffer_idx, result)
-                except CapacityError:
+                except CapacityError as e:
+                    # Check if we've exceeded max retry time
+                    if time.monotonic() >= max_time:
+                        elapsed = time.monotonic() - start_time
+                        return (
+                            buffer_idx,
+                            TransformResult.error(
+                                {
+                                    "reason": "capacity_retry_timeout",
+                                    "error": str(e),
+                                    "status_code": e.status_code,
+                                    "elapsed_seconds": elapsed,
+                                    "max_seconds": self._max_capacity_retry_seconds,
+                                },
+                                retryable=False,
+                            ),
+                        )
+
                     # Trigger throttle backoff
                     self._throttle.on_capacity_error()
 
@@ -1598,8 +1887,9 @@ from elspeth.plugins.llm.capacity_errors import CapacityError
                     delay_ms = self._throttle.current_delay_ms
                     if delay_ms > 0:
                         time.sleep(delay_ms / 1000)
+                        self._throttle.record_throttle_wait(delay_ms)
 
-                    # Retry (infinite for capacity errors)
+                    # Retry
                     continue
         finally:
             # Always release semaphore
@@ -1615,7 +1905,7 @@ Expected: PASS
 
 ```bash
 git add src/elspeth/plugins/llm/pooled_executor.py tests/plugins/llm/test_pooled_executor.py
-git commit -m "feat(llm): add capacity error handling with infinite retry"
+git commit -m "feat(llm): add capacity error handling with max retry timeout"
 ```
 
 ---
@@ -1725,6 +2015,8 @@ class TestOpenRouterPooledExecution:
 
         assert transform._executor is not None
         assert transform._executor.pool_size == 5
+
+        transform.close()
 ```
 
 ### Step 2: Run test to verify it fails
@@ -1741,24 +2033,20 @@ Expected: FAIL - _executor attribute doesn't exist
 from elspeth.plugins.llm.pooled_executor import PooledExecutor
 from elspeth.plugins.llm.capacity_errors import CapacityError, is_capacity_error
 
-# Modify __init__ to create executor:
-    def __init__(self, config: dict[str, Any]) -> None:
-        # ... existing code ...
-
+# Modify __init__ - add after existing config parsing:
         # Create pooled executor if pool_size > 1
         if cfg.pool_config is not None:
             self._executor: PooledExecutor | None = PooledExecutor(cfg.pool_config)
         else:
             self._executor = None
 
-# Add method for single-row processing (extract from process):
-    def _process_single(
-        self, row: dict[str, Any], ctx: PluginContext
+# Add method _process_single (extract HTTP logic from process):
+    def _process_single_with_state(
+        self, row: dict[str, Any], state_id: str
     ) -> TransformResult:
-        """Process a single row via OpenRouter API.
+        """Process a single row via OpenRouter API with explicit state_id.
 
-        This is the core processing logic, used both for sequential
-        processing and as the worker function for pooled execution.
+        This is used by the pooled executor where each row has its own state.
 
         Raises:
             CapacityError: On 429/503/529 HTTP errors (for pooled retry)
@@ -1788,15 +2076,16 @@ from elspeth.plugins.llm.capacity_errors import CapacityError, is_capacity_error
         if self._max_tokens:
             request_body["max_tokens"] = self._max_tokens
 
-        # 3. Call via audited HTTP client (EXTERNAL - wrap)
-        if ctx.landscape is None or ctx.state_id is None:
+        # 3. Get recorder from transform's stored reference (set during on_start)
+        if self._recorder is None:
             raise RuntimeError(
-                "OpenRouter transform requires landscape recorder and state_id."
+                "OpenRouter transform requires recorder. "
+                "Ensure on_start was called."
             )
 
         http_client = AuditedHTTPClient(
-            recorder=ctx.landscape,
-            state_id=ctx.state_id,
+            recorder=self._recorder,
+            state_id=state_id,
             timeout=self._timeout,
             base_url=self._base_url,
             headers={"Authorization": f"Bearer {self._api_key}"},
@@ -1812,9 +2101,7 @@ from elspeth.plugins.llm.capacity_errors import CapacityError, is_capacity_error
         except httpx.HTTPStatusError as e:
             # Check for capacity error
             if is_capacity_error(e.response.status_code):
-                raise CapacityError(
-                    e.response.status_code, str(e)
-                ) from e
+                raise CapacityError(e.response.status_code, str(e)) from e
             # Non-capacity HTTP error
             return TransformResult.error(
                 {"reason": "api_call_failed", "error": str(e)},
@@ -1867,20 +2154,20 @@ from elspeth.plugins.llm.capacity_errors import CapacityError, is_capacity_error
 
         return TransformResult.success(output)
 
-# Modify process to use executor when available:
-    def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
-        """Process row via OpenRouter API.
+# Add on_start to capture recorder:
+    def on_start(self, ctx: PluginContext) -> None:
+        """Capture recorder reference for pooled execution."""
+        self._recorder = ctx.landscape
 
-        Uses pooled executor if pool_size > 1, otherwise sequential.
-        """
-        # Sequential mode - use existing logic
-        return self._process_single(row, ctx)
-
+# Modify close:
     def close(self) -> None:
         """Release resources."""
         if self._executor is not None:
             self._executor.shutdown(wait=True)
+        self._recorder = None
 ```
+
+Also add `self._recorder: LandscapeRecorder | None = None` to `__init__`.
 
 ### Step 4: Run test to verify it passes
 
@@ -1896,12 +2183,12 @@ git commit -m "feat(llm): integrate PooledExecutor into OpenRouterLLMTransform"
 
 ---
 
-## Task 12: Property-Based Test for Reorder Buffer
+## Task 12: Property-Based Test for Reorder Buffer (Fixed)
 
 **Files:**
 - Modify: `tests/plugins/llm/test_reorder_buffer.py`
 
-Add Hypothesis property test for ordering invariant.
+Add Hypothesis property test for ordering invariant (fixed to avoid random.shuffle).
 
 ### Step 1: Write property test
 
@@ -1926,46 +2213,58 @@ class TestReorderBufferProperties:
         n = len(completion_order)
 
         # Submit n items
-        indices = [buffer.submit() for _ in range(n)]
+        for _ in range(n):
+            buffer.submit()
 
-        # Complete in permuted order
+        # Complete in permuted order (using Hypothesis-provided permutation)
         for complete_idx in completion_order:
             buffer.complete(complete_idx, complete_idx)
 
         # Collect all results
         all_results: list[int] = []
-        while buffer.pending_count > 0 or (ready := buffer.get_ready_results()):
-            all_results.extend(ready)
+        while buffer.pending_count > 0:
+            ready = buffer.get_ready_results()
+            for entry in ready:
+                all_results.append(entry.result)
+
+        # Drain any remaining
+        ready = buffer.get_ready_results()
+        for entry in ready:
+            all_results.append(entry.result)
 
         # Must be in submission order (0, 1, 2, ..., n-1)
         assert all_results == list(range(n))
 
     @given(
-        n=st.integers(min_value=1, max_value=50),
+        completion_order=st.permutations(range(20)),
     )
-    def test_all_submitted_items_eventually_emitted(self, n: int) -> None:
+    @settings(max_examples=50)
+    def test_all_submitted_items_eventually_emitted(
+        self, completion_order: list[int]
+    ) -> None:
         """Every submitted item is eventually emitted exactly once."""
-        import random
-
         buffer = ReorderBuffer[str]()
+        n = len(completion_order)
 
         # Submit n items
         for _ in range(n):
             buffer.submit()
 
-        # Complete in random order
-        indices = list(range(n))
-        random.shuffle(indices)
-        for idx in indices:
+        # Complete in Hypothesis-provided permutation order
+        for idx in completion_order:
             buffer.complete(idx, f"result_{idx}")
 
         # Collect all results
         all_results: list[str] = []
-        while True:
+        while buffer.pending_count > 0:
             ready = buffer.get_ready_results()
-            if not ready:
-                break
-            all_results.extend(ready)
+            for entry in ready:
+                all_results.append(entry.result)
+
+        # Drain any remaining
+        ready = buffer.get_ready_results()
+        for entry in ready:
+            all_results.append(entry.result)
 
         # Must have exactly n results
         assert len(all_results) == n
@@ -1986,58 +2285,49 @@ git commit -m "test(llm): add property-based tests for reorder buffer"
 
 ---
 
-## Task 13: Update Module Exports
+## Task 13: Update Module Exports (Minimal Public API)
 
 **Files:**
 - Modify: `src/elspeth/plugins/llm/__init__.py`
 
-Export new classes from the module.
+Export only public API, keep internal classes private.
 
 ### Step 1: Read current exports
 
 Run: `cat src/elspeth/plugins/llm/__init__.py`
 
-### Step 2: Add new exports
+### Step 2: Add minimal exports
 
 ```python
 # src/elspeth/plugins/llm/__init__.py
 """LLM transform plugins for ELSPETH."""
 
-from elspeth.plugins.llm.aimd_throttle import AIMDThrottle, ThrottleConfig
-from elspeth.plugins.llm.azure import AzureOpenAILLMTransform
+from elspeth.plugins.llm.azure import AzureLLMTransform
 from elspeth.plugins.llm.azure_batch import AzureBatchLLMTransform
 from elspeth.plugins.llm.base import BaseLLMTransform, LLMConfig, PoolConfig
-from elspeth.plugins.llm.capacity_errors import (
-    CAPACITY_ERROR_CODES,
-    CapacityError,
-    is_capacity_error,
-)
+from elspeth.plugins.llm.batch_errors import BatchPendingError
+from elspeth.plugins.llm.capacity_errors import CapacityError
 from elspeth.plugins.llm.openrouter import OpenRouterLLMTransform
-from elspeth.plugins.llm.pooled_executor import PooledExecutor
-from elspeth.plugins.llm.reorder_buffer import ReorderBuffer
 from elspeth.plugins.llm.templates import PromptTemplate, RenderedPrompt, TemplateError
 
 __all__ = [
-    # Transforms
+    # Transforms (public)
     "AzureBatchLLMTransform",
-    "AzureOpenAILLMTransform",
+    "AzureLLMTransform",
     "BaseLLMTransform",
     "OpenRouterLLMTransform",
-    # Config
+    # Config (public - users may inspect)
     "LLMConfig",
     "PoolConfig",
-    "ThrottleConfig",
-    # Pooled execution
-    "AIMDThrottle",
+    # Exceptions (public - plugins may catch/raise)
+    "BatchPendingError",
     "CapacityError",
-    "CAPACITY_ERROR_CODES",
-    "is_capacity_error",
-    "PooledExecutor",
-    "ReorderBuffer",
-    # Templates
+    # Templates (public)
     "PromptTemplate",
     "RenderedPrompt",
     "TemplateError",
+    # Note: AIMDThrottle, ReorderBuffer, PooledExecutor are internal
+    # and not exported. Import directly if needed for testing.
 ]
 ```
 
@@ -2050,17 +2340,17 @@ Expected: All tests PASS
 
 ```bash
 git add src/elspeth/plugins/llm/__init__.py
-git commit -m "feat(llm): export pooled execution classes"
+git commit -m "feat(llm): export minimal public API for pooled execution"
 ```
 
 ---
 
-## Task 14: Full Integration Test with Throttle
+## Task 14: Full Integration Test
 
 **Files:**
 - Modify: `tests/integration/test_llm_transforms.py`
 
-Add integration test for full pooled execution with simulated capacity errors.
+Add integration test for full pooled execution.
 
 ### Step 1: Write integration test
 
@@ -2073,7 +2363,11 @@ class TestPooledExecutionIntegration:
     def test_batch_with_simulated_capacity_errors(self) -> None:
         """Verify pooled execution handles capacity errors correctly."""
         from unittest.mock import patch, MagicMock
+        from threading import Lock
         import random
+
+        # Seed random for reproducibility
+        random.seed(42)
 
         # Create transform with pooling
         transform = OpenRouterLLMTransform({
@@ -2083,13 +2377,15 @@ class TestPooledExecutionIntegration:
             "schema": {"fields": "dynamic"},
             "pool_size": 3,
             "max_dispatch_delay_ms": 100,
+            "max_capacity_retry_seconds": 10,
         })
 
         # Track calls per row
         call_counts: dict[int, int] = {}
+        lock = Lock()
 
         def mock_post(*args, **kwargs):
-            """Simulate 30% capacity error rate."""
+            """Simulate 50% capacity error rate on first call."""
             body = kwargs.get("json", {})
             messages = body.get("messages", [])
 
@@ -2097,10 +2393,12 @@ class TestPooledExecutionIntegration:
             if messages:
                 content = messages[-1].get("content", "")
                 idx = int(content.split("_")[1]) if "_" in content else 0
-                call_counts[idx] = call_counts.get(idx, 0) + 1
+                with lock:
+                    call_counts[idx] = call_counts.get(idx, 0) + 1
+                    current_count = call_counts[idx]
 
                 # First call has 50% chance of capacity error
-                if call_counts[idx] == 1 and random.random() < 0.5:
+                if current_count == 1 and random.random() < 0.5:
                     response = MagicMock(spec=httpx.Response)
                     response.status_code = 429
                     raise httpx.HTTPStatusError(
@@ -2114,7 +2412,7 @@ class TestPooledExecutionIntegration:
             response.status_code = 200
             response.headers = {"content-type": "application/json"}
             response.json.return_value = {
-                "choices": [{"message": {"content": f"done"}}],
+                "choices": [{"message": {"content": "done"}}],
                 "usage": {},
             }
             response.raise_for_status = MagicMock()
@@ -2135,6 +2433,15 @@ class TestPooledExecutionIntegration:
             config={},
             schema_config=schema,
         )
+
+        # Call on_start to set up recorder
+        ctx = PluginContext(
+            run_id=run.run_id,
+            config={},
+            landscape=recorder,
+            state_id=None,  # Will be set per-row
+        )
+        transform.on_start(ctx)
 
         # Process batch of rows
         rows = [{"text": f"row_{i}"} for i in range(5)]
@@ -2161,14 +2468,14 @@ class TestPooledExecutionIntegration:
                     input_data=row,
                 )
 
-                ctx = PluginContext(
+                row_ctx = PluginContext(
                     run_id=run.run_id,
                     config={},
                     landscape=recorder,
                     state_id=state.state_id,
                 )
 
-                result = transform.process(row, ctx)
+                result = transform.process(row, row_ctx)
                 results.append(result)
 
         # All should succeed (capacity errors were retried)
@@ -2187,7 +2494,7 @@ Expected: PASS
 
 ```bash
 git add tests/integration/test_llm_transforms.py
-git commit -m "test(llm): add pooled execution integration test"
+git commit -m "test(llm): add full pooled execution integration test"
 ```
 
 ---
@@ -2196,15 +2503,28 @@ git commit -m "test(llm): add pooled execution integration test"
 
 | Task | Component | Purpose |
 |------|-----------|---------|
-| 1-4 | `AIMDThrottle` | TCP-style congestion control |
+| 1-4 | `AIMDThrottle` | TCP-style congestion control with stats |
 | 5 | `capacity_errors` | Error classification |
-| 6 | `ReorderBuffer` | Strict output ordering |
-| 7 | `PoolConfig` | Configuration schema |
-| 8-10 | `PooledExecutor` | Parallel execution engine |
-| 11 | `OpenRouterLLMTransform` | Integration |
-| 12 | Property tests | Ordering invariant |
-| 13 | Module exports | API surface |
+| 6 | `ReorderBuffer` | Strict output ordering with timing |
+| 7 | `PoolConfig` | Configuration schema with max retry timeout |
+| 8-10 | `PooledExecutor` | Parallel execution with per-row state |
+| 11 | `OpenRouterLLMTransform` | Integration with pooled executor |
+| 12 | Property tests | Ordering invariant (Hypothesis) |
+| 13 | Module exports | Minimal public API |
 | 14 | Integration test | End-to-end validation |
+
+---
+
+## Code Review Issues Addressed
+
+| Issue | How Addressed |
+|-------|---------------|
+| No `state_id` per-row | Added `RowContext` dataclass, `execute_batch` takes list of contexts |
+| Infinite retry without timeout | Added `max_capacity_retry_seconds` config (default 1 hour) |
+| Hypothesis uses `random.shuffle` | Changed to `st.permutations()` for reproducibility |
+| Wrong class name | Fixed to `AzureLLMTransform` |
+| Exports internal classes | Only export public API in `__init__.py` |
+| Missing timing | Added `submit_timestamp`, `complete_timestamp`, `buffer_wait_ms` to `BufferEntry` |
 
 ---
 

@@ -577,7 +577,7 @@ Legend:
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| AUD-001 | 🆕 Every token reaches exactly one terminal state | Bug analysis | ⚠️ AT RISK | EXPANDED/BUFFERED/COALESCED need audit |
+| AUD-001 | 🆕 Every token reaches exactly one terminal state | Bug analysis | ✅ IMPLEMENTED | `token_outcomes` table with partial unique index; 17 recording sites in processor.py |
 | AUD-002 | 🆕 Explicit routing events (no inference from absence) | Bug analysis | ⚠️ PARTIAL | `continue` inferred; should be explicit |
 | AUD-003 | 🆕 Batch trigger type recorded | Bug analysis | ⚠️ PARTIAL | Column exists but unused |
 | AUD-004 | 🆕 Validation errors include node_id | Bug analysis | ⚠️ PARTIAL | node_id often NULL |

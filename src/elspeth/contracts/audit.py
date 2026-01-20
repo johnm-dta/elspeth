@@ -20,6 +20,7 @@ from elspeth.contracts.enums import (
     NodeStateStatus,
     NodeType,
     RoutingMode,
+    RowOutcome,
     RunStatus,
 )
 
@@ -391,3 +392,28 @@ class TransformErrorRecord:
     created_at: datetime
     row_data_json: str | None = None
     error_details_json: str | None = None
+
+
+@dataclass(frozen=True)
+class TokenOutcome:
+    """Recorded terminal state for a token.
+
+    Captures the moment a token reached its terminal (or buffered) state.
+    Part of AUD-001 audit integrity - explicit rather than derived.
+    """
+
+    outcome_id: str
+    run_id: str
+    token_id: str
+    outcome: RowOutcome  # Direct type, not forward reference
+    is_terminal: bool
+    recorded_at: datetime
+
+    # Outcome-specific fields (nullable based on outcome type)
+    sink_name: str | None = None
+    batch_id: str | None = None
+    fork_group_id: str | None = None
+    join_group_id: str | None = None
+    expand_group_id: str | None = None
+    error_hash: str | None = None
+    context_json: str | None = None

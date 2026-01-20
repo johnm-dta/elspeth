@@ -370,3 +370,46 @@ class TestAuditedHTTPClient:
 
         call_kwargs = recorder.record_call.call_args[1]
         assert call_kwargs["request_data"]["json"] is None
+
+    def test_sensitive_response_headers_filtered(self) -> None:
+        """Sensitive response headers (cookies, auth) are filtered from audit trail."""
+        recorder = self._create_mock_recorder()
+
+        client = AuditedHTTPClient(
+            recorder=recorder,
+            state_id="state_123",
+        )
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = httpx.Headers(
+            {
+                "content-type": "application/json",
+                "x-request-id": "req-456",
+                "set-cookie": "session=secret-session-token; HttpOnly",
+                "www-authenticate": "Bearer realm=api",
+                "x-auth-token": "sensitive-token-value",
+            }
+        )
+        mock_response.content = b"{}"
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value = mock_client
+
+            client.post("https://api.example.com/v1/process")
+
+        call_kwargs = recorder.record_call.call_args[1]
+        response_headers = call_kwargs["response_data"]["headers"]
+
+        # Sensitive headers should NOT be recorded
+        assert "set-cookie" not in response_headers
+        assert "www-authenticate" not in response_headers
+        assert "x-auth-token" not in response_headers
+
+        # Non-sensitive headers SHOULD be recorded
+        assert response_headers["content-type"] == "application/json"
+        assert response_headers["x-request-id"] == "req-456"

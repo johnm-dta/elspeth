@@ -60,8 +60,16 @@ class AuditedHTTPClient(AuditedClientBase):
         self._base_url = base_url
         self._default_headers = headers or {}
 
-    def _filter_sensitive_headers(self, headers: dict[str, str]) -> dict[str, str]:
-        """Filter out sensitive headers from audit recording.
+    # Headers that may contain secrets - excluded from audit trail
+    _SENSITIVE_REQUEST_HEADERS = frozenset(
+        {"authorization", "x-api-key", "api-key", "x-auth-token", "proxy-authorization"}
+    )
+    _SENSITIVE_RESPONSE_HEADERS = frozenset(
+        {"set-cookie", "www-authenticate", "proxy-authenticate", "x-auth-token"}
+    )
+
+    def _filter_request_headers(self, headers: dict[str, str]) -> dict[str, str]:
+        """Filter out sensitive request headers from audit recording.
 
         Auth headers are not recorded to avoid storing secrets.
 
@@ -69,12 +77,38 @@ class AuditedHTTPClient(AuditedClientBase):
             headers: Full headers dict
 
         Returns:
-            Headers dict with auth-related headers removed
+            Headers dict with sensitive headers removed
         """
         return {
             k: v
             for k, v in headers.items()
-            if "auth" not in k.lower() and "key" not in k.lower()
+            if k.lower() not in self._SENSITIVE_REQUEST_HEADERS
+            and "auth" not in k.lower()
+            and "key" not in k.lower()
+            and "secret" not in k.lower()
+            and "token" not in k.lower()
+        }
+
+    def _filter_response_headers(self, headers: dict[str, str]) -> dict[str, str]:
+        """Filter out sensitive response headers from audit recording.
+
+        Response headers that may contain secrets (cookies, auth challenges)
+        are not recorded.
+
+        Args:
+            headers: Full headers dict
+
+        Returns:
+            Headers dict with sensitive headers removed
+        """
+        return {
+            k: v
+            for k, v in headers.items()
+            if k.lower() not in self._SENSITIVE_RESPONSE_HEADERS
+            and "auth" not in k.lower()
+            and "key" not in k.lower()
+            and "secret" not in k.lower()
+            and "token" not in k.lower()
         }
 
     def post(
@@ -102,12 +136,12 @@ class AuditedHTTPClient(AuditedClientBase):
         full_url = f"{self._base_url}{url}" if self._base_url else url
         merged_headers = {**self._default_headers, **(headers or {})}
 
-        # Filter auth headers from recorded request
+        # Filter sensitive headers from recorded request
         request_data = {
             "method": "POST",
             "url": full_url,
             "json": json,
-            "headers": self._filter_sensitive_headers(merged_headers),
+            "headers": self._filter_request_headers(merged_headers),
         }
 
         start = time.perf_counter()
@@ -130,7 +164,7 @@ class AuditedHTTPClient(AuditedClientBase):
                 request_data=request_data,
                 response_data={
                     "status_code": response.status_code,
-                    "headers": dict(response.headers),
+                    "headers": self._filter_response_headers(dict(response.headers)),
                     "body_size": len(response.content),
                 },
                 latency_ms=latency_ms,

@@ -643,6 +643,7 @@ all = [
 azure = [
     { name = "azure-identity" },
     { name = "azure-storage-blob" },
+    { name = "jinja2" },
 ]
 dev = [
     { name = "hypothesis" },
@@ -674,6 +675,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'llm'", specifier = ">=0.27" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.98" },
+    { name = "jinja2", marker = "extra == 'azure'", specifier = ">=3.1" },
     { name = "jinja2", marker = "extra == 'llm'", specifier = ">=3.1" },
     { name = "litellm", marker = "extra == 'llm'", specifier = ">=1.30" },
     { name = "mutmut", marker = "extra == 'dev'", specifier = ">=2.4" },

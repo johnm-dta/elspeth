@@ -139,3 +139,68 @@ def _discover_in_file(py_file: Path, base_class: type) -> list[type]:
         discovered.append(obj)
 
     return discovered
+
+
+# Import base classes for PLUGIN_SCAN_CONFIG
+# These imports are deferred to avoid circular imports at module load time
+def _get_base_classes() -> dict[str, type]:
+    """Get base classes for plugin discovery (deferred import)."""
+    from elspeth.plugins.base import BaseSink, BaseSource, BaseTransform
+
+    return {
+        "sources": BaseSource,
+        "transforms": BaseTransform,
+        "sinks": BaseSink,
+    }
+
+
+# Configuration: which directories to scan for each plugin type
+# NOTE: Non-recursive scanning - subdirectories must be listed explicitly
+#
+# IMPORTANT: Gates are NOT included here. Per docs/contracts/plugin-protocol.md,
+# gates are "config-driven system operations" handled by the engine, NOT plugins.
+# See "System Operations (NOT Plugins)" section in the plugin protocol.
+PLUGIN_SCAN_CONFIG: dict[str, list[str]] = {
+    "sources": ["sources", "azure"],
+    "transforms": ["transforms", "transforms/azure", "llm"],
+    "sinks": ["sinks", "azure"],
+}
+
+
+def discover_all_plugins() -> dict[str, list[type]]:
+    """Discover all built-in plugins by scanning configured directories.
+
+    Returns:
+        Dict mapping plugin type to list of discovered plugin classes:
+        {
+            "sources": [CSVSource, JSONSource, ...],
+            "transforms": [PassThrough, FieldMapper, ...],
+            "sinks": [CSVSink, JSONSink, ...],
+        }
+    """
+    plugins_root = Path(__file__).parent
+    base_classes = _get_base_classes()
+    result: dict[str, list[type]] = {}
+
+    for plugin_type, directories in PLUGIN_SCAN_CONFIG.items():
+        base_class = base_classes[plugin_type]
+
+        all_discovered: list[type] = []
+        seen_names: set[str] = set()
+
+        for dir_name in directories:
+            directory = plugins_root / dir_name
+            discovered = discover_plugins_in_directory(directory, base_class)
+
+            for cls in discovered:
+                # Skip duplicates (same class discovered from different logic)
+                # NOTE: cls.name is guaranteed to exist by _discover_in_file validation
+                cls_name: str = cls.name  # type: ignore[attr-defined]
+                if cls_name in seen_names:
+                    continue
+                seen_names.add(cls_name)
+                all_discovered.append(cls)
+
+        result[plugin_type] = all_discovered
+
+    return result

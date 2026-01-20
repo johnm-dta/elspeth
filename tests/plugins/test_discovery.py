@@ -60,3 +60,91 @@ class TestDiscoverPlugins:
 
         class_names = [cls.__name__ for cls in discovered]
         assert "BaseSource" not in class_names
+
+
+class TestDiscoverAllPlugins:
+    """Test discovery across all plugin directories."""
+
+    def test_discover_all_sources(self) -> None:
+        """Verify all sources are discovered including azure."""
+        from elspeth.plugins.discovery import discover_all_plugins
+
+        discovered = discover_all_plugins()
+
+        source_names = [cls.name for cls in discovered["sources"]]
+        assert "csv" in source_names
+        assert "json" in source_names
+        assert "null" in source_names
+        # Azure blob source lives in plugins/azure/
+        assert "azure_blob" in source_names
+
+    def test_discover_all_transforms(self) -> None:
+        """Verify all transforms are discovered including llm/ and transforms/azure/."""
+        from elspeth.plugins.discovery import discover_all_plugins
+
+        discovered = discover_all_plugins()
+
+        transform_names = [cls.name for cls in discovered["transforms"]]
+        assert "passthrough" in transform_names
+        assert "field_mapper" in transform_names
+        # LLM transforms live in plugins/llm/ - verify ALL are discovered
+        assert "azure_llm" in transform_names, f"Missing azure_llm in {transform_names}"
+        assert "openrouter_llm" in transform_names, f"Missing openrouter_llm in {transform_names}"
+        assert "azure_batch_llm" in transform_names, f"Missing azure_batch_llm in {transform_names}"
+        # Azure transforms live in plugins/transforms/azure/ (subdirectory!)
+        assert "azure_content_safety" in transform_names, f"Missing azure_content_safety in {transform_names}"
+        assert "azure_prompt_shield" in transform_names, f"Missing azure_prompt_shield in {transform_names}"
+
+    def test_discover_all_sinks(self) -> None:
+        """Verify all sinks are discovered including azure."""
+        from elspeth.plugins.discovery import discover_all_plugins
+
+        discovered = discover_all_plugins()
+
+        sink_names = [cls.name for cls in discovered["sinks"]]
+        assert "csv" in sink_names
+        assert "json" in sink_names
+        assert "database" in sink_names
+
+    def test_no_duplicate_names_within_type(self) -> None:
+        """Verify no duplicate plugin names within same type."""
+        from elspeth.plugins.discovery import discover_all_plugins
+
+        discovered = discover_all_plugins()
+
+        for plugin_type, plugins in discovered.items():
+            names = [cls.name for cls in plugins]
+            assert len(names) == len(set(names)), f"Duplicate names in {plugin_type}: {names}"
+
+    def test_discovery_matches_hookimpl_counts(self) -> None:
+        """Verify discovery finds same plugins as static hookimpls.
+
+        This is a MIGRATION TEST that compares discovery to the old static hookimpls.
+        It will be CONVERTED to static count assertions in Task 9 after hookimpl
+        files are deleted.
+
+        IMPORTANT: This test imports from hookimpl files. When those files are
+        deleted in Task 9, this test MUST be updated - see Task 9 Step 4.
+        """
+        from elspeth.plugins.discovery import discover_all_plugins
+        from elspeth.plugins.sinks.hookimpl import builtin_sinks
+        from elspeth.plugins.sources.hookimpl import builtin_sources
+        from elspeth.plugins.transforms.hookimpl import builtin_transforms
+
+        # Get counts from old static hookimpls
+        old_source_count = len(builtin_sources.elspeth_get_source())
+        old_transform_count = len(builtin_transforms.elspeth_get_transforms())
+        old_sink_count = len(builtin_sinks.elspeth_get_sinks())
+
+        # Get counts from new discovery
+        discovered = discover_all_plugins()
+
+        assert len(discovered["sources"]) == old_source_count, (
+            f"Source count mismatch: discovery={len(discovered['sources'])}, hookimpl={old_source_count}"
+        )
+        assert len(discovered["transforms"]) == old_transform_count, (
+            f"Transform count mismatch: discovery={len(discovered['transforms'])}, hookimpl={old_transform_count}"
+        )
+        assert len(discovered["sinks"]) == old_sink_count, (
+            f"Sink count mismatch: discovery={len(discovered['sinks'])}, hookimpl={old_sink_count}"
+        )

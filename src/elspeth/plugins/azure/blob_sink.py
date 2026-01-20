@@ -51,10 +51,11 @@ class AzureBlobSinkConfig(DataPluginConfig):
     Extends DataPluginConfig which requires schema configuration.
     Unlike file-based sinks, does not extend PathConfig (no local file path).
 
-    Supports three authentication methods (mutually exclusive):
+    Supports four authentication methods (mutually exclusive):
     1. connection_string - Simple connection string auth (default)
-    2. use_managed_identity + account_url - Azure Managed Identity
-    3. tenant_id + client_id + client_secret + account_url - Service Principal
+    2. sas_token + account_url - Shared Access Signature token
+    3. use_managed_identity + account_url - Azure Managed Identity
+    4. tenant_id + client_id + client_secret + account_url - Service Principal
 
     Example configurations:
 
@@ -63,13 +64,19 @@ class AzureBlobSinkConfig(DataPluginConfig):
         container: "my-container"
         blob_path: "results/{{ run_id }}/output.csv"
 
-        # Option 2: Managed Identity (for Azure-hosted workloads)
+        # Option 2: SAS token
+        sas_token: "${AZURE_STORAGE_SAS_TOKEN}"
+        account_url: "https://mystorageaccount.blob.core.windows.net"
+        container: "my-container"
+        blob_path: "results/{{ run_id }}/output.csv"
+
+        # Option 3: Managed Identity (for Azure-hosted workloads)
         use_managed_identity: true
         account_url: "https://mystorageaccount.blob.core.windows.net"
         container: "my-container"
         blob_path: "results/{{ run_id }}/output.csv"
 
-        # Option 3: Service Principal
+        # Option 4: Service Principal
         tenant_id: "${AZURE_TENANT_ID}"
         client_id: "${AZURE_CLIENT_ID}"
         client_secret: "${AZURE_CLIENT_SECRET}"
@@ -84,7 +91,13 @@ class AzureBlobSinkConfig(DataPluginConfig):
         description="Azure Storage connection string",
     )
 
-    # Auth Option 2: Managed Identity
+    # Auth Option 2: SAS token
+    sas_token: str | None = Field(
+        default=None,
+        description="Azure Storage SAS token (with or without leading '?')",
+    )
+
+    # Auth Option 3: Managed Identity
     use_managed_identity: bool = Field(
         default=False,
         description="Use Azure Managed Identity for authentication",
@@ -94,7 +107,7 @@ class AzureBlobSinkConfig(DataPluginConfig):
         description="Azure Storage account URL (e.g., https://mystorageaccount.blob.core.windows.net)",
     )
 
-    # Auth Option 3: Service Principal
+    # Auth Option 4: Service Principal
     tenant_id: str | None = Field(
         default=None,
         description="Azure AD tenant ID for Service Principal auth",
@@ -141,6 +154,7 @@ class AzureBlobSinkConfig(DataPluginConfig):
         # This will raise ValueError with descriptive messages if invalid
         AzureAuthConfig(
             connection_string=self.connection_string,
+            sas_token=self.sas_token,
             use_managed_identity=self.use_managed_identity,
             account_url=self.account_url,
             tenant_id=self.tenant_id,
@@ -157,6 +171,7 @@ class AzureBlobSinkConfig(DataPluginConfig):
         """
         return AzureAuthConfig(
             connection_string=self.connection_string,
+            sas_token=self.sas_token,
             use_managed_identity=self.use_managed_identity,
             account_url=self.account_url,
             tenant_id=self.tenant_id,
@@ -179,6 +194,10 @@ class AzureBlobSinkConfig(DataPluginConfig):
         if not v or not v.strip():
             raise ValueError("blob_path cannot be empty")
         return v
+
+
+# Rebuild model to resolve forward references for dynamic module loading
+AzureBlobSinkConfig.model_rebuild()
 
 
 class AzureBlobSink(BaseSink):

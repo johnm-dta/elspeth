@@ -87,6 +87,9 @@ class AzurePromptShield(BaseTransform):
         self.input_schema = schema
         self.output_schema = schema
 
+        # Create own HTTP client (following OpenRouter pattern)
+        self._http_client: httpx.Client | None = None
+
     def process(
         self,
         row: dict[str, Any],
@@ -151,6 +154,12 @@ class AzurePromptShield(BaseTransform):
         else:
             return self._fields
 
+    def _get_http_client(self) -> httpx.Client:
+        """Get or create HTTP client for API calls."""
+        if self._http_client is None:
+            self._http_client = httpx.Client(timeout=30.0)
+        return self._http_client
+
     def _analyze_prompt(
         self,
         text: str,
@@ -162,14 +171,11 @@ class AzurePromptShield(BaseTransform):
             user_prompt_attack: True if jailbreak detected in user prompt
             document_attack: True if prompt injection detected in any document
         """
-        if ctx.http_client is None:
-            raise RuntimeError(
-                "AzurePromptShield requires http_client in PluginContext"
-            )
+        client = self._get_http_client()
 
         url = f"{self._endpoint}/contentsafety/text:shieldPrompt?api-version={self.API_VERSION}"
 
-        response = ctx.http_client.post(
+        response = client.post(
             url,
             json={
                 "userPrompt": text,
@@ -201,4 +207,6 @@ class AzurePromptShield(BaseTransform):
 
     def close(self) -> None:
         """Release resources."""
-        pass
+        if self._http_client is not None:
+            self._http_client.close()
+            self._http_client = None

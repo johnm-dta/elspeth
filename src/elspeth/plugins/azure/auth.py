@@ -1,14 +1,15 @@
 # src/elspeth/plugins/azure/auth.py
 """Azure authentication configuration for ELSPETH Azure plugins.
 
-Supports three authentication methods (mutually exclusive):
+Supports four authentication methods (mutually exclusive):
 1. Connection string - Simple connection string auth (default)
-2. Managed Identity - For Azure-hosted workloads
-3. Service Principal - For automated/CI scenarios
+2. SAS token - Shared Access Signature token with account_url
+3. Managed Identity - For Azure-hosted workloads
+4. Service Principal - For automated/CI scenarios
 
-IMPORTANT: This module handles external system credentials. Connection strings
-and service principal secrets should be passed via environment variables, not
-hardcoded in configuration files.
+IMPORTANT: This module handles external system credentials. Connection strings,
+SAS tokens, and service principal secrets should be passed via environment
+variables, not hardcoded in configuration files.
 """
 
 from __future__ import annotations
@@ -24,21 +25,26 @@ if TYPE_CHECKING:
 class AzureAuthConfig(BaseModel):
     """Azure authentication configuration.
 
-    Supports three methods (mutually exclusive):
+    Supports four methods (mutually exclusive):
     1. connection_string - Simple connection string auth
-    2. use_managed_identity + account_url - Azure Managed Identity
-    3. tenant_id + client_id + client_secret + account_url - Service Principal
+    2. sas_token + account_url - Shared Access Signature token
+    3. use_managed_identity + account_url - Azure Managed Identity
+    4. tenant_id + client_id + client_secret + account_url - Service Principal
 
     Example configurations:
 
         # Option 1: Connection string (simplest)
         connection_string: "${AZURE_STORAGE_CONNECTION_STRING}"
 
-        # Option 2: Managed Identity (for Azure-hosted workloads)
+        # Option 2: SAS token
+        sas_token: "${AZURE_STORAGE_SAS_TOKEN}"
+        account_url: "https://mystorageaccount.blob.core.windows.net"
+
+        # Option 3: Managed Identity (for Azure-hosted workloads)
         use_managed_identity: true
         account_url: "https://mystorageaccount.blob.core.windows.net"
 
-        # Option 3: Service Principal
+        # Option 4: Service Principal
         tenant_id: "${AZURE_TENANT_ID}"
         client_id: "${AZURE_CLIENT_ID}"
         client_secret: "${AZURE_CLIENT_SECRET}"
@@ -50,11 +56,14 @@ class AzureAuthConfig(BaseModel):
     # Option 1: Connection string
     connection_string: str | None = None
 
-    # Option 2: Managed Identity
+    # Option 2: SAS token
+    sas_token: str | None = None
+
+    # Option 3: Managed Identity
     use_managed_identity: bool = False
     account_url: str | None = None
 
-    # Option 3: Service Principal
+    # Option 4: Service Principal
     tenant_id: str | None = None
     client_id: str | None = None
     client_secret: str | None = None
@@ -63,9 +72,10 @@ class AzureAuthConfig(BaseModel):
     def validate_auth_method(self) -> Self:
         """Ensure exactly one auth method is configured.
 
-        Validates that exactly one of the three authentication methods is
+        Validates that exactly one of the four authentication methods is
         properly configured:
         - Connection string requires connection_string field
+        - SAS token requires sas_token AND account_url
         - Managed Identity requires use_managed_identity=True AND account_url
         - Service Principal requires all of: tenant_id, client_id, client_secret, account_url
 
@@ -73,6 +83,7 @@ class AzureAuthConfig(BaseModel):
             ValueError: If zero or multiple auth methods are configured.
         """
         has_conn_string = self.connection_string is not None and bool(self.connection_string.strip())
+        has_sas_token = self.sas_token is not None and bool(self.sas_token.strip()) and self.account_url is not None
         has_managed_identity = self.use_managed_identity and self.account_url is not None
         has_service_principal = all(
             [
@@ -83,13 +94,14 @@ class AzureAuthConfig(BaseModel):
             ]
         )
 
-        methods = [has_conn_string, has_managed_identity, has_service_principal]
+        methods = [has_conn_string, has_sas_token, has_managed_identity, has_service_principal]
         active_count = sum(methods)
 
         if active_count == 0:
             raise ValueError(
                 "No authentication method configured. Provide one of: "
                 "connection_string, "
+                "sas_token + account_url, "
                 "managed identity (use_managed_identity + account_url), or "
                 "service principal (tenant_id + client_id + client_secret + account_url)"
             )
@@ -98,17 +110,21 @@ class AzureAuthConfig(BaseModel):
             raise ValueError(
                 "Multiple authentication methods configured. Provide exactly one of: "
                 "connection_string, "
+                "sas_token + account_url, "
                 "managed identity (use_managed_identity + account_url), or "
                 "service principal (tenant_id + client_id + client_secret + account_url)"
             )
 
         # Additional validation for partial configurations
+        if self.sas_token and not self.account_url:
+            raise ValueError("SAS token auth requires account_url. Example: https://mystorageaccount.blob.core.windows.net")
+
         if self.use_managed_identity and not self.account_url:
             raise ValueError("Managed Identity auth requires account_url. Example: https://mystorageaccount.blob.core.windows.net")
 
         sp_fields = [self.tenant_id, self.client_id, self.client_secret]
         sp_field_count = sum(1 for f in sp_fields if f is not None)
-        if 0 < sp_field_count < 3 and not has_conn_string and not has_managed_identity:
+        if 0 < sp_field_count < 3 and not has_conn_string and not has_sas_token and not has_managed_identity:
             missing = []
             if self.tenant_id is None:
                 missing.append("tenant_id")
@@ -138,6 +154,14 @@ class AzureAuthConfig(BaseModel):
 
         if self.connection_string:
             return BlobServiceClient.from_connection_string(self.connection_string)
+
+        elif self.sas_token:
+            # SAS token auth: append token to account URL
+            assert self.account_url is not None  # Validated by model_validator
+            # Ensure SAS token starts with '?' for URL concatenation
+            sas = self.sas_token if self.sas_token.startswith("?") else f"?{self.sas_token}"
+            sas_url = f"{self.account_url.rstrip('/')}{sas}"
+            return BlobServiceClient(sas_url)
 
         elif self.use_managed_identity:
             try:
@@ -178,10 +202,12 @@ class AzureAuthConfig(BaseModel):
         """Return the active authentication method name.
 
         Returns:
-            One of: 'connection_string', 'managed_identity', 'service_principal'
+            One of: 'connection_string', 'sas_token', 'managed_identity', 'service_principal'
         """
         if self.connection_string:
             return "connection_string"
+        elif self.sas_token:
+            return "sas_token"
         elif self.use_managed_identity:
             return "managed_identity"
         else:

@@ -112,6 +112,9 @@ class AzureContentSafety(BaseTransform):
         self.input_schema = schema
         self.output_schema = schema
 
+        # Create own HTTP client (following OpenRouter pattern)
+        self._http_client: httpx.Client | None = None
+
     def process(
         self,
         row: dict[str, Any],
@@ -177,18 +180,23 @@ class AzureContentSafety(BaseTransform):
         else:
             return self._fields
 
+    def _get_http_client(self) -> httpx.Client:
+        """Get or create HTTP client for API calls."""
+        if self._http_client is None:
+            self._http_client = httpx.Client(timeout=30.0)
+        return self._http_client
+
     def _analyze_content(
         self,
         text: str,
         ctx: PluginContext,
     ) -> dict[str, int]:
         """Call Azure Content Safety API."""
-        if ctx.http_client is None:
-            raise RuntimeError("AzureContentSafety requires http_client in PluginContext")
+        client = self._get_http_client()
 
         url = f"{self._endpoint}/contentsafety/text:analyze?api-version={self.API_VERSION}"
 
-        response = ctx.http_client.post(
+        response = client.post(
             url,
             json={"text": text},
             headers={
@@ -248,4 +256,6 @@ class AzureContentSafety(BaseTransform):
 
     def close(self) -> None:
         """Release resources."""
-        pass
+        if self._http_client is not None:
+            self._http_client.close()
+            self._http_client = None

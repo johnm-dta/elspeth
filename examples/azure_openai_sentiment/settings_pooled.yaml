@@ -1,0 +1,70 @@
+# ELSPETH Azure OpenAI Sentiment Analysis Example - POOLED EXECUTION
+#
+# This is a multi-threaded variant of the sentiment analysis pipeline.
+# It processes multiple rows concurrently using pooled execution with
+# AIMD (Additive Increase, Multiplicative Decrease) throttling.
+#
+# Prerequisites:
+#   export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com"
+#   export AZURE_OPENAI_KEY="your-api-key-here"
+#   export AZURE_OPENAI_DEPLOYMENT="your-gpt-deployment-name"
+#
+# Run with:
+#   uv run elspeth run -s examples/azure_openai_sentiment/settings_pooled.yaml --execute
+#
+# Key differences from settings.yaml:
+#   - pool_size: 3 (processes 3 rows concurrently)
+#   - AIMD throttling automatically backs off on rate limits
+#   - Results maintain submission order despite concurrent processing
+
+datasource:
+  plugin: csv
+  options:
+    path: examples/azure_openai_sentiment/input.csv
+    schema:
+      mode: free
+      fields:
+        - "id: int"
+        - "text: str"
+    on_validation_failure: discard
+
+row_plugins:
+  - plugin: azure_llm
+    options:
+      deployment_name: "${AZURE_OPENAI_DEPLOYMENT}"
+      endpoint: "${AZURE_OPENAI_ENDPOINT}"
+      api_key: "${AZURE_OPENAI_KEY}"
+      api_version: "${AZURE_OPENAI_API_VERSION}"
+      template: |
+        Analyze the sentiment of the following text and respond with ONLY a JSON object.
+
+        Text: {{ row.text }}
+
+        Respond with exactly this format (no other text):
+        {"sentiment": "positive" or "negative" or "neutral", "confidence": 0.0-1.0, "summary": "brief explanation"}
+      temperature: 0.0  # Deterministic for consistent results
+      response_field: sentiment_analysis
+      schema:
+        fields: dynamic
+
+      # === POOLED EXECUTION CONFIG ===
+      # Process multiple rows concurrently with automatic rate limiting
+      pool_size: 3  # Number of concurrent workers (1 = sequential, >1 = pooled)
+
+      # AIMD throttling options (optional - these are defaults)
+      # max_dispatch_delay_ms: 5000      # Maximum backoff delay (5 seconds)
+      # max_capacity_retry_seconds: 60   # Timeout for retrying rate-limited requests
+
+sinks:
+  output:
+    plugin: csv
+    options:
+      path: examples/azure_openai_sentiment/output/results_pooled.csv
+      schema:
+        fields: dynamic
+
+output_sink: output
+
+# Audit trail stored in runs/
+landscape:
+  url: sqlite:///examples/azure_openai_sentiment/runs/audit_pooled.db

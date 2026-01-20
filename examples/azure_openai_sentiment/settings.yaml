@@ -1,0 +1,56 @@
+# ELSPETH Azure OpenAI Sentiment Analysis Example
+#
+# This pipeline reads text from a CSV, analyzes sentiment using Azure OpenAI,
+# and outputs the results with sentiment scores.
+#
+# Prerequisites:
+#   export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com"
+#   export AZURE_OPENAI_KEY="your-api-key-here"
+#   export AZURE_OPENAI_DEPLOYMENT="your-gpt-deployment-name"
+#
+# Run with:
+#   uv run elspeth run -s examples/azure_openai_sentiment/settings.yaml --execute
+
+datasource:
+  plugin: csv
+  options:
+    path: examples/azure_openai_sentiment/input.csv
+    schema:
+      mode: free
+      fields:
+        - "id: int"
+        - "text: str"
+    on_validation_failure: discard
+
+row_plugins:
+  - plugin: azure_llm
+    options:
+      deployment_name: "${AZURE_OPENAI_DEPLOYMENT}"
+      endpoint: "${AZURE_OPENAI_ENDPOINT}"
+      api_key: "${AZURE_OPENAI_KEY}"
+      api_version: "${AZURE_OPENAI_API_VERSION}"
+      template: |
+        Analyze the sentiment of the following text and respond with ONLY a JSON object.
+
+        Text: {{ row.text }}
+
+        Respond with exactly this format (no other text):
+        {"sentiment": "positive" or "negative" or "neutral", "confidence": 0.0-1.0, "summary": "brief explanation"}
+      temperature: 0.0  # Deterministic for consistent results
+      response_field: sentiment_analysis
+      schema:
+        fields: dynamic
+
+sinks:
+  output:
+    plugin: csv
+    options:
+      path: examples/azure_openai_sentiment/output/results.csv
+      schema:
+        fields: dynamic
+
+output_sink: output
+
+# Audit trail stored in runs/
+landscape:
+  url: sqlite:///examples/azure_openai_sentiment/runs/audit.db

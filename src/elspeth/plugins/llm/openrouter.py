@@ -119,8 +119,48 @@ class OpenRouterLLMTransform(BaseTransform):
         """Capture recorder reference for pooled execution."""
         self._recorder = ctx.landscape
 
-    def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
-        """Process row via OpenRouter API using audited HTTP client.
+    def _process_batch(
+        self,
+        rows: list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Process batch of rows with parallel execution.
+
+        Called when is_batch_aware=True and an aggregation emits a batch.
+        Uses pooled executor for concurrent API calls with rate limiting.
+
+        Args:
+            rows: List of row dicts to process
+            ctx: Plugin context with landscape and state_id
+
+        Returns:
+            TransformResult with batch results or error
+
+        Note:
+            Stub implementation - full parallel execution in Task 4.
+        """
+        # Handle empty batch edge case
+        if not rows:
+            return TransformResult.success({"batch_empty": True, "row_count": 0})
+
+        # Temporary: return error until Task 4 implements parallel execution
+        return TransformResult.error(
+            {
+                "reason": "batch_not_implemented",
+                "message": "Batch processing will be implemented in Task 4",
+                "row_count": len(rows),
+            }
+        )
+
+    def process(
+        self,
+        row: dict[str, Any] | list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Process row(s) via OpenRouter API using audited HTTP client.
+
+        When is_batch_aware=True and used in aggregation, receives list[dict].
+        Otherwise receives single dict.
 
         Routes to pooled or sequential execution based on pool_size config.
 
@@ -128,8 +168,21 @@ class OpenRouterLLMTransform(BaseTransform):
         1. Template rendering (THEIR DATA) - wrap, return error
         2. HTTP API call (EXTERNAL) - wrap, return error
         3. Response parsing (OUR CODE) - let crash if malformed
+
+        Args:
+            row: Single row dict OR list of row dicts (batch aggregation)
+            ctx: Plugin context with landscape and state_id
+
+        Returns:
+            TransformResult with processed row(s) or error
         """
-        # Route to pooled execution if configured
+        # Dispatch to batch processing if given a list
+        # NOTE: This isinstance check is legitimate polymorphic dispatch for
+        # batch-aware transforms, not defensive programming to hide bugs.
+        if isinstance(row, list):
+            return self._process_batch(row, ctx)
+
+        # Route to pooled execution if configured (single row)
         if self._executor is not None:
             if ctx.landscape is None or ctx.state_id is None:
                 raise RuntimeError(

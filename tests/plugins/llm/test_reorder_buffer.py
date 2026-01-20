@@ -6,7 +6,7 @@ import time
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from elspeth.plugins.llm.reorder_buffer import ReorderBuffer
+from elspeth.plugins.pooling.reorder_buffer import ReorderBuffer
 
 
 class TestReorderBufferBasic:

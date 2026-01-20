@@ -1,30 +1,52 @@
 """Tests for AzureContentSafety transform."""
 
 from typing import TYPE_CHECKING, Any
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
 from elspeth.plugins.config_base import PluginConfigError
 
 if TYPE_CHECKING:
-    pass
+    from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
 
-def make_mock_context(http_response: dict[str, Any] | None = None) -> Mock:
-    """Create mock PluginContext with HTTP client."""
+def make_mock_context() -> Mock:
+    """Create mock PluginContext."""
     from elspeth.plugins.context import PluginContext
 
     ctx = Mock(spec=PluginContext, run_id="test-run")
-
-    if http_response is not None:
-        response_mock = Mock()
-        response_mock.status_code = 200
-        response_mock.json.return_value = http_response
-        response_mock.raise_for_status = Mock()
-        ctx.http_client.post.return_value = response_mock
-
+    ctx.state_id = "test-state-id"
+    ctx.landscape = Mock()
     return ctx
+
+
+def make_content_safety_with_mock_response(
+    config: dict[str, Any],
+    response_data: dict[str, Any],
+) -> tuple["AzureContentSafety", MagicMock]:
+    """Create Content Safety transform with mocked HTTP client.
+
+    Returns the transform and the mock client for assertions.
+    """
+    from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+    transform = AzureContentSafety(config)
+
+    # Create mock response
+    response_mock = MagicMock()
+    response_mock.status_code = 200
+    response_mock.json.return_value = response_data
+    response_mock.raise_for_status = MagicMock()
+
+    # Create mock client
+    mock_client = MagicMock()
+    mock_client.post.return_value = response_mock
+
+    # Inject mock client directly (bypassing _get_http_client)
+    transform._http_client = mock_client
+
+    return transform, mock_client
 
 
 class TestAzureContentSafetyConfig:
@@ -305,19 +327,14 @@ class TestAzureContentSafetyTransform:
 
     def test_content_below_threshold_passes(self) -> None:
         """Content with severity below thresholds passes through."""
-        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
-
-        transform = AzureContentSafety(
+        transform, _mock_client = make_content_safety_with_mock_response(
             {
                 "endpoint": "https://test.cognitiveservices.azure.com",
                 "api_key": "test-key",
                 "fields": ["content"],
                 "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
                 "schema": {"fields": "dynamic"},
-            }
-        )
-
-        ctx = make_mock_context(
+            },
             {
                 "categoriesAnalysis": [
                     {"category": "Hate", "severity": 0},
@@ -325,9 +342,10 @@ class TestAzureContentSafetyTransform:
                     {"category": "Sexual", "severity": 0},
                     {"category": "SelfHarm", "severity": 0},
                 ]
-            }
+            },
         )
 
+        ctx = make_mock_context()
         row = {"content": "Hello world", "id": 1}
         result = transform.process(row, ctx)
 
@@ -336,19 +354,14 @@ class TestAzureContentSafetyTransform:
 
     def test_content_exceeding_threshold_returns_error(self) -> None:
         """Content exceeding any threshold returns error."""
-        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
-
-        transform = AzureContentSafety(
+        transform, _mock_client = make_content_safety_with_mock_response(
             {
                 "endpoint": "https://test.cognitiveservices.azure.com",
                 "api_key": "test-key",
                 "fields": ["content"],
                 "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
                 "schema": {"fields": "dynamic"},
-            }
-        )
-
-        ctx = make_mock_context(
+            },
             {
                 "categoriesAnalysis": [
                     {"category": "Hate", "severity": 4},  # Exceeds threshold of 2
@@ -356,9 +369,10 @@ class TestAzureContentSafetyTransform:
                     {"category": "Sexual", "severity": 0},
                     {"category": "SelfHarm", "severity": 0},
                 ]
-            }
+            },
         )
 
+        ctx = make_mock_context()
         row = {"content": "Some hateful content", "id": 1}
         result = transform.process(row, ctx)
 
@@ -384,13 +398,16 @@ class TestAzureContentSafetyTransform:
             }
         )
 
-        ctx = make_mock_context()
-        ctx.http_client.post.side_effect = httpx.HTTPStatusError(
+        # Create mock client that raises HTTPStatusError
+        mock_client = MagicMock()
+        mock_client.post.side_effect = httpx.HTTPStatusError(
             "Rate limited",
             request=Mock(),
             response=Mock(status_code=429),
         )
+        transform._http_client = mock_client
 
+        ctx = make_mock_context()
         row = {"content": "test", "id": 1}
         result = transform.process(row, ctx)
 
@@ -415,9 +432,12 @@ class TestAzureContentSafetyTransform:
             }
         )
 
-        ctx = make_mock_context()
-        ctx.http_client.post.side_effect = httpx.RequestError("Connection failed")
+        # Create mock client that raises RequestError
+        mock_client = MagicMock()
+        mock_client.post.side_effect = httpx.RequestError("Connection failed")
+        transform._http_client = mock_client
 
+        ctx = make_mock_context()
         row = {"content": "test", "id": 1}
         result = transform.process(row, ctx)
 
@@ -429,19 +449,14 @@ class TestAzureContentSafetyTransform:
 
     def test_skips_missing_configured_field(self) -> None:
         """Transform skips fields not present in the row."""
-        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
-
-        transform = AzureContentSafety(
+        transform, _mock_client = make_content_safety_with_mock_response(
             {
                 "endpoint": "https://test.cognitiveservices.azure.com",
                 "api_key": "test-key",
                 "fields": ["content", "optional_field"],
                 "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
                 "schema": {"fields": "dynamic"},
-            }
-        )
-
-        ctx = make_mock_context(
+            },
             {
                 "categoriesAnalysis": [
                     {"category": "Hate", "severity": 0},
@@ -449,9 +464,10 @@ class TestAzureContentSafetyTransform:
                     {"category": "Sexual", "severity": 0},
                     {"category": "SelfHarm", "severity": 0},
                 ]
-            }
+            },
         )
 
+        ctx = make_mock_context()
         # Row is missing "optional_field"
         row = {"content": "safe data", "id": 1}
         result = transform.process(row, ctx)
@@ -464,21 +480,19 @@ class TestAzureContentSafetyTransform:
         Azure API responses are external data (Tier 3: Zero Trust) and may
         return unexpected structures. This should be handled gracefully.
         """
-        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
-
-        transform = AzureContentSafety(
+        # Mock a malformed response (missing categoriesAnalysis)
+        transform, _mock_client = make_content_safety_with_mock_response(
             {
                 "endpoint": "https://test.cognitiveservices.azure.com",
                 "api_key": "test-key",
                 "fields": ["content"],
                 "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
                 "schema": {"fields": "dynamic"},
-            }
+            },
+            {"unexpectedField": "value"},
         )
 
-        # Mock a malformed response (missing categoriesAnalysis)
-        ctx = make_mock_context({"unexpectedField": "value"})
-
+        ctx = make_mock_context()
         row = {"content": "test", "id": 1}
         result = transform.process(row, ctx)
 
@@ -494,27 +508,23 @@ class TestAzureContentSafetyTransform:
 
         Each category item must have 'category' and 'severity' fields.
         """
-        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
-
-        transform = AzureContentSafety(
+        # Mock a response with malformed category items (missing severity)
+        transform, _mock_client = make_content_safety_with_mock_response(
             {
                 "endpoint": "https://test.cognitiveservices.azure.com",
                 "api_key": "test-key",
                 "fields": ["content"],
                 "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
                 "schema": {"fields": "dynamic"},
-            }
-        )
-
-        # Mock a response with malformed category items (missing severity)
-        ctx = make_mock_context(
+            },
             {
                 "categoriesAnalysis": [
                     {"category": "Hate"},  # Missing "severity"
                 ]
-            }
+            },
         )
 
+        ctx = make_mock_context()
         row = {"content": "test", "id": 1}
         result = transform.process(row, ctx)
 
@@ -529,28 +539,24 @@ class TestAzureContentSafetyTransform:
         If Azure returns fewer categories than expected, missing ones
         are treated as having severity 0 to avoid false positives.
         """
-        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
-
-        transform = AzureContentSafety(
+        # Mock a response with only some categories
+        transform, _mock_client = make_content_safety_with_mock_response(
             {
                 "endpoint": "https://test.cognitiveservices.azure.com",
                 "api_key": "test-key",
                 "fields": ["content"],
                 "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
                 "schema": {"fields": "dynamic"},
-            }
-        )
-
-        # Mock a response with only some categories
-        ctx = make_mock_context(
+            },
             {
                 "categoriesAnalysis": [
                     {"category": "Hate", "severity": 0},
                     # Missing Violence, Sexual, SelfHarm
                 ]
-            }
+            },
         )
 
+        ctx = make_mock_context()
         row = {"content": "test", "id": 1}
         result = transform.process(row, ctx)
 
@@ -563,20 +569,15 @@ class TestAzureContentSafetyTransform:
         Per design doc: threshold=0 means "block severity > 0" not "block all".
         This is the edge case where >= would incorrectly block safe content.
         """
-        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
-
-        transform = AzureContentSafety(
+        # Azure returns all safe (severity 0)
+        transform, _mock_client = make_content_safety_with_mock_response(
             {
                 "endpoint": "https://test.cognitiveservices.azure.com",
                 "api_key": "test-key",
                 "fields": ["content"],
                 "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
                 "schema": {"fields": "dynamic"},
-            }
-        )
-
-        # Azure returns all safe (severity 0)
-        ctx = make_mock_context(
+            },
             {
                 "categoriesAnalysis": [
                     {"category": "Hate", "severity": 0},
@@ -584,9 +585,10 @@ class TestAzureContentSafetyTransform:
                     {"category": "Sexual", "severity": 0},
                     {"category": "SelfHarm", "severity": 0},
                 ]
-            }
+            },
         )
 
+        ctx = make_mock_context()
         row = {"content": "completely safe content", "id": 1}
         result = transform.process(row, ctx)
 
@@ -596,20 +598,15 @@ class TestAzureContentSafetyTransform:
 
     def test_threshold_zero_blocks_severity_one(self) -> None:
         """Threshold=0 should block content with severity >= 1."""
-        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
-
-        transform = AzureContentSafety(
+        # Azure returns self_harm severity 1 (above threshold 0)
+        transform, _mock_client = make_content_safety_with_mock_response(
             {
                 "endpoint": "https://test.cognitiveservices.azure.com",
                 "api_key": "test-key",
                 "fields": ["content"],
                 "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
                 "schema": {"fields": "dynamic"},
-            }
-        )
-
-        # Azure returns self_harm severity 1 (above threshold 0)
-        ctx = make_mock_context(
+            },
             {
                 "categoriesAnalysis": [
                     {"category": "Hate", "severity": 0},
@@ -617,9 +614,10 @@ class TestAzureContentSafetyTransform:
                     {"category": "Sexual", "severity": 0},
                     {"category": "SelfHarm", "severity": 1},
                 ]
-            }
+            },
         )
 
+        ctx = make_mock_context()
         row = {"content": "content with mild self-harm", "id": 1}
         result = transform.process(row, ctx)
 
@@ -627,29 +625,6 @@ class TestAzureContentSafetyTransform:
         assert result.status == "error"
         assert result.reason["reason"] == "content_safety_violation"
         assert result.reason["categories"]["self_harm"]["exceeded"] is True
-
-    def test_missing_http_client_raises_error(self) -> None:
-        """Missing http_client in context raises RuntimeError."""
-        from elspeth.plugins.context import PluginContext
-        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
-
-        transform = AzureContentSafety(
-            {
-                "endpoint": "https://test.cognitiveservices.azure.com",
-                "api_key": "test-key",
-                "fields": ["content"],
-                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
-                "schema": {"fields": "dynamic"},
-            }
-        )
-
-        ctx = Mock(spec=PluginContext, run_id="test-run")
-        ctx.http_client = None
-
-        row = {"content": "test", "id": 1}
-
-        with pytest.raises(RuntimeError, match="http_client"):
-            transform.process(row, ctx)
 
     def test_close_is_noop(self) -> None:
         """close() method is a no-op but should not raise."""
@@ -673,19 +648,14 @@ class TestAzureContentSafetyTransform:
 
     def test_api_called_with_correct_endpoint_and_headers(self) -> None:
         """API is called with correct endpoint, version, and headers."""
-        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
-
-        transform = AzureContentSafety(
+        transform, mock_client = make_content_safety_with_mock_response(
             {
                 "endpoint": "https://test.cognitiveservices.azure.com/",  # With trailing slash
                 "api_key": "my-secret-key",
                 "fields": ["content"],
                 "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
                 "schema": {"fields": "dynamic"},
-            }
-        )
-
-        ctx = make_mock_context(
+            },
             {
                 "categoriesAnalysis": [
                     {"category": "Hate", "severity": 0},
@@ -693,15 +663,16 @@ class TestAzureContentSafetyTransform:
                     {"category": "Sexual", "severity": 0},
                     {"category": "SelfHarm", "severity": 0},
                 ]
-            }
+            },
         )
 
+        ctx = make_mock_context()
         row = {"content": "test text", "id": 1}
         transform.process(row, ctx)
 
         # Verify API was called correctly
-        ctx.http_client.post.assert_called_once()
-        call_args = ctx.http_client.post.call_args
+        mock_client.post.assert_called_once()
+        call_args = mock_client.post.call_args
 
         # Check URL (trailing slash should be stripped)
         expected_url = "https://test.cognitiveservices.azure.com/contentsafety/text:analyze?api-version=2024-09-01"
@@ -715,3 +686,270 @@ class TestAzureContentSafetyTransform:
         # Check request body
         json_body = call_args[1]["json"]
         assert json_body == {"text": "test text"}
+
+
+class TestContentSafetyPoolConfig:
+    """Tests for Content Safety pool configuration."""
+
+    def test_pool_size_default_is_one(self) -> None:
+        """Default pool_size is 1 (sequential)."""
+        from elspeth.plugins.transforms.azure.content_safety import (
+            AzureContentSafetyConfig,
+        )
+
+        cfg = AzureContentSafetyConfig.from_dict(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        assert cfg.pool_size == 1
+
+    def test_pool_size_configurable(self) -> None:
+        """pool_size can be configured."""
+        from elspeth.plugins.transforms.azure.content_safety import (
+            AzureContentSafetyConfig,
+        )
+
+        cfg = AzureContentSafetyConfig.from_dict(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+                "pool_size": 5,
+            }
+        )
+
+        assert cfg.pool_size == 5
+
+    def test_pool_config_property_returns_none_when_sequential(self) -> None:
+        """pool_config returns None when pool_size=1."""
+        from elspeth.plugins.transforms.azure.content_safety import (
+            AzureContentSafetyConfig,
+        )
+
+        cfg = AzureContentSafetyConfig.from_dict(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+                "pool_size": 1,
+            }
+        )
+
+        assert cfg.pool_config is None
+
+    def test_pool_config_property_returns_config_when_pooled(self) -> None:
+        """pool_config returns PoolConfig when pool_size>1."""
+        from elspeth.plugins.transforms.azure.content_safety import (
+            AzureContentSafetyConfig,
+        )
+
+        cfg = AzureContentSafetyConfig.from_dict(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+                "pool_size": 3,
+            }
+        )
+
+        assert cfg.pool_config is not None
+        assert cfg.pool_config.pool_size == 3
+
+
+class TestContentSafetyPooledExecution:
+    """Tests for Content Safety pooled execution."""
+
+    def test_batch_aware_is_true_when_pooled(self) -> None:
+        """Transform is batch_aware when pool_size > 1."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+                "pool_size": 3,
+            }
+        )
+
+        assert transform.is_batch_aware is True
+
+    def test_batch_aware_is_false_when_sequential(self) -> None:
+        """Transform is not batch_aware when pool_size=1."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+                "pool_size": 1,
+            }
+        )
+
+        assert transform.is_batch_aware is False
+
+    def test_pooled_execution_processes_batch_concurrently(self) -> None:
+        """Pooled transform processes batch rows concurrently."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+                "pool_size": 3,
+            }
+        )
+
+        # Create mock response for safe content
+        response_mock = MagicMock()
+        response_mock.status_code = 200
+        response_mock.json.return_value = {
+            "categoriesAnalysis": [
+                {"category": "Hate", "severity": 0},
+                {"category": "Violence", "severity": 0},
+                {"category": "Sexual", "severity": 0},
+                {"category": "SelfHarm", "severity": 0},
+            ]
+        }
+        response_mock.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.post.return_value = response_mock
+        transform._http_client = mock_client
+
+        ctx = make_mock_context()
+        rows = [
+            {"content": "Hello", "id": 1},
+            {"content": "World", "id": 2},
+            {"content": "Test", "id": 3},
+        ]
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.rows is not None
+        assert len(result.rows) == 3
+
+    def test_pooled_execution_handles_threshold_violations(self) -> None:
+        """Pooled execution correctly handles content violations."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+                "pool_size": 3,
+            }
+        )
+
+        def make_response(*args, **kwargs):
+            """Return response based on content, not call order (avoids race condition)."""
+            response = MagicMock()
+            response.status_code = 200
+            response.raise_for_status = MagicMock()
+
+            # Check the actual content being analyzed
+            request_body = kwargs.get("json", {})
+            text = request_body.get("text", "")
+
+            if "violent" in text.lower():  # Match on content, not call order
+                response.json.return_value = {
+                    "categoriesAnalysis": [
+                        {"category": "Hate", "severity": 0},
+                        {"category": "Violence", "severity": 5},  # Exceeds threshold 2
+                        {"category": "Sexual", "severity": 0},
+                        {"category": "SelfHarm", "severity": 0},
+                    ]
+                }
+            else:
+                response.json.return_value = {
+                    "categoriesAnalysis": [
+                        {"category": "Hate", "severity": 0},
+                        {"category": "Violence", "severity": 0},
+                        {"category": "Sexual", "severity": 0},
+                        {"category": "SelfHarm", "severity": 0},
+                    ]
+                }
+            return response
+
+        mock_client = MagicMock()
+        mock_client.post.side_effect = make_response
+        transform._http_client = mock_client
+
+        ctx = make_mock_context()
+        rows = [
+            {"content": "Safe content 1", "id": 1},
+            {"content": "Violent content here", "id": 2},  # This one triggers violation
+            {"content": "Safe content 3", "id": 3},
+        ]
+        result = transform.process(rows, ctx)
+
+        # Result should be success since not ALL rows failed
+        assert result.status == "success"
+        assert result.rows is not None
+        assert len(result.rows) == 3
+
+        # Row 1: success (no error field)
+        assert "_content_safety_error" not in result.rows[0]
+        # Row 2: has content safety error
+        assert "_content_safety_error" in result.rows[1]
+        assert result.rows[1]["_content_safety_error"]["reason"] == "content_safety_violation"
+        # Row 3: success (no error field)
+        assert "_content_safety_error" not in result.rows[2]
+
+    def test_pooled_rate_limit_triggers_capacity_error(self) -> None:
+        """Rate limit (429) triggers CapacityError for AIMD retry."""
+        import httpx
+
+        from elspeth.plugins.pooling import CapacityError
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+                "pool_size": 3,
+            }
+        )
+
+        # Create mock client that returns 429
+        mock_client = MagicMock()
+        mock_client.post.side_effect = httpx.HTTPStatusError(
+            "Rate limited",
+            request=Mock(),
+            response=Mock(status_code=429),
+        )
+        transform._http_client = mock_client
+
+        row = {"content": "test", "id": 1}
+
+        # _process_single_with_state should raise CapacityError for 429
+        with pytest.raises(CapacityError) as exc_info:
+            transform._process_single_with_state(row, "test-state-id")
+
+        assert exc_info.value.status_code == 429

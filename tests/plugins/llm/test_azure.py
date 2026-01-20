@@ -713,7 +713,7 @@ class TestAzureLLMTransformPooledExecution:
     def test_process_single_with_state_raises_capacity_error_on_rate_limit(self) -> None:
         """_process_single_with_state should raise CapacityError on rate limits."""
         from elspeth.plugins.clients.llm import RateLimitError
-        from elspeth.plugins.llm.capacity_errors import CapacityError
+        from elspeth.plugins.pooling import CapacityError
 
         transform = AzureLLMTransform(
             {

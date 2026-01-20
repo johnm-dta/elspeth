@@ -7,9 +7,7 @@ from threading import Lock
 from typing import Any
 
 from elspeth.contracts import TransformResult
-from elspeth.plugins.llm.base import PoolConfig
-from elspeth.plugins.llm.capacity_errors import CapacityError
-from elspeth.plugins.llm.pooled_executor import PooledExecutor, RowContext
+from elspeth.plugins.pooling import CapacityError, PoolConfig, PooledExecutor, RowContext
 
 
 class TestPooledExecutorInit:

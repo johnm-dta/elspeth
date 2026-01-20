@@ -1,5 +1,5 @@
-# src/elspeth/plugins/llm/pooled_executor.py
-"""Pooled executor for parallel LLM API calls with AIMD throttling.
+# src/elspeth/plugins/pooling/executor.py
+"""Pooled executor for parallel API calls with AIMD throttling.
 
 Manages concurrent requests while:
 - Respecting pool size limits via semaphore
@@ -19,10 +19,10 @@ from threading import Semaphore
 from typing import Any
 
 from elspeth.contracts import TransformResult
-from elspeth.plugins.llm.aimd_throttle import AIMDThrottle
-from elspeth.plugins.llm.base import PoolConfig
-from elspeth.plugins.llm.capacity_errors import CapacityError
-from elspeth.plugins.llm.reorder_buffer import ReorderBuffer
+from elspeth.plugins.pooling.config import PoolConfig
+from elspeth.plugins.pooling.errors import CapacityError
+from elspeth.plugins.pooling.reorder_buffer import ReorderBuffer
+from elspeth.plugins.pooling.throttle import AIMDThrottle
 
 
 @dataclass
@@ -43,7 +43,7 @@ class RowContext:
 
 
 class PooledExecutor:
-    """Executor for parallel LLM API calls with strict ordering.
+    """Executor for parallel API calls with strict ordering.
 
     Manages a pool of concurrent requests with:
     - Semaphore-controlled dispatch (max pool_size in flight)

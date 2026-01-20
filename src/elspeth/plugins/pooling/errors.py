@@ -1,5 +1,5 @@
-# src/elspeth/plugins/llm/capacity_errors.py
-"""Capacity error classification for LLM API calls.
+# src/elspeth/plugins/pooling/errors.py
+"""Capacity error classification for pooled API transforms.
 
 Capacity errors are transient overload conditions that should be retried
 with AIMD throttling. They are distinct from "normal" errors
@@ -36,7 +36,7 @@ def is_capacity_error(status_code: int) -> bool:
 class CapacityError(Exception):
     """Exception for capacity/rate limit errors.
 
-    Raised when an LLM API call fails due to capacity limits.
+    Raised when an API call fails due to capacity limits.
     These errors trigger AIMD throttle and are retried until
     max_capacity_retry_seconds is exceeded.
 

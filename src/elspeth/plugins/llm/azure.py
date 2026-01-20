@@ -18,9 +18,8 @@ from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.clients.llm import AuditedLLMClient, LLMClientError, RateLimitError
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.base import LLMConfig
-from elspeth.plugins.llm.capacity_errors import CapacityError
-from elspeth.plugins.llm.pooled_executor import PooledExecutor, RowContext
 from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
+from elspeth.plugins.pooling import CapacityError, PooledExecutor, RowContext
 from elspeth.plugins.schema_factory import create_schema_from_config
 
 if TYPE_CHECKING:

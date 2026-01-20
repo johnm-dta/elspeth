@@ -1023,8 +1023,7 @@ class TestPooledExecutionIntegration:
         import random
         from threading import Lock
 
-        from elspeth.plugins.llm.capacity_errors import CapacityError
-        from elspeth.plugins.llm.pooled_executor import RowContext
+        from elspeth.plugins.pooling import CapacityError, RowContext
 
         # Seed random for reproducibility
         random.seed(42)
@@ -1100,8 +1099,7 @@ class TestPooledExecutionIntegration:
         Uses mock process function because capacity retries with the same
         state_id would cause call_index collisions in the audit trail.
         """
-        from elspeth.plugins.llm.capacity_errors import CapacityError
-        from elspeth.plugins.llm.pooled_executor import RowContext
+        from elspeth.plugins.pooling import CapacityError, RowContext
 
         # Create transform with very short timeout for testing
         transform = OpenRouterLLMTransform(
@@ -1144,7 +1142,7 @@ class TestPooledExecutionIntegration:
         """Verify batch handles mix of success and non-capacity errors."""
         from unittest.mock import patch
 
-        from elspeth.plugins.llm.pooled_executor import RowContext
+        from elspeth.plugins.pooling import RowContext
 
         # Create transform with pooling
         transform = OpenRouterLLMTransform(

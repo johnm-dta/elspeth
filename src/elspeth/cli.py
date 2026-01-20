@@ -610,51 +610,27 @@ def _build_resume_pipeline_config(
     """
     from elspeth.engine import PipelineConfig
     from elspeth.plugins.base import BaseSink, BaseTransform
-    from elspeth.plugins.llm.azure import AzureLLMTransform
-    from elspeth.plugins.llm.azure_batch import AzureBatchLLMTransform
-    from elspeth.plugins.llm.openrouter import OpenRouterLLMTransform
-    from elspeth.plugins.sinks.csv_sink import CSVSink
-    from elspeth.plugins.sinks.database_sink import DatabaseSink
-    from elspeth.plugins.sinks.json_sink import JSONSink
     from elspeth.plugins.sources.null_source import NullSource
-    from elspeth.plugins.transforms import FieldMapper, PassThrough
-    from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
-    from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
-    from elspeth.plugins.transforms.batch_replicate import BatchReplicate
-    from elspeth.plugins.transforms.batch_stats import BatchStats
-    from elspeth.plugins.transforms.json_explode import JSONExplode
-    from elspeth.plugins.transforms.keyword_filter import KeywordFilter
 
-    # Plugin registries (same as _execute_pipeline)
-    TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
-        "passthrough": PassThrough,
-        "field_mapper": FieldMapper,
-        "batch_stats": BatchStats,
-        "json_explode": JSONExplode,
-        "keyword_filter": KeywordFilter,
-        "azure_content_safety": AzureContentSafety,
-        "azure_prompt_shield": AzurePromptShield,
-        "batch_replicate": BatchReplicate,
-        "openrouter_llm": OpenRouterLLMTransform,
-        "azure_llm": AzureLLMTransform,
-        "azure_batch_llm": AzureBatchLLMTransform,
-    }
+    # Get plugin manager for dynamic plugin lookup
+    manager = _get_plugin_manager()
 
     # Source is NullSource for resume - data comes from payloads
     source = NullSource({})
 
-    # Build transforms from settings (same logic as _execute_pipeline)
+    # Build transforms from settings via PluginManager
     transforms: list[BaseTransform] = []
     for plugin_config in settings.row_plugins:
         plugin_name = plugin_config.plugin
         plugin_options = dict(plugin_config.options)
 
-        if plugin_name not in TRANSFORM_PLUGINS:
-            raise ValueError(f"Unknown transform plugin: {plugin_name}")
-        transform_class = TRANSFORM_PLUGINS[plugin_name]
-        transforms.append(transform_class(plugin_options))
+        transform_cls = manager.get_transform_by_name(plugin_name)
+        if transform_cls is None:
+            available = [t.name for t in manager.get_transforms()]
+            raise ValueError(f"Unknown transform plugin: {plugin_name}. Available: {available}")
+        transforms.append(transform_cls(plugin_options))  # type: ignore[arg-type]
 
-    # Build aggregation transforms (same logic as _execute_pipeline)
+    # Build aggregation transforms via PluginManager
     # Need the graph to get aggregation node IDs
     graph = ExecutionGraph.from_config(settings)
     agg_id_map = graph.get_aggregation_id_map()
@@ -667,16 +643,17 @@ def _build_resume_pipeline_config(
         aggregation_settings[node_id] = agg_config
 
         plugin_name = agg_config.plugin
-        if plugin_name not in TRANSFORM_PLUGINS:
-            raise ValueError(f"Unknown aggregation plugin: {plugin_name}")
-        transform_class = TRANSFORM_PLUGINS[plugin_name]
+        transform_cls = manager.get_transform_by_name(plugin_name)
+        if transform_cls is None:
+            available = [t.name for t in manager.get_transforms()]
+            raise ValueError(f"Unknown aggregation plugin: {plugin_name}. Available: {available}")
 
         agg_options = dict(agg_config.options)
-        transform = transform_class(agg_options)
+        transform = transform_cls(agg_options)
         transform.node_id = node_id
-        transforms.append(transform)
+        transforms.append(transform)  # type: ignore[arg-type]
 
-    # Build sinks from settings
+    # Build sinks from settings via PluginManager
     # CRITICAL: Resume must append to existing output, not overwrite
     sinks: dict[str, BaseSink] = {}
     for sink_name, sink_settings in settings.sinks.items():
@@ -684,17 +661,11 @@ def _build_resume_pipeline_config(
         sink_options = dict(sink_settings.options)
         sink_options["mode"] = "append"  # Resume appends to existing files
 
-        sink: BaseSink
-        if sink_plugin == "csv":
-            sink = CSVSink(sink_options)
-        elif sink_plugin == "json":
-            sink = JSONSink(sink_options)
-        elif sink_plugin == "database":
-            sink = DatabaseSink(sink_options)
-        else:
-            raise ValueError(f"Unknown sink plugin: {sink_plugin}")
-
-        sinks[sink_name] = sink
+        sink_cls = manager.get_sink_by_name(sink_plugin)
+        if sink_cls is None:
+            available = [s.name for s in manager.get_sinks()]
+            raise ValueError(f"Unknown sink plugin: {sink_plugin}. Available: {available}")
+        sinks[sink_name] = sink_cls(sink_options)  # type: ignore[assignment]
 
     return PipelineConfig(
         source=source,  # type: ignore[arg-type]

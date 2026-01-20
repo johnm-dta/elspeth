@@ -1,11 +1,18 @@
 """Tests for Azure Multi-Query LLM transform."""
 
+from __future__ import annotations
+
+import json
+from collections.abc import Generator
+from contextlib import contextmanager
 from typing import Any
+from unittest.mock import Mock, patch
 
 import pytest
 
 from elspeth.contracts import Determinism
 from elspeth.plugins.config_base import PluginConfigError
+from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.azure_multi_query import AzureMultiQueryLLMTransform
 
 # Common schema config
@@ -18,7 +25,7 @@ def make_config(**overrides: Any) -> dict[str, Any]:
         "deployment_name": "gpt-4o",
         "endpoint": "https://test.openai.azure.com",
         "api_key": "test-key",
-        "template": "Input: {{ input_1 }}\nCriterion: {{ criterion.name }}",
+        "template": "Input: {{ row.input_1 }}\nCriterion: {{ row.criterion.name }}",
         "system_prompt": "You are an assessment AI. Respond in JSON.",
         "case_studies": [
             {"name": "cs1", "input_fields": ["cs1_bg", "cs1_sym", "cs1_hist"]},
@@ -35,6 +42,56 @@ def make_config(**overrides: Any) -> dict[str, Any]:
     }
     config.update(overrides)
     return config
+
+
+@contextmanager
+def mock_azure_openai_responses(
+    responses: list[dict[str, Any]],
+) -> Generator[Mock, None, None]:
+    """Mock Azure OpenAI to return sequence of JSON responses."""
+    call_count = 0
+
+    def make_response() -> Mock:
+        nonlocal call_count
+        content = json.dumps(responses[call_count % len(responses)])
+        call_count += 1
+
+        mock_usage = Mock()
+        mock_usage.prompt_tokens = 10
+        mock_usage.completion_tokens = 5
+
+        mock_message = Mock()
+        mock_message.content = content
+
+        mock_choice = Mock()
+        mock_choice.message = mock_message
+
+        mock_response = Mock()
+        mock_response.choices = [mock_choice]
+        mock_response.model = "gpt-4o"
+        mock_response.usage = mock_usage
+        mock_response.model_dump = Mock(return_value={"model": "gpt-4o"})
+
+        return mock_response
+
+    with patch("openai.AzureOpenAI") as mock_azure_class:
+        mock_client = Mock()
+        mock_client.chat.completions.create.side_effect = lambda **kwargs: make_response()
+        mock_azure_class.return_value = mock_client
+        yield mock_client
+
+
+def make_plugin_context(state_id: str = "state-123") -> PluginContext:
+    """Create a PluginContext with mocked landscape."""
+    mock_landscape = Mock()
+    mock_landscape.record_external_call = Mock()
+    mock_landscape.record_call = Mock()
+    return PluginContext(
+        run_id="run-123",
+        landscape=mock_landscape,
+        state_id=state_id,
+        config={},
+    )
 
 
 class TestAzureMultiQueryLLMTransformInit:
@@ -74,3 +131,137 @@ class TestAzureMultiQueryLLMTransformInit:
         del config["criteria"]
         with pytest.raises(PluginConfigError):
             AzureMultiQueryLLMTransform(config)
+
+
+class TestSingleQueryProcessing:
+    """Tests for _process_single_query method."""
+
+    def test_process_single_query_renders_template(self) -> None:
+        """Single query renders template with input fields and criterion."""
+        responses = [{"score": 85, "rationale": "Good diagnosis"}]
+
+        with mock_azure_openai_responses(responses) as mock_client:
+            transform = AzureMultiQueryLLMTransform(make_config())
+            ctx = make_plugin_context()
+            # Call on_start to set up the recorder
+            transform.on_start(ctx)
+
+            row = {
+                "cs1_bg": "45yo male",
+                "cs1_sym": "chest pain",
+                "cs1_hist": "family history",
+            }
+            spec = transform._query_specs[0]  # cs1_diagnosis
+
+            transform._process_single_query(row, spec, ctx.state_id)
+
+            # Check template was rendered with correct content
+            call_args = mock_client.chat.completions.create.call_args
+            messages = call_args.kwargs["messages"]
+            user_message = messages[-1]["content"]
+
+            assert "45yo male" in user_message
+            assert "diagnosis" in user_message.lower()
+
+    def test_process_single_query_parses_json_response(self) -> None:
+        """Single query parses JSON and returns mapped fields."""
+        responses = [{"score": 85, "rationale": "Excellent assessment"}]
+
+        with mock_azure_openai_responses(responses):
+            transform = AzureMultiQueryLLMTransform(make_config())
+            ctx = make_plugin_context()
+            transform.on_start(ctx)
+
+            row = {"cs1_bg": "data", "cs1_sym": "data", "cs1_hist": "data"}
+            spec = transform._query_specs[0]  # cs1_diagnosis
+
+            result = transform._process_single_query(row, spec, ctx.state_id)
+
+            assert result.status == "success"
+            assert result.row is not None
+            # Output fields use prefix from spec
+            assert result.row["cs1_diagnosis_score"] == 85
+            assert result.row["cs1_diagnosis_rationale"] == "Excellent assessment"
+
+    def test_process_single_query_handles_invalid_json(self) -> None:
+        """Single query returns error on invalid JSON response."""
+        with patch("openai.AzureOpenAI") as mock_azure_class:
+            mock_client = Mock()
+            mock_response = Mock()
+            mock_response.choices = [Mock(message=Mock(content="not json"))]
+            mock_response.model = "gpt-4o"
+            mock_response.usage = Mock(prompt_tokens=10, completion_tokens=5)
+            mock_response.model_dump = Mock(return_value={})
+            mock_client.chat.completions.create.return_value = mock_response
+            mock_azure_class.return_value = mock_client
+
+            transform = AzureMultiQueryLLMTransform(make_config())
+            ctx = make_plugin_context()
+            transform.on_start(ctx)
+
+            row = {"cs1_bg": "data", "cs1_sym": "data", "cs1_hist": "data"}
+            spec = transform._query_specs[0]
+
+            result = transform._process_single_query(row, spec, ctx.state_id)
+
+            assert result.status == "error"
+            assert "json" in result.reason["reason"].lower()
+
+    def test_process_single_query_raises_capacity_error_on_rate_limit(self) -> None:
+        """Rate limit errors are converted to CapacityError for pooled retry."""
+        from elspeth.plugins.clients.llm import RateLimitError
+        from elspeth.plugins.llm.capacity_errors import CapacityError
+
+        with patch("openai.AzureOpenAI") as mock_azure_class:
+            mock_client = Mock()
+            # Simulate rate limit from the underlying client
+            mock_client.chat.completions.create.side_effect = Exception("Rate limit exceeded")
+            mock_azure_class.return_value = mock_client
+
+            transform = AzureMultiQueryLLMTransform(make_config())
+            ctx = make_plugin_context()
+
+            row = {"cs1_bg": "data", "cs1_sym": "data", "cs1_hist": "data"}
+            spec = transform._query_specs[0]
+
+            # Need to mock at AuditedLLMClient level since that's where RateLimitError comes from
+            with patch.object(transform, "_get_llm_client") as mock_get_client:
+                mock_llm_client = Mock()
+                mock_llm_client.chat_completion.side_effect = RateLimitError("Rate limit exceeded")
+                mock_get_client.return_value = mock_llm_client
+
+                with pytest.raises(CapacityError) as exc_info:
+                    transform._process_single_query(row, spec, ctx.state_id)
+
+                assert exc_info.value.status_code == 429
+
+    def test_process_single_query_handles_template_error(self) -> None:
+        """Template rendering errors return error result with details."""
+        from elspeth.plugins.llm.templates import TemplateError
+
+        with mock_azure_openai_responses([{"score": 85, "rationale": "ok"}]):
+            transform = AzureMultiQueryLLMTransform(make_config())
+            ctx = make_plugin_context()
+
+            row = {"cs1_bg": "data", "cs1_sym": "data", "cs1_hist": "data"}
+            spec = transform._query_specs[0]
+
+            # Mock template to raise error
+            with patch.object(transform._template, "render_with_metadata") as mock_render:
+                mock_render.side_effect = TemplateError("Undefined variable 'missing'")
+
+                result = transform._process_single_query(row, spec, ctx.state_id)
+
+                assert result.status == "error"
+                assert result.reason["reason"] == "template_rendering_failed"
+                assert "missing" in result.reason["error"]
+
+    def test_get_llm_client_requires_recorder(self) -> None:
+        """_get_llm_client raises RuntimeError if recorder not set via on_start."""
+        transform = AzureMultiQueryLLMTransform(make_config())
+        # Don't call on_start - recorder will be None
+
+        with pytest.raises(RuntimeError) as exc_info:
+            transform._get_llm_client("state-123")
+
+        assert "recorder" in str(exc_info.value).lower()

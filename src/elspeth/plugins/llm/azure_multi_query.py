@@ -6,16 +6,18 @@ into a single output row with all-or-nothing error handling.
 
 from __future__ import annotations
 
+import json
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts import Determinism, TransformResult
 from elspeth.plugins.base import BaseTransform
-from elspeth.plugins.clients.llm import AuditedLLMClient
+from elspeth.plugins.clients.llm import AuditedLLMClient, LLMClientError, RateLimitError
 from elspeth.plugins.context import PluginContext
+from elspeth.plugins.llm.capacity_errors import CapacityError
 from elspeth.plugins.llm.multi_query import MultiQueryConfig, QuerySpec
 from elspeth.plugins.llm.pooled_executor import PooledExecutor
-from elspeth.plugins.llm.templates import PromptTemplate
+from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
 from elspeth.plugins.schema_factory import create_schema_from_config
 
 if TYPE_CHECKING:
@@ -128,6 +130,138 @@ class AzureMultiQueryLLMTransform(BaseTransform):
     def on_start(self, ctx: PluginContext) -> None:
         """Capture recorder reference for pooled execution."""
         self._recorder = ctx.landscape
+
+    def _get_underlying_client(self) -> AzureOpenAI:
+        """Get or create the underlying Azure OpenAI client."""
+        if self._underlying_client is None:
+            from openai import AzureOpenAI
+
+            self._underlying_client = AzureOpenAI(
+                azure_endpoint=self._azure_endpoint,
+                api_key=self._azure_api_key,
+                api_version=self._azure_api_version,
+            )
+        return self._underlying_client
+
+    def _get_llm_client(self, state_id: str) -> AuditedLLMClient:
+        """Get or create LLM client for a state_id."""
+        with self._llm_clients_lock:
+            if state_id not in self._llm_clients:
+                if self._recorder is None:
+                    raise RuntimeError("Transform requires recorder. Ensure on_start was called.")
+                self._llm_clients[state_id] = AuditedLLMClient(
+                    recorder=self._recorder,
+                    state_id=state_id,
+                    underlying_client=self._get_underlying_client(),
+                    provider="azure",
+                )
+            return self._llm_clients[state_id]
+
+    def _process_single_query(
+        self,
+        row: dict[str, Any],
+        spec: QuerySpec,
+        state_id: str,
+    ) -> TransformResult:
+        """Process a single query (one case_study x criterion pair).
+
+        Args:
+            row: Full input row
+            spec: Query specification with input field mapping
+            state_id: State ID for audit trail
+
+        Returns:
+            TransformResult with mapped output fields
+
+        Raises:
+            CapacityError: On rate limit (for pooled retry)
+        """
+        # 1. Build synthetic row for PromptTemplate
+        # Templates use {{ row.input_1 }}, {{ row.criterion }}, {{ row.original }}, {{ lookup }}
+        # This preserves PromptTemplate's audit metadata (template_hash, variables_hash)
+        synthetic_row = spec.build_template_context(row)
+        # synthetic_row now contains: input_1, input_2, ..., criterion, row (original)
+
+        # 2. Render template using PromptTemplate (preserves audit metadata)
+        # THEIR DATA - wrap in try/catch
+        try:
+            rendered = self._template.render_with_metadata(synthetic_row)
+        except TemplateError as e:
+            return TransformResult.error(
+                {
+                    "reason": "template_rendering_failed",
+                    "error": str(e),
+                    "query": spec.output_prefix,
+                    "template_hash": self._template.template_hash,
+                }
+            )
+
+        # 3. Build messages
+        messages: list[dict[str, str]] = []
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": rendered.prompt})
+
+        # 4. Get LLM client
+        llm_client = self._get_llm_client(state_id)
+
+        # 5. Call LLM (EXTERNAL - wrap, raise CapacityError for retry)
+        try:
+            response = llm_client.chat_completion(
+                model=self._model,
+                messages=messages,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
+        except RateLimitError as e:
+            raise CapacityError(429, str(e)) from e
+        except LLMClientError as e:
+            return TransformResult.error(
+                {
+                    "reason": "llm_call_failed",
+                    "error": str(e),
+                    "query": spec.output_prefix,
+                }
+            )
+
+        # 6. Parse JSON response (THEIR DATA - wrap)
+        try:
+            parsed = json.loads(response.content)
+        except json.JSONDecodeError as e:
+            return TransformResult.error(
+                {
+                    "reason": "json_parse_failed",
+                    "error": str(e),
+                    "query": spec.output_prefix,
+                    "raw_response": response.content[:500],  # Truncate for audit
+                }
+            )
+
+        # 7. Map output fields
+        output: dict[str, Any] = {}
+        for json_field, suffix in self._output_mapping.items():
+            output_key = f"{spec.output_prefix}_{suffix}"
+            if json_field not in parsed:
+                return TransformResult.error(
+                    {
+                        "reason": "missing_output_field",
+                        "field": json_field,
+                        "query": spec.output_prefix,
+                    }
+                )
+            output[output_key] = parsed[json_field]
+
+        # 8. Add metadata for audit trail
+        output[f"{spec.output_prefix}_usage"] = response.usage
+        output[f"{spec.output_prefix}_model"] = response.model
+        # Template metadata for reproducibility
+        output[f"{spec.output_prefix}_template_hash"] = rendered.template_hash
+        output[f"{spec.output_prefix}_variables_hash"] = rendered.variables_hash
+        output[f"{spec.output_prefix}_template_source"] = rendered.template_source
+        output[f"{spec.output_prefix}_lookup_hash"] = rendered.lookup_hash
+        output[f"{spec.output_prefix}_lookup_source"] = rendered.lookup_source
+
+        return TransformResult.success(output)
 
     def process(
         self,

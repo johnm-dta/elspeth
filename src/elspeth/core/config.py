@@ -1070,7 +1070,10 @@ def _expand_template_files(
             raise TemplateFileError(f"Lookup file not found: {lookup_path}")
 
         try:
-            result["lookup"] = yaml.safe_load(lookup_path.read_text(encoding="utf-8"))
+            loaded = yaml.safe_load(lookup_path.read_text(encoding="utf-8"))
+            # Coerce None (empty file) to {} so it gets a distinct hash from "no lookup"
+            # This ensures empty lookup files are auditable as "intentionally empty"
+            result["lookup"] = loaded if loaded is not None else {}
         except yaml.YAMLError as e:
             raise TemplateFileError(f"Invalid YAML in lookup file: {e}") from e
 

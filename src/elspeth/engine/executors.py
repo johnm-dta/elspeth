@@ -164,8 +164,10 @@ class TransformExecutor:
             attempt=attempt,
         )
 
-        # Set state_id on context for external call recording
+        # Set state_id and node_id on context for external call recording
+        # and batch checkpoint lookup (node_id required for _batch_checkpoints keying)
         ctx.state_id = state.state_id
+        ctx.node_id = transform.node_id
         ctx._call_index = 0  # Reset call index for this state
 
         # Execute with timing and span
@@ -894,8 +896,10 @@ class AggregationExecutor:
             attempt=0,
         )
 
-        # Set state_id on context for external call recording
+        # Set state_id and node_id on context for external call recording
+        # and batch checkpoint lookup (node_id required for _batch_checkpoints keying)
         ctx.state_id = state.state_id
+        ctx.node_id = node_id
         ctx._call_index = 0  # Reset call index for this state
 
         # Step 3: Execute with timing and span

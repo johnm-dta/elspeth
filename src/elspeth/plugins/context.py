@@ -147,8 +147,14 @@ class PluginContext:
 
         Called when batch processing completes successfully
         or when starting fresh after a failure.
+
+        Clears both the local checkpoint and any restored batch checkpoint
+        for the current node to prevent stale data on subsequent batches.
         """
         self._checkpoint.clear()
+        # Also clear restored batch checkpoint to prevent stale resume data
+        if self.node_id and self.node_id in self._batch_checkpoints:
+            del self._batch_checkpoints[self.node_id]
 
     def get(self, key: str, *, default: Any = None) -> Any:
         """Get a config value by dotted path.

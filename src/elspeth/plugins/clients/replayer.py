@@ -65,6 +65,28 @@ class ReplayMissError(Exception):
         super().__init__(f"No recorded call found for request hash: {request_hash}")
 
 
+class ReplayPayloadMissingError(Exception):
+    """Raised when recorded call exists but payload is missing.
+
+    This indicates the call was recorded but the response payload
+    has been purged from the payload store or the store is disabled.
+    In replay mode, we cannot proceed without the actual response data.
+
+    Attributes:
+        call_id: ID of the call whose payload is missing
+        request_hash: Hash of the request (for debugging)
+    """
+
+    def __init__(self, call_id: str, request_hash: str) -> None:
+        self.call_id = call_id
+        self.request_hash = request_hash
+        super().__init__(
+            f"Recorded call {call_id} exists but response payload is missing "
+            f"(request_hash={request_hash}). Payload may have been purged or "
+            "payload store may be disabled."
+        )
+
+
 class CallReplayer:
     """Replays recorded external calls instead of making live calls.
 
@@ -99,10 +121,10 @@ class CallReplayer:
         """
         self._recorder = recorder
         self._source_run_id = source_run_id
-        # Cache: (call_type, request_hash) -> (response_data, latency_ms, was_error, error_data)
+        # Cache: (call_type, request_hash) -> (response_data, latency_ms, was_error, error_data, call_id)
         self._cache: dict[
             tuple[str, str],
-            tuple[dict[str, Any] | None, float | None, bool, dict[str, Any] | None],
+            tuple[dict[str, Any], float | None, bool, dict[str, Any] | None, str],
         ] = {}
 
     @property
@@ -129,15 +151,18 @@ class CallReplayer:
 
         Raises:
             ReplayMissError: If no matching recorded call is found
+            ReplayPayloadMissingError: If call exists but payload is missing/purged
         """
         request_hash = stable_hash(request_data)
         cache_key = (call_type, request_hash)
 
         # Check cache first
+        # Note: cache stores actual response_data (could be None if error call had no response)
+        # but we validated it wasn't None when caching, so this is safe
         if cache_key in self._cache:
-            resp, latency, was_error, error = self._cache[cache_key]
+            resp, latency, was_error, error, _call_id = self._cache[cache_key]
             return ReplayedCall(
-                response_data=resp or {},
+                response_data=resp,
                 original_latency_ms=latency,
                 request_hash=request_hash,
                 was_error=was_error,
@@ -165,16 +190,27 @@ class CallReplayer:
         # Determine if this was an error call
         was_error = call.status == CallStatus.ERROR
 
-        # Cache for future lookups
+        # Fail if payload is missing for SUCCESS calls - replay cannot proceed
+        # without actual response. Error calls may legitimately have no response
+        # (the call failed before getting one), so we allow None there.
+        if response_data is None and not was_error:
+            raise ReplayPayloadMissingError(call.call_id, request_hash)
+
+        # For error calls without response, use empty dict
+        if response_data is None:
+            response_data = {}
+
+        # Cache for future lookups (includes call_id for debugging)
         self._cache[cache_key] = (
             response_data,
             call.latency_ms,
             was_error,
             error_data,
+            call.call_id,
         )
 
         return ReplayedCall(
-            response_data=response_data or {},
+            response_data=response_data,
             original_latency_ms=call.latency_ms,
             request_hash=request_hash,
             was_error=was_error,

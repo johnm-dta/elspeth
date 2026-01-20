@@ -251,19 +251,19 @@ allow_hits:
   # entries raise MissingEdgeError with clear diagnostics.
   # ============================================================
 
-  - key: "engine/executors.py:R1:GateExecutor:execute_gate:line=398"
+  - key: "engine/executors.py:R1:GateExecutor:execute_gate:line=400"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=662"
+  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=664"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=676"
+  - key: "engine/executors.py:R1:GateExecutor:_record_routing:line=678"
     owner: "architecture"
     reason: "Lookup with explicit None check - raises MissingEdgeError if not found"
     safety: "Raises immediately with node_id and label for debugging"
@@ -277,37 +277,37 @@ allow_hits:
   # are handled gracefully (return empty list or skip trigger update).
   # ============================================================
 
-  - key: "engine/executors.py:R1:AggregationExecutor:buffer_row:line=763"
+  - key: "engine/executors.py:R1:AggregationExecutor:buffer_row:line=765"
     owner: "architecture"
     reason: "Checking if batch exists to decide whether to create one"
     safety: "None means 'create new batch' - explicit conditional logic follows"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:buffer_row:line=788"
+  - key: "engine/executors.py:R1:AggregationExecutor:buffer_row:line=790"
     owner: "architecture"
     reason: "Optional trigger evaluator lookup - not all aggregations have config"
     safety: "None means 'no trigger config' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_buffered_rows:line=801"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_buffered_rows:line=803"
     owner: "architecture"
     reason: "Intentional Optional API: returns empty list for unknown node_id"
     safety: "Empty list is safe default - no rows buffered yet"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_buffered_tokens:line=812"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_buffered_tokens:line=814"
     owner: "architecture"
     reason: "Intentional Optional API: returns empty list for unknown node_id"
     safety: "Empty list is safe default - no tokens buffered yet"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:_get_buffered_data:line=827"
+  - key: "engine/executors.py:R1:AggregationExecutor:_get_buffered_data:line=829"
     owner: "architecture"
     reason: "Intentional Optional API: returns empty list for unknown node_id"
     safety: "Empty list is safe default - no rows buffered"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:_get_buffered_data:line=828"
+  - key: "engine/executors.py:R1:AggregationExecutor:_get_buffered_data:line=830"
     owner: "architecture"
     reason: "Intentional Optional API: returns empty list for unknown node_id"
     safety: "Empty list is safe default - no tokens buffered"
@@ -320,43 +320,43 @@ allow_hits:
   # buffer state for crash recovery. These use .get() for intentional reasons.
   # ============================================================
 
-  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=1001"
+  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=1005"
     owner: "architecture"
     reason: "Optional trigger evaluator lookup - not all aggregations have trigger config"
     safety: "None means 'no trigger config' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:_reset_batch_state:line=1013"
+  - key: "engine/executors.py:R1:AggregationExecutor:_reset_batch_state:line=1017"
     owner: "architecture"
     reason: "Idempotent cleanup: batch_id may not exist if already reset"
     safety: "None means 'already cleaned up or never existed' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_buffer_count:line=1028"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_buffer_count:line=1032"
     owner: "architecture"
     reason: "Intentional Optional API: returns 0 for unknown node_id"
     safety: "0 is safe default - no rows buffered"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_checkpoint_state:line=1046"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_checkpoint_state:line=1050"
     owner: "architecture"
     reason: "Intentional Optional: batch_id may not exist yet"
     safety: "None is valid for checkpoint state - no batch started yet"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:restore_from_checkpoint:line=1060"
+  - key: "engine/executors.py:R1:AggregationExecutor:restore_from_checkpoint:line=1064"
     owner: "architecture"
     reason: "Trust boundary: checkpoint state from previous run may be malformed"
     safety: "Default empty list for missing rows - graceful recovery"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:restore_from_checkpoint:line=1061"
+  - key: "engine/executors.py:R1:AggregationExecutor:restore_from_checkpoint:line=1065"
     owner: "architecture"
     reason: "Trust boundary: checkpoint state from previous run may be malformed"
     safety: "None batch_id means no batch to restore - graceful recovery"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:restore_from_checkpoint:line=1072"
+  - key: "engine/executors.py:R1:AggregationExecutor:restore_from_checkpoint:line=1076"
     owner: "architecture"
     reason: "Optional trigger evaluator lookup - node may not have trigger config"
     safety: "None means 'no trigger config' - correctly skipped"
@@ -370,25 +370,25 @@ allow_hits:
   # are valid (no batch yet) or raise ValueError with clear diagnostics.
   # ============================================================
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_batch_id:line=1087"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_batch_id:line=1091"
     owner: "architecture"
     reason: "Intentional Optional API: returns None if no batch exists for node_id"
     safety: "Callers check return value - this is the documented contract"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:should_flush:line=1098"
+  - key: "engine/executors.py:R1:AggregationExecutor:should_flush:line=1102"
     owner: "architecture"
     reason: "Intentional Optional API: returns False if no evaluator exists for node_id"
     safety: "No evaluator means no trigger config - return False is correct behavior"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_trigger_type:line=1112"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_trigger_type:line=1116"
     owner: "architecture"
     reason: "Intentional Optional API: returns None if no evaluator exists for node_id"
     safety: "No evaluator means no trigger config - return None is correct behavior"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:get_restored_state:line=1141"
+  - key: "engine/executors.py:R1:AggregationExecutor:get_restored_state:line=1145"
     owner: "architecture"
     reason: "Intentional Optional API: returns None if no state was restored for node_id"
     safety: "Callers check return value - None means 'not restored, use default state'"
@@ -401,19 +401,19 @@ allow_hits:
   # Missing entries cause explicit RuntimeError with clear diagnostics.
   # ============================================================
 
-  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=862"
+  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=864"
     owner: "architecture"
     reason: "Explicit existence check: raises RuntimeError if batch_id is None"
     safety: "Raises immediately with node_id for debugging"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=867"
+  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=869"
     owner: "architecture"
     reason: "Existence check paired with explicit RuntimeError if empty"
     safety: "Raises immediately if buffer is empty"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=868"
+  - key: "engine/executors.py:R1:AggregationExecutor:execute_flush:line=870"
     owner: "architecture"
     reason: "Token buffer lookup matches row buffer lookup pattern"
     safety: "Empty list default paired with row buffer check"
@@ -627,100 +627,100 @@ allow_hits:
   # ============================================================
 
   # --- Checkpoint API capability checks (fail-fast if missing) ---
-  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_get_checkpoint:line=278"
+  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_get_checkpoint:line=281"
     owner: "architecture"
     reason: "Capability check: verify checkpoint API exists before using it"
     safety: "Raises RuntimeError if method doesn't exist - fail-fast, not silent degradation"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_update_checkpoint:line=295"
+  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_update_checkpoint:line=298"
     owner: "architecture"
     reason: "Capability check: verify checkpoint API exists before using it"
     safety: "Raises RuntimeError if method doesn't exist - fail-fast, not silent degradation"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_clear_checkpoint:line=311"
+  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_clear_checkpoint:line=314"
     owner: "architecture"
     reason: "Capability check: verify checkpoint API exists before using it"
     safety: "Raises RuntimeError if method doesn't exist - fail-fast, not silent degradation"
     expires: null  # Permanent - intentional design
 
   # --- Checkpoint data access ---
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_process_batch:line=259"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_process_batch:line=262"
     owner: "architecture"
     reason: "Checkpoint may be None or empty dict - checking for batch_id existence"
     safety: "None/missing batch_id means PHASE 1 (fresh submit), explicit logic follows"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_check_batch_status:line=531"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_check_batch_status:line=534"
     owner: "architecture"
     reason: "submitted_at may not exist in old checkpoint format"
     safety: "Missing submitted_at skips timeout check - graceful degradation"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=576"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=579"
     owner: "architecture"
     reason: "row_mapping may not exist in corrupted checkpoint"
     safety: "Empty dict default allows graceful recovery - rows return with error"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=577"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=580"
     owner: "architecture"
     reason: "template_errors may not exist in old checkpoint format"
     safety: "Empty list default means no template errors tracked - graceful degradation"
     expires: null  # Permanent - intentional design
 
   # --- Reverse lookup for row index to custom_id ---
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=629"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=632"
     owner: "architecture"
     reason: "Intentional Optional API: rows with template errors aren't in mapping"
     safety: "None is checked explicitly on next line with 'if custom_id is None'"
     expires: null  # Permanent - intentional design
 
   # --- Azure Batch API response trust boundary ---
-  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_check_batch_status:line=503"
+  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_check_batch_status:line=506"
     owner: "architecture"
     reason: "Trust boundary: Azure batch.errors may not exist on all batch statuses"
     safety: "Graceful handling - error info still returned without detailed errors"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R2:AzureBatchLLMTransform:_check_batch_status:line=486"
+  - key: "plugins/llm/azure_batch.py:R2:AzureBatchLLMTransform:_check_batch_status:line=489"
     owner: "architecture"
     reason: "Trust boundary: Azure batch.output_file_id only exists on completed batches"
     safety: "Recorded as None in audit trail - field is informational only"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=645"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=648"
     owner: "architecture"
     reason: "Trust boundary: Azure batch result 'error' field is optional"
     safety: "Graceful handling - checks for error before extracting response"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=657"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=660"
     owner: "architecture"
     reason: "Trust boundary: Azure batch result 'response' field structure varies"
     safety: "Graceful default to {} - handles missing/malformed responses"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=658"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=661"
     owner: "architecture"
     reason: "Trust boundary: Azure batch response 'body' field may be missing"
     safety: "Graceful default to {} - handles missing/malformed responses"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=659"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=662"
     owner: "architecture"
     reason: "Trust boundary: Azure batch response 'choices' field may be missing"
     safety: "Graceful default to [] - explicit check for empty choices follows"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=662"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=665"
     owner: "architecture"
     reason: "Trust boundary: Azure choice 'message.content' structure may vary"
     safety: "Graceful default to '' - empty content is valid for audit trail"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=663"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=666"
     owner: "architecture"
     reason: "Trust boundary: Azure response 'usage' field is optional"
     safety: "Graceful default to {} - usage is metadata, not critical"

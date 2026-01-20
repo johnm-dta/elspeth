@@ -14,6 +14,7 @@ from elspeth.plugins.clients.replayer import (
     CallReplayer,
     ReplayedCall,
     ReplayMissError,
+    ReplayPayloadMissingError,
 )
 
 
@@ -252,7 +253,11 @@ class TestCallReplayer:
         assert recorder.find_call_by_request_hash.call_count == 2
 
     def test_replay_with_none_response_data(self) -> None:
-        """Handles calls where response data couldn't be retrieved."""
+        """Raises error when payload is missing for SUCCESS calls.
+
+        Missing payload for success calls would cause silent incorrect outputs,
+        so we fail fast instead of silently coercing to empty dict.
+        """
         recorder = self._create_mock_recorder()
         request_data = {"model": "gpt-4", "messages": []}
         request_hash = stable_hash(request_data)
@@ -262,10 +267,12 @@ class TestCallReplayer:
         recorder.get_call_response_data.return_value = None  # Payload purged
 
         replayer = CallReplayer(recorder, source_run_id="run_abc123")
-        result = replayer.replay(call_type="llm", request_data=request_data)
 
-        # Should return empty dict, not None
-        assert result.response_data == {}
+        with pytest.raises(ReplayPayloadMissingError) as exc_info:
+            replayer.replay(call_type="llm", request_data=request_data)
+
+        assert exc_info.value.call_id == "call_123"
+        assert exc_info.value.request_hash == request_hash
 
     def test_replay_http_call_type(self) -> None:
         """Replay works for HTTP call types."""

@@ -8,6 +8,7 @@ and pooled (pool_size>1) execution modes.
 
 from __future__ import annotations
 
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Self
 
 from pydantic import Field, model_validator
@@ -18,11 +19,13 @@ from elspeth.plugins.clients.llm import AuditedLLMClient, LLMClientError, RateLi
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.base import LLMConfig
 from elspeth.plugins.llm.capacity_errors import CapacityError
-from elspeth.plugins.llm.pooled_executor import PooledExecutor
+from elspeth.plugins.llm.pooled_executor import PooledExecutor, RowContext
 from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
 from elspeth.plugins.schema_factory import create_schema_from_config
 
 if TYPE_CHECKING:
+    from openai import AzureOpenAI
+
     from elspeth.core.landscape.recorder import LandscapeRecorder
 
 
@@ -136,6 +139,13 @@ class AzureLLMTransform(BaseTransform):
         else:
             self._executor = None
 
+        # LLM client cache for pooled execution - ensures call_index uniqueness across retries
+        # Each state_id gets its own client with monotonically increasing call indices
+        self._llm_clients: dict[str, AuditedLLMClient] = {}
+        self._llm_clients_lock = Lock()
+        # Cache underlying Azure clients to avoid recreating them
+        self._underlying_client: AzureOpenAI | None = None
+
     def on_start(self, ctx: PluginContext) -> None:
         """Capture recorder reference for pooled execution.
 
@@ -148,8 +158,7 @@ class AzureLLMTransform(BaseTransform):
     def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
         """Process a row through Azure OpenAI.
 
-        Uses sequential processing via ctx.state_id. For pooled execution,
-        use _process_single_with_state() directly via the executor.
+        Routes to pooled or sequential execution based on pool_size config.
 
         Error handling follows Three-Tier Trust Model:
         1. Template rendering (THEIR DATA) - wrap, return error
@@ -163,6 +172,20 @@ class AzureLLMTransform(BaseTransform):
         Returns:
             TransformResult with processed row or error
         """
+        # Route to pooled execution if configured
+        if self._executor is not None:
+            if ctx.landscape is None or ctx.state_id is None:
+                raise RuntimeError(
+                    "Pooled execution requires landscape recorder and state_id. Ensure transform is executed through the engine."
+                )
+            row_ctx = RowContext(row=row, state_id=ctx.state_id, row_index=0)
+            results = self._executor.execute_batch(
+                contexts=[row_ctx],
+                process_fn=self._process_single_with_state,
+            )
+            return results[0]
+
+        # Sequential execution path
         # 1. Render template with row data (THEIR DATA - wrap)
         try:
             rendered = self._template.render_with_metadata(row)
@@ -235,10 +258,48 @@ class AzureLLMTransform(BaseTransform):
 
         return TransformResult.success(output)
 
+    def _get_underlying_client(self) -> AzureOpenAI:
+        """Get or create the underlying Azure OpenAI client.
+
+        The underlying client is stateless and can be shared across all calls.
+        """
+        if self._underlying_client is None:
+            # Import here to avoid hard dependency on openai package
+            from openai import AzureOpenAI
+
+            self._underlying_client = AzureOpenAI(
+                azure_endpoint=self._azure_endpoint,
+                api_key=self._azure_api_key,
+                api_version=self._azure_api_version,
+            )
+        return self._underlying_client
+
+    def _get_llm_client(self, state_id: str) -> AuditedLLMClient:
+        """Get or create LLM client for a state_id.
+
+        Clients are cached to preserve call_index across retries.
+        This ensures uniqueness of (state_id, call_index) even when
+        the pooled executor retries after CapacityError.
+
+        Thread-safe: multiple workers can call this concurrently.
+        """
+        with self._llm_clients_lock:
+            if state_id not in self._llm_clients:
+                if self._recorder is None:
+                    raise RuntimeError("Azure transform requires recorder. Ensure on_start was called.")
+                self._llm_clients[state_id] = AuditedLLMClient(
+                    recorder=self._recorder,
+                    state_id=state_id,
+                    underlying_client=self._get_underlying_client(),
+                    provider="azure",
+                )
+            return self._llm_clients[state_id]
+
     def _process_single_with_state(self, row: dict[str, Any], state_id: str) -> TransformResult:
         """Process a single row via Azure OpenAI with explicit state_id.
 
         This is used by the pooled executor where each row has its own state.
+        Uses cached LLM clients to ensure call_index uniqueness across retries.
 
         Raises:
             CapacityError: On rate limit errors (for pooled retry)
@@ -262,25 +323,8 @@ class AzureLLMTransform(BaseTransform):
             messages.append({"role": "system", "content": self._system_prompt})
         messages.append({"role": "user", "content": rendered.prompt})
 
-        # 3. Get recorder from transform's stored reference (set during on_start)
-        if self._recorder is None:
-            raise RuntimeError("Azure transform requires recorder. Ensure on_start was called.")
-
-        # Import here to avoid hard dependency on openai package
-        from openai import AzureOpenAI
-
-        underlying_client = AzureOpenAI(
-            azure_endpoint=self._azure_endpoint,
-            api_key=self._azure_api_key,
-            api_version=self._azure_api_version,
-        )
-
-        llm_client = AuditedLLMClient(
-            recorder=self._recorder,
-            state_id=state_id,
-            underlying_client=underlying_client,
-            provider="azure",
-        )
+        # 3. Get cached LLM client (preserves call_index across retries)
+        llm_client = self._get_llm_client(state_id)
 
         # 4. Call LLM (EXTERNAL - wrap, raise CapacityError for pooled retry)
         try:
@@ -335,3 +379,7 @@ class AzureLLMTransform(BaseTransform):
         if self._executor is not None:
             self._executor.shutdown(wait=True)
         self._recorder = None
+        # Clear cached LLM clients
+        with self._llm_clients_lock:
+            self._llm_clients.clear()
+        self._underlying_client = None

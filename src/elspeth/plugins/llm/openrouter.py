@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -14,7 +15,7 @@ from elspeth.plugins.clients.http import AuditedHTTPClient
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.base import LLMConfig
 from elspeth.plugins.llm.capacity_errors import CapacityError, is_capacity_error
-from elspeth.plugins.llm.pooled_executor import PooledExecutor
+from elspeth.plugins.llm.pooled_executor import PooledExecutor, RowContext
 from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
 from elspeth.plugins.schema_factory import create_schema_from_config
 
@@ -108,6 +109,11 @@ class OpenRouterLLMTransform(BaseTransform):
         else:
             self._executor = None
 
+        # HTTP client cache for pooled execution - ensures call_index uniqueness across retries
+        # Each state_id gets its own client with monotonically increasing call indices
+        self._http_clients: dict[str, AuditedHTTPClient] = {}
+        self._http_clients_lock = Lock()
+
     def on_start(self, ctx: PluginContext) -> None:
         """Capture recorder reference for pooled execution."""
         self._recorder = ctx.landscape
@@ -115,11 +121,27 @@ class OpenRouterLLMTransform(BaseTransform):
     def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
         """Process row via OpenRouter API using audited HTTP client.
 
+        Routes to pooled or sequential execution based on pool_size config.
+
         Error handling follows Three-Tier Trust Model:
         1. Template rendering (THEIR DATA) - wrap, return error
         2. HTTP API call (EXTERNAL) - wrap, return error
         3. Response parsing (OUR CODE) - let crash if malformed
         """
+        # Route to pooled execution if configured
+        if self._executor is not None:
+            if ctx.landscape is None or ctx.state_id is None:
+                raise RuntimeError(
+                    "Pooled execution requires landscape recorder and state_id. Ensure transform is executed through the engine."
+                )
+            row_ctx = RowContext(row=row, state_id=ctx.state_id, row_index=0)
+            results = self._executor.execute_batch(
+                contexts=[row_ctx],
+                process_fn=self._process_single_with_state,
+            )
+            return results[0]
+
+        # Sequential execution path
         # 1. Render template (THEIR DATA - wrap)
         try:
             rendered = self._template.render_with_metadata(row)
@@ -234,10 +256,33 @@ class OpenRouterLLMTransform(BaseTransform):
 
         return TransformResult.success(output)
 
+    def _get_http_client(self, state_id: str) -> AuditedHTTPClient:
+        """Get or create HTTP client for a state_id.
+
+        Clients are cached to preserve call_index across retries.
+        This ensures uniqueness of (state_id, call_index) even when
+        the pooled executor retries after CapacityError.
+
+        Thread-safe: multiple workers can call this concurrently.
+        """
+        with self._http_clients_lock:
+            if state_id not in self._http_clients:
+                if self._recorder is None:
+                    raise RuntimeError("OpenRouter transform requires recorder. Ensure on_start was called.")
+                self._http_clients[state_id] = AuditedHTTPClient(
+                    recorder=self._recorder,
+                    state_id=state_id,
+                    timeout=self._timeout,
+                    base_url=self._base_url,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                )
+            return self._http_clients[state_id]
+
     def _process_single_with_state(self, row: dict[str, Any], state_id: str) -> TransformResult:
         """Process a single row via OpenRouter API with explicit state_id.
 
         This is used by the pooled executor where each row has its own state.
+        Uses cached HTTP clients to ensure call_index uniqueness across retries.
 
         Args:
             row: The row data to process
@@ -276,17 +321,8 @@ class OpenRouterLLMTransform(BaseTransform):
         if self._max_tokens:
             request_body["max_tokens"] = self._max_tokens
 
-        # 3. Get recorder from transform's stored reference (set during on_start)
-        if self._recorder is None:
-            raise RuntimeError("OpenRouter transform requires recorder. Ensure on_start was called.")
-
-        http_client = AuditedHTTPClient(
-            recorder=self._recorder,
-            state_id=state_id,
-            timeout=self._timeout,
-            base_url=self._base_url,
-            headers={"Authorization": f"Bearer {self._api_key}"},
-        )
+        # 3. Get cached HTTP client (preserves call_index across retries)
+        http_client = self._get_http_client(state_id)
 
         try:
             response = http_client.post(
@@ -362,3 +398,6 @@ class OpenRouterLLMTransform(BaseTransform):
         if self._executor is not None:
             self._executor.shutdown(wait=True)
         self._recorder = None
+        # Clear cached HTTP clients
+        with self._http_clients_lock:
+            self._http_clients.clear()

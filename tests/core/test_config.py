@@ -2222,6 +2222,52 @@ class TestExpandTemplateFiles:
         with pytest.raises(TemplateFileError, match="Cannot specify both"):
             _expand_template_files(config, settings_path)
 
+    def test_expand_lookup_file(self, tmp_path: Path) -> None:
+        """lookup_file is expanded to parsed YAML at config time."""
+        from elspeth.core.config import _expand_template_files
+
+        # Create lookup file
+        lookup_file = tmp_path / "prompts" / "lookups.yaml"
+        lookup_file.parent.mkdir(parents=True, exist_ok=True)
+        lookup_file.write_text("categories:\n  - Electronics\n  - Clothing\n")
+
+        settings_path = tmp_path / "settings.yaml"
+
+        config = {
+            "template": "{{ lookup.categories }}",
+            "lookup_file": "prompts/lookups.yaml",
+        }
+
+        expanded = _expand_template_files(config, settings_path)
+
+        assert expanded["lookup"] == {"categories": ["Electronics", "Clothing"]}
+        assert expanded["lookup_source"] == "prompts/lookups.yaml"
+        assert "lookup_file" not in expanded
+
+    def test_expand_template_and_lookup_files(self, tmp_path: Path) -> None:
+        """Both template_file and lookup_file expand together."""
+        from elspeth.core.config import _expand_template_files
+
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+
+        (prompts_dir / "classify.j2").write_text("Category: {{ lookup.cats[row.id] }}")
+        (prompts_dir / "lookups.yaml").write_text("cats:\n  0: A\n  1: B\n")
+
+        settings_path = tmp_path / "settings.yaml"
+
+        config = {
+            "template_file": "prompts/classify.j2",
+            "lookup_file": "prompts/lookups.yaml",
+        }
+
+        expanded = _expand_template_files(config, settings_path)
+
+        assert expanded["template"] == "Category: {{ lookup.cats[row.id] }}"
+        assert expanded["template_source"] == "prompts/classify.j2"
+        assert expanded["lookup"] == {"cats": {0: "A", 1: "B"}}
+        assert expanded["lookup_source"] == "prompts/lookups.yaml"
+
 
 class TestLoadSettingsWithRunMode:
     """Tests for loading YAML with run_mode configuration."""

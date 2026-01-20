@@ -20,10 +20,122 @@ The following issues from code review have been addressed:
 |-------|------------|
 | **Critical:** No `state_id` per-row in pooled execution | Added `RowContext` dataclass to pass `state_id` per row (Task 9) |
 | **Critical:** Infinite retry with no escape | Added `max_capacity_retry_seconds` config (Task 7) |
+| **Critical:** `_call_index` in AuditedClientBase not thread-safe | Added `Lock` to `_next_call_index()` (Task 0 - NEW) |
+| **Critical:** Throttle delay before semaphore acquire | Moved delay inside worker, after semaphore acquire (Task 9) |
+| **Critical:** Semaphore held during capacity retry loop | Release before sleep, re-acquire after (Task 10) |
+| **Important:** Incomplete buffer drain after `as_completed` | Added final drain loop (Task 9) |
 | Hypothesis test uses `random.shuffle` | Fixed to use `st.permutations()` (Task 12) |
 | Wrong class name `AzureOpenAILLMTransform` | Fixed to `AzureLLMTransform` (Task 13) |
 | Module exports internal classes | Only export public API, keep internals private (Task 13) |
 | Missing timing in reorder buffer | Added `submit_timestamp`/`complete_timestamp` (Task 6) |
+
+---
+
+## Task 0: Thread-Safe Call Index in AuditedClientBase
+
+**Files:**
+- Modify: `src/elspeth/plugins/clients/base.py`
+- Test: `tests/plugins/clients/test_audited_client_base.py`
+
+**CRITICAL FIX:** The existing `AuditedClientBase._next_call_index()` is not thread-safe. With pooled execution, multiple threads calling this simultaneously will cause `call_index` collisions, corrupting the audit trail.
+
+### Step 1: Write failing test for thread safety
+
+```python
+# tests/plugins/clients/test_audited_client_base.py
+"""Tests for AuditedClientBase thread safety."""
+
+import threading
+from unittest.mock import MagicMock
+
+import pytest
+
+from elspeth.plugins.clients.base import AuditedClientBase
+
+
+class ConcreteAuditedClient(AuditedClientBase):
+    """Concrete implementation for testing."""
+    pass
+
+
+class TestCallIndexThreadSafety:
+    """Test that _next_call_index is thread-safe."""
+
+    def test_concurrent_call_index_no_duplicates(self) -> None:
+        """Multiple threads should get unique call indices."""
+        mock_recorder = MagicMock()
+        client = ConcreteAuditedClient(
+            recorder=mock_recorder,
+            state_id="test-state",
+        )
+
+        indices: list[int] = []
+        lock = threading.Lock()
+
+        def get_indices(count: int) -> None:
+            for _ in range(count):
+                idx = client._next_call_index()
+                with lock:
+                    indices.append(idx)
+
+        # Spawn 10 threads, each getting 100 indices
+        threads = [
+            threading.Thread(target=get_indices, args=(100,))
+            for _ in range(10)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # All 1000 indices should be unique
+        assert len(indices) == 1000
+        assert len(set(indices)) == 1000, "Duplicate call indices detected!"
+
+        # Should be 0-999
+        assert sorted(indices) == list(range(1000))
+```
+
+### Step 2: Run test to verify it fails
+
+Run: `pytest tests/plugins/clients/test_audited_client_base.py::TestCallIndexThreadSafety -v`
+Expected: FAIL with duplicate indices (race condition)
+
+### Step 3: Add thread-safe locking
+
+```python
+# Modify src/elspeth/plugins/clients/base.py
+
+# Add import at top:
+from threading import Lock
+
+# In AuditedClientBase.__init__, add:
+        self._call_index_lock = Lock()
+
+# Replace _next_call_index method:
+    def _next_call_index(self) -> int:
+        """Get next call index for this client (thread-safe).
+
+        Returns:
+            Sequential call index, unique within this client instance
+        """
+        with self._call_index_lock:
+            idx = self._call_index
+            self._call_index += 1
+            return idx
+```
+
+### Step 4: Run test to verify it passes
+
+Run: `pytest tests/plugins/clients/test_audited_client_base.py::TestCallIndexThreadSafety -v`
+Expected: PASS
+
+### Step 5: Commit
+
+```bash
+git add src/elspeth/plugins/clients/base.py tests/plugins/clients/test_audited_client_base.py
+git commit -m "fix(clients): make AuditedClientBase._next_call_index thread-safe"
+```
 
 ---
 
@@ -1645,13 +1757,9 @@ from concurrent.futures import Future, as_completed
             # Reserve slot in reorder buffer
             buffer_idx = self._buffer.submit()
 
-            # Apply throttle delay before dispatch
-            delay_ms = self._throttle.current_delay_ms
-            if delay_ms > 0:
-                time.sleep(delay_ms / 1000)
-                self._throttle.record_throttle_wait(delay_ms)
-
             # Acquire semaphore (blocks if pool is full)
+            # NOTE: Throttle delay is applied INSIDE the worker, not here,
+            # to avoid serial delays blocking parallel submission
             self._semaphore.acquire()
 
             # Submit to thread pool
@@ -1678,6 +1786,15 @@ from concurrent.futures import Future, as_completed
             for entry in ready:
                 results.append(entry.result)
 
+        # CRITICAL: Final drain - collect any remaining results not yet emitted
+        # (the last completed future may not have been at the head of the queue)
+        while self._buffer.pending_count > 0:
+            ready = self._buffer.get_ready_results()
+            if not ready:
+                break  # Safety: shouldn't happen if all futures completed
+            for entry in ready:
+                results.append(entry.result)
+
         return results
 
     def _execute_single(
@@ -1689,6 +1806,10 @@ from concurrent.futures import Future, as_completed
     ) -> tuple[int, TransformResult]:
         """Execute single row and handle throttle feedback.
 
+        Throttle delay is applied HERE (inside the worker) rather than
+        in the submission loop. This ensures parallel dispatch isn't
+        serialized by throttle delays.
+
         Args:
             buffer_idx: Index in reorder buffer
             row: Row to process
@@ -1699,6 +1820,12 @@ from concurrent.futures import Future, as_completed
             Tuple of (buffer_idx, result)
         """
         try:
+            # Apply throttle delay INSIDE worker (after semaphore acquired)
+            delay_ms = self._throttle.current_delay_ms
+            if delay_ms > 0:
+                time.sleep(delay_ms / 1000)
+                self._throttle.record_throttle_wait(delay_ms)
+
             result = process_fn(row, state_id)
             self._throttle.on_success()
             return (buffer_idx, result)
@@ -1825,6 +1952,76 @@ class TestPooledExecutorCapacityHandling:
         assert results[0].status == "error"
 
         executor.shutdown()
+
+    def test_capacity_retry_releases_semaphore_during_backoff(self) -> None:
+        """During capacity retry backoff, semaphore should be released.
+
+        This ensures other workers can make progress while one is sleeping.
+        CRITICAL: Without this, all workers hitting capacity errors would
+        deadlock the pool.
+        """
+        config = PoolConfig(
+            pool_size=2,
+            recovery_step_ms=50,
+            max_dispatch_delay_ms=100,
+        )
+        executor = PooledExecutor(config)
+
+        # Track concurrent execution during retry
+        row0_in_retry_sleep = threading.Event()
+        row1_completed = threading.Event()
+        execution_order: list[str] = []
+        lock = Lock()
+
+        def mock_process(row: dict, state_id: str) -> TransformResult:
+            idx = row["idx"]
+            with lock:
+                execution_order.append(f"start_{idx}")
+
+            if idx == 0:
+                # Row 0: First call fails, signals it's sleeping, waits, then succeeds
+                if not hasattr(mock_process, "row0_called"):
+                    mock_process.row0_called = True
+                    row0_in_retry_sleep.set()  # Signal we're about to sleep
+                    raise CapacityError(429, "Rate limited")
+                # Second call succeeds
+                row1_completed.wait(timeout=2)  # Wait for row 1 to complete
+                with lock:
+                    execution_order.append(f"end_{idx}")
+                return TransformResult.success(row)
+            else:
+                # Row 1: Wait until row 0 is in retry sleep, then complete
+                row0_in_retry_sleep.wait(timeout=2)
+                time.sleep(0.05)  # Give row 0 time to release semaphore
+                with lock:
+                    execution_order.append(f"end_{idx}")
+                row1_completed.set()
+                return TransformResult.success(row)
+
+        contexts = [
+            RowContext(row={"idx": 0}, state_id="state_0", row_index=0),
+            RowContext(row={"idx": 1}, state_id="state_1", row_index=1),
+        ]
+
+        results = executor.execute_batch(contexts, mock_process)
+
+        # Both should succeed
+        assert len(results) == 2
+        assert all(r.status == "success" for r in results)
+
+        # Row 1 should have executed WHILE row 0 was in retry sleep
+        # If semaphore wasn't released, row 1 would be blocked
+        assert "end_1" in execution_order
+        end_1_idx = execution_order.index("end_1")
+        # end_1 should happen before end_0 (row 1 completes during row 0's retry)
+        assert "end_0" in execution_order
+        end_0_idx = execution_order.index("end_0")
+        assert end_1_idx < end_0_idx, (
+            f"Row 1 should complete before Row 0's retry succeeds. "
+            f"Order: {execution_order}"
+        )
+
+        executor.shutdown()
 ```
 
 ### Step 2: Run test to verify it fails
@@ -1883,16 +2080,26 @@ from elspeth.plugins.llm.capacity_errors import CapacityError
                     # Trigger throttle backoff
                     self._throttle.on_capacity_error()
 
+                    # CRITICAL: Release semaphore BEFORE sleeping
+                    # This allows other workers to make progress while we wait
+                    self._semaphore.release()
+
                     # Wait throttle delay before retry
                     delay_ms = self._throttle.current_delay_ms
                     if delay_ms > 0:
                         time.sleep(delay_ms / 1000)
                         self._throttle.record_throttle_wait(delay_ms)
 
+                    # Re-acquire semaphore for retry
+                    self._semaphore.acquire()
+
                     # Retry
                     continue
         finally:
             # Always release semaphore
+            # Note: During capacity retry, we release before sleep and re-acquire after,
+            # so when we reach this finally block (success, timeout, or other exception),
+            # we always hold the semaphore and need to release it exactly once.
             self._semaphore.release()
 ```
 
@@ -2503,6 +2710,7 @@ git commit -m "test(llm): add full pooled execution integration test"
 
 | Task | Component | Purpose |
 |------|-----------|---------|
+| **0** | `AuditedClientBase` | **Thread-safe `_call_index` with Lock** |
 | 1-4 | `AIMDThrottle` | TCP-style congestion control with stats |
 | 5 | `capacity_errors` | Error classification |
 | 6 | `ReorderBuffer` | Strict output ordering with timing |
@@ -2519,6 +2727,10 @@ git commit -m "test(llm): add full pooled execution integration test"
 
 | Issue | How Addressed |
 |-------|---------------|
+| **CRITICAL:** `_call_index` not thread-safe | Added `Lock` to `_next_call_index()` (Task 0) |
+| **CRITICAL:** Throttle delay before semaphore | Moved delay inside worker, after semaphore acquire (Task 9) |
+| **CRITICAL:** Semaphore held during retry | Release before sleep, re-acquire after (Task 10) |
+| **Important:** Incomplete buffer drain | Added final drain loop after `as_completed` (Task 9) |
 | No `state_id` per-row | Added `RowContext` dataclass, `execute_batch` takes list of contexts |
 | Infinite retry without timeout | Added `max_capacity_retry_seconds` config (default 1 hour) |
 | Hypothesis uses `random.shuffle` | Changed to `st.permutations()` for reproducibility |

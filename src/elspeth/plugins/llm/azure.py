@@ -179,11 +179,17 @@ class AzureLLMTransform(BaseTransform):
                     "Pooled execution requires landscape recorder and state_id. Ensure transform is executed through the engine."
                 )
             row_ctx = RowContext(row=row, state_id=ctx.state_id, row_index=0)
-            results = self._executor.execute_batch(
-                contexts=[row_ctx],
-                process_fn=self._process_single_with_state,
-            )
-            return results[0]
+            try:
+                results = self._executor.execute_batch(
+                    contexts=[row_ctx],
+                    process_fn=self._process_single_with_state,
+                )
+                return results[0]
+            finally:
+                # Evict cached client after row completes to prevent unbounded memory growth
+                # The client is only needed during retry loops within execute_batch()
+                with self._llm_clients_lock:
+                    self._llm_clients.pop(ctx.state_id, None)
 
         # Sequential execution path
         # 1. Render template with row data (THEIR DATA - wrap)

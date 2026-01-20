@@ -135,6 +135,188 @@ elspeth explain --run latest --row 42
 # Artifact hash: 7b2e4f...
 ```
 
+## Docker Container
+
+ELSPETH is available as a Docker container for production deployments. The container follows a **CLI-first design** where arguments are passed directly to the `elspeth` CLI.
+
+### Quick Start with Docker
+
+```bash
+# Show help
+docker run ghcr.io/your-org/elspeth
+
+# Check version
+docker run ghcr.io/your-org/elspeth --version
+
+# List available plugins
+docker run ghcr.io/your-org/elspeth plugins list
+```
+
+### Running Pipelines
+
+Mount your configuration and data directories:
+
+```bash
+# Run a pipeline
+docker run --rm \
+  -v $(pwd)/config:/app/config:ro \
+  -v $(pwd)/input:/app/input:ro \
+  -v $(pwd)/output:/app/output \
+  -v $(pwd)/state:/app/state \
+  ghcr.io/your-org/elspeth:v0.1.0 \
+  run --settings /app/config/pipeline.yaml --execute
+
+# Validate configuration
+docker run --rm \
+  -v $(pwd)/config:/app/config:ro \
+  ghcr.io/your-org/elspeth:v0.1.0 \
+  validate --settings /app/config/pipeline.yaml
+
+# Explain a row
+docker run --rm \
+  -v $(pwd)/state:/app/state:ro \
+  ghcr.io/your-org/elspeth:v0.1.0 \
+  explain --run latest --row 42 --no-tui
+```
+
+### Standard Volume Mounts
+
+| Host Path | Container Path | Mode | Purpose |
+|-----------|----------------|------|---------|
+| `./config` | `/app/config` | `ro` | Pipeline YAML, settings |
+| `./input` | `/app/input` | `ro` | Source data files (CSV, JSON, etc.) |
+| `./output` | `/app/output` | `rw` | Sink output files |
+| `./state` | `/app/state` | `rw` | SQLite landscape DB, checkpoints, payloads |
+| `./secrets` | `/app/secrets` | `ro` | Sensitive config (optional) |
+
+### Environment Variables
+
+Pass secrets and configuration via environment variables:
+
+```bash
+docker run --rm \
+  -e DATABASE_URL="sqlite:////app/state/landscape.db" \
+  -e OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
+  -e ELSPETH_FINGERPRINT_KEY="${ELSPETH_FINGERPRINT_KEY}" \
+  -v $(pwd)/config:/app/config:ro \
+  -v $(pwd)/input:/app/input:ro \
+  -v $(pwd)/output:/app/output \
+  -v $(pwd)/state:/app/state \
+  ghcr.io/your-org/elspeth:v0.1.0 \
+  run --settings /app/config/pipeline.yaml --execute
+```
+
+### Using docker-compose
+
+For easier management, use docker-compose:
+
+```yaml
+# docker-compose.yaml
+services:
+  elspeth:
+    image: ghcr.io/your-org/elspeth:${IMAGE_TAG:-latest}
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-sqlite:////app/state/landscape.db}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+    volumes:
+      - ./config:/app/config:ro
+      - ./input:/app/input:ro
+      - ./output:/app/output
+      - ./state:/app/state
+    command: ["--help"]
+```
+
+```bash
+# Run a pipeline
+docker compose run --rm elspeth run --settings /app/config/pipeline.yaml --execute
+
+# Validate config
+docker compose run --rm elspeth validate --settings /app/config/pipeline.yaml
+
+# Check health
+docker compose run --rm elspeth health --verbose
+```
+
+### Health Checks
+
+The `health` command verifies system readiness:
+
+```bash
+# Basic health check
+docker run --rm ghcr.io/your-org/elspeth health
+
+# Verbose output
+docker run --rm ghcr.io/your-org/elspeth health --verbose
+
+# JSON output (for automation)
+docker run --rm ghcr.io/your-org/elspeth health --json
+```
+
+Example output:
+
+```json
+{
+  "status": "healthy",
+  "version": "0.1.0",
+  "commit": "abc123f",
+  "checks": {
+    "version": {"status": "ok", "value": "0.1.0"},
+    "python": {"status": "ok", "value": "3.11.9"},
+    "database": {"status": "ok", "value": "connected"},
+    "plugins": {"status": "ok", "value": "4 sources, 11 transforms, 4 sinks"}
+  }
+}
+```
+
+### Image Tags
+
+| Tag Pattern | Example | Use Case |
+|-------------|---------|----------|
+| `sha-<commit>` | `sha-abc123f` | CI/CD deployments (immutable) |
+| `v<version>` | `v0.1.0` | Release versions |
+| `latest` | `latest` | Development (avoid in production) |
+
+### Container Registries
+
+Images are published to:
+
+- **GitHub Container Registry**: `ghcr.io/your-org/elspeth`
+- **Azure Container Registry**: `<your-acr>.azurecr.io/elspeth` (if configured)
+
+### Configuration in Containers
+
+Pipeline configurations should use absolute container paths:
+
+```yaml
+# config/pipeline.yaml
+datasource:
+  plugin: csv
+  options:
+    path: /app/input/data.csv  # References mounted input directory
+
+sinks:
+  output:
+    plugin: csv
+    options:
+      path: /app/output/results.csv  # References mounted output directory
+
+landscape:
+  url: ${DATABASE_URL:-sqlite:////app/state/landscape.db}
+
+payload_store:
+  base_path: /app/state/payloads
+```
+
+### Building the Image Locally
+
+```bash
+# Build the image
+docker build -t elspeth:local .
+
+# Run locally built image
+docker run --rm elspeth:local --version
+```
+
 ## Core Features
 
 ### Full Audit Trail (Landscape)

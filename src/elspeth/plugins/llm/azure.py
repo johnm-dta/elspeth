@@ -67,7 +67,7 @@ class AzureLLMTransform(BaseTransform):
               endpoint: "${AZURE_OPENAI_ENDPOINT}"
               api_key: "${AZURE_OPENAI_KEY}"
               template: |
-                Analyze: {{ text }}
+                Analyze: {{ row.text }}
               schema:
                 fields: dynamic
     """
@@ -196,6 +196,9 @@ class AzureLLMTransform(BaseTransform):
         output[f"{self._response_field}_usage"] = response.usage
         output[f"{self._response_field}_template_hash"] = rendered.template_hash
         output[f"{self._response_field}_variables_hash"] = rendered.variables_hash
+        output[f"{self._response_field}_template_source"] = rendered.template_source
+        output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
+        output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
         output[f"{self._response_field}_model"] = response.model
 
         return TransformResult.success(output)

@@ -432,12 +432,13 @@ class AzureBlobSource(BaseSource):
             yield from self._validate_and_yield(row, ctx)
 
     def _validate_and_yield(
-        self, row: dict[str, Any], ctx: PluginContext
+        self, row: Any, ctx: PluginContext
     ) -> Iterator[SourceRow]:
         """Validate a row and yield if valid, otherwise quarantine.
 
         Args:
-            row: Row data to validate.
+            row: Row data to validate. May be non-dict for malformed external
+                 data (e.g., JSON arrays containing primitives).
             ctx: Plugin context for recording validation errors.
 
         Yields:

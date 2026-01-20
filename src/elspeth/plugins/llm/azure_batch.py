@@ -109,7 +109,7 @@ class AzureBatchLLMTransform(BaseTransform):
               endpoint: "${AZURE_OPENAI_ENDPOINT}"
               api_key: "${AZURE_OPENAI_KEY}"
               template: |
-                Analyze: {{ text }}
+                Analyze: {{ row.text }}
               schema:
                 fields: dynamic
               poll_interval_seconds: 300

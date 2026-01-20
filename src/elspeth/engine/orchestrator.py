@@ -26,6 +26,7 @@ from elspeth.engine.schema_validator import validate_pipeline_schemas
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.base import BaseGate, BaseTransform
 from elspeth.plugins.context import PluginContext
+from elspeth.plugins.llm.batch_errors import BatchPendingError
 from elspeth.plugins.protocols import SinkProtocol, SourceProtocol
 
 # Type alias for row-processing plugins in the transforms pipeline
@@ -442,6 +443,14 @@ class Orchestrator:
 
             return result
 
+        except BatchPendingError:
+            # BatchPendingError is a CONTROL-FLOW SIGNAL, not an error.
+            # A batch transform has submitted work that isn't complete yet.
+            # DO NOT mark run as failed - it's pending, not failed.
+            # Re-raise for caller to schedule retry based on check_after_seconds.
+            # The run remains in its current state (the caller should manage
+            # run status transitions for pending/retry scenarios).
+            raise
         except Exception:
             # Only mark run as failed if it didn't complete successfully
             # (export failures are tracked separately)

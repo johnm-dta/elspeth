@@ -46,7 +46,7 @@ class OpenRouterLLMTransform(BaseTransform):
             options:
               model: "anthropic/claude-3-opus"
               template: |
-                Analyze: {{ text }}
+                Analyze: {{ row.text }}
               api_key: "${OPENROUTER_API_KEY}"
               schema:
                 fields: dynamic
@@ -206,6 +206,9 @@ class OpenRouterLLMTransform(BaseTransform):
         output[f"{self._response_field}_usage"] = usage
         output[f"{self._response_field}_template_hash"] = rendered.template_hash
         output[f"{self._response_field}_variables_hash"] = rendered.variables_hash
+        output[f"{self._response_field}_template_source"] = rendered.template_source
+        output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
+        output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
         output[f"{self._response_field}_model"] = data.get("model", self._model)
 
         return TransformResult.success(output)

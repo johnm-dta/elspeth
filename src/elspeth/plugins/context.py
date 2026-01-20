@@ -219,7 +219,7 @@ class PluginContext:
 
     def record_validation_error(
         self,
-        row: dict[str, Any],
+        row: Any,
         error: str,
         schema_mode: str,
         destination: str,
@@ -231,7 +231,8 @@ class PluginContext:
         for complete audit coverage.
 
         Args:
-            row: The row data that failed validation
+            row: The row data that failed validation (may be non-dict for
+                 malformed external data like JSON arrays containing primitives)
             error: Description of the validation failure
             schema_mode: "strict", "free", or "dynamic"
             destination: Sink name where row is routed, or "discard"
@@ -242,7 +243,12 @@ class PluginContext:
         from elspeth.core.canonical import stable_hash
 
         # Generate row_id from content hash if not present
-        row_id = str(row["id"]) if "id" in row else stable_hash(row)[:16]
+        # External data may be non-dict (e.g., JSON array containing primitives),
+        # so we must check isinstance before accessing dict keys
+        if isinstance(row, dict) and "id" in row:
+            row_id = str(row["id"])
+        else:
+            row_id = stable_hash(row)[:16]
 
         if self.landscape is None:
             logger.warning(

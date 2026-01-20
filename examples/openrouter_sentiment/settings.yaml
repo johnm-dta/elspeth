@@ -28,7 +28,7 @@ row_plugins:
       template: |
         Analyze the sentiment of the following text and respond with ONLY a JSON object.
 
-        Text: {{ text }}
+        Text: {{ row.text }}
 
         Respond with exactly this format (no other text):
         {"sentiment": "positive" or "negative" or "neutral", "confidence": 0.0-1.0, "summary": "brief explanation"}

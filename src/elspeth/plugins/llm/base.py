@@ -149,7 +149,7 @@ class BaseLLMTransform(BaseTransform):
     # Example: name = "my_llm_transform"
 
     @abstractmethod
-    def _get_llm_client(self, ctx: PluginContext) -> "AuditedLLMClient":
+    def _get_llm_client(self, ctx: PluginContext) -> AuditedLLMClient:
         """Create or return an AuditedLLMClient for this transform.
 
         Subclasses MUST implement this to be self-contained. The client
@@ -234,6 +234,9 @@ class BaseLLMTransform(BaseTransform):
         # 6. Add audit metadata for template traceability
         output[f"{self._response_field}_template_hash"] = rendered.template_hash
         output[f"{self._response_field}_variables_hash"] = rendered.variables_hash
+        output[f"{self._response_field}_template_source"] = rendered.template_source
+        output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
+        output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
 
         return TransformResult.success(output)
 

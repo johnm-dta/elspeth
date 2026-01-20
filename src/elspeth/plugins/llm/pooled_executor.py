@@ -29,13 +29,12 @@ from elspeth.plugins.llm.reorder_buffer import ReorderBuffer
 class RowContext:
     """Context for processing a single row in the pool.
 
-    This allows each row to have its own state_id for audit trail,
-    solving the "single state_id for all parallel rows" problem.
-
     Attributes:
         row: The row data to process
-        state_id: Unique state ID for this row's audit trail
-        row_index: Original index for ordering
+        state_id: State ID for audit trail. Can be unique per row OR shared
+            across batch rows (when used with aggregation). When shared,
+            call_index in PluginContext provides uniqueness for external_calls.
+        row_index: Original index for result ordering
     """
 
     row: dict[str, Any]

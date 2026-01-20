@@ -54,6 +54,17 @@ class LLMConfig(TransformDataConfig):
         "llm_response", description="Field name for LLM response in output"
     )
 
+    # New fields for file-based templates
+    lookup: dict[str, Any] | None = Field(
+        None, description="Lookup data loaded from YAML file"
+    )
+    template_source: str | None = Field(
+        None, description="Template file path for audit (None if inline)"
+    )
+    lookup_source: str | None = Field(
+        None, description="Lookup file path for audit (None if no lookup)"
+    )
+
     @field_validator("template")
     @classmethod
     def validate_template(cls, v: str) -> str:

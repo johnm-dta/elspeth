@@ -228,6 +228,21 @@ class TestLLMConfig:
                 }
             )
 
+    def test_llm_config_accepts_lookup_fields(self) -> None:
+        """LLMConfig accepts lookup and source metadata fields."""
+        config = LLMConfig.from_dict({
+            "model": "test-model",
+            "template": "Hello, {{ row.name }}!",
+            "template_source": "prompts/test.j2",
+            "lookup": {"key": "value"},
+            "lookup_source": "prompts/lookups.yaml",
+            "schema": {"fields": "dynamic"},
+        })
+
+        assert config.template_source == "prompts/test.j2"
+        assert config.lookup == {"key": "value"}
+        assert config.lookup_source == "prompts/lookups.yaml"
+
 
 class TestBaseLLMTransformInit:
     """Tests for BaseLLMTransform initialization."""

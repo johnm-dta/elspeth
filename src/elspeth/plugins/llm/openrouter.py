@@ -174,12 +174,19 @@ class OpenRouterLLMTransform(BaseTransform):
         """Fallback for batch processing without executor (pool_size=1).
 
         Processes rows one at a time using existing sequential logic.
+        Uses cached HTTP client to preserve call_index across rows.
         """
         results: list[TransformResult] = []
-        for row in rows:
-            # Use the single-row sequential path
-            result = self._process_sequential(row, ctx)
-            results.append(result)
+        try:
+            for row in rows:
+                # Use the single-row sequential path with cached client
+                result = self._process_sequential(row, ctx)
+                results.append(result)
+        finally:
+            # Clean up cached client after batch completes
+            assert ctx.state_id is not None
+            with self._http_clients_lock:
+                self._http_clients.pop(ctx.state_id, None)
         return self._assemble_batch_results(rows, results)
 
     def _process_sequential(
@@ -218,18 +225,12 @@ class OpenRouterLLMTransform(BaseTransform):
         if self._max_tokens:
             request_body["max_tokens"] = self._max_tokens
 
-        # 3. Call via audited HTTP client
-        # NOTE: ctx.landscape and ctx.state_id are guaranteed non-None here
-        # because _process_sequential is only called from _process_batch_sequential,
-        # which is only called from _process_batch after the None check.
-        assert ctx.landscape is not None and ctx.state_id is not None
-        http_client = AuditedHTTPClient(
-            recorder=ctx.landscape,
-            state_id=ctx.state_id,
-            timeout=self._timeout,
-            base_url=self._base_url,
-            headers={"Authorization": f"Bearer {self._api_key}"},
-        )
+        # 3. Call via cached HTTP client
+        # Uses _get_http_client to preserve call_index across rows in a batch.
+        # All rows in a batch share the same state_id, so the cached client
+        # ensures call_index increments (0, 1, 2, ...) rather than resetting.
+        assert ctx.state_id is not None
+        http_client = self._get_http_client(ctx.state_id)
 
         try:
             response = http_client.post(

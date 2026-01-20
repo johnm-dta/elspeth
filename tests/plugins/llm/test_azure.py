@@ -859,6 +859,9 @@ class TestAzureBatchProcessing:
 
     def test_process_accepts_list_of_rows(self, ctx: PluginContext, transform: AzureLLMTransform) -> None:
         """process() should accept a list of rows and return success_multi."""
+        # Initialize transform with recorder reference
+        transform.on_start(ctx)
+
         rows = [
             {"text": "hello"},
             {"text": "world"},
@@ -895,6 +898,8 @@ class TestAzureBatchProcessing:
                 "schema": DYNAMIC_SCHEMA,
             }
         )
+        # Initialize transform with recorder reference
+        transform.on_start(ctx)
 
         rows = [
             {"text": "good1"},

@@ -3,6 +3,9 @@
 
 import time
 
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
 from elspeth.plugins.llm.reorder_buffer import ReorderBuffer
 
 
@@ -138,3 +141,72 @@ class TestReorderBufferTiming:
         assert ready[0].buffer_wait_ms < 50
         # Second item waited while first was pending
         assert ready[1].buffer_wait_ms >= 15  # At least 20ms minus some tolerance
+
+
+class TestReorderBufferProperties:
+    """Property-based tests for reorder buffer invariants."""
+
+    @given(
+        completion_order=st.permutations(range(10)),
+    )
+    @settings(max_examples=100)
+    def test_output_order_matches_submission_order(self, completion_order: list[int]) -> None:
+        """For ANY completion order, output is always in submission order."""
+        buffer = ReorderBuffer[int]()
+        n = len(completion_order)
+
+        # Submit n items
+        for _ in range(n):
+            buffer.submit()
+
+        # Complete in permuted order (using Hypothesis-provided permutation)
+        for complete_idx in completion_order:
+            buffer.complete(complete_idx, complete_idx)
+
+        # Collect all results
+        all_results: list[int] = []
+        while buffer.pending_count > 0:
+            ready = buffer.get_ready_results()
+            for entry in ready:
+                all_results.append(entry.result)
+
+        # Drain any remaining
+        ready = buffer.get_ready_results()
+        for entry in ready:
+            all_results.append(entry.result)
+
+        # Must be in submission order (0, 1, 2, ..., n-1)
+        assert all_results == list(range(n))
+
+    @given(
+        completion_order=st.permutations(range(20)),
+    )
+    @settings(max_examples=50)
+    def test_all_submitted_items_eventually_emitted(self, completion_order: list[int]) -> None:
+        """Every submitted item is eventually emitted exactly once."""
+        buffer = ReorderBuffer[str]()
+        n = len(completion_order)
+
+        # Submit n items
+        for _ in range(n):
+            buffer.submit()
+
+        # Complete in Hypothesis-provided permutation order
+        for idx in completion_order:
+            buffer.complete(idx, f"result_{idx}")
+
+        # Collect all results
+        all_results: list[str] = []
+        while buffer.pending_count > 0:
+            ready = buffer.get_ready_results()
+            for entry in ready:
+                all_results.append(entry.result)
+
+        # Drain any remaining
+        ready = buffer.get_ready_results()
+        for entry in ready:
+            all_results.append(entry.result)
+
+        # Must have exactly n results
+        assert len(all_results) == n
+        assert buffer.pending_count == 0

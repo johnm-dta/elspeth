@@ -185,7 +185,17 @@ def check_compatibility(
 
 
 def _type_name(t: Any) -> str:
-    """Get readable name for a type annotation."""
+    """Get readable name for a type annotation.
+
+    For generic types (Optional, Union, list[T], etc.), returns the full
+    representation rather than just the origin type name.
+    """
+    # For generic types, use str() to get full representation
+    origin = get_origin(t)
+    if origin is not None:
+        # Generic type - str() gives readable form like "list[str]" or "int | None"
+        return str(t)
+    # For simple types, use __name__ if available
     if hasattr(t, "__name__"):
         return str(t.__name__)
     return str(t)
@@ -202,12 +212,17 @@ def _types_compatible(actual: Any, expected: Any) -> bool:
 
     Handles:
     - Exact matches
+    - Any type (accepts everything)
     - Numeric compatibility (int -> float)
     - Optional[X] on consumer side (producer can send X or X | None)
-    - Union types (both typing.Union and X | Y syntax)
+    - Union types with coercion (int compatible with float | None)
     """
     # Exact match
     if actual == expected:
+        return True
+
+    # Any accepts everything
+    if expected is Any:
         return True
 
     # Numeric compatibility (int -> float is OK)
@@ -217,12 +232,12 @@ def _types_compatible(actual: Any, expected: Any) -> bool:
     # Handle Optional/Union types (both typing.Union and types.UnionType)
     if _is_union_type(expected):
         expected_args = get_args(expected)
-        # Check if actual type matches any of the union members
-        if actual in expected_args:
+        # Check if actual type matches any of the union members (with coercion)
+        if any(_types_compatible(actual, expected_member) for expected_member in expected_args):
             return True
-        # Check if actual is a Union that's a subset
+        # Check if actual is a Union where all members are compatible
         if _is_union_type(actual):
             actual_args = get_args(actual)
-            return all(a in expected_args for a in actual_args)
+            return all(any(_types_compatible(a, e) for e in expected_args) for a in actual_args)
 
     return False

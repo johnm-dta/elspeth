@@ -469,7 +469,13 @@ allow_hits:
     safety: "Graceful handling - validation error message still produced"
     expires: null  # Permanent - intentional design
 
-  - key: "contracts/data.py:R3:_type_name:line=189"
+  - key: "contracts/schema.py:R1:SchemaConfig:from_dict:line=154"
+    owner: "architecture"
+    reason: "Round-trip serialization: to_dict() outputs mode='dynamic', from_dict() must accept it"
+    safety: "Explicit check for serialized form before standard parsing - enables audit trail storage"
+    expires: null  # Permanent - intentional design
+
+  - key: "contracts/data.py:R3:_type_name:line=199"
     owner: "architecture"
     reason: "Type introspection: not all types have __name__ attribute"
     safety: "Graceful fallback to str() - error message still produced"
@@ -774,13 +780,13 @@ allow_hits:
   # severity 0 (safe) to avoid false positives.
   # ============================================================
 
-  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=225"
+  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=241"
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=229"
+  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=245"
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"

@@ -38,12 +38,28 @@ class RoutingAction:
 
     This field is REQUIRED per architecture. Without it, executors cannot
     correctly record routing events or determine token flow.
+
+    Invariants (enforced by __post_init__):
+    - CONTINUE must have empty destinations
+    - FORK_TO_PATHS must use COPY mode
+    - ROUTE must have exactly one destination
     """
 
     kind: RoutingKind
     destinations: tuple[str, ...]
     mode: RoutingMode
     reason: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        """Validate invariants between kind, mode, and destinations."""
+        if self.kind == RoutingKind.CONTINUE and self.destinations:
+            raise ValueError("CONTINUE must have empty destinations")
+
+        if self.kind == RoutingKind.FORK_TO_PATHS and self.mode != RoutingMode.COPY:
+            raise ValueError("FORK_TO_PATHS must use COPY mode")
+
+        if self.kind == RoutingKind.ROUTE and len(self.destinations) != 1:
+            raise ValueError("ROUTE must have exactly one destination")
 
     @classmethod
     def continue_(cls, *, reason: dict[str, Any] | None = None) -> "RoutingAction":
@@ -91,10 +107,13 @@ class RoutingAction:
         """Fork token to multiple parallel paths (always copy mode).
 
         Raises:
-            ValueError: If paths is empty (fork requires at least one destination).
+            ValueError: If paths is empty or contains duplicates.
         """
         if not paths:
             raise ValueError("fork_to_paths requires at least one destination path")
+        if len(paths) != len(set(paths)):
+            duplicates = [p for p in paths if paths.count(p) > 1]
+            raise ValueError(f"fork_to_paths requires unique path names (duplicates: {sorted(set(duplicates))})")
         return cls(
             kind=RoutingKind.FORK_TO_PATHS,
             destinations=tuple(paths),

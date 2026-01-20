@@ -136,3 +136,27 @@ Analyze these entries:
         result = template.render({})
         assert "- Electronics" in result
         assert "- Clothing" in result
+
+    def test_lookup_hash_is_stable(self) -> None:
+        """Same lookup data produces same hash."""
+        data = {"categories": ["A", "B", "C"]}
+        t1 = PromptTemplate("{{ lookup.categories }}", lookup_data=data)
+        t2 = PromptTemplate("{{ lookup.categories }}", lookup_data=data)
+        assert t1.lookup_hash == t2.lookup_hash
+
+    def test_no_lookup_has_none_hash(self) -> None:
+        """Template without lookup data has None lookup_hash."""
+        template = PromptTemplate("Hello, {{ row.name }}!")
+        assert template.lookup_hash is None
+        assert template.lookup_source is None
+
+    def test_empty_lookup_has_hash(self) -> None:
+        """Template with empty lookup_data={} still gets a hash.
+
+        We distinguish None (no lookup configured) from {} (empty lookup).
+        An empty lookup is still a valid configuration that should be auditable.
+        Per CLAUDE.md: "No inference - if it's not recorded, it didn't happen."
+        """
+        template = PromptTemplate("Hello, {{ row.name }}!", lookup_data={})
+        assert template.lookup_hash is not None  # Empty dict still gets hashed
+        assert template.lookup_source is None  # No source file specified

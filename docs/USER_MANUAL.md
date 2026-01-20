@@ -22,7 +22,7 @@ This manual covers day-to-day usage of the ELSPETH CLI for running auditable pip
 
 ```bash
 # Clone and install
-git clone https://github.com/your-org/elspeth-rapid.git
+git clone https://github.com/tachyon-beep/elspeth-rapid.git
 cd elspeth-rapid
 uv venv && source .venv/bin/activate
 uv pip install -e ".[all]"  # Full installation with LLM support

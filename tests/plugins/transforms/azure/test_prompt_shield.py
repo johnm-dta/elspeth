@@ -393,12 +393,12 @@ class TestAzurePromptShieldTransform:
         # Only one API call should be made (for "prompt" field)
         assert ctx.http_client.post.call_count == 1
 
-    def test_malformed_api_response_defaults_to_no_attack(self) -> None:
-        """Malformed API responses default to no attack (fail-safe).
+    def test_malformed_api_response_returns_error(self) -> None:
+        """Malformed API responses return error (fail-closed security posture).
 
-        Azure API responses are external data (Tier 3: Zero Trust) and may
-        return unexpected structures. Missing fields default to False (no attack)
-        to avoid false positives on API changes.
+        Prompt Shield is a security transform. If Azure's API changes or returns
+        garbage, we must not let potentially malicious content pass through
+        undetected. Malformed responses are treated as errors, not "no attack".
         """
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -417,14 +417,18 @@ class TestAzurePromptShieldTransform:
         row = {"prompt": "test", "id": 1}
         result = transform.process(row, ctx)
 
-        # Should pass since missing fields default to False (no attack)
-        assert result.status == "success"
+        # Fail-closed: malformed response returns error, not success
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "api_error"
+        assert "malformed" in result.reason["message"].lower()
+        assert result.retryable is True
 
-    def test_partial_api_response_defaults_to_no_attack(self) -> None:
-        """Partial API responses default to no attack for missing fields.
+    def test_partial_api_response_returns_error(self) -> None:
+        """Partial API responses return error (fail-closed security posture).
 
-        If userPromptAnalysis is present but documentsAnalysis is missing,
-        documentsAnalysis defaults to no attack.
+        If documentsAnalysis is missing from the response, that's a malformed
+        response that should be rejected, not treated as "no document attack".
         """
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
@@ -437,7 +441,7 @@ class TestAzurePromptShieldTransform:
             }
         )
 
-        # Mock a response with only userPromptAnalysis
+        # Mock a response with only userPromptAnalysis (documentsAnalysis missing)
         ctx = make_mock_context(
             {
                 "userPromptAnalysis": {"attackDetected": False},
@@ -448,8 +452,12 @@ class TestAzurePromptShieldTransform:
         row = {"prompt": "test", "id": 1}
         result = transform.process(row, ctx)
 
-        # Should pass - missing documentsAnalysis defaults to no attack
-        assert result.status == "success"
+        # Fail-closed: partial response returns error, not success
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "api_error"
+        assert "malformed" in result.reason["message"].lower()
+        assert result.retryable is True
 
     def test_http_error_non_rate_limit_not_retryable(self) -> None:
         """Non-429 HTTP errors are not retryable."""

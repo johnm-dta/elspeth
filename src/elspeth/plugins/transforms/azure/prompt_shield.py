@@ -182,15 +182,16 @@ class AzurePromptShield(BaseTransform):
         response.raise_for_status()
 
         # Parse response - Azure API responses are external data (Tier 3: Zero Trust)
-        # Missing fields default to False (no attack) to avoid false positives on API changes
-        data = response.json()
-
-        # External API data - use .get() with safe defaults
-        user_prompt_analysis = data.get("userPromptAnalysis", {})
-        user_attack = user_prompt_analysis.get("attackDetected", False)
-
-        documents_analysis = data.get("documentsAnalysis", [])
-        doc_attack = any(doc.get("attackDetected", False) for doc in documents_analysis)
+        # Security transform: fail CLOSED on malformed response
+        # If Azure's API changes or returns garbage, we must not let potentially
+        # malicious content pass through undetected
+        try:
+            data = response.json()
+            user_attack = data["userPromptAnalysis"]["attackDetected"]
+            documents_analysis = data["documentsAnalysis"]
+            doc_attack = any(doc["attackDetected"] for doc in documents_analysis)
+        except (KeyError, TypeError) as e:
+            raise httpx.RequestError(f"Malformed Prompt Shield response: {e}") from e
 
         return {
             "user_prompt_attack": user_attack,

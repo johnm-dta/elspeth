@@ -82,9 +82,7 @@ class TestCSVSink:
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
-        sink = CSVSink(
-            {"path": str(output_file), "delimiter": ";", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = CSVSink({"path": str(output_file), "delimiter": ";", "schema": DYNAMIC_SCHEMA})
 
         sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.flush()
@@ -122,9 +120,7 @@ class TestCSVSink:
 
         sink.close()
 
-    def test_batch_write_returns_artifact_descriptor(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_batch_write_returns_artifact_descriptor(self, tmp_path: Path, ctx: PluginContext) -> None:
         """write() returns ArtifactDescriptor with content hash."""
         from elspeth.contracts import ArtifactDescriptor
         from elspeth.plugins.sinks.csv_sink import CSVSink
@@ -140,9 +136,7 @@ class TestCSVSink:
         assert artifact.content_hash  # Non-empty
         assert artifact.size_bytes > 0
 
-    def test_batch_write_content_hash_is_sha256(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_batch_write_content_hash_is_sha256(self, tmp_path: Path, ctx: PluginContext) -> None:
         """content_hash is SHA-256 of file contents."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
@@ -158,9 +152,7 @@ class TestCSVSink:
 
         assert artifact.content_hash == expected_hash
 
-    def test_batch_write_multiple_rows(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_batch_write_multiple_rows(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Batch write handles multiple rows."""
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
@@ -215,9 +207,7 @@ class TestCSVSink:
         sink = CSVSink({"path": "/tmp/test.csv", "schema": DYNAMIC_SCHEMA})
         assert sink.determinism == Determinism.IO_WRITE
 
-    def test_cumulative_hash_after_multiple_writes(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_cumulative_hash_after_multiple_writes(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Each write() returns hash of cumulative file contents, not just new rows.
 
         For audit integrity, the ArtifactDescriptor returned from each write()
@@ -243,9 +233,7 @@ class TestCSVSink:
 
         # Verify second hash matches cumulative file contents (not just new rows)
         file_content_after_second = output_file.read_bytes()
-        expected_hash_after_second = hashlib.sha256(
-            file_content_after_second
-        ).hexdigest()
+        expected_hash_after_second = hashlib.sha256(file_content_after_second).hexdigest()
         assert hash_after_second == expected_hash_after_second
 
         # Third write

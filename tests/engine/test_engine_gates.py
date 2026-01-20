@@ -84,9 +84,7 @@ def _build_test_graph_with_config_gates(
         for route_label, target in gate_config.routes.items():
             route_resolution_map[(node_id, route_label)] = target
             if target not in ("continue", "fork") and target in sink_ids:
-                graph.add_edge(
-                    node_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE
-                )
+                graph.add_edge(node_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE)
 
         prev = node_id
 
@@ -150,9 +148,7 @@ class TestCompositeConditions:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -184,9 +180,7 @@ class TestCompositeConditions:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 4
@@ -231,9 +225,7 @@ class TestCompositeConditions:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -262,9 +254,7 @@ class TestCompositeConditions:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 3
@@ -306,9 +296,7 @@ class TestCompositeConditions:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -338,9 +326,7 @@ class TestCompositeConditions:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 4
@@ -384,9 +370,7 @@ class TestCompositeConditions:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -415,9 +399,7 @@ class TestCompositeConditions:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 3
@@ -523,9 +505,7 @@ class TestRouteLabelResolution:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -711,9 +691,7 @@ class TestForkCreatesChildTokens:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -756,12 +734,8 @@ class TestForkCreatesChildTokens:
         assert result.rows_forked == 1
 
         # CRITICAL: Each sink gets exactly one row (the fork child for that branch)
-        assert (
-            len(path_a_sink.results) == 1
-        ), f"path_a should get 1 row, got {len(path_a_sink.results)}"
-        assert (
-            len(path_b_sink.results) == 1
-        ), f"path_b should get 1 row, got {len(path_b_sink.results)}"
+        assert len(path_a_sink.results) == 1, f"path_a should get 1 row, got {len(path_a_sink.results)}"
+        assert len(path_b_sink.results) == 1, f"path_b should get 1 row, got {len(path_b_sink.results)}"
 
         # Both should have the same value (forked from same parent)
         assert path_a_sink.results[0]["value"] == 42
@@ -814,9 +788,7 @@ class TestForkCreatesChildTokens:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -860,14 +832,10 @@ class TestForkCreatesChildTokens:
         assert result.rows_forked == 1
 
         # "alerts" child -> alerts_sink (branch matches sink)
-        assert (
-            len(alerts_sink.results) == 1
-        ), f"alerts sink should get 1 row, got {len(alerts_sink.results)}"
+        assert len(alerts_sink.results) == 1, f"alerts sink should get 1 row, got {len(alerts_sink.results)}"
 
         # "stats" child -> default_sink (no matching sink, falls back)
-        assert (
-            len(default_sink.results) == 1
-        ), f"default sink should get 1 row (stats fallback), got {len(default_sink.results)}"
+        assert len(default_sink.results) == 1, f"default sink should get 1 row (stats fallback), got {len(default_sink.results)}"
 
         # Both should have the same value (forked from same parent)
         assert alerts_sink.results[0]["value"] == 99
@@ -921,9 +889,7 @@ class TestForkCreatesChildTokens:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -966,17 +932,11 @@ class TestForkCreatesChildTokens:
         assert result.rows_processed == 3
 
         # CRITICAL: rows_forked counts parent rows that forked
-        assert (
-            result.rows_forked == 3
-        ), f"Expected 3 forked rows, got {result.rows_forked}"
+        assert result.rows_forked == 3, f"Expected 3 forked rows, got {result.rows_forked}"
 
         # Each sink should receive 3 rows (one child per source row)
-        assert (
-            len(analysis_sink.results) == 3
-        ), f"analysis should get 3 rows, got {len(analysis_sink.results)}"
-        assert (
-            len(archive_sink.results) == 3
-        ), f"archive should get 3 rows, got {len(archive_sink.results)}"
+        assert len(analysis_sink.results) == 3, f"analysis should get 3 rows, got {len(analysis_sink.results)}"
+        assert len(archive_sink.results) == 3, f"archive should get 3 rows, got {len(archive_sink.results)}"
 
         # Verify all values are preserved
         analysis_values = {r["value"] for r in analysis_sink.results}
@@ -1164,9 +1124,7 @@ class TestEndToEndPipeline:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -1283,9 +1241,7 @@ class TestEndToEndPipeline:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -1307,9 +1263,7 @@ class TestEndToEndPipeline:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         # Query Landscape for registered nodes
         with db.engine.connect() as conn:
@@ -1375,9 +1329,7 @@ class TestEndToEndPipeline:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -1401,9 +1353,7 @@ class TestEndToEndPipeline:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 2
@@ -1473,21 +1423,15 @@ class TestEndToEndPipeline:
             # We expect 1 routing event for the "true" -> "urgent" route
             # The "false" -> "continue" route doesn't generate a routing event
             # because it just continues to next node
-            assert (
-                len(routing_events) == 1
-            ), f"Expected 1 routing event for routed token, got {len(routing_events)}"
+            assert len(routing_events) == 1, f"Expected 1 routing event for routed token, got {len(routing_events)}"
 
             routing_event = routing_events[0]
             edge_label = routing_event[4]
-            assert (
-                edge_label == "true"
-            ), f"Edge label should be 'true', got {edge_label}"
+            assert edge_label == "true", f"Edge label should be 'true', got {edge_label}"
 
             # The routing event should have a reason_hash (metadata was recorded)
             reason_hash = routing_event[3]
-            assert (
-                reason_hash is not None
-            ), "Routing event should have reason_hash for audit trail"
+            assert reason_hash is not None, "Routing event should have reason_hash for audit trail"
 
             # 4. Verify the edge points to the urgent sink
             to_node_id = routing_event[5]
@@ -1620,9 +1564,7 @@ class TestGateRuntimeErrors:
             import json
 
             error = json.loads(error_json)
-            assert (
-                error["type"] == "KeyError"
-            ), f"Expected KeyError, got {error['type']}"
+            assert error["type"] == "KeyError", f"Expected KeyError, got {error['type']}"
 
     def test_optional_field_with_get_succeeds(self) -> None:
         """Gate using row.get() for optional field should succeed safely.

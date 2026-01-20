@@ -61,8 +61,7 @@ class MissingEdgeError(Exception):
         self.node_id = node_id
         self.label = label
         super().__init__(
-            f"No edge registered from node {node_id} with label '{label}'. "
-            "Audit trail would be incomplete - refusing to proceed."
+            f"No edge registered from node {node_id} with label '{label}'. Audit trail would be incomplete - refusing to proceed."
         )
 
 
@@ -551,8 +550,7 @@ class GateExecutor:
                 error=error,
             )
             raise ValueError(
-                f"Gate '{gate_config.name}' condition returned '{route_label}' "
-                f"which is not in routes: {list(gate_config.routes.keys())}"
+                f"Gate '{gate_config.name}' condition returned '{route_label}' which is not in routes: {list(gate_config.routes.keys())}"
             )
 
         destination = gate_config.routes[route_label]
@@ -568,9 +566,7 @@ class GateExecutor:
 
         elif destination == "fork":
             # Fork to multiple paths - fork_to guaranteed by GateSettings.validate_fork_consistency()
-            assert (
-                gate_config.fork_to is not None
-            )  # Pydantic validation guarantees this
+            assert gate_config.fork_to is not None  # Pydantic validation guarantees this
 
             if token_manager is None:
                 error = {
@@ -608,9 +604,7 @@ class GateExecutor:
         else:
             # Route to a named sink
             sink_name = destination
-            action = RoutingAction.route(
-                route_label, mode=RoutingMode.MOVE, reason=reason
-            )
+            action = RoutingAction.route(route_label, mode=RoutingMode.MOVE, reason=reason)
 
             # Record routing event
             self._record_routing(
@@ -817,9 +811,7 @@ class AggregationExecutor:
         """
         return list(self._buffer_tokens.get(node_id, []))
 
-    def _get_buffered_data(
-        self, node_id: str
-    ) -> tuple[list[dict[str, Any]], list[TokenInfo]]:
+    def _get_buffered_data(self, node_id: str) -> tuple[list[dict[str, Any]], list[TokenInfo]]:
         """Internal: Get buffered rows and tokens without clearing.
 
         IMPORTANT: This method does NOT record audit trail. Production code
@@ -982,9 +974,7 @@ class AggregationExecutor:
         else:
             # Transform returned error status
             error_info: ExecutionError = {
-                "exception": str(result.reason)
-                if result.reason
-                else "Transform returned error",
+                "exception": str(result.reason) if result.reason else "Transform returned error",
                 "type": "TransformError",
             }
             self._recorder.complete_node_state(

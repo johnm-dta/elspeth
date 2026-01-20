@@ -35,9 +35,7 @@ class AzureOpenAIConfig(LLMConfig):
     """
 
     # Override model to make it optional - will default to deployment_name
-    model: str = Field(
-        default="", description="Model identifier (defaults to deployment_name)"
-    )
+    model: str = Field(default="", description="Model identifier (defaults to deployment_name)")
 
     deployment_name: str = Field(..., description="Azure deployment name")
     endpoint: str = Field(..., description="Azure OpenAI endpoint URL")
@@ -156,8 +154,7 @@ class AzureLLMTransform(BaseTransform):
         # 3. Create audited LLM client (self-contained)
         if ctx.landscape is None or ctx.state_id is None:
             raise RuntimeError(
-                "Azure LLM transform requires landscape recorder and state_id. "
-                "Ensure transform is executed through the engine."
+                "Azure LLM transform requires landscape recorder and state_id. Ensure transform is executed through the engine."
             )
 
         # Import here to avoid hard dependency on openai package

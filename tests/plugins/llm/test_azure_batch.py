@@ -364,9 +364,7 @@ class TestAzureBatchLLMTransformEmptyBatch:
             }
         )
 
-    def test_empty_batch_returns_success_with_metadata(
-        self, ctx: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_empty_batch_returns_success_with_metadata(self, ctx: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Empty batch returns success with batch_empty metadata."""
         result = transform.process([], ctx)
 
@@ -401,9 +399,7 @@ class TestAzureBatchLLMTransformSubmit:
             }
         )
 
-    def test_fresh_batch_submits_and_raises_pending(
-        self, ctx: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_fresh_batch_submits_and_raises_pending(self, ctx: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Fresh batch submits to Azure and raises BatchPendingError."""
         # Mock Azure client
         mock_client = Mock()
@@ -427,9 +423,7 @@ class TestAzureBatchLLMTransformSubmit:
         assert error.status == "submitted"
         assert error.check_after_seconds == 300
 
-    def test_checkpoint_saved_after_submit(
-        self, ctx: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_checkpoint_saved_after_submit(self, ctx: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Checkpoint is saved immediately after batch submission."""
         mock_client = Mock()
         mock_file = Mock()
@@ -642,9 +636,7 @@ class TestAzureBatchLLMTransformResume:
             }
         )
 
-    def test_resume_with_checkpoint_checks_status(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_resume_with_checkpoint_checks_status(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Resume with checkpoint checks batch status."""
         mock_client = Mock()
         mock_batch = Mock()
@@ -663,9 +655,7 @@ class TestAzureBatchLLMTransformResume:
         assert error.batch_id == "batch-456"
         assert error.status == "in_progress"
 
-    def test_completed_batch_downloads_results(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_completed_batch_downloads_results(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Completed batch downloads and returns results."""
         mock_client = Mock()
         mock_batch = Mock()
@@ -701,9 +691,7 @@ class TestAzureBatchLLMTransformResume:
         assert result.rows[0]["llm_response"] == "Analysis result"
         assert result.rows[0]["llm_response_usage"]["prompt_tokens"] == 10
 
-    def test_failed_batch_returns_error(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_failed_batch_returns_error(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Failed batch returns TransformResult.error()."""
         mock_client = Mock()
         mock_batch = Mock()
@@ -724,9 +712,7 @@ class TestAzureBatchLLMTransformResume:
         assert result.reason["reason"] == "batch_failed"
         assert result.reason["batch_id"] == "batch-456"
 
-    def test_cancelled_batch_returns_error(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_cancelled_batch_returns_error(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Cancelled batch returns TransformResult.error()."""
         mock_client = Mock()
         mock_batch = Mock()
@@ -744,9 +730,7 @@ class TestAzureBatchLLMTransformResume:
         assert result.reason is not None
         assert result.reason["reason"] == "batch_cancelled"
 
-    def test_expired_batch_returns_error(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_expired_batch_returns_error(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Expired batch returns TransformResult.error()."""
         mock_client = Mock()
         mock_batch = Mock()
@@ -764,9 +748,7 @@ class TestAzureBatchLLMTransformResume:
         assert result.reason is not None
         assert result.reason["reason"] == "batch_expired"
 
-    def test_checkpoint_cleared_on_completion(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_checkpoint_cleared_on_completion(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Checkpoint is cleared after successful completion."""
         mock_client = Mock()
         mock_batch = Mock()
@@ -816,9 +798,7 @@ class TestAzureBatchLLMTransformTimeout:
             }
         )
 
-    def test_batch_timeout_returns_error(
-        self, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_batch_timeout_returns_error(self, transform: AzureBatchLLMTransform) -> None:
         """Batch exceeding max_wait_hours returns error."""
         ctx = PluginContext(run_id="test-run", config={})
         # Pre-populate checkpoint from old timestamp for timeout test
@@ -875,9 +855,7 @@ class TestAzureBatchLLMTransformSingleRow:
             }
         )
 
-    def test_single_row_input_raises_pending(
-        self, ctx: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_single_row_input_raises_pending(self, ctx: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Single row input is processed through batch API."""
         mock_client = Mock()
         mock_file = Mock()
@@ -915,9 +893,7 @@ class TestAzureBatchLLMTransformResultAssembly:
             }
         )
 
-    def test_results_assembled_in_original_order(
-        self, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_results_assembled_in_original_order(self, transform: AzureBatchLLMTransform) -> None:
         """Results are assembled in original row order."""
         from datetime import UTC, datetime
 

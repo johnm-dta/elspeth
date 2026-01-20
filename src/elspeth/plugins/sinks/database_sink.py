@@ -106,9 +106,7 @@ class DatabaseSink(BaseSink):
             )
             self._metadata.create_all(self._engine, checkfirst=True)
 
-    def write(
-        self, rows: list[dict[str, Any]], ctx: PluginContext
-    ) -> ArtifactDescriptor:
+    def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
         """Write a batch of rows to the database.
 
         CRITICAL: Hashes the canonical JSON payload BEFORE insert.

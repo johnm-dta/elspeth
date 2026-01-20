@@ -43,12 +43,8 @@ class JSONExplodeConfig(DataPluginConfig):
     """
 
     array_field: str = Field(..., description="Name of the array field to explode")
-    output_field: str = Field(
-        default="item", description="Name for the exploded element"
-    )
-    include_index: bool = Field(
-        default=True, description="Whether to include item_index field"
-    )
+    output_field: str = Field(default="item", description="Name for the exploded element")
+    include_index: bool = Field(default=True, description="Whether to include item_index field")
 
 
 class JSONExplode(BaseTransform):
@@ -101,9 +97,7 @@ class JSONExplode(BaseTransform):
 
         # Schema setup - DataPluginConfig validates schema_config is not None
         assert cfg.schema_config is not None
-        schema = create_schema_from_config(
-            cfg.schema_config, "JSONExplodeSchema", allow_coercion=False
-        )
+        schema = create_schema_from_config(cfg.schema_config, "JSONExplodeSchema", allow_coercion=False)
         self.input_schema = schema
         self.output_schema = schema
 

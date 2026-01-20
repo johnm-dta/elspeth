@@ -74,7 +74,7 @@ from elspeth.plugins.results import (
     TransformResult,
 )
 
-__all__ = [  # - grouped by category for readability
+__all__ = [  # Grouped by category for readability
     # Results (NOTE: AcceptResult deleted in aggregation structural cleanup)
     "GateResult",
     "RoutingAction",

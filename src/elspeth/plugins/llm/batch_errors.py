@@ -75,6 +75,4 @@ class BatchPendingError(Exception):
         self.check_after_seconds = check_after_seconds
         self.checkpoint = checkpoint
         self.node_id = node_id
-        super().__init__(
-            f"Batch {batch_id} is {status}, check after {check_after_seconds}s"
-        )
+        super().__init__(f"Batch {batch_id} is {status}, check after {check_after_seconds}s")

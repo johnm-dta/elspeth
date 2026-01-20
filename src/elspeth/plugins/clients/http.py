@@ -61,12 +61,8 @@ class AuditedHTTPClient(AuditedClientBase):
         self._default_headers = headers or {}
 
     # Headers that may contain secrets - excluded from audit trail
-    _SENSITIVE_REQUEST_HEADERS = frozenset(
-        {"authorization", "x-api-key", "api-key", "x-auth-token", "proxy-authorization"}
-    )
-    _SENSITIVE_RESPONSE_HEADERS = frozenset(
-        {"set-cookie", "www-authenticate", "proxy-authenticate", "x-auth-token"}
-    )
+    _SENSITIVE_REQUEST_HEADERS = frozenset({"authorization", "x-api-key", "api-key", "x-auth-token", "proxy-authorization"})
+    _SENSITIVE_RESPONSE_HEADERS = frozenset({"set-cookie", "www-authenticate", "proxy-authenticate", "x-auth-token"})
 
     def _filter_request_headers(self, headers: dict[str, str]) -> dict[str, str]:
         """Filter out sensitive request headers from audit recording.
@@ -171,11 +167,7 @@ class AuditedHTTPClient(AuditedClientBase):
                     response_body = response.text
             else:
                 # For non-JSON, store text (truncated for very large responses)
-                response_body = (
-                    response.text[:100_000]
-                    if len(response.text) > 100_000
-                    else response.text
-                )
+                response_body = response.text[:100_000] if len(response.text) > 100_000 else response.text
 
             # Determine status based on HTTP response code
             # 2xx = SUCCESS, 4xx/5xx = ERROR (audit must reflect what application sees)

@@ -91,9 +91,7 @@ class _ExpressionValidator(ast.NodeVisitor):
         """Allow only row.get method access."""
         if isinstance(node.value, ast.Name) and node.value.id == "row":
             if node.attr != "get":
-                self.errors.append(
-                    f"Forbidden row attribute: {node.attr!r} (only 'get' is allowed)"
-                )
+                self.errors.append(f"Forbidden row attribute: {node.attr!r} (only 'get' is allowed)")
         else:
             self.errors.append(f"Forbidden attribute access: {node.attr!r}")
         self.generic_visit(node)
@@ -108,9 +106,7 @@ class _ExpressionValidator(ast.NodeVisitor):
         ):
             # row.get() is allowed with 1 or 2 arguments
             if len(node.args) < 1 or len(node.args) > 2:
-                self.errors.append(
-                    f"row.get() requires 1 or 2 arguments, got {len(node.args)}"
-                )
+                self.errors.append(f"row.get() requires 1 or 2 arguments, got {len(node.args)}")
             if node.keywords:
                 self.errors.append("row.get() does not accept keyword arguments")
             self.generic_visit(node)
@@ -122,9 +118,7 @@ class _ExpressionValidator(ast.NodeVisitor):
         """Validate comparison operators."""
         for op in node.ops:
             if type(op) not in _COMPARISON_OPS:
-                self.errors.append(
-                    f"Forbidden comparison operator: {type(op).__name__}"
-                )
+                self.errors.append(f"Forbidden comparison operator: {type(op).__name__}")
         self.generic_visit(node)
 
     def visit_BoolOp(self, node: ast.BoolOp) -> None:
@@ -449,9 +443,7 @@ class ExpressionParser:
 
         # Ternary: boolean if both branches are boolean
         if isinstance(node, ast.IfExp):
-            return self._is_boolean_node(node.body) and self._is_boolean_node(
-                node.orelse
-            )
+            return self._is_boolean_node(node.body) and self._is_boolean_node(node.orelse)
 
         # Everything else (field access, arithmetic, etc.) is not guaranteed boolean
         return False

@@ -44,9 +44,7 @@ def _create_mock_response(
 
 
 @contextmanager
-def mock_httpx_client(
-    response: Mock | None = None, side_effect: Exception | None = None
-) -> Generator[Mock, None, None]:
+def mock_httpx_client(response: Mock | None = None, side_effect: Exception | None = None) -> Generator[Mock, None, None]:
     """Context manager to mock httpx.Client with a response or side_effect."""
     with patch("httpx.Client") as mock_client_class:
         mock_client = Mock()
@@ -244,9 +242,7 @@ class TestOpenRouterLLMTransformProcess:
             }
         )
 
-    def test_successful_api_call_returns_enriched_row(
-        self, ctx: PluginContext, transform: OpenRouterLLMTransform
-    ) -> None:
+    def test_successful_api_call_returns_enriched_row(self, ctx: PluginContext, transform: OpenRouterLLMTransform) -> None:
         """Successful API call returns row with LLM response."""
         mock_response = _create_mock_response(
             content="The analysis is positive.",
@@ -269,9 +265,7 @@ class TestOpenRouterLLMTransformProcess:
         # Original data preserved
         assert result.row["text"] == "hello world"
 
-    def test_template_rendering_error_returns_transform_error(
-        self, ctx: PluginContext, transform: OpenRouterLLMTransform
-    ) -> None:
+    def test_template_rendering_error_returns_transform_error(self, ctx: PluginContext, transform: OpenRouterLLMTransform) -> None:
         """Template rendering failure returns TransformResult.error()."""
         # Missing required_field triggers template error (no HTTP call needed)
         result = transform.process({"other_field": "value"}, ctx)
@@ -281,9 +275,7 @@ class TestOpenRouterLLMTransformProcess:
         assert result.reason["reason"] == "template_rendering_failed"
         assert "template_hash" in result.reason
 
-    def test_http_error_returns_transform_error(
-        self, ctx: PluginContext, transform: OpenRouterLLMTransform
-    ) -> None:
+    def test_http_error_returns_transform_error(self, ctx: PluginContext, transform: OpenRouterLLMTransform) -> None:
         """HTTP error returns TransformResult.error()."""
         with mock_httpx_client(
             side_effect=httpx.HTTPStatusError(
@@ -299,9 +291,7 @@ class TestOpenRouterLLMTransformProcess:
         assert result.reason["reason"] == "api_call_failed"
         assert result.retryable is False
 
-    def test_rate_limit_429_is_retryable(
-        self, ctx: PluginContext, transform: OpenRouterLLMTransform
-    ) -> None:
+    def test_rate_limit_429_is_retryable(self, ctx: PluginContext, transform: OpenRouterLLMTransform) -> None:
         """Rate limit (429) errors are marked retryable."""
         with mock_httpx_client(
             side_effect=httpx.HTTPStatusError(
@@ -317,9 +307,7 @@ class TestOpenRouterLLMTransformProcess:
         assert result.reason["reason"] == "api_call_failed"
         assert result.retryable is True
 
-    def test_request_error_not_retryable(
-        self, ctx: PluginContext, transform: OpenRouterLLMTransform
-    ) -> None:
+    def test_request_error_not_retryable(self, ctx: PluginContext, transform: OpenRouterLLMTransform) -> None:
         """Network/connection errors (RequestError) are not retryable."""
         with mock_httpx_client(side_effect=httpx.ConnectError("Connection refused")):
             result = transform.process({"text": "hello"}, ctx)
@@ -329,18 +317,14 @@ class TestOpenRouterLLMTransformProcess:
         assert result.reason["reason"] == "api_call_failed"
         assert result.retryable is False
 
-    def test_missing_landscape_raises_runtime_error(
-        self, transform: OpenRouterLLMTransform
-    ) -> None:
+    def test_missing_landscape_raises_runtime_error(self, transform: OpenRouterLLMTransform) -> None:
         """Missing landscape in context raises RuntimeError."""
         ctx = PluginContext(run_id="test-run", config={}, landscape=None, state_id=None)
 
         with pytest.raises(RuntimeError, match="requires landscape"):
             transform.process({"text": "hello"}, ctx)
 
-    def test_system_prompt_included_in_request(
-        self, ctx: PluginContext, mock_recorder: Mock
-    ) -> None:
+    def test_system_prompt_included_in_request(self, ctx: PluginContext, mock_recorder: Mock) -> None:
         """System prompt is included when configured."""
         transform = OpenRouterLLMTransform(
             {
@@ -367,9 +351,7 @@ class TestOpenRouterLLMTransformProcess:
             assert messages[1]["role"] == "user"
             assert messages[1]["content"] == "hello"
 
-    def test_no_system_prompt_single_message(
-        self, ctx: PluginContext, transform: OpenRouterLLMTransform
-    ) -> None:
+    def test_no_system_prompt_single_message(self, ctx: PluginContext, transform: OpenRouterLLMTransform) -> None:
         """Without system prompt, only user message is sent."""
         mock_response = _create_mock_response()
         with mock_httpx_client(response=mock_response) as mock_client:
@@ -406,9 +388,7 @@ class TestOpenRouterLLMTransformProcess:
         assert "analysis_variables_hash" in result.row
         assert "analysis_model" in result.row
 
-    def test_model_from_response_used_when_available(
-        self, ctx: PluginContext, transform: OpenRouterLLMTransform
-    ) -> None:
+    def test_model_from_response_used_when_available(self, ctx: PluginContext, transform: OpenRouterLLMTransform) -> None:
         """Model name from response is used if different from request."""
         mock_response = _create_mock_response(
             model="anthropic/claude-3-opus-20240229"  # Different from request
@@ -419,9 +399,7 @@ class TestOpenRouterLLMTransformProcess:
         assert result.row is not None
         assert result.row["llm_response_model"] == "anthropic/claude-3-opus-20240229"
 
-    def test_raise_for_status_called(
-        self, ctx: PluginContext, transform: OpenRouterLLMTransform
-    ) -> None:
+    def test_raise_for_status_called(self, ctx: PluginContext, transform: OpenRouterLLMTransform) -> None:
         """raise_for_status is called on response to check errors."""
         mock_response = _create_mock_response(
             raise_for_status_error=httpx.HTTPStatusError(
@@ -535,9 +513,7 @@ class TestOpenRouterLLMTransformIntegration:
             }
         )
 
-        with mock_httpx_client(
-            side_effect=httpx.ConnectError("Failed to connect to server")
-        ):
+        with mock_httpx_client(side_effect=httpx.ConnectError("Failed to connect to server")):
             result = transform.process({"text": "hello"}, ctx)
 
         assert result.status == "error"
@@ -889,9 +865,7 @@ Text: {{ row.text }}""",
             assert "spam: unwanted messages" in user_message
             assert "ham: legitimate messages" in user_message
 
-    def test_template_error_includes_source_in_error_details(
-        self, ctx: PluginContext
-    ) -> None:
+    def test_template_error_includes_source_in_error_details(self, ctx: PluginContext) -> None:
         """Template rendering error includes template_source for debugging."""
         transform = OpenRouterLLMTransform(
             {

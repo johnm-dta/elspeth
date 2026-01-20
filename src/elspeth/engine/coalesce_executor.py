@@ -145,10 +145,7 @@ class CoalesceExecutor:
             raise ValueError(f"Coalesce '{coalesce_name}' not registered")
 
         if token.branch_name is None:
-            raise ValueError(
-                f"Token {token.token_id} has no branch_name - "
-                "only forked tokens can be coalesced"
-            )
+            raise ValueError(f"Token {token.token_id} has no branch_name - only forked tokens can be coalesced")
 
         settings = self._settings[coalesce_name]
         node_id = self._node_ids[coalesce_name]
@@ -156,8 +153,7 @@ class CoalesceExecutor:
         # Validate branch is expected
         if token.branch_name not in settings.branches:
             raise ValueError(
-                f"Token branch '{token.branch_name}' not in expected branches "
-                f"for coalesce '{coalesce_name}': {settings.branches}"
+                f"Token branch '{token.branch_name}' not in expected branches for coalesce '{coalesce_name}': {settings.branches}"
             )
 
         # Get or create pending state for this row
@@ -263,9 +259,7 @@ class CoalesceExecutor:
                     "branch": branch,
                     "arrival_offset_ms": (t - pending.first_arrival) * 1000,
                 }
-                for branch, t in sorted(
-                    pending.arrival_times.items(), key=lambda x: x[1]
-                )
+                for branch, t in sorted(pending.arrival_times.items(), key=lambda x: x[1])
             ],
             "wait_duration_ms": (now - pending.first_arrival) * 1000,
         }
@@ -296,11 +290,7 @@ class CoalesceExecutor:
 
         elif settings.merge == "nested":
             # Each branch as nested object
-            return {
-                branch_name: arrived[branch_name].row_data
-                for branch_name in settings.branches
-                if branch_name in arrived
-            }
+            return {branch_name: arrived[branch_name].row_data for branch_name in settings.branches if branch_name in arrived}
 
         # settings.merge == "select":
         # Take specific branch output

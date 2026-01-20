@@ -342,9 +342,7 @@ class TestAzureLLMTransformProcess:
             }
         )
 
-    def test_successful_llm_call_returns_enriched_row(
-        self, ctx: PluginContext, transform: AzureLLMTransform
-    ) -> None:
+    def test_successful_llm_call_returns_enriched_row(self, ctx: PluginContext, transform: AzureLLMTransform) -> None:
         """Successful LLM call returns row with response."""
         with mock_azure_openai_client(
             content="The analysis is positive.",
@@ -366,9 +364,7 @@ class TestAzureLLMTransformProcess:
         # Original data preserved
         assert result.row["text"] == "hello world"
 
-    def test_model_passed_to_azure_client_is_deployment_name(
-        self, ctx: PluginContext, transform: AzureLLMTransform
-    ) -> None:
+    def test_model_passed_to_azure_client_is_deployment_name(self, ctx: PluginContext, transform: AzureLLMTransform) -> None:
         """deployment_name is used as model in Azure client calls."""
         with mock_azure_openai_client() as mock_client:
             transform.process({"text": "hello"}, ctx)
@@ -376,9 +372,7 @@ class TestAzureLLMTransformProcess:
             call_args = mock_client.chat.completions.create.call_args
             assert call_args.kwargs["model"] == "my-gpt4o-deployment"
 
-    def test_template_rendering_error_returns_transform_error(
-        self, ctx: PluginContext, transform: AzureLLMTransform
-    ) -> None:
+    def test_template_rendering_error_returns_transform_error(self, ctx: PluginContext, transform: AzureLLMTransform) -> None:
         """Template rendering failure returns TransformResult.error()."""
         # Missing required 'text' field triggers template error
         with mock_azure_openai_client():
@@ -389,9 +383,7 @@ class TestAzureLLMTransformProcess:
         assert result.reason["reason"] == "template_rendering_failed"
         assert "template_hash" in result.reason
 
-    def test_llm_client_error_returns_transform_error(
-        self, ctx: PluginContext, transform: AzureLLMTransform
-    ) -> None:
+    def test_llm_client_error_returns_transform_error(self, ctx: PluginContext, transform: AzureLLMTransform) -> None:
         """LLM client failure returns TransformResult.error()."""
         # Mock the underlying client to raise an exception
         with mock_azure_openai_client(side_effect=Exception("API Error")):
@@ -403,9 +395,7 @@ class TestAzureLLMTransformProcess:
         assert "API Error" in result.reason["error"]
         assert result.retryable is False
 
-    def test_rate_limit_error_is_retryable(
-        self, ctx: PluginContext, transform: AzureLLMTransform
-    ) -> None:
+    def test_rate_limit_error_is_retryable(self, ctx: PluginContext, transform: AzureLLMTransform) -> None:
         """Rate limit errors marked retryable=True."""
         # Rate limit errors contain "rate" or "429" in the message
         with mock_azure_openai_client(side_effect=Exception("Rate limit exceeded 429")):
@@ -416,9 +406,7 @@ class TestAzureLLMTransformProcess:
         assert result.reason["reason"] == "rate_limited"
         assert result.retryable is True
 
-    def test_missing_landscape_raises_runtime_error(
-        self, transform: AzureLLMTransform
-    ) -> None:
+    def test_missing_landscape_raises_runtime_error(self, transform: AzureLLMTransform) -> None:
         """Missing landscape in context raises RuntimeError."""
         ctx = PluginContext(run_id="test-run", config={}, state_id="test-state")
         ctx.landscape = None
@@ -426,13 +414,9 @@ class TestAzureLLMTransformProcess:
         with pytest.raises(RuntimeError, match="requires landscape recorder"):
             transform.process({"text": "hello"}, ctx)
 
-    def test_missing_state_id_raises_runtime_error(
-        self, mock_recorder: Mock, transform: AzureLLMTransform
-    ) -> None:
+    def test_missing_state_id_raises_runtime_error(self, mock_recorder: Mock, transform: AzureLLMTransform) -> None:
         """Missing state_id in context raises RuntimeError."""
-        ctx = PluginContext(
-            run_id="test-run", config={}, landscape=mock_recorder, state_id=None
-        )
+        ctx = PluginContext(run_id="test-run", config={}, landscape=mock_recorder, state_id=None)
 
         with pytest.raises(RuntimeError, match="requires landscape recorder"):
             transform.process({"text": "hello"}, ctx)
@@ -462,9 +446,7 @@ class TestAzureLLMTransformProcess:
             assert messages[1]["role"] == "user"
             assert messages[1]["content"] == "hello"
 
-    def test_temperature_and_max_tokens_passed_to_client(
-        self, ctx: PluginContext
-    ) -> None:
+    def test_temperature_and_max_tokens_passed_to_client(self, ctx: PluginContext) -> None:
         """Temperature and max_tokens are passed to Azure client."""
         transform = AzureLLMTransform(
             {
@@ -514,9 +496,7 @@ class TestAzureLLMTransformProcess:
         """close() does nothing but doesn't raise."""
         transform.close()  # Should not raise
 
-    def test_azure_client_created_with_correct_credentials(
-        self, ctx: PluginContext, transform: AzureLLMTransform
-    ) -> None:
+    def test_azure_client_created_with_correct_credentials(self, ctx: PluginContext, transform: AzureLLMTransform) -> None:
         """AzureOpenAI client is created with correct credentials."""
         with patch("openai.AzureOpenAI") as mock_azure_class:
             # Set up the mock to return a properly configured client

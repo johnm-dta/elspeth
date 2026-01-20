@@ -100,14 +100,8 @@ class TriggerConfig(BaseModel):
     @model_validator(mode="after")
     def validate_at_least_one_trigger(self) -> "TriggerConfig":
         """At least one trigger must be configured."""
-        if (
-            self.count is None
-            and self.timeout_seconds is None
-            and self.condition is None
-        ):
-            raise ValueError(
-                "at least one trigger must be configured (count, timeout_seconds, or condition)"
-            )
+        if self.count is None and self.timeout_seconds is None and self.condition is None:
+            raise ValueError("at least one trigger must be configured (count, timeout_seconds, or condition)")
         return self
 
     @property
@@ -189,12 +183,8 @@ class GateSettings(BaseModel):
     model_config = {"frozen": True}
 
     name: str = Field(description="Gate identifier (unique within pipeline)")
-    condition: str = Field(
-        description="Expression to evaluate (validated by ExpressionParser)"
-    )
-    routes: dict[str, str] = Field(
-        description="Maps route labels to destinations ('continue' or sink name)"
-    )
+    condition: str = Field(description="Expression to evaluate (validated by ExpressionParser)")
+    routes: dict[str, str] = Field(description="Maps route labels to destinations ('continue' or sink name)")
     fork_to: list[str] | None = Field(
         default=None,
         description="List of paths for fork operations",
@@ -232,18 +222,12 @@ class GateSettings(BaseModel):
         for label, destination in v.items():
             # Check route label is not reserved
             if label in _RESERVED_EDGE_LABELS:
-                raise ValueError(
-                    f"Route label '{label}' is reserved and cannot be used. "
-                    f"Reserved labels: {sorted(_RESERVED_EDGE_LABELS)}"
-                )
+                raise ValueError(f"Route label '{label}' is reserved and cannot be used. Reserved labels: {sorted(_RESERVED_EDGE_LABELS)}")
 
             if destination in ("continue", "fork"):
                 continue
             if not _IDENTIFIER_PATTERN.match(destination):
-                raise ValueError(
-                    f"Route destination '{destination}' for label '{label}' "
-                    "must be 'continue', 'fork', or a valid identifier"
-                )
+                raise ValueError(f"Route destination '{destination}' for label '{label}' must be 'continue', 'fork', or a valid identifier")
         return v
 
     @field_validator("fork_to")
@@ -259,10 +243,7 @@ class GateSettings(BaseModel):
 
         for branch in v:
             if branch in _RESERVED_EDGE_LABELS:
-                raise ValueError(
-                    f"Fork branch '{branch}' is reserved and cannot be used. "
-                    f"Reserved labels: {sorted(_RESERVED_EDGE_LABELS)}"
-                )
+                raise ValueError(f"Fork branch '{branch}' is reserved and cannot be used. Reserved labels: {sorted(_RESERVED_EDGE_LABELS)}")
         return v
 
     @model_validator(mode="after")
@@ -297,21 +278,13 @@ class GateSettings(BaseModel):
                 extra = route_labels - expected_labels
 
                 # Build helpful error message
-                msg_parts = [
-                    f"Gate '{self.name}' has a boolean condition "
-                    f"({self.condition!r}) but route labels don't match."
-                ]
+                msg_parts = [f"Gate '{self.name}' has a boolean condition ({self.condition!r}) but route labels don't match."]
 
                 if extra:
-                    msg_parts.append(
-                        f"Found labels {sorted(extra)!r} but boolean expressions "
-                        "evaluate to True/False, not these values."
-                    )
+                    msg_parts.append(f"Found labels {sorted(extra)!r} but boolean expressions evaluate to True/False, not these values.")
                 if missing:
                     msg_parts.append(f"Missing required labels: {sorted(missing)!r}.")
-                msg_parts.append(
-                    'Use routes: {"true": <destination>, "false": <destination>}'
-                )
+                msg_parts.append('Use routes: {"true": <destination>, "false": <destination>}')
 
                 raise ValueError(" ".join(msg_parts))
 
@@ -378,35 +351,23 @@ class CoalesceSettings(BaseModel):
     def validate_policy_requirements(self) -> "CoalesceSettings":
         """Validate policy-specific requirements."""
         if self.policy == "quorum" and self.quorum_count is None:
+            raise ValueError(f"Coalesce '{self.name}': quorum policy requires quorum_count")
+        if self.policy == "quorum" and self.quorum_count is not None and self.quorum_count > len(self.branches):
             raise ValueError(
-                f"Coalesce '{self.name}': quorum policy requires quorum_count"
-            )
-        if (
-            self.policy == "quorum"
-            and self.quorum_count is not None
-            and self.quorum_count > len(self.branches)
-        ):
-            raise ValueError(
-                f"Coalesce '{self.name}': quorum_count ({self.quorum_count}) "
-                f"cannot exceed number of branches ({len(self.branches)})"
+                f"Coalesce '{self.name}': quorum_count ({self.quorum_count}) cannot exceed number of branches ({len(self.branches)})"
             )
         if self.policy == "best_effort" and self.timeout_seconds is None:
-            raise ValueError(
-                f"Coalesce '{self.name}': best_effort policy requires timeout_seconds"
-            )
+            raise ValueError(f"Coalesce '{self.name}': best_effort policy requires timeout_seconds")
         return self
 
     @model_validator(mode="after")
     def validate_merge_requirements(self) -> "CoalesceSettings":
         """Validate merge strategy requirements."""
         if self.merge == "select" and self.select_branch is None:
-            raise ValueError(
-                f"Coalesce '{self.name}': select merge strategy requires select_branch"
-            )
+            raise ValueError(f"Coalesce '{self.name}': select merge strategy requires select_branch")
         if self.select_branch is not None and self.select_branch not in self.branches:
             raise ValueError(
-                f"Coalesce '{self.name}': select_branch '{self.select_branch}' "
-                f"must be one of the expected branches: {self.branches}"
+                f"Coalesce '{self.name}': select_branch '{self.select_branch}' must be one of the expected branches: {self.branches}"
             )
         return self
 
@@ -528,9 +489,7 @@ class ServiceRateLimit(BaseModel):
     model_config = {"frozen": True}
 
     requests_per_second: int = Field(gt=0, description="Maximum requests per second")
-    requests_per_minute: int | None = Field(
-        default=None, gt=0, description="Maximum requests per minute"
-    )
+    requests_per_minute: int | None = Field(default=None, gt=0, description="Maximum requests per minute")
 
 
 class RateLimitSettings(BaseModel):
@@ -551,21 +510,11 @@ class RateLimitSettings(BaseModel):
 
     model_config = {"frozen": True}
 
-    enabled: bool = Field(
-        default=True, description="Enable rate limiting for external calls"
-    )
-    default_requests_per_second: int = Field(
-        default=10, gt=0, description="Default rate limit for unconfigured services"
-    )
-    default_requests_per_minute: int | None = Field(
-        default=None, gt=0, description="Optional per-minute rate limit"
-    )
-    persistence_path: str | None = Field(
-        default=None, description="SQLite path for cross-process limits"
-    )
-    services: dict[str, ServiceRateLimit] = Field(
-        default_factory=dict, description="Per-service rate limit configurations"
-    )
+    enabled: bool = Field(default=True, description="Enable rate limiting for external calls")
+    default_requests_per_second: int = Field(default=10, gt=0, description="Default rate limit for unconfigured services")
+    default_requests_per_minute: int | None = Field(default=None, gt=0, description="Optional per-minute rate limit")
+    persistence_path: str | None = Field(default=None, description="SQLite path for cross-process limits")
+    services: dict[str, ServiceRateLimit] = Field(default_factory=dict, description="Per-service rate limit configurations")
 
     def get_service_config(self, service_name: str) -> ServiceRateLimit:
         """Get rate limit config for a service, with fallback to defaults."""
@@ -590,9 +539,7 @@ class CheckpointSettings(BaseModel):
 
     enabled: bool = True
     frequency: Literal["every_row", "every_n", "aggregation_only"] = "every_row"
-    checkpoint_interval: int | None = Field(
-        default=None, gt=0
-    )  # Required if frequency == "every_n"
+    checkpoint_interval: int | None = Field(default=None, gt=0)  # Required if frequency == "every_n"
     aggregation_boundaries: bool = True  # Always checkpoint at aggregation flush
 
     @model_validator(mode="after")
@@ -608,15 +555,9 @@ class RetrySettings(BaseModel):
     model_config = {"frozen": True}
 
     max_attempts: int = Field(default=3, gt=0, description="Maximum retry attempts")
-    initial_delay_seconds: float = Field(
-        default=1.0, gt=0, description="Initial backoff delay"
-    )
-    max_delay_seconds: float = Field(
-        default=60.0, gt=0, description="Maximum backoff delay"
-    )
-    exponential_base: float = Field(
-        default=2.0, gt=1.0, description="Exponential backoff base"
-    )
+    initial_delay_seconds: float = Field(default=1.0, gt=0, description="Initial backoff delay")
+    max_delay_seconds: float = Field(default=60.0, gt=0, description="Maximum backoff delay")
+    exponential_base: float = Field(default=2.0, gt=1.0, description="Exponential backoff base")
 
 
 class PayloadStoreSettings(BaseModel):
@@ -629,9 +570,7 @@ class PayloadStoreSettings(BaseModel):
         default=Path(".elspeth/payloads"),
         description="Base path for filesystem backend",
     )
-    retention_days: int = Field(
-        default=90, gt=0, description="Payload retention in days"
-    )
+    retention_days: int = Field(default=90, gt=0, description="Payload retention in days")
 
 
 class ElspethSettings(BaseModel):
@@ -718,10 +657,7 @@ class ElspethSettings(BaseModel):
     def validate_output_sink_exists(self) -> "ElspethSettings":
         """Ensure output_sink references a defined sink."""
         if self.output_sink not in self.sinks:
-            raise ValueError(
-                f"output_sink '{self.output_sink}' not found in sinks. "
-                f"Available sinks: {list(self.sinks.keys())}"
-            )
+            raise ValueError(f"output_sink '{self.output_sink}' not found in sinks. Available sinks: {list(self.sinks.keys())}")
         return self
 
     @model_validator(mode="after")
@@ -729,13 +665,10 @@ class ElspethSettings(BaseModel):
         """Ensure export.sink references a defined sink when enabled."""
         if self.landscape.export.enabled:
             if self.landscape.export.sink is None:
-                raise ValueError(
-                    "landscape.export.sink is required when export is enabled"
-                )
+                raise ValueError("landscape.export.sink is required when export is enabled")
             if self.landscape.export.sink not in self.sinks:
                 raise ValueError(
-                    f"landscape.export.sink '{self.landscape.export.sink}' not found in sinks. "
-                    f"Available sinks: {list(self.sinks.keys())}"
+                    f"landscape.export.sink '{self.landscape.export.sink}' not found in sinks. Available sinks: {list(self.sinks.keys())}"
                 )
         return self
 
@@ -755,20 +688,13 @@ class ElspethSettings(BaseModel):
         Replay and verify modes need a source run ID to replay/compare against.
         Live mode does not require (and ignores) replay_source_run_id.
         """
-        if (
-            self.run_mode in (RunMode.REPLAY, RunMode.VERIFY)
-            and not self.replay_source_run_id
-        ):
-            raise ValueError(
-                f"replay_source_run_id is required when run_mode is '{self.run_mode.value}'"
-            )
+        if self.run_mode in (RunMode.REPLAY, RunMode.VERIFY) and not self.replay_source_run_id:
+            raise ValueError(f"replay_source_run_id is required when run_mode is '{self.run_mode.value}'")
         return self
 
     @field_validator("sinks")
     @classmethod
-    def validate_sinks_not_empty(
-        cls, v: dict[str, SinkSettings]
-    ) -> dict[str, SinkSettings]:
+    def validate_sinks_not_empty(cls, v: dict[str, SinkSettings]) -> dict[str, SinkSettings]:
         """At least one sink is required."""
         if not v:
             raise ValueError("At least one sink is required")
@@ -821,9 +747,7 @@ def _expand_env_vars(config: dict[str, Any]) -> dict[str, Any]:
 
 
 # Secret field names that should be fingerprinted (exact matches)
-_SECRET_FIELD_NAMES = frozenset(
-    {"api_key", "token", "password", "secret", "credential"}
-)
+_SECRET_FIELD_NAMES = frozenset({"api_key", "token", "password", "secret", "credential"})
 
 # Secret field suffixes that should be fingerprinted
 _SECRET_FIELD_SUFFIXES = ("_secret", "_key", "_token", "_password", "_credential")
@@ -831,9 +755,7 @@ _SECRET_FIELD_SUFFIXES = ("_secret", "_key", "_token", "_password", "_credential
 
 def _is_secret_field(field_name: str) -> bool:
     """Check if a field name represents a secret that should be fingerprinted."""
-    return field_name in _SECRET_FIELD_NAMES or field_name.endswith(
-        _SECRET_FIELD_SUFFIXES
-    )
+    return field_name in _SECRET_FIELD_NAMES or field_name.endswith(_SECRET_FIELD_SUFFIXES)
 
 
 def _fingerprint_secrets(
@@ -1011,9 +933,7 @@ def _expand_config_templates(
             if isinstance(plugin_config, dict):
                 plugin = dict(plugin_config)
                 if "options" in plugin and isinstance(plugin["options"], dict):
-                    plugin["options"] = _expand_template_files(
-                        plugin["options"], settings_path
-                    )
+                    plugin["options"] = _expand_template_files(plugin["options"], settings_path)
                 plugins.append(plugin)
             else:
                 plugins.append(plugin_config)
@@ -1077,45 +997,25 @@ def _fingerprint_config_for_audit(
     if "datasource" in config and isinstance(config["datasource"], dict):
         ds = config["datasource"]
         if "options" in ds and isinstance(ds["options"], dict):
-            ds["options"] = _fingerprint_secrets(
-                ds["options"], fail_if_no_key=fail_if_no_key
-            )
+            ds["options"] = _fingerprint_secrets(ds["options"], fail_if_no_key=fail_if_no_key)
 
     # === Sink options ===
     if "sinks" in config and isinstance(config["sinks"], dict):
         for sink in config["sinks"].values():
-            if (
-                isinstance(sink, dict)
-                and "options" in sink
-                and isinstance(sink["options"], dict)
-            ):
-                sink["options"] = _fingerprint_secrets(
-                    sink["options"], fail_if_no_key=fail_if_no_key
-                )
+            if isinstance(sink, dict) and "options" in sink and isinstance(sink["options"], dict):
+                sink["options"] = _fingerprint_secrets(sink["options"], fail_if_no_key=fail_if_no_key)
 
     # === Row plugin options ===
     if "row_plugins" in config and isinstance(config["row_plugins"], list):
         for plugin in config["row_plugins"]:
-            if (
-                isinstance(plugin, dict)
-                and "options" in plugin
-                and isinstance(plugin["options"], dict)
-            ):
-                plugin["options"] = _fingerprint_secrets(
-                    plugin["options"], fail_if_no_key=fail_if_no_key
-                )
+            if isinstance(plugin, dict) and "options" in plugin and isinstance(plugin["options"], dict):
+                plugin["options"] = _fingerprint_secrets(plugin["options"], fail_if_no_key=fail_if_no_key)
 
     # === Aggregation options ===
     if "aggregations" in config and isinstance(config["aggregations"], list):
         for agg in config["aggregations"]:
-            if (
-                isinstance(agg, dict)
-                and "options" in agg
-                and isinstance(agg["options"], dict)
-            ):
-                agg["options"] = _fingerprint_secrets(
-                    agg["options"], fail_if_no_key=fail_if_no_key
-                )
+            if isinstance(agg, dict) and "options" in agg and isinstance(agg["options"], dict):
+                agg["options"] = _fingerprint_secrets(agg["options"], fail_if_no_key=fail_if_no_key)
 
     return config
 
@@ -1145,9 +1045,7 @@ def _expand_template_files(
     # Handle template_file
     if "template_file" in result:
         if "template" in result:
-            raise TemplateFileError(
-                "Cannot specify both 'template' and 'template_file'"
-            )
+            raise TemplateFileError("Cannot specify both 'template' and 'template_file'")
         template_file = result.pop("template_file")
         template_path = Path(template_file)
         if not template_path.is_absolute():
@@ -1219,11 +1117,7 @@ def load_settings(config_path: Path) -> ElspethSettings:
     # Dynaconf returns uppercase keys; convert to lowercase for Pydantic
     # Also filter out internal Dynaconf settings
     internal_keys = {"LOAD_DOTENV", "ENVIRONMENTS", "SETTINGS_FILES"}
-    raw_config = {
-        k.lower(): v
-        for k, v in dynaconf_settings.as_dict().items()
-        if k not in internal_keys
-    }
+    raw_config = {k.lower(): v for k, v in dynaconf_settings.as_dict().items() if k not in internal_keys}
 
     # Expand ${VAR} and ${VAR:-default} patterns in config values
     raw_config = _expand_env_vars(raw_config)

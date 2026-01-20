@@ -47,9 +47,7 @@ class TestPluginSystemIntegration:
             input_schema = InputSchema
             output_schema = EnrichedSchema
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(
                     {
                         "value": row["value"],
@@ -62,13 +60,9 @@ class TestPluginSystemIntegration:
             input_schema = EnrichedSchema
             collected: ClassVar[list[dict[str, Any]]] = []
 
-            def write(
-                self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> ArtifactDescriptor:
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
                 MemorySink.collected.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory://collected", content_hash="test", size_bytes=0
-                )
+                return ArtifactDescriptor.for_file(path="memory://collected", content_hash="test", size_bytes=0)
 
             def flush(self) -> None:
                 pass
@@ -157,6 +151,4 @@ class TestPluginSystemIntegration:
         """
         import elspeth.plugins.base as base
 
-        assert not hasattr(
-            base, "BaseAggregation"
-        ), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
+        assert not hasattr(base, "BaseAggregation"), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"

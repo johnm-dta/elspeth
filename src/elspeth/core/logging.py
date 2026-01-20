@@ -56,9 +56,7 @@ def configure_logging(
 
     structlog.configure(
         processors=processors,
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, level.upper())
-        ),
+        wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level.upper())),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(),
         # IMPORTANT: Disable caching to allow reconfiguration in tests

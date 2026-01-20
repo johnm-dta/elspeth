@@ -54,9 +54,7 @@ class TestRecordCall:
         )
         return state.state_id
 
-    def test_record_successful_llm_call(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_record_successful_llm_call(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Test recording a successful LLM call."""
         call = recorder.record_call(
             state_id=state_id,
@@ -78,9 +76,7 @@ class TestRecordCall:
         assert call.latency_ms == 150.5
         assert call.error_json is None
 
-    def test_record_failed_call_with_error(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_record_failed_call_with_error(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Test recording a failed call with error details."""
         call = recorder.record_call(
             state_id=state_id,
@@ -97,9 +93,7 @@ class TestRecordCall:
         assert call.error_json is not None
         assert "500" in call.error_json
 
-    def test_multiple_calls_same_state(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_multiple_calls_same_state(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Test recording multiple calls for the same state."""
         call1 = recorder.record_call(
             state_id=state_id,
@@ -127,9 +121,7 @@ class TestRecordCall:
         assert calls[0].call_index == 0
         assert calls[1].call_index == 1
 
-    def test_call_with_payload_refs(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_call_with_payload_refs(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Test recording calls with payload store references."""
         call = recorder.record_call(
             state_id=state_id,
@@ -145,9 +137,7 @@ class TestRecordCall:
         assert call.request_ref == "sha256:abc123..."
         assert call.response_ref == "sha256:def456..."
 
-    def test_duplicate_call_index_raises_integrity_error(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_duplicate_call_index_raises_integrity_error(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Test that duplicate (state_id, call_index) raises IntegrityError."""
         # First call succeeds
         recorder.record_call(
@@ -170,9 +160,7 @@ class TestRecordCall:
                 response_data={"response": "Second"},
             )
 
-    def test_invalid_state_id_raises_integrity_error(
-        self, recorder: LandscapeRecorder
-    ) -> None:
+    def test_invalid_state_id_raises_integrity_error(self, recorder: LandscapeRecorder) -> None:
         """Test that invalid state_id raises IntegrityError (FK constraint)."""
         with pytest.raises(IntegrityError):
             recorder.record_call(
@@ -213,9 +201,7 @@ class TestRecordCall:
 
         assert call.call_type == CallType.SQL
 
-    def test_record_filesystem_call(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_record_filesystem_call(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Test recording a filesystem call type."""
         call = recorder.record_call(
             state_id=state_id,
@@ -229,9 +215,7 @@ class TestRecordCall:
 
         assert call.call_type == CallType.FILESYSTEM
 
-    def test_call_without_latency(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_call_without_latency(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Test recording a call without latency information."""
         call = recorder.record_call(
             state_id=state_id,
@@ -245,9 +229,7 @@ class TestRecordCall:
 
         assert call.latency_ms is None
 
-    def test_error_call_without_response(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_error_call_without_response(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Test recording an error call with no response data."""
         call = recorder.record_call(
             state_id=state_id,
@@ -265,9 +247,7 @@ class TestRecordCall:
         assert call.error_json is not None
         assert "timeout" in call.error_json
 
-    def test_created_at_is_set(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_created_at_is_set(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Test that created_at timestamp is automatically set."""
         call = recorder.record_call(
             state_id=state_id,
@@ -280,9 +260,7 @@ class TestRecordCall:
 
         assert call.created_at is not None
 
-    def test_request_hash_is_deterministic(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_request_hash_is_deterministic(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Test that the same request data produces the same hash."""
         request_data = {"model": "gpt-4", "prompt": "Hello, world!"}
 

@@ -35,9 +35,7 @@ class TestPluginManager:
             def __init__(self, config: dict[str, Any]) -> None:
                 pass
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({**row, "y": row["x"] * 2})
 
             def on_start(self, ctx: PluginContext) -> None:
@@ -76,9 +74,7 @@ class TestPluginManager:
             def __init__(self, config: dict[str, Any]) -> None:
                 pass
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
             def on_start(self, ctx: PluginContext) -> None:
@@ -95,9 +91,7 @@ class TestPluginManager:
             def __init__(self, config: dict[str, Any]) -> None:
                 pass
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
             def on_start(self, ctx: PluginContext) -> None:

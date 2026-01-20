@@ -35,9 +35,7 @@ non_finite_floats = nan_values | infinity_values
 
 # NumPy NaN and Infinity
 numpy_nan_values = st.sampled_from([np.nan, np.float64("nan")])
-numpy_infinity_values = st.sampled_from(
-    [np.inf, -np.inf, np.float64("inf"), np.float64("-inf")]
-)
+numpy_infinity_values = st.sampled_from([np.inf, -np.inf, np.float64("inf"), np.float64("-inf")])
 numpy_non_finite = numpy_nan_values | numpy_infinity_values
 
 # All non-finite values
@@ -188,9 +186,7 @@ class TestNonFiniteEdgeCases:
         non_finite=all_non_finite,
     )
     @settings(max_examples=50)
-    def test_mixed_valid_and_invalid_rejected(
-        self, valid_float: float, non_finite: float
-    ) -> None:
+    def test_mixed_valid_and_invalid_rejected(self, valid_float: float, non_finite: float) -> None:
         """Property: A structure with both valid and invalid floats is rejected."""
         assume(math.isfinite(valid_float))
 

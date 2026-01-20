@@ -94,9 +94,7 @@ class PurgeManager:
         query = (
             select(rows_table.c.source_data_ref)
             .distinct()
-            .select_from(
-                rows_table.join(runs_table, rows_table.c.run_id == runs_table.c.run_id)
-            )
+            .select_from(rows_table.join(runs_table, rows_table.c.run_id == runs_table.c.run_id))
             .where(
                 and_(
                     runs_table.c.status == "completed",

@@ -160,9 +160,7 @@ class TestValidationErrorRecording:
         assert token.row_id is not None
         assert token.node_id == "source_node"
 
-    def test_record_validation_error_without_landscape_logs_warning(
-        self, caplog: "pytest.LogCaptureFixture"
-    ) -> None:
+    def test_record_validation_error_without_landscape_logs_warning(self, caplog: "pytest.LogCaptureFixture") -> None:
         """record_validation_error logs warning when no landscape configured."""
         import logging
 
@@ -321,9 +319,7 @@ class TestRouteToSink:
         assert hasattr(ctx, "route_to_sink")
         assert callable(ctx.route_to_sink)
 
-    def test_route_to_sink_logs_action(
-        self, caplog: "pytest.LogCaptureFixture"
-    ) -> None:
+    def test_route_to_sink_logs_action(self, caplog: "pytest.LogCaptureFixture") -> None:
         """route_to_sink logs the routing action."""
         import logging
 
@@ -399,9 +395,7 @@ class TestTransformErrorRecording:
         assert token.destination == "error_sink"
         assert token.error_id is None  # No landscape
 
-    def test_record_transform_error_without_landscape_logs_warning(
-        self, caplog: "pytest.LogCaptureFixture"
-    ) -> None:
+    def test_record_transform_error_without_landscape_logs_warning(self, caplog: "pytest.LogCaptureFixture") -> None:
         """record_transform_error logs warning when no landscape configured."""
         import logging
 

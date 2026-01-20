@@ -122,10 +122,7 @@ class CompatibilityResult:
         if self.missing_fields:
             parts.append(f"Missing fields: {', '.join(self.missing_fields)}")
         if self.type_mismatches:
-            mismatches = [
-                f"{name} (expected {expected}, got {actual})"
-                for name, expected, actual in self.type_mismatches
-            ]
+            mismatches = [f"{name} (expected {expected}, got {actual})" for name, expected, actual in self.type_mismatches]
             parts.append(f"Type mismatches: {', '.join(mismatches)}")
 
         return "; ".join(parts)
@@ -169,9 +166,7 @@ def check_compatibility(
                 missing.append(field_name)
         else:
             producer_field = producer_fields[field_name]
-            if not _types_compatible(
-                producer_field.annotation, consumer_field.annotation
-            ):
+            if not _types_compatible(producer_field.annotation, consumer_field.annotation):
                 mismatches.append(
                     (
                         field_name,

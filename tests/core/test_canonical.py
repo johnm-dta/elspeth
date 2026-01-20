@@ -324,8 +324,7 @@ class TestCrossProcessStability:
 
         result = stable_hash(data)
         assert result == golden_hash, (
-            f"Hash stability broken! Got {result}, expected {golden_hash}. "
-            "This may indicate audit trail integrity issues."
+            f"Hash stability broken! Got {result}, expected {golden_hash}. This may indicate audit trail integrity issues."
         )
 
     def test_version_constant_exists(self) -> None:

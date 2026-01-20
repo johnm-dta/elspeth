@@ -57,9 +57,7 @@ class TestCLIIntegration:
         config_file.write_text(yaml.dump(config))
         return config_file
 
-    def test_full_workflow_csv_to_json(
-        self, pipeline_config: Path, tmp_path: Path
-    ) -> None:
+    def test_full_workflow_csv_to_json(self, pipeline_config: Path, tmp_path: Path) -> None:
         """Complete workflow: validate, run with --execute, check output."""
         from elspeth.cli import app
 
@@ -95,9 +93,7 @@ class TestCLIIntegration:
         # Sinks
         assert "database" in result.stdout
 
-    def test_dry_run_does_not_create_output(
-        self, pipeline_config: Path, tmp_path: Path
-    ) -> None:
+    def test_dry_run_does_not_create_output(self, pipeline_config: Path, tmp_path: Path) -> None:
         """dry-run does not create output files."""
         from elspeth.cli import app
 
@@ -146,9 +142,7 @@ class TestSourceQuarantineRouting:
         return csv_file
 
     @pytest.fixture
-    def quarantine_pipeline_config(
-        self, tmp_path: Path, csv_with_invalid_rows: Path
-    ) -> Path:
+    def quarantine_pipeline_config(self, tmp_path: Path, csv_with_invalid_rows: Path) -> Path:
         """Create pipeline with quarantine sink for invalid rows."""
         config = {
             "datasource": {
@@ -185,9 +179,7 @@ class TestSourceQuarantineRouting:
         config_file.write_text(yaml.dump(config))
         return config_file
 
-    def test_invalid_rows_routed_to_quarantine_sink(
-        self, quarantine_pipeline_config: Path, tmp_path: Path
-    ) -> None:
+    def test_invalid_rows_routed_to_quarantine_sink(self, quarantine_pipeline_config: Path, tmp_path: Path) -> None:
         """Invalid source rows are written to the quarantine sink.
 
         This is the key acceptance test for the source quarantine routing feature.
@@ -196,9 +188,7 @@ class TestSourceQuarantineRouting:
         from elspeth.cli import app
 
         # Run the pipeline
-        result = runner.invoke(
-            app, ["run", "-s", str(quarantine_pipeline_config), "--execute"]
-        )
+        result = runner.invoke(app, ["run", "-s", str(quarantine_pipeline_config), "--execute"])
         assert result.exit_code == 0
 
         # Check valid rows went to default output
@@ -216,9 +206,7 @@ class TestSourceQuarantineRouting:
         assert quarantine_data[0]["name"] == "bob"
         assert quarantine_data[0]["score"] == "bad"  # Original value preserved
 
-    def test_discard_does_not_write_to_sink(
-        self, tmp_path: Path, csv_with_invalid_rows: Path
-    ) -> None:
+    def test_discard_does_not_write_to_sink(self, tmp_path: Path, csv_with_invalid_rows: Path) -> None:
         """When on_validation_failure='discard', invalid rows are not written."""
         config = {
             "datasource": {

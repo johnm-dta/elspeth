@@ -733,9 +733,7 @@ class TestLandscapeRecorderNodeStates:
             input_data={},
             attempt=0,
         )
-        recorder.complete_node_state(
-            state1.state_id, status="failed", error={}, duration_ms=1.0
-        )
+        recorder.complete_node_state(state1.state_id, status="failed", error={}, duration_ms=1.0)
 
         # Second attempt
         state2 = recorder.begin_node_state(
@@ -2126,10 +2124,7 @@ class TestReproducibilityGradeComputation:
 
         assert completed_run.status == RunStatus.COMPLETED
         assert completed_run.completed_at is not None
-        assert (
-            completed_run.reproducibility_grade
-            == ReproducibilityGrade.FULL_REPRODUCIBLE.value
-        )
+        assert completed_run.reproducibility_grade == ReproducibilityGrade.FULL_REPRODUCIBLE.value
 
     def test_grade_degrades_after_purge(self) -> None:
         """REPLAY_REPRODUCIBLE degrades to ATTRIBUTABLE_ONLY after purge."""
@@ -2158,10 +2153,7 @@ class TestReproducibilityGradeComputation:
 
         # Finalize with REPLAY_REPRODUCIBLE grade
         completed_run = recorder.finalize_run(run.run_id, status="completed")
-        assert (
-            completed_run.reproducibility_grade
-            == ReproducibilityGrade.REPLAY_REPRODUCIBLE.value
-        )
+        assert completed_run.reproducibility_grade == ReproducibilityGrade.REPLAY_REPRODUCIBLE.value
 
         # Simulate purge - grade should degrade
         update_grade_after_purge(db, run.run_id)
@@ -2169,10 +2161,7 @@ class TestReproducibilityGradeComputation:
         # Check grade was degraded
         updated_run = recorder.get_run(run.run_id)
         assert updated_run is not None
-        assert (
-            updated_run.reproducibility_grade
-            == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
-        )
+        assert updated_run.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
 
     def test_full_reproducible_unchanged_after_purge(self) -> None:
         """FULL_REPRODUCIBLE remains unchanged after purge (payloads not needed for replay)."""
@@ -2201,10 +2190,7 @@ class TestReproducibilityGradeComputation:
 
         # Finalize with FULL_REPRODUCIBLE grade
         completed_run = recorder.finalize_run(run.run_id, status="completed")
-        assert (
-            completed_run.reproducibility_grade
-            == ReproducibilityGrade.FULL_REPRODUCIBLE.value
-        )
+        assert completed_run.reproducibility_grade == ReproducibilityGrade.FULL_REPRODUCIBLE.value
 
         # Simulate purge - grade should NOT degrade
         update_grade_after_purge(db, run.run_id)
@@ -2212,10 +2198,7 @@ class TestReproducibilityGradeComputation:
         # Check grade unchanged
         updated_run = recorder.get_run(run.run_id)
         assert updated_run is not None
-        assert (
-            updated_run.reproducibility_grade
-            == ReproducibilityGrade.FULL_REPRODUCIBLE.value
-        )
+        assert updated_run.reproducibility_grade == ReproducibilityGrade.FULL_REPRODUCIBLE.value
 
     def test_compute_grade_empty_pipeline(self) -> None:
         """Empty pipeline (no nodes) gets FULL_REPRODUCIBLE."""
@@ -2275,20 +2258,14 @@ class TestReproducibilityGradeComputation:
         # Verify it's ATTRIBUTABLE_ONLY
         run_after_first_purge = recorder.get_run(run.run_id)
         assert run_after_first_purge is not None
-        assert (
-            run_after_first_purge.reproducibility_grade
-            == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
-        )
+        assert run_after_first_purge.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
 
         # Call purge again - should remain ATTRIBUTABLE_ONLY
         update_grade_after_purge(db, run.run_id)
 
         run_after_second_purge = recorder.get_run(run.run_id)
         assert run_after_second_purge is not None
-        assert (
-            run_after_second_purge.reproducibility_grade
-            == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
-        )
+        assert run_after_second_purge.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
 
     def test_default_determinism_counts_as_deterministic(self) -> None:
         """Nodes registered without explicit determinism default to DETERMINISTIC."""
@@ -2506,11 +2483,7 @@ class TestTransformErrorRecording:
 
         # Verify stored in database
         with db.connection() as conn:
-            result = conn.execute(
-                select(transform_errors_table).where(
-                    transform_errors_table.c.error_id == error_id
-                )
-            )
+            result = conn.execute(select(transform_errors_table).where(transform_errors_table.c.error_id == error_id))
             row = result.fetchone()
 
         assert row is not None
@@ -2550,11 +2523,7 @@ class TestTransformErrorRecording:
         )
 
         with db.connection() as conn:
-            result = conn.execute(
-                select(transform_errors_table).where(
-                    transform_errors_table.c.error_id == error_id
-                )
-            )
+            result = conn.execute(select(transform_errors_table).where(transform_errors_table.c.error_id == error_id))
             row = result.fetchone()
 
         assert row is not None
@@ -2583,11 +2552,7 @@ class TestTransformErrorRecording:
         )
 
         with db.connection() as conn:
-            result = conn.execute(
-                select(transform_errors_table).where(
-                    transform_errors_table.c.error_id == error_id
-                )
-            )
+            result = conn.execute(select(transform_errors_table).where(transform_errors_table.c.error_id == error_id))
             row = result.fetchone()
 
         assert row is not None
@@ -2635,9 +2600,7 @@ class TestBatchRecoveryQueries:
             aggregation_node_id="agg_node",
         )
         recorder.update_batch_status(completed_batch.batch_id, "executing")
-        recorder.update_batch_status(
-            completed_batch.batch_id, "completed", trigger_reason="count"
-        )
+        recorder.update_batch_status(completed_batch.batch_id, "completed", trigger_reason="count")
 
         # Act
         incomplete = recorder.get_incomplete_batches(run.run_id)
@@ -2702,15 +2665,9 @@ class TestBatchRecoveryQueries:
             schema_config=DYNAMIC_SCHEMA,
         )
 
-        batch1 = recorder.create_batch(
-            run_id=run.run_id, aggregation_node_id="agg_node"
-        )
-        batch2 = recorder.create_batch(
-            run_id=run.run_id, aggregation_node_id="agg_node"
-        )
-        batch3 = recorder.create_batch(
-            run_id=run.run_id, aggregation_node_id="agg_node"
-        )
+        batch1 = recorder.create_batch(run_id=run.run_id, aggregation_node_id="agg_node")
+        batch2 = recorder.create_batch(run_id=run.run_id, aggregation_node_id="agg_node")
+        batch3 = recorder.create_batch(run_id=run.run_id, aggregation_node_id="agg_node")
 
         incomplete = recorder.get_incomplete_batches(run.run_id)
 

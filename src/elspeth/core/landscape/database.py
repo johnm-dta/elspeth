@@ -69,9 +69,7 @@ class LandscapeDB:
         """
 
         @event.listens_for(engine, "connect")
-        def set_sqlite_pragma(
-            dbapi_connection: object, connection_record: object
-        ) -> None:
+        def set_sqlite_pragma(dbapi_connection: object, connection_record: object) -> None:
             cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
             # Enable WAL mode for better concurrency
             cursor.execute("PRAGMA journal_mode=WAL")

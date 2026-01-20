@@ -41,9 +41,7 @@ class TestTransformExecutor:
             name = "double"
             node_id = node.node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({"value": row["value"] * 2})
 
         transform = DoubleTransform()
@@ -105,9 +103,7 @@ class TestTransformExecutor:
             node_id = node.node_id
             _on_error = "discard"  # Required for transforms that return errors
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.error({"message": "validation failed"})
 
         transform = FailingTransform()
@@ -163,9 +159,7 @@ class TestTransformExecutor:
             name = "exploding"
             node_id = node.node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 raise RuntimeError("kaboom!")
 
         transform = ExplodingTransform()
@@ -227,9 +221,7 @@ class TestTransformExecutor:
             name = "enricher"
             node_id = node.node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({**row, "enriched": True})
 
         transform = EnrichTransform()
@@ -288,9 +280,7 @@ class TestTransformExecutor:
             name = "identity"
             node_id = node.node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
         transform = IdentityTransform()
@@ -355,9 +345,7 @@ class TestTransformExecutor:
             node_id = node.node_id
             _on_error = "discard"
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.error({"message": "invalid input"})
 
         transform = DiscardingTransform()
@@ -414,9 +402,7 @@ class TestTransformExecutor:
             node_id = node.node_id
             _on_error = "error_sink"  # Routes to named error sink
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.error({"message": "routing to error sink"})
 
         transform = ErrorRoutingTransform()
@@ -472,9 +458,7 @@ class TestTransformExecutor:
             name = "successful"
             node_id = node.node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({"result": "ok"})
 
         transform = SuccessfulTransform()
@@ -532,9 +516,7 @@ class TestTransformExecutor:
             name = "attempt_test"
             node_id = node.node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
         transform = SimpleTransform()
@@ -556,9 +538,7 @@ class TestTransformExecutor:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         # Patch begin_node_state to capture attempt
-        with patch.object(
-            recorder, "begin_node_state", wraps=recorder.begin_node_state
-        ) as mock:
+        with patch.object(recorder, "begin_node_state", wraps=recorder.begin_node_state) as mock:
             executor.execute_transform(
                 transform=as_transform(transform),
                 token=token,
@@ -791,9 +771,7 @@ class TestGateExecutor:
         ctx = PluginContext(run_id=run.run_id, config={})
 
         # Empty route resolution map - label not configured
-        executor = GateExecutor(
-            recorder, SpanFactory(), edge_map={}, route_resolution_map={}
-        )
+        executor = GateExecutor(recorder, SpanFactory(), edge_map={}, route_resolution_map={})
 
         token = TokenInfo(
             row_id="row-1",
@@ -1767,9 +1745,7 @@ class TestAggregationExecutorOldInterfaceDeleted:
         )
 
         # Old accept() method should be deleted
-        assert not hasattr(
-            executor, "accept"
-        ), "accept() method should be deleted - use buffer_row() instead"
+        assert not hasattr(executor, "accept"), "accept() method should be deleted - use buffer_row() instead"
 
     def test_old_flush_method_deleted(self) -> None:
         """Old flush() method should be deleted from AggregationExecutor."""
@@ -1791,12 +1767,8 @@ class TestAggregationExecutorOldInterfaceDeleted:
         # Note: flush() was the old method that called plugin.flush()
         # execute_flush() is the production method with full audit recording
         # _get_buffered_data() is internal-only for testing
-        assert hasattr(
-            executor, "execute_flush"
-        ), "execute_flush() should exist for production flush with audit"
-        assert hasattr(
-            executor, "_get_buffered_data"
-        ), "_get_buffered_data() should exist for testing buffer contents"
+        assert hasattr(executor, "execute_flush"), "execute_flush() should exist for production flush with audit"
+        assert hasattr(executor, "_get_buffered_data"), "_get_buffered_data() should exist for testing buffer contents"
 
 
 class TestAggregationExecutorTriggersDeleted:
@@ -1812,9 +1784,7 @@ class TestAggregationExecutorTriggersDeleted:
         """BaseAggregation should be deleted (aggregation is structural)."""
         import elspeth.plugins.base as base
 
-        assert not hasattr(
-            base, "BaseAggregation"
-        ), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
+        assert not hasattr(base, "BaseAggregation"), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
 
 
 class TestSinkExecutor:
@@ -1846,9 +1816,7 @@ class TestSinkExecutor:
             name = "csv_output"
             node_id: str | None = sink_node.node_id
 
-            def write(
-                self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> ArtifactDescriptor:
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
                 # Simulate writing rows and return artifact info
                 return ArtifactDescriptor.for_file(
                     path="/tmp/output.csv",
@@ -1933,9 +1901,7 @@ class TestSinkExecutor:
             name = "empty_sink"
             node_id: str | None = sink_node.node_id
 
-            def write(
-                self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> ArtifactDescriptor:
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
                 raise AssertionError("Should not be called for empty tokens")
 
         sink = EmptySink()
@@ -1981,9 +1947,7 @@ class TestSinkExecutor:
             name = "exploding_sink"
             node_id: str | None = sink_node.node_id
 
-            def write(
-                self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> ArtifactDescriptor:
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
                 raise RuntimeError("disk full!")
 
         sink = ExplodingSink()
@@ -2056,9 +2020,7 @@ class TestSinkExecutor:
             node_id: str | None = sink_node.node_id
             _batch_count: int = 0
 
-            def write(
-                self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> ArtifactDescriptor:
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
                 self._batch_count += 1
                 return ArtifactDescriptor.for_file(
                     path=f"/tmp/batch_{self._batch_count}.json",
@@ -2136,12 +2098,8 @@ class TestSinkExecutor:
             name = "linked_sink"
             node_id: str | None = sink_node.node_id
 
-            def write(
-                self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> ArtifactDescriptor:
-                return ArtifactDescriptor.for_file(
-                    path="/tmp/linked.csv", size_bytes=512, content_hash="xyz"
-                )
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
+                return ArtifactDescriptor.for_file(path="/tmp/linked.csv", size_bytes=512, content_hash="xyz")
 
         sink = LinkedSink()
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -2308,9 +2266,7 @@ class TestAggregationExecutorRestore:
         )
 
         # Verify old accept() method is deleted
-        assert not hasattr(
-            executor, "accept"
-        ), "accept() method should be deleted - use buffer_row() instead"
+        assert not hasattr(executor, "accept"), "accept() method should be deleted - use buffer_row() instead"
 
 
 class TestAggregationExecutorBuffering:

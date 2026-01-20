@@ -121,9 +121,7 @@ class CheckpointManager:
         """
         with self._db.engine.connect() as conn:
             results = conn.execute(
-                select(checkpoints_table)
-                .where(checkpoints_table.c.run_id == run_id)
-                .order_by(asc(checkpoints_table.c.sequence_number))
+                select(checkpoints_table).where(checkpoints_table.c.run_id == run_id).order_by(asc(checkpoints_table.c.sequence_number))
             ).fetchall()
 
         return [
@@ -151,8 +149,6 @@ class CheckpointManager:
             Number of checkpoints deleted
         """
         with self._db.engine.connect() as conn:
-            result = conn.execute(
-                delete(checkpoints_table).where(checkpoints_table.c.run_id == run_id)
-            )
+            result = conn.execute(delete(checkpoints_table).where(checkpoints_table.c.run_id == run_id))
             conn.commit()
             return result.rowcount

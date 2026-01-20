@@ -130,12 +130,8 @@ class RowProcessor:
 
         self._token_manager = TokenManager(recorder)
         self._transform_executor = TransformExecutor(recorder, span_factory)
-        self._gate_executor = GateExecutor(
-            recorder, span_factory, edge_map, route_resolution_map
-        )
-        self._aggregation_executor = AggregationExecutor(
-            recorder, span_factory, run_id, aggregation_settings=aggregation_settings
-        )
+        self._gate_executor = GateExecutor(recorder, span_factory, edge_map, route_resolution_map)
+        self._aggregation_executor = AggregationExecutor(recorder, span_factory, run_id, aggregation_settings=aggregation_settings)
 
         # Restore aggregation state if provided (crash recovery)
         if restored_aggregation_state:
@@ -259,9 +255,7 @@ class RowProcessor:
 
                 if more_transforms:
                     # Queue enriched tokens as work items for remaining transforms
-                    for token, enriched_data in zip(
-                        buffered_tokens, result.rows, strict=True
-                    ):
+                    for token, enriched_data in zip(buffered_tokens, result.rows, strict=True):
                         updated_token = TokenInfo(
                             row_id=token.row_id,
                             token_id=token.token_id,
@@ -279,9 +273,7 @@ class RowProcessor:
                 else:
                     # No more transforms - return COMPLETED for all tokens
                     results: list[RowResult] = []
-                    for token, enriched_data in zip(
-                        buffered_tokens, result.rows, strict=True
-                    ):
+                    for token, enriched_data in zip(buffered_tokens, result.rows, strict=True):
                         updated_token = TokenInfo(
                             row_id=token.row_id,
                             token_id=token.token_id,
@@ -494,10 +486,7 @@ class RowProcessor:
             while work_queue:
                 iterations += 1
                 if iterations > MAX_WORK_QUEUE_ITERATIONS:
-                    raise RuntimeError(
-                        f"Work queue exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. "
-                        "Possible infinite loop in pipeline."
-                    )
+                    raise RuntimeError(f"Work queue exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. Possible infinite loop in pipeline.")
 
                 item = work_queue.popleft()
                 result, child_items = self._process_single_token(
@@ -574,10 +563,7 @@ class RowProcessor:
             while work_queue:
                 iterations += 1
                 if iterations > MAX_WORK_QUEUE_ITERATIONS:
-                    raise RuntimeError(
-                        f"Work queue exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. "
-                        "Possible infinite loop in pipeline."
-                    )
+                    raise RuntimeError(f"Work queue exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. Possible infinite loop in pipeline.")
 
                 item = work_queue.popleft()
                 result, child_items = self._process_single_token(
@@ -665,9 +651,7 @@ class RowProcessor:
 
                         if branch_name and branch_name in self._branch_to_coalesce:
                             child_coalesce_name = self._branch_to_coalesce[branch_name]
-                            child_coalesce_step = self._coalesce_step_map.get(
-                                child_coalesce_name
-                            )
+                            child_coalesce_step = self._coalesce_step_map.get(child_coalesce_name)
 
                         child_items.append(
                             _WorkItem(
@@ -694,11 +678,7 @@ class RowProcessor:
             elif isinstance(transform, BaseTransform):
                 # Check if this is a batch-aware transform at an aggregation node
                 node_id = transform.node_id
-                if (
-                    transform.is_batch_aware
-                    and node_id is not None
-                    and node_id in self._aggregation_settings
-                ):
+                if transform.is_batch_aware and node_id is not None and node_id in self._aggregation_settings:
                     # Use engine buffering for aggregation
                     return self._process_batch_aggregation_node(
                         transform=transform,
@@ -711,13 +691,11 @@ class RowProcessor:
 
                 # Regular transform (with optional retry)
                 try:
-                    result, current_token, error_sink = (
-                        self._execute_transform_with_retry(
-                            transform=transform,
-                            token=current_token,
-                            ctx=ctx,
-                            step=step,
-                        )
+                    result, current_token, error_sink = self._execute_transform_with_retry(
+                        transform=transform,
+                        token=current_token,
+                        ctx=ctx,
+                        step=step,
                     )
                 except MaxRetriesExceeded as e:
                     # All retries exhausted - return FAILED outcome
@@ -803,10 +781,7 @@ class RowProcessor:
                 # by _execute_transform_with_retry, continues to next transform)
 
             else:
-                raise TypeError(
-                    f"Unknown transform type: {type(transform).__name__}. "
-                    f"Expected BaseTransform or BaseGate."
-                )
+                raise TypeError(f"Unknown transform type: {type(transform).__name__}. Expected BaseTransform or BaseGate.")
 
         # Process config-driven gates (after all plugin transforms)
         # Step continues from where transforms left off
@@ -816,9 +791,7 @@ class RowProcessor:
         # If start_step > len(transforms), we skip some config gates
         # (e.g., fork children that already passed through earlier gates)
         config_gate_start_idx = max(0, start_step - len(transforms))
-        for gate_idx, gate_config in enumerate(
-            self._config_gates[config_gate_start_idx:], start=config_gate_start_idx
-        ):
+        for gate_idx, gate_config in enumerate(self._config_gates[config_gate_start_idx:], start=config_gate_start_idx):
             step = config_gate_start_step + gate_idx
 
             # Get the node_id for this config gate
@@ -856,9 +829,7 @@ class RowProcessor:
 
                     if cfg_branch_name and cfg_branch_name in self._branch_to_coalesce:
                         cfg_coalesce_name = self._branch_to_coalesce[cfg_branch_name]
-                        cfg_coalesce_step = self._coalesce_step_map.get(
-                            cfg_coalesce_name
-                        )
+                        cfg_coalesce_step = self._coalesce_step_map.get(cfg_coalesce_name)
 
                     # Children start after ALL transforms, at next config gate
                     child_items.append(

@@ -90,7 +90,7 @@ from elspeth.contracts.config import (
 from elspeth.contracts.engine import RetryPolicy
 from elspeth.contracts.cli import ExecutionResult
 
-__all__ = [  # - grouped by category for readability
+__all__ = [  # Grouped by category for readability
     # audit
     "Artifact",
     # errors

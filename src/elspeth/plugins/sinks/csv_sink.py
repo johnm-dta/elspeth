@@ -88,9 +88,7 @@ class CSVSink(BaseSink):
         self._writer: csv.DictWriter[str] | None = None
         self._fieldnames: Sequence[str] | None = None
 
-    def write(
-        self, rows: list[dict[str, Any]], ctx: PluginContext
-    ) -> ArtifactDescriptor:
+    def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
         """Write a batch of rows to the CSV file.
 
         Args:

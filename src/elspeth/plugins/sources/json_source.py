@@ -128,9 +128,7 @@ class JSONSource(BaseSource):
         for row in data:
             yield from self._validate_and_yield(row, ctx)
 
-    def _validate_and_yield(
-        self, row: dict[str, Any], ctx: PluginContext
-    ) -> Iterator[SourceRow]:
+    def _validate_and_yield(self, row: dict[str, Any], ctx: PluginContext) -> Iterator[SourceRow]:
         """Validate a row and yield if valid, otherwise quarantine.
 
         Args:

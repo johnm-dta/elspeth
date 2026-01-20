@@ -18,7 +18,6 @@ from pathlib import Path
 from textwrap import dedent
 
 import pytest
-
 from scripts.cicd.no_bug_hiding import (
     Allowlist,
     AllowlistEntry,

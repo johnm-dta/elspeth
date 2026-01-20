@@ -72,12 +72,8 @@ class AzureAuthConfig(BaseModel):
         Raises:
             ValueError: If zero or multiple auth methods are configured.
         """
-        has_conn_string = self.connection_string is not None and bool(
-            self.connection_string.strip()
-        )
-        has_managed_identity = (
-            self.use_managed_identity and self.account_url is not None
-        )
+        has_conn_string = self.connection_string is not None and bool(self.connection_string.strip())
+        has_managed_identity = self.use_managed_identity and self.account_url is not None
         has_service_principal = all(
             [
                 self.tenant_id is not None,
@@ -108,10 +104,7 @@ class AzureAuthConfig(BaseModel):
 
         # Additional validation for partial configurations
         if self.use_managed_identity and not self.account_url:
-            raise ValueError(
-                "Managed Identity auth requires account_url. "
-                "Example: https://mystorageaccount.blob.core.windows.net"
-            )
+            raise ValueError("Managed Identity auth requires account_url. Example: https://mystorageaccount.blob.core.windows.net")
 
         sp_fields = [self.tenant_id, self.client_id, self.client_secret]
         sp_field_count = sum(1 for f in sp_fields if f is not None)
@@ -125,9 +118,7 @@ class AzureAuthConfig(BaseModel):
                 missing.append("client_secret")
             if self.account_url is None:
                 missing.append("account_url")
-            raise ValueError(
-                f"Service Principal auth requires all fields. Missing: {', '.join(missing)}"
-            )
+            raise ValueError(f"Service Principal auth requires all fields. Missing: {', '.join(missing)}")
 
         return self
 
@@ -143,10 +134,7 @@ class AzureAuthConfig(BaseModel):
         try:
             from azure.storage.blob import BlobServiceClient
         except ImportError as e:
-            raise ImportError(
-                "azure-storage-blob is required for Azure plugins. "
-                "Install with: uv pip install azure-storage-blob"
-            ) from e
+            raise ImportError("azure-storage-blob is required for Azure plugins. Install with: uv pip install azure-storage-blob") from e
 
         if self.connection_string:
             return BlobServiceClient.from_connection_string(self.connection_string)
@@ -156,8 +144,7 @@ class AzureAuthConfig(BaseModel):
                 from azure.identity import DefaultAzureCredential
             except ImportError as e:
                 raise ImportError(
-                    "azure-identity is required for Managed Identity auth. "
-                    "Install with: uv pip install azure-identity"
+                    "azure-identity is required for Managed Identity auth. Install with: uv pip install azure-identity"
                 ) from e
 
             credential = DefaultAzureCredential()
@@ -171,8 +158,7 @@ class AzureAuthConfig(BaseModel):
                 from azure.identity import ClientSecretCredential
             except ImportError as e:
                 raise ImportError(
-                    "azure-identity is required for Service Principal auth. "
-                    "Install with: uv pip install azure-identity"
+                    "azure-identity is required for Service Principal auth. Install with: uv pip install azure-identity"
                 ) from e
 
             # All fields are validated to be not None by the model_validator

@@ -64,27 +64,15 @@ class AzureBatchConfig(TransformDataConfig):
     system_prompt: str | None = Field(None, description="Optional system prompt")
     temperature: float = Field(0.0, ge=0.0, le=2.0, description="Sampling temperature")
     max_tokens: int | None = Field(None, gt=0, description="Maximum response tokens")
-    response_field: str = Field(
-        "llm_response", description="Output field name for LLM response"
-    )
+    response_field: str = Field("llm_response", description="Output field name for LLM response")
 
-    poll_interval_seconds: int = Field(
-        300, ge=1, description="Batch status check interval in seconds"
-    )
-    max_wait_hours: int = Field(
-        24, ge=1, le=24, description="Maximum batch wait time in hours"
-    )
+    poll_interval_seconds: int = Field(300, ge=1, description="Batch status check interval in seconds")
+    max_wait_hours: int = Field(24, ge=1, le=24, description="Maximum batch wait time in hours")
 
     # Template metadata fields for audit trail (matching LLMConfig)
-    lookup: dict[str, Any] | None = Field(
-        None, description="Lookup data loaded from YAML file"
-    )
-    template_source: str | None = Field(
-        None, description="Template file path for audit (None if inline)"
-    )
-    lookup_source: str | None = Field(
-        None, description="Lookup file path for audit (None if no lookup)"
-    )
+    lookup: dict[str, Any] | None = Field(None, description="Lookup data loaded from YAML file")
+    template_source: str | None = Field(None, description="Template file path for audit (None if inline)")
+    lookup_source: str | None = Field(None, description="Lookup file path for audit (None if no lookup)")
 
 
 class AzureBatchLLMTransform(BaseTransform):
@@ -386,9 +374,7 @@ class AzureBatchLLMTransform(BaseTransform):
             return TransformResult.error(
                 {
                     "reason": "all_templates_failed",
-                    "template_errors": [
-                        {"row_index": idx, "error": err} for idx, err in template_errors
-                    ],
+                    "template_errors": [{"row_index": idx, "error": err} for idx, err in template_errors],
                 }
             )
 
@@ -515,9 +501,7 @@ class AzureBatchLLMTransform(BaseTransform):
                 "batch_id": batch_id,
             }
             if hasattr(batch, "errors") and batch.errors:
-                error_info["errors"] = [
-                    {"code": e.code, "message": e.message} for e in batch.errors.data
-                ]
+                error_info["errors"] = [{"code": e.code, "message": e.message} for e in batch.errors.data]
 
             return TransformResult.error(error_info)
 
@@ -547,9 +531,7 @@ class AzureBatchLLMTransform(BaseTransform):
             submitted_at_str = checkpoint.get("submitted_at")
             if submitted_at_str:
                 submitted_at = datetime.fromisoformat(submitted_at_str)
-                elapsed_hours = (
-                    datetime.now(UTC) - submitted_at
-                ).total_seconds() / 3600
+                elapsed_hours = (datetime.now(UTC) - submitted_at).total_seconds() / 3600
 
                 if elapsed_hours > self._max_wait_hours:
                     self._clear_checkpoint(ctx)
@@ -628,16 +610,12 @@ class AzureBatchLLMTransform(BaseTransform):
         template_error_indices = {idx for idx, _ in template_errors}
 
         # Build reverse mapping once (O(n) instead of O(n^2) lookup per row)
-        idx_to_custom_id: dict[int, str] = {
-            ridx: cid for cid, ridx in row_mapping.items()
-        }
+        idx_to_custom_id: dict[int, str] = {ridx: cid for cid, ridx in row_mapping.items()}
 
         for idx, row in enumerate(rows):
             if idx in template_error_indices:
                 # Row had template error - include original row with error field
-                error_msg = next(
-                    (err for i, err in template_errors if i == idx), "Unknown error"
-                )
+                error_msg = next((err for i, err in template_errors if i == idx), "Unknown error")
                 output_row = dict(row)
                 output_row[self._response_field] = None
                 output_row[f"{self._response_field}_error"] = {
@@ -673,9 +651,7 @@ class AzureBatchLLMTransform(BaseTransform):
                     "error": result["error"],
                 }
                 output_rows.append(output_row)
-                row_errors.append(
-                    {"row_index": idx, "reason": "api_error", "error": result["error"]}
-                )
+                row_errors.append({"row_index": idx, "reason": "api_error", "error": result["error"]})
             else:
                 # Success - extract response
                 response = result.get("response", {})
@@ -690,9 +666,7 @@ class AzureBatchLLMTransform(BaseTransform):
                     output_row[self._response_field] = content
                     output_row[f"{self._response_field}_usage"] = usage
                     # Add template hash for audit
-                    output_row[f"{self._response_field}_template_hash"] = (
-                        self._template.template_hash
-                    )
+                    output_row[f"{self._response_field}_template_hash"] = self._template.template_hash
                     output_rows.append(output_row)
                 else:
                     # No choices in response
@@ -702,9 +676,7 @@ class AzureBatchLLMTransform(BaseTransform):
                         "reason": "no_choices_in_response",
                     }
                     output_rows.append(output_row)
-                    row_errors.append(
-                        {"row_index": idx, "reason": "no_choices_in_response"}
-                    )
+                    row_errors.append({"row_index": idx, "reason": "no_choices_in_response"})
 
         # Clear checkpoint after successful completion
         self._clear_checkpoint(ctx)

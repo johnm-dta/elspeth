@@ -82,11 +82,7 @@ class TestJSONSource:
         from elspeth.plugins.sources.json_source import JSONSource
 
         jsonl_file = tmp_path / "data.jsonl"
-        jsonl_file.write_text(
-            '{"id": 1, "name": "alice"}\n'
-            '{"id": 2, "name": "bob"}\n'
-            '{"id": 3, "name": "carol"}\n'
-        )
+        jsonl_file.write_text('{"id": 1, "name": "alice"}\n{"id": 2, "name": "bob"}\n{"id": 3, "name": "carol"}\n')
 
         source = JSONSource(
             {
@@ -101,9 +97,7 @@ class TestJSONSource:
         assert len(rows) == 3
         assert rows[2].row["name"] == "carol"
 
-    def test_auto_detect_jsonl_by_extension(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_auto_detect_jsonl_by_extension(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Auto-detect JSONL format from .jsonl extension."""
         from elspeth.plugins.sources.json_source import JSONSource
 
@@ -121,9 +115,7 @@ class TestJSONSource:
 
         assert len(rows) == 2
 
-    def test_json_object_with_data_key(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_json_object_with_data_key(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Load rows from nested JSON object using data_key."""
         from elspeth.plugins.sources.json_source import JSONSource
 
@@ -147,9 +139,7 @@ class TestJSONSource:
         assert len(rows) == 2
         assert rows[0].row == {"id": 1}
 
-    def test_empty_lines_ignored_in_jsonl(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_empty_lines_ignored_in_jsonl(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Empty lines in JSONL are ignored."""
         from elspeth.plugins.sources.json_source import JSONSource
 
@@ -227,9 +217,7 @@ class TestJSONSourceConfigValidation:
         from elspeth.plugins.sources.json_source import JSONSource
 
         with pytest.raises(PluginConfigError, match="path"):
-            JSONSource(
-                {"schema": DYNAMIC_SCHEMA, "on_validation_failure": QUARANTINE_SINK}
-            )
+            JSONSource({"schema": DYNAMIC_SCHEMA, "on_validation_failure": QUARANTINE_SINK})
 
     def test_empty_path_raises_error(self) -> None:
         """Empty path string raises PluginConfigError."""
@@ -266,9 +254,7 @@ class TestJSONSourceConfigValidation:
         from elspeth.plugins.sources.json_source import JSONSource
 
         with pytest.raises(PluginConfigError, match=r"require.*schema"):
-            JSONSource(
-                {"path": "/tmp/test.json", "on_validation_failure": QUARANTINE_SINK}
-            )
+            JSONSource({"path": "/tmp/test.json", "on_validation_failure": QUARANTINE_SINK})
 
     def test_missing_on_validation_failure_raises_error(self) -> None:
         """Missing on_validation_failure raises PluginConfigError."""
@@ -287,9 +273,7 @@ class TestJSONSourceQuarantineYielding:
         """Create a minimal plugin context."""
         return PluginContext(run_id="test-run", config={})
 
-    def test_invalid_row_yields_quarantined_source_row(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_invalid_row_yields_quarantined_source_row(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Invalid row yields SourceRow.quarantined() with error info."""
         import json
 
@@ -337,9 +321,7 @@ class TestJSONSourceQuarantineYielding:
         assert quarantined.quarantine_error is not None
         assert "score" in quarantined.quarantine_error  # Error mentions the field
 
-    def test_discard_mode_does_not_yield_invalid_rows(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_discard_mode_does_not_yield_invalid_rows(self, tmp_path: Path, ctx: PluginContext) -> None:
         """When on_validation_failure='discard', invalid rows are not yielded."""
         import json
 
@@ -372,9 +354,7 @@ class TestJSONSourceQuarantineYielding:
         assert all(isinstance(r, SourceRow) and not r.is_quarantined for r in results)
         assert {r.row["name"] for r in results} == {"alice", "carol"}
 
-    def test_jsonl_invalid_row_yields_quarantined(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_jsonl_invalid_row_yields_quarantined(self, tmp_path: Path, ctx: PluginContext) -> None:
         """JSONL format also yields SourceRow.quarantined() for invalid rows."""
         from elspeth.contracts import SourceRow
         from elspeth.plugins.sources.json_source import JSONSource
@@ -382,9 +362,7 @@ class TestJSONSourceQuarantineYielding:
         # JSONL with invalid row
         jsonl_file = tmp_path / "data.jsonl"
         jsonl_file.write_text(
-            '{"id": 1, "name": "alice", "score": 95}\n'
-            '{"id": 2, "name": "bob", "score": "bad"}\n'
-            '{"id": 3, "name": "carol", "score": 92}\n'
+            '{"id": 1, "name": "alice", "score": 95}\n{"id": 2, "name": "bob", "score": "bad"}\n{"id": 3, "name": "carol", "score": 92}\n'
         )
 
         source = JSONSource(

@@ -100,9 +100,7 @@ class PromptTemplate:
         # Both are valid, but they're semantically different for audit purposes.
         self._lookup_data = lookup_data if lookup_data is not None else {}
         self._lookup_source = lookup_source
-        self._lookup_hash = (
-            _sha256(canonical_json(lookup_data)) if lookup_data is not None else None
-        )
+        self._lookup_hash = _sha256(canonical_json(lookup_data)) if lookup_data is not None else None
 
         # Use sandboxed environment for security
         self._env = SandboxedEnvironment(

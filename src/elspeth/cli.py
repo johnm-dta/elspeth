@@ -110,9 +110,7 @@ def run(
         raise typer.Exit(1) from None
 
     if verbose:
-        typer.echo(
-            f"Graph validated: {graph.node_count} nodes, {graph.edge_count} edges"
-        )
+        typer.echo(f"Graph validated: {graph.node_count} nodes, {graph.edge_count} edges")
 
     if dry_run:
         typer.echo("Dry run mode - would execute:")
@@ -215,9 +213,7 @@ def explain(
     tui_app.run()
 
 
-def _execute_pipeline(
-    config: ElspethSettings, verbose: bool = False
-) -> ExecutionResult:
+def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> ExecutionResult:
     """Execute a pipeline from configuration.
 
     Args:
@@ -424,12 +420,8 @@ PLUGIN_REGISTRY: dict[str, list[PluginInfo]] = {
     ],
     "transform": [
         PluginInfo(name="passthrough", description="Pass rows through unchanged"),
-        PluginInfo(
-            name="field_mapper", description="Rename, select, and reorganize fields"
-        ),
-        PluginInfo(
-            name="json_explode", description="Explode array field into multiple rows"
-        ),
+        PluginInfo(name="field_mapper", description="Rename, select, and reorganize fields"),
+        PluginInfo(name="json_explode", description="Explode array field into multiple rows"),
     ],
     "sink": [
         PluginInfo(name="csv", description="Write rows to CSV files"),
@@ -542,12 +534,8 @@ def purge(
                 typer.echo("Specify --database to provide path directly.", err=True)
                 raise typer.Exit(1) from None
         else:
-            typer.echo(
-                "Error: No settings.yaml found and --database not provided.", err=True
-            )
-            typer.echo(
-                "Specify --database to provide path to Landscape database.", err=True
-            )
+            typer.echo("Error: No settings.yaml found and --database not provided.", err=True)
+            typer.echo("Specify --database to provide path to Landscape database.", err=True)
             raise typer.Exit(1) from None
 
     if payload_dir:
@@ -578,9 +566,7 @@ def purge(
             return
 
         if dry_run:
-            typer.echo(
-                f"Would delete {len(expired_refs)} payload(s) older than {retention_days} days:"
-            )
+            typer.echo(f"Would delete {len(expired_refs)} payload(s) older than {retention_days} days:")
             for ref in expired_refs[:10]:  # Show first 10
                 exists = payload_store.exists(ref)
                 status = "exists" if exists else "already deleted"
@@ -591,9 +577,7 @@ def purge(
 
         # Confirm unless --yes
         if not yes:
-            confirm = typer.confirm(
-                f"Delete {len(expired_refs)} payload(s) older than {retention_days} days?"
-            )
+            confirm = typer.confirm(f"Delete {len(expired_refs)} payload(s) older than {retention_days} days?")
             if not confirm:
                 typer.echo("Aborted.")
                 raise typer.Exit(1)
@@ -740,13 +724,9 @@ def _build_resume_graph_from_db(
     graph = ExecutionGraph()
 
     with db.engine.connect() as conn:
-        nodes = conn.execute(
-            select(nodes_table).where(nodes_table.c.run_id == run_id)
-        ).fetchall()
+        nodes = conn.execute(select(nodes_table).where(nodes_table.c.run_id == run_id)).fetchall()
 
-        edges = conn.execute(
-            select(edges_table).where(edges_table.c.run_id == run_id)
-        ).fetchall()
+        edges = conn.execute(select(edges_table).where(edges_table.c.run_id == run_id)).fetchall()
 
     for node in nodes:
         graph.add_node(
@@ -829,12 +809,8 @@ def resume(
         db_url = settings_config.landscape.url
         typer.echo(f"Using database from settings.yaml: {db_url}")
     else:
-        typer.echo(
-            "Error: No settings.yaml found and --database not provided.", err=True
-        )
-        typer.echo(
-            "Specify --database to provide path to Landscape database.", err=True
-        )
+        typer.echo("Error: No settings.yaml found and --database not provided.", err=True)
+        typer.echo("Specify --database to provide path to Landscape database.", err=True)
         raise typer.Exit(1)
 
     # Initialize database and recovery manager

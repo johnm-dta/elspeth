@@ -49,10 +49,7 @@ json_primitives = (
 # Recursive strategy for nested JSON structures
 json_values = st.recursive(
     json_primitives,
-    lambda children: (
-        st.lists(children, max_size=10)
-        | st.dictionaries(st.text(max_size=20), children, max_size=10)
-    ),
+    lambda children: (st.lists(children, max_size=10) | st.dictionaries(st.text(max_size=20), children, max_size=10)),
     max_leaves=50,
 )
 
@@ -109,9 +106,7 @@ class TestCanonicalJsonDeterminism:
 
     @given(data=st.dictionaries(dict_keys, json_primitives, min_size=2, max_size=10))
     @settings(max_examples=300)
-    def test_canonical_json_sorts_keys_deterministically(
-        self, data: dict[str, Any]
-    ) -> None:
+    def test_canonical_json_sorts_keys_deterministically(self, data: dict[str, Any]) -> None:
         """Property: Dictionary keys are always in the same order (RFC 8785 sorting).
 
         Note: RFC 8785 uses a specific lexicographic sort order that may differ
@@ -243,13 +238,9 @@ class TestPandasNumpyNormalization:
         minute=st.integers(min_value=0, max_value=59),
     )
     @settings(max_examples=100)
-    def test_pandas_timestamp_deterministic(
-        self, year: int, month: int, day: int, hour: int, minute: int
-    ) -> None:
+    def test_pandas_timestamp_deterministic(self, year: int, month: int, day: int, hour: int, minute: int) -> None:
         """Property: pandas.Timestamp values hash deterministically."""
-        ts = pd.Timestamp(
-            year=year, month=month, day=day, hour=hour, minute=minute, tz="UTC"
-        )
+        ts = pd.Timestamp(year=year, month=month, day=day, hour=hour, minute=minute, tz="UTC")
         hash1 = stable_hash({"timestamp": ts})
         hash2 = stable_hash({"timestamp": ts})
         assert hash1 == hash2
@@ -299,11 +290,7 @@ class TestSpecialTypes:
     def test_decimal_deterministic(self, int_part: int, dec_places: int) -> None:
         """Property: Decimal values hash deterministically."""
         # Create a Decimal with specific precision
-        value = (
-            Decimal(int_part) / Decimal(10**dec_places)
-            if dec_places > 0
-            else Decimal(int_part)
-        )
+        value = Decimal(int_part) / Decimal(10**dec_places) if dec_places > 0 else Decimal(int_part)
         hash1 = stable_hash({"decimal": value})
         hash2 = stable_hash({"decimal": value})
         assert hash1 == hash2
@@ -317,9 +304,7 @@ class TestSpecialTypes:
         second=st.integers(min_value=0, max_value=59),
     )
     @settings(max_examples=100)
-    def test_datetime_utc_deterministic(
-        self, year: int, month: int, day: int, hour: int, minute: int, second: int
-    ) -> None:
+    def test_datetime_utc_deterministic(self, year: int, month: int, day: int, hour: int, minute: int, second: int) -> None:
         """Property: datetime values with UTC hash deterministically."""
         dt = datetime(year, month, day, hour, minute, second, tzinfo=UTC)
         hash1 = stable_hash({"datetime": dt})
@@ -332,9 +317,7 @@ class TestSpecialTypes:
         day=st.integers(min_value=1, max_value=28),
     )
     @settings(max_examples=50)
-    def test_naive_datetime_treated_as_utc(
-        self, year: int, month: int, day: int
-    ) -> None:
+    def test_naive_datetime_treated_as_utc(self, year: int, month: int, day: int) -> None:
         """Property: Naive datetime is treated as UTC (consistent policy)."""
         # Create naive datetime by removing timezone from UTC datetime
         utc_dt = datetime(year, month, day, 12, 0, 0, tzinfo=UTC)

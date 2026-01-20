@@ -17,9 +17,7 @@ from elspeth.plugins.protocols import SinkProtocol
 DYNAMIC_SCHEMA = {"fields": "dynamic"}
 
 # Standard connection string for tests
-TEST_CONNECTION_STRING = (
-    "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=key"
-)
+TEST_CONNECTION_STRING = "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=key"
 TEST_CONTAINER = "output-container"
 TEST_BLOB_PATH = "results/output.csv"
 
@@ -41,9 +39,7 @@ def ctx() -> PluginContext:
 @pytest.fixture
 def mock_container_client() -> Generator[MagicMock, None, None]:
     """Create a mock container client for testing."""
-    with patch(
-        "elspeth.plugins.azure.blob_sink.AzureBlobSink._get_container_client"
-    ) as mock:
+    with patch("elspeth.plugins.azure.blob_sink.AzureBlobSink._get_container_client") as mock:
         yield mock
 
 
@@ -189,9 +185,7 @@ class TestAzureBlobSinkConfigValidation:
 class TestAzureBlobSinkWriteCSV:
     """Tests for CSV writing to Azure Blob."""
 
-    def test_write_csv_to_blob(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_write_csv_to_blob(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """Basic CSV writing to blob."""
         mock_blob_client = MagicMock()
         mock_container = MagicMock()
@@ -221,9 +215,7 @@ class TestAzureBlobSinkWriteCSV:
         assert result.content_hash == hashlib.sha256(uploaded_content).hexdigest()
         assert result.size_bytes == len(uploaded_content)
 
-    def test_csv_with_custom_delimiter(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_csv_with_custom_delimiter(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """CSV with custom delimiter works correctly."""
         mock_blob_client = MagicMock()
         mock_container = MagicMock()
@@ -239,9 +231,7 @@ class TestAzureBlobSinkWriteCSV:
         assert b"id;name" in uploaded_content
         assert b"1;alice" in uploaded_content
 
-    def test_csv_without_header(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_csv_without_header(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """CSV without header row when include_header=False."""
         mock_blob_client = MagicMock()
         mock_container = MagicMock()
@@ -263,9 +253,7 @@ class TestAzureBlobSinkWriteCSV:
 class TestAzureBlobSinkWriteJSON:
     """Tests for JSON writing to Azure Blob."""
 
-    def test_write_json_to_blob(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_write_json_to_blob(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """JSON array writing to blob."""
         mock_blob_client = MagicMock()
         mock_container = MagicMock()
@@ -296,9 +284,7 @@ class TestAzureBlobSinkWriteJSON:
 class TestAzureBlobSinkWriteJSONL:
     """Tests for JSONL writing to Azure Blob."""
 
-    def test_write_jsonl_to_blob(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_write_jsonl_to_blob(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """JSONL (newline-delimited) writing to blob."""
         mock_blob_client = MagicMock()
         mock_container = MagicMock()
@@ -331,9 +317,7 @@ class TestAzureBlobSinkWriteJSONL:
 class TestAzureBlobSinkPathTemplating:
     """Tests for Jinja2 path templating."""
 
-    def test_blob_path_with_run_id_template(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_blob_path_with_run_id_template(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """Blob path with {{ run_id }} template renders correctly."""
         mock_blob_client = MagicMock()
         mock_container = MagicMock()
@@ -353,18 +337,14 @@ class TestAzureBlobSinkPathTemplating:
         # Verify artifact descriptor uses rendered path
         assert "test-run-123" in result.path_or_uri
 
-    def test_blob_path_with_timestamp_template(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_blob_path_with_timestamp_template(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """Blob path with {{ timestamp }} template renders correctly."""
         mock_blob_client = MagicMock()
         mock_container = MagicMock()
         mock_container.get_blob_client.return_value = mock_blob_client
         mock_container_client.return_value = mock_container
 
-        sink = AzureBlobSink(
-            make_config(blob_path="results/{{ timestamp }}/output.csv")
-        )
+        sink = AzureBlobSink(make_config(blob_path="results/{{ timestamp }}/output.csv"))
         rows = [{"id": 1, "name": "alice"}]
 
         sink.write(rows, ctx)
@@ -379,9 +359,7 @@ class TestAzureBlobSinkPathTemplating:
 class TestAzureBlobSinkOverwriteBehavior:
     """Tests for overwrite behavior."""
 
-    def test_overwrite_true_succeeds_when_blob_exists(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_overwrite_true_succeeds_when_blob_exists(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """With overwrite=True, writing succeeds even if blob exists."""
         mock_blob_client = MagicMock()
         mock_blob_client.exists.return_value = True
@@ -401,9 +379,7 @@ class TestAzureBlobSinkOverwriteBehavior:
         call_kwargs = mock_blob_client.upload_blob.call_args[1]
         assert call_kwargs["overwrite"] is True
 
-    def test_overwrite_false_raises_if_blob_exists(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_overwrite_false_raises_if_blob_exists(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """With overwrite=False, raises ValueError if blob exists."""
         mock_blob_client = MagicMock()
         mock_blob_client.exists.return_value = True
@@ -417,9 +393,7 @@ class TestAzureBlobSinkOverwriteBehavior:
         with pytest.raises(ValueError, match="already exists"):
             sink.write(rows, ctx)
 
-    def test_overwrite_false_succeeds_if_blob_not_exists(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_overwrite_false_succeeds_if_blob_not_exists(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """With overwrite=False, succeeds if blob does not exist."""
         mock_blob_client = MagicMock()
         mock_blob_client.exists.return_value = False
@@ -437,9 +411,7 @@ class TestAzureBlobSinkOverwriteBehavior:
 class TestAzureBlobSinkArtifactDescriptor:
     """Tests for ArtifactDescriptor correctness."""
 
-    def test_returns_artifact_descriptor_with_hash(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_returns_artifact_descriptor_with_hash(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """Write returns ArtifactDescriptor with correct content hash."""
         mock_blob_client = MagicMock()
         mock_container = MagicMock()
@@ -461,9 +433,7 @@ class TestAzureBlobSinkArtifactDescriptor:
         assert "azure://" in result.path_or_uri
         assert TEST_CONTAINER in result.path_or_uri
 
-    def test_artifact_descriptor_contains_rendered_path(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_artifact_descriptor_contains_rendered_path(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """ArtifactDescriptor path_or_uri contains rendered blob path."""
         mock_blob_client = MagicMock()
         mock_container = MagicMock()
@@ -483,9 +453,7 @@ class TestAzureBlobSinkArtifactDescriptor:
 class TestAzureBlobSinkEmptyRows:
     """Tests for empty rows edge case."""
 
-    def test_empty_rows_returns_empty_descriptor(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_empty_rows_returns_empty_descriptor(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """Empty rows list returns descriptor with empty content hash."""
         sink = AzureBlobSink(make_config())
         rows: list[dict[str, Any]] = []
@@ -503,9 +471,7 @@ class TestAzureBlobSinkEmptyRows:
 class TestAzureBlobSinkErrors:
     """Tests for error handling."""
 
-    def test_upload_error_propagates_with_context(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_upload_error_propagates_with_context(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """Azure upload errors propagate with context message."""
         mock_blob_client = MagicMock()
         mock_blob_client.upload_blob.side_effect = Exception("Network error")
@@ -519,9 +485,7 @@ class TestAzureBlobSinkErrors:
         with pytest.raises(Exception, match="Failed to upload blob"):
             sink.write(rows, ctx)
 
-    def test_connection_error_propagates(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_connection_error_propagates(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """Connection errors propagate to caller."""
         mock_container_client.side_effect = Exception("Connection refused")
 
@@ -541,9 +505,7 @@ class TestAzureBlobSinkLifecycle:
         sink.close()
         sink.close()  # Should not raise
 
-    def test_close_clears_client(
-        self, mock_container_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_close_clears_client(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """close() clears the container client reference."""
         mock_blob_client = MagicMock()
         mock_container = MagicMock()
@@ -571,8 +533,7 @@ class TestAzureBlobSinkImportError:
         # Mock the import to fail
         with patch.object(sink, "_get_container_client") as mock_get:
             mock_get.side_effect = ImportError(
-                "azure-storage-blob is required for AzureBlobSink. "
-                "Install with: uv pip install azure-storage-blob"
+                "azure-storage-blob is required for AzureBlobSink. Install with: uv pip install azure-storage-blob"
             )
 
             with pytest.raises(ImportError, match="azure-storage-blob"):
@@ -762,13 +723,9 @@ class TestAzureBlobSinkAuthClientCreation:
             # Verify DefaultAzureCredential was instantiated
             mock_credential_cls.assert_called_once()
             # Verify BlobServiceClient was created with account_url and credential
-            mock_service_client_cls.assert_called_once_with(
-                TEST_ACCOUNT_URL, credential=mock_credential
-            )
+            mock_service_client_cls.assert_called_once_with(TEST_ACCOUNT_URL, credential=mock_credential)
 
-    def test_service_principal_uses_client_secret_credential(
-        self, ctx: PluginContext
-    ) -> None:
+    def test_service_principal_uses_client_secret_credential(self, ctx: PluginContext) -> None:
         """Service principal auth uses ClientSecretCredential."""
         sink = AzureBlobSink(
             make_config(
@@ -800,27 +757,19 @@ class TestAzureBlobSinkAuthClientCreation:
                 client_secret=TEST_CLIENT_SECRET,
             )
             # Verify BlobServiceClient was created with account_url and credential
-            mock_service_client_cls.assert_called_once_with(
-                TEST_ACCOUNT_URL, credential=mock_credential
-            )
+            mock_service_client_cls.assert_called_once_with(TEST_ACCOUNT_URL, credential=mock_credential)
 
-    def test_connection_string_uses_from_connection_string(
-        self, ctx: PluginContext
-    ) -> None:
+    def test_connection_string_uses_from_connection_string(self, ctx: PluginContext) -> None:
         """Connection string auth uses from_connection_string factory."""
         sink = AzureBlobSink(make_config(connection_string=TEST_CONNECTION_STRING))
 
         # Mock the azure.storage.blob import
         with patch("azure.storage.blob.BlobServiceClient") as mock_service_client_cls:
             mock_service_client = MagicMock()
-            mock_service_client_cls.from_connection_string.return_value = (
-                mock_service_client
-            )
+            mock_service_client_cls.from_connection_string.return_value = mock_service_client
 
             # Trigger client creation
             sink._auth_config.create_blob_service_client()
 
             # Verify from_connection_string was called
-            mock_service_client_cls.from_connection_string.assert_called_once_with(
-                TEST_CONNECTION_STRING
-            )
+            mock_service_client_cls.from_connection_string.assert_called_once_with(TEST_CONNECTION_STRING)

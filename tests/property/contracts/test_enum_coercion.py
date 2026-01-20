@@ -381,17 +381,13 @@ class TestAllDatabaseEnumsConsistent:
     def test_all_values_are_lowercase(self, enum_type: type[Enum]) -> None:
         """All enum values are lowercase (database convention)."""
         for member in enum_type:
-            assert (
-                member.value == member.value.lower()
-            ), f"{enum_type.__name__}.{member.name} has non-lowercase value: {member.value}"
+            assert member.value == member.value.lower(), f"{enum_type.__name__}.{member.name} has non-lowercase value: {member.value}"
 
     @pytest.mark.parametrize("enum_type", DATABASE_STORED_ENUMS)
     def test_no_duplicate_values(self, enum_type: type[Enum]) -> None:
         """All enum values are unique within the type."""
         values = [m.value for m in enum_type]
-        assert len(values) == len(
-            set(values)
-        ), f"{enum_type.__name__} has duplicate values"
+        assert len(values) == len(set(values)), f"{enum_type.__name__} has duplicate values"
 
     @pytest.mark.parametrize("enum_type", DATABASE_STORED_ENUMS)
     def test_string_conversion_roundtrips(self, enum_type: type[Enum]) -> None:

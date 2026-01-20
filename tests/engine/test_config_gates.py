@@ -83,9 +83,7 @@ def _build_test_graph_with_config_gates(
         for route_label, target in gate_config.routes.items():
             route_resolution_map[(node_id, route_label)] = target
             if target not in ("continue", "fork") and target in sink_ids:
-                graph.add_edge(
-                    node_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE
-                )
+                graph.add_edge(node_id, sink_ids[target], label=route_label, mode=RoutingMode.MOVE)
 
         prev = node_id
 
@@ -140,9 +138,7 @@ class TestConfigGateIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -165,9 +161,7 @@ class TestConfigGateIntegration:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 2
@@ -208,9 +202,7 @@ class TestConfigGateIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -238,9 +230,7 @@ class TestConfigGateIntegration:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         assert result.rows_processed == 3
@@ -297,9 +287,7 @@ class TestConfigGateIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -399,9 +387,7 @@ class TestConfigGateIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -495,9 +481,7 @@ class TestConfigGateIntegration:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -519,9 +503,7 @@ class TestConfigGateIntegration:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         # Query Landscape for registered nodes
         with db.engine.connect() as conn:
@@ -691,9 +673,7 @@ class TestMultipleConfigGates:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -727,9 +707,7 @@ class TestMultipleConfigGates:
         )
 
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(
-            config, graph=_build_test_graph_with_config_gates(config)
-        )
+        result = orchestrator.run(config, graph=_build_test_graph_with_config_gates(config))
 
         assert result.status == "completed"
         # Row passes gate1, routes to mid via gate2

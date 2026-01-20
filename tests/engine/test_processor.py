@@ -80,9 +80,7 @@ class TestRowProcessor:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({"value": row["value"] * 2})
 
         class AddOneTransform(BaseTransform):
@@ -94,9 +92,7 @@ class TestRowProcessor:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({"value": row["value"] + 1})
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -161,9 +157,7 @@ class TestRowProcessor:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({**row, "enriched": True})
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -271,13 +265,9 @@ class TestRowProcessor:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if row.get("value", 0) < 0:
-                    return TransformResult.error(
-                        {"message": "negative values not allowed"}
-                    )
+                    return TransformResult.error({"message": "negative values not allowed"})
                 return TransformResult.success(row)
 
         ctx = PluginContext(run_id=run.run_id, config={}, landscape=recorder)
@@ -338,13 +328,9 @@ class TestRowProcessor:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if row.get("value", 0) < 0:
-                    return TransformResult.error(
-                        {"message": "negative values not allowed"}
-                    )
+                    return TransformResult.error({"message": "negative values not allowed"})
                 return TransformResult.success(row)
 
         ctx = PluginContext(run_id=run.run_id, config={}, landscape=recorder)
@@ -410,13 +396,9 @@ class TestRowProcessor:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if row.get("value", 0) < 0:
-                    return TransformResult.error(
-                        {"message": "negative values not allowed"}
-                    )
+                    return TransformResult.error({"message": "negative values not allowed"})
                 return TransformResult.success(row)
 
         ctx = PluginContext(run_id=run.run_id, config={}, landscape=recorder)
@@ -493,9 +475,7 @@ class TestRowProcessorGates:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({**row, "final": True})
 
         # Config-driven gate: always continues
@@ -821,9 +801,7 @@ class TestRowProcessorTokenIdentity:
                 self.name = name  # type: ignore[misc]
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
         ctx = PluginContext(run_id=run.run_id, config={})
@@ -1009,13 +987,9 @@ class TestRowProcessorNestedForks:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 # Note: .get() is allowed here - this is row data (their data, Tier 2)
-                return TransformResult.success(
-                    {**row, "count": row.get("count", 0) + 1}
-                )
+                return TransformResult.success({**row, "count": row.get("count", 0) + 1})
 
         # Config-driven fork gates
         gate1_config = GateSettings(
@@ -1191,9 +1165,7 @@ class TestRowProcessorWorkQueue:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({**row, "processed": True})
 
         # Config-driven fork gate
@@ -1299,9 +1271,7 @@ class TestQuarantineIntegration:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if row["value"] < 0:
                     return TransformResult.error(
                         {
@@ -1398,9 +1368,7 @@ class TestQuarantineIntegration:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 # row.get() is allowed here - this is row data (their data, Tier 2)
                 if "required_field" not in row:
                     return TransformResult.error(
@@ -1613,9 +1581,7 @@ class TestRowProcessorCoalesce:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({**row, "sentiment": "positive"})
 
         class EnrichB(BaseTransform):
@@ -1627,9 +1593,7 @@ class TestRowProcessorCoalesce:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({**row, "entities": ["ACME"]})
 
         # Config-driven fork gate
@@ -1801,9 +1765,7 @@ class TestRowProcessorCoalesce:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({**row, "sentiment": "positive"})
 
         class EnrichB(BaseTransform):
@@ -1815,9 +1777,7 @@ class TestRowProcessorCoalesce:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({**row, "entities": ["ACME"]})
 
         # Config-driven fork gate
@@ -1881,9 +1841,7 @@ class TestRowProcessorCoalesce:
         # The merged token's parents are the consumed child tokens (with branch names)
         merged_token = coalesced.token
         merged_parents = recorder.get_token_parents(merged_token.token_id)
-        assert (
-            len(merged_parents) == 2
-        ), "Merged token should have 2 parents (the consumed children)"
+        assert len(merged_parents) == 2, "Merged token should have 2 parents (the consumed children)"
 
         # Get child token IDs from the merged token's parents
         child_token_ids = {p.parent_token_id for p in merged_parents}
@@ -1901,24 +1859,18 @@ class TestRowProcessorCoalesce:
         for child_token_id in child_token_ids:
             parents = recorder.get_token_parents(child_token_id)
             assert len(parents) == 1, "Child token should have 1 parent"
-            assert (
-                parents[0].parent_token_id == forked.token_id
-            ), "Parent should be the forked token"
+            assert parents[0].parent_token_id == forked.token_id, "Parent should be the forked token"
 
         # === Audit Trail: Verify consumed tokens have node_states at coalesce ===
         # The CoalesceExecutor records node_states for consumed tokens
         for child_token_id in child_token_ids:
             states = recorder.get_node_states_for_token(child_token_id)
             # Should have states: gate evaluation + transform processing + coalesce
-            assert (
-                len(states) >= 1
-            ), f"Child token {child_token_id} should have node states"
+            assert len(states) >= 1, f"Child token {child_token_id} should have node states"
 
             # Check that at least one state is at the coalesce node
             coalesce_states = [s for s in states if s.node_id == coalesce_node.node_id]
-            assert (
-                len(coalesce_states) == 1
-            ), "Child token should have exactly one coalesce node_state"
+            assert len(coalesce_states) == 1, "Child token should have exactly one coalesce node_state"
 
             coalesce_state = coalesce_states[0]
             assert coalesce_state.status.value == "completed"
@@ -1926,15 +1878,11 @@ class TestRowProcessorCoalesce:
         # === Audit Trail: Verify merged token has join_group_id ===
         merged_token_record = recorder.get_token(merged_token.token_id)
         assert merged_token_record is not None
-        assert (
-            merged_token_record.join_group_id is not None
-        ), "Merged token should have join_group_id"
+        assert merged_token_record.join_group_id is not None, "Merged token should have join_group_id"
 
         # === Audit Trail: Verify complete lineage back to source ===
         # Follow the chain: merged_token -> children -> forked parent -> source row
-        assert (
-            merged_token.row_id == row.row_id
-        ), "Merged token traces back to source row"
+        assert merged_token.row_id == row.row_id, "Merged token traces back to source row"
 
     def test_coalesce_best_effort_with_quarantined_child(self) -> None:
         """best_effort policy should merge available children even if one quarantines.
@@ -2018,9 +1966,7 @@ class TestRowProcessorCoalesce:
             row_data={"text": "ACME earnings report", "sentiment": "positive"},
             branch_name="sentiment",
         )
-        outcome1 = coalesce_executor.accept(
-            sentiment_token, "merger", step_in_pipeline=3
-        )
+        outcome1 = coalesce_executor.accept(sentiment_token, "merger", step_in_pipeline=3)
         assert outcome1.held is True
 
         # entities child completes with enriched data
@@ -2030,9 +1976,7 @@ class TestRowProcessorCoalesce:
             row_data={"text": "ACME earnings report", "entities": ["ACME"]},
             branch_name="entities",
         )
-        outcome2 = coalesce_executor.accept(
-            entities_token, "merger", step_in_pipeline=3
-        )
+        outcome2 = coalesce_executor.accept(entities_token, "merger", step_in_pipeline=3)
         assert outcome2.held is True  # Still waiting (need all 3 or timeout)
 
         # summary child is QUARANTINED - it never arrives at coalesce
@@ -2297,12 +2241,8 @@ class TestRowProcessorCoalesce:
             token_manager=token_manager,
             run_id=run.run_id,
         )
-        coalesce_executor.register_coalesce(
-            inner_coalesce_settings, inner_coalesce_node.node_id
-        )
-        coalesce_executor.register_coalesce(
-            outer_coalesce_settings, outer_coalesce_node.node_id
-        )
+        coalesce_executor.register_coalesce(inner_coalesce_settings, inner_coalesce_node.node_id)
+        coalesce_executor.register_coalesce(outer_coalesce_settings, outer_coalesce_node.node_id)
 
         # === Level 0: Create initial token (source row) ===
         initial_token = token_manager.create_initial_token(
@@ -2371,14 +2311,10 @@ class TestRowProcessorCoalesce:
         )
 
         # === Inner coalesce: merge A1 + A2 ===
-        inner_outcome1 = coalesce_executor.accept(
-            enriched_a1, "inner_merger", step_in_pipeline=3
-        )
+        inner_outcome1 = coalesce_executor.accept(enriched_a1, "inner_merger", step_in_pipeline=3)
         assert inner_outcome1.held is True  # First arrival, waiting for A2
 
-        inner_outcome2 = coalesce_executor.accept(
-            enriched_a2, "inner_merger", step_in_pipeline=3
-        )
+        inner_outcome2 = coalesce_executor.accept(enriched_a2, "inner_merger", step_in_pipeline=3)
         assert inner_outcome2.held is False  # Both arrived, merge triggered
         assert inner_outcome2.merged_token is not None
         assert inner_outcome2.failure_reason is None
@@ -2419,14 +2355,10 @@ class TestRowProcessorCoalesce:
             branch_name="path_a_merged",  # Assign branch for outer coalesce
         )
 
-        outer_outcome1 = coalesce_executor.accept(
-            inner_for_outer, "outer_merger", step_in_pipeline=4
-        )
+        outer_outcome1 = coalesce_executor.accept(inner_for_outer, "outer_merger", step_in_pipeline=4)
         assert outer_outcome1.held is True  # Waiting for path_b
 
-        outer_outcome2 = coalesce_executor.accept(
-            enriched_b, "outer_merger", step_in_pipeline=4
-        )
+        outer_outcome2 = coalesce_executor.accept(enriched_b, "outer_merger", step_in_pipeline=4)
         assert outer_outcome2.held is False  # Both arrived, final merge triggered
         assert outer_outcome2.merged_token is not None
         assert outer_outcome2.failure_reason is None
@@ -2628,9 +2560,7 @@ class TestRowProcessorRetry:
         )
 
         processor._transform_executor = Mock()
-        processor._transform_executor.execute_transform.side_effect = ConnectionError(
-            "fail"
-        )
+        processor._transform_executor.execute_transform.side_effect = ConnectionError("fail")
 
         transform = Mock()
         transform.node_id = "t1"
@@ -2686,9 +2616,7 @@ class TestRowProcessorRetry:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 raise ConnectionError("Network always down")
 
         # Create processor with retry (max 2 attempts, fast delays for test)
@@ -2719,9 +2647,7 @@ class TestRowProcessorRetry:
 
         # Error info should be captured
         assert result.error is not None
-        assert "MaxRetriesExceeded" in str(result.error) or "attempts" in str(
-            result.error
-        )
+        assert "MaxRetriesExceeded" in str(result.error) or "attempts" in str(result.error)
 
 
 class TestRowProcessorRecovery:
@@ -2785,9 +2711,7 @@ class TestProcessorBatchTransforms:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if isinstance(rows, list):
                     total = sum(r["value"] for r in rows)
                     return TransformResult.success({"total": total})
@@ -2878,14 +2802,10 @@ class TestProcessorBatchTransforms:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if isinstance(rows, list):
                     # Batch mode - sum all values
-                    return TransformResult.success(
-                        {"value": sum(r["value"] for r in rows)}
-                    )
+                    return TransformResult.success({"value": sum(r["value"] for r in rows)})
                 # Single-row mode - double
                 return TransformResult.success({"value": rows["value"] * 2})
 
@@ -2959,9 +2879,7 @@ class TestProcessorBatchTransforms:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if isinstance(rows, list):
                     total = sum(r["value"] for r in rows)
                     return TransformResult.success({"total": total})
@@ -3076,9 +2994,7 @@ class TestProcessorDeaggregation:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 # Expand each row into 2 rows
                 return TransformResult.success_multi(
                     [
@@ -3164,9 +3080,7 @@ class TestProcessorDeaggregation:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success_multi([row, row])  # But returns multi!
 
         db = LandscapeDB.in_memory()
@@ -3240,16 +3154,11 @@ class TestProcessorPassthroughMode:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if isinstance(rows, list):
                     # Batch mode: enrich each row with batch_size
                     batch_size = len(rows)
-                    enriched = [
-                        {**row, "batch_size": batch_size, "enriched": True}
-                        for row in rows
-                    ]
+                    enriched = [{**row, "batch_size": batch_size, "enriched": True} for row in rows]
                     return TransformResult.success_multi(enriched)
                 # Single row mode
                 return TransformResult.success(rows)
@@ -3329,9 +3238,7 @@ class TestProcessorPassthroughMode:
         # The buffered tokens should reappear in completed results
         completed_token_ids = {r.token_id for r in completed}
         for token_id in buffered_token_ids:
-            assert (
-                token_id in completed_token_ids
-            ), f"Buffered token {token_id} not found in completed results"
+            assert token_id in completed_token_ids, f"Buffered token {token_id} not found in completed results"
 
         # All completed rows should be enriched
         for result in completed:
@@ -3370,9 +3277,7 @@ class TestProcessorPassthroughMode:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if isinstance(rows, list):
                     # Wrong: returns fewer rows than input
                     return TransformResult.success_multi([rows[0]])
@@ -3422,18 +3327,12 @@ class TestProcessorPassthroughMode:
         ctx = PluginContext(run_id=run.run_id, config={})
 
         # Process first 2 rows (buffered)
-        processor.process_row(
-            row_index=0, row_data={"value": 1}, transforms=[transform], ctx=ctx
-        )
-        processor.process_row(
-            row_index=1, row_data={"value": 2}, transforms=[transform], ctx=ctx
-        )
+        processor.process_row(row_index=0, row_data={"value": 1}, transforms=[transform], ctx=ctx)
+        processor.process_row(row_index=1, row_data={"value": 2}, transforms=[transform], ctx=ctx)
 
         # 3rd row triggers flush - should fail because transform returns 1 row instead of 3
         with pytest.raises(ValueError, match="same number of output rows"):
-            processor.process_row(
-                row_index=2, row_data={"value": 3}, transforms=[transform], ctx=ctx
-            )
+            processor.process_row(row_index=2, row_data={"value": 3}, transforms=[transform], ctx=ctx)
 
     def test_aggregation_passthrough_continues_to_next_transform(self) -> None:
         """Passthrough mode rows continue through remaining transforms after flush."""
@@ -3461,9 +3360,7 @@ class TestProcessorPassthroughMode:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if isinstance(rows, list):
                     enriched = [{**row, "batch_enriched": True} for row in rows]
                     return TransformResult.success_multi(enriched)
@@ -3482,9 +3379,7 @@ class TestProcessorPassthroughMode:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({**row, "value": row["value"] * 2})
 
         db = LandscapeDB.in_memory()
@@ -3596,9 +3491,7 @@ class TestProcessorTransformMode:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if isinstance(rows, list):
                     # Group by 'category' and output one row per group
                     groups: dict[str, dict[str, Any]] = {}
@@ -3698,9 +3591,7 @@ class TestProcessorTransformMode:
         # Verify new token_ids created (not reusing input tokens)
         completed_tokens = {r.token_id for r in completed}
         consumed_tokens = {r.token_id for r in consumed}
-        assert completed_tokens.isdisjoint(
-            consumed_tokens
-        ), "Transform mode should create NEW tokens"
+        assert completed_tokens.isdisjoint(consumed_tokens), "Transform mode should create NEW tokens"
 
     def test_aggregation_transform_mode_single_row_output(self) -> None:
         """Transform mode with single row output still creates new token."""
@@ -3728,9 +3619,7 @@ class TestProcessorTransformMode:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if isinstance(rows, list):
                     # Single aggregated output
                     total = sum(r.get("value", 0) for r in rows)
@@ -3832,9 +3721,7 @@ class TestProcessorTransformMode:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, rows: list[dict[str, Any]] | dict[str, Any], ctx: PluginContext) -> TransformResult:
                 if isinstance(rows, list):
                     groups: dict[str, dict[str, Any]] = {}
                     for row in rows:
@@ -3858,12 +3745,8 @@ class TestProcessorTransformMode:
                 super().__init__({})
                 self.node_id = node_id
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
-                return TransformResult.success(
-                    {**row, "count": row["count"] * 2, "doubled": True}
-                )
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+                return TransformResult.success({**row, "count": row["count"] * 2, "doubled": True})
 
         db = LandscapeDB.in_memory()
         recorder = LandscapeRecorder(db)

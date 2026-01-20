@@ -323,9 +323,7 @@ class TestSourceDataConfig:
 
         config = SourceDataConfig(
             path="data.csv",
-            schema_config=SchemaConfig.from_dict(
-                {"fields": ["id: int", "name: str"], "mode": "strict"}
-            ),
+            schema_config=SchemaConfig.from_dict({"fields": ["id: int", "name: str"], "mode": "strict"}),
             on_validation_failure="quarantine_sink",
         )
 
@@ -338,9 +336,7 @@ class TestSourceDataConfig:
 
         config = SourceDataConfig(
             path="data.csv",
-            schema_config=SchemaConfig.from_dict(
-                {"fields": ["id: int"], "mode": "free"}
-            ),
+            schema_config=SchemaConfig.from_dict({"fields": ["id: int"], "mode": "free"}),
             on_validation_failure="discard",
         )
 
@@ -354,9 +350,7 @@ class TestSourceDataConfig:
         with pytest.raises(ValidationError):
             SourceDataConfig(
                 path="data.csv",
-                schema_config=SchemaConfig.from_dict(
-                    {"fields": ["id: int"], "mode": "strict"}
-                ),
+                schema_config=SchemaConfig.from_dict({"fields": ["id: int"], "mode": "strict"}),
                 on_validation_failure="",
             )
 
@@ -367,9 +361,7 @@ class TestSourceDataConfig:
 
         config = SourceDataConfig(
             path="data/input.csv",
-            schema_config=SchemaConfig.from_dict(
-                {"fields": ["name: str"], "mode": "strict"}
-            ),
+            schema_config=SchemaConfig.from_dict({"fields": ["name: str"], "mode": "strict"}),
             on_validation_failure="bad_rows",
         )
 
@@ -398,9 +390,7 @@ class TestTransformDataConfig:
         from elspeth.plugins.config_base import TransformDataConfig
 
         config = TransformDataConfig(
-            schema_config=SchemaConfig.from_dict(
-                {"mode": "strict", "fields": ["id: int"]}
-            ),
+            schema_config=SchemaConfig.from_dict({"mode": "strict", "fields": ["id: int"]}),
             on_error="failed_transforms",
         )
 
@@ -412,9 +402,7 @@ class TestTransformDataConfig:
         from elspeth.plugins.config_base import TransformDataConfig
 
         config = TransformDataConfig(
-            schema_config=SchemaConfig.from_dict(
-                {"mode": "strict", "fields": ["id: int"]}
-            ),
+            schema_config=SchemaConfig.from_dict({"mode": "strict", "fields": ["id: int"]}),
             on_error="discard",
         )
 
@@ -427,9 +415,7 @@ class TestTransformDataConfig:
 
         with pytest.raises(ValidationError):
             TransformDataConfig(
-                schema_config=SchemaConfig.from_dict(
-                    {"mode": "strict", "fields": ["id: int"]}
-                ),
+                schema_config=SchemaConfig.from_dict({"mode": "strict", "fields": ["id: int"]}),
                 on_error="",
             )
 

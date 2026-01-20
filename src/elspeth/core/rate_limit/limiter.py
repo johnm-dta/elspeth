@@ -55,11 +55,7 @@ def _custom_excepthook(args: threading.ExceptHookArgs) -> None:
     # 1. Thread is registered for suppression
     # 2. Exception is AssertionError (the known benign cleanup race)
     with _suppressed_lock:
-        if (
-            thread_ident is not None
-            and thread_ident in _suppressed_thread_idents
-            and args.exc_type is AssertionError
-        ):
+        if thread_ident is not None and thread_ident in _suppressed_thread_idents and args.exc_type is AssertionError:
             # Remove from suppression set (one-time suppression per thread)
             _suppressed_thread_idents.discard(thread_ident)
             logger.debug(
@@ -161,9 +157,7 @@ class RateLimiter:
         if persistence_path:
             self._conn = sqlite3.connect(persistence_path, check_same_thread=False)
             table_name = f"ratelimit_{name}_second"
-            self._conn.execute(
-                SQLiteQueries.CREATE_BUCKET_TABLE.format(table=table_name)
-            )
+            self._conn.execute(SQLiteQueries.CREATE_BUCKET_TABLE.format(table=table_name))
             self._conn.commit()
             second_bucket: InMemoryBucket | SQLiteBucket = SQLiteBucket(
                 rates=second_rates,
@@ -174,18 +168,14 @@ class RateLimiter:
             second_bucket = InMemoryBucket(rates=second_rates)
 
         self._buckets.append(second_bucket)
-        self._limiters.append(
-            Limiter(second_bucket, max_delay=Duration.MINUTE, raise_when_fail=True)
-        )
+        self._limiters.append(Limiter(second_bucket, max_delay=Duration.MINUTE, raise_when_fail=True))
 
         # Per-minute rate limiter (if specified)
         if requests_per_minute is not None:
             minute_rates = [Rate(requests_per_minute, Duration.MINUTE)]
             if persistence_path and self._conn is not None:
                 table_name = f"ratelimit_{name}_minute"
-                self._conn.execute(
-                    SQLiteQueries.CREATE_BUCKET_TABLE.format(table=table_name)
-                )
+                self._conn.execute(SQLiteQueries.CREATE_BUCKET_TABLE.format(table=table_name))
                 self._conn.commit()
                 minute_bucket: InMemoryBucket | SQLiteBucket = SQLiteBucket(
                     rates=minute_rates,
@@ -196,9 +186,7 @@ class RateLimiter:
                 minute_bucket = InMemoryBucket(rates=minute_rates)
 
             self._buckets.append(minute_bucket)
-            self._limiters.append(
-                Limiter(minute_bucket, max_delay=Duration.MINUTE, raise_when_fail=True)
-            )
+            self._limiters.append(Limiter(minute_bucket, max_delay=Duration.MINUTE, raise_when_fail=True))
 
     def acquire(self, weight: int = 1) -> None:
         """Acquire rate limit tokens, blocking if necessary.

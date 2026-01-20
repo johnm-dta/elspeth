@@ -42,9 +42,7 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink(
-            {"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA})
 
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.write([{"id": 2, "name": "bob"}], ctx)
@@ -61,9 +59,7 @@ class TestJSONSink:
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.jsonl"
-        sink = JSONSink(
-            {"path": str(output_file), "format": "jsonl", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = JSONSink({"path": str(output_file), "format": "jsonl", "schema": DYNAMIC_SCHEMA})
 
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.write([{"id": 2, "name": "bob"}], ctx)
@@ -75,9 +71,7 @@ class TestJSONSink:
         assert json.loads(lines[0])["name"] == "alice"
         assert json.loads(lines[1])["name"] == "bob"
 
-    def test_auto_detect_format_from_extension(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_auto_detect_format_from_extension(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Auto-detect JSONL format from .jsonl extension."""
         from elspeth.plugins.sinks.json_sink import JSONSink
 
@@ -94,9 +88,7 @@ class TestJSONSink:
         data = json.loads(content)
         assert data == {"id": 1}  # Single object, not array
 
-    def test_json_extension_defaults_to_array(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_json_extension_defaults_to_array(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Auto-detect JSON array format from .json extension."""
         from elspeth.plugins.sinks.json_sink import JSONSink
 
@@ -144,9 +136,7 @@ class TestJSONSink:
         assert "\n" in content  # Pretty-printed has newlines
         assert "  " in content  # Has indentation
 
-    def test_batch_write_returns_artifact_descriptor(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_batch_write_returns_artifact_descriptor(self, tmp_path: Path, ctx: PluginContext) -> None:
         """write() returns ArtifactDescriptor with content hash."""
         from elspeth.contracts import ArtifactDescriptor
         from elspeth.plugins.sinks.json_sink import JSONSink
@@ -162,9 +152,7 @@ class TestJSONSink:
         assert artifact.content_hash  # Non-empty
         assert artifact.size_bytes > 0
 
-    def test_batch_write_content_hash_is_sha256(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_batch_write_content_hash_is_sha256(self, tmp_path: Path, ctx: PluginContext) -> None:
         """content_hash is SHA-256 of file contents."""
         from elspeth.plugins.sinks.json_sink import JSONSink
 
@@ -179,9 +167,7 @@ class TestJSONSink:
 
         assert artifact.content_hash == expected_hash
 
-    def test_batch_write_jsonl_content_hash(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_batch_write_jsonl_content_hash(self, tmp_path: Path, ctx: PluginContext) -> None:
         """JSONL format also returns correct content hash."""
         from elspeth.plugins.sinks.json_sink import JSONSink
 
@@ -226,16 +212,12 @@ class TestJSONSink:
         sink = JSONSink({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA})
         assert sink.determinism == Determinism.IO_WRITE
 
-    def test_cumulative_hash_after_multiple_writes(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_cumulative_hash_after_multiple_writes(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Each write() returns hash of cumulative file contents."""
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
-        sink = JSONSink(
-            {"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA}
-        )
+        sink = JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA})
 
         # First write
         artifact1 = sink.write([{"id": 1}], ctx)

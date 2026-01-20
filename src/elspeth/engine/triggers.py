@@ -98,10 +98,7 @@ class TriggerEvaluator:
             return True
 
         # Check timeout trigger
-        if (
-            self._config.timeout_seconds is not None
-            and self.batch_age_seconds >= self._config.timeout_seconds
-        ):
+        if self._config.timeout_seconds is not None and self.batch_age_seconds >= self._config.timeout_seconds:
             self._last_triggered = "timeout"
             return True
 

@@ -157,9 +157,7 @@ class TestCSVSourceQuarantineContract(SourceContractPropertyTestBase):
         quarantined_rows = [r for r in rows if r.is_quarantined]
 
         assert len(valid_rows) == 2, f"Expected 2 valid rows, got {len(valid_rows)}"
-        assert (
-            len(quarantined_rows) == 1
-        ), f"Expected 1 quarantined row, got {len(quarantined_rows)}"
+        assert len(quarantined_rows) == 1, f"Expected 1 quarantined row, got {len(quarantined_rows)}"
 
         # Verify quarantined row has proper attributes
         q_row = quarantined_rows[0]

@@ -45,9 +45,7 @@ def populated_db() -> tuple[LandscapeDB, str]:
 class TestLandscapeExporterRunMetadata:
     """Exporter extracts run metadata."""
 
-    def test_exporter_extracts_run_metadata(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_extracts_run_metadata(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """Exporter should yield run metadata as first record."""
         db, run_id = populated_db
         exporter = LandscapeExporter(db)
@@ -60,9 +58,7 @@ class TestLandscapeExporterRunMetadata:
         assert run_records[0]["run_id"] == run_id
         assert run_records[0]["status"] == "completed"
 
-    def test_exporter_run_metadata_has_required_fields(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_run_metadata_has_required_fields(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """Run record should have all required fields."""
         db, run_id = populated_db
         exporter = LandscapeExporter(db)
@@ -86,9 +82,7 @@ class TestLandscapeExporterRunMetadata:
 class TestLandscapeExporterRows:
     """Exporter extracts row records."""
 
-    def test_exporter_extracts_rows(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_extracts_rows(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """Exporter should yield row records."""
         db, run_id = populated_db
         exporter = LandscapeExporter(db)
@@ -99,9 +93,7 @@ class TestLandscapeExporterRows:
         assert len(row_records) == 1
         assert row_records[0]["row_index"] == 0
 
-    def test_exporter_row_has_required_fields(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_row_has_required_fields(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """Row record should have all required fields."""
         db, run_id = populated_db
         exporter = LandscapeExporter(db)
@@ -124,9 +116,7 @@ class TestLandscapeExporterRows:
 class TestLandscapeExporterNodes:
     """Exporter extracts node records."""
 
-    def test_exporter_extracts_nodes(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_extracts_nodes(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """Exporter should yield node records."""
         db, run_id = populated_db
         exporter = LandscapeExporter(db)
@@ -493,17 +483,13 @@ class TestLandscapeExporterComplexRun:
         parent_records = [r for r in records if r["record_type"] == "token_parent"]
         # Two children, each with one parent relationship
         assert len(parent_records) == 2
-        assert all(
-            r["parent_token_id"] == parent_token.token_id for r in parent_records
-        )
+        assert all(r["parent_token_id"] == parent_token.token_id for r in parent_records)
 
 
 class TestLandscapeExporterSigning:
     """Exporter HMAC signing for legal-grade integrity verification."""
 
-    def test_exporter_signs_records_when_enabled(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_signs_records_when_enabled(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """When signing enabled, each record should have signature field."""
         db, run_id = populated_db
         exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
@@ -515,9 +501,7 @@ class TestLandscapeExporterSigning:
             assert "signature" in record
             assert len(record["signature"]) == 64  # SHA256 hex
 
-    def test_exporter_manifest_contains_final_hash(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_manifest_contains_final_hash(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """Signed export should include manifest with hash of all records."""
         db, run_id = populated_db
         exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
@@ -532,9 +516,7 @@ class TestLandscapeExporterSigning:
         assert "final_hash" in manifest
         assert "exported_at" in manifest  # Timestamp for forensics
 
-    def test_exporter_unsigned_has_no_signatures(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_unsigned_has_no_signatures(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """When signing disabled, records should not have signature field."""
         db, run_id = populated_db
         exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
@@ -548,9 +530,7 @@ class TestLandscapeExporterSigning:
         manifest_records = [r for r in records if r.get("record_type") == "manifest"]
         assert len(manifest_records) == 0
 
-    def test_exporter_raises_when_sign_without_key(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_raises_when_sign_without_key(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """Requesting signing without key should raise ValueError."""
         db, run_id = populated_db
         exporter = LandscapeExporter(db)  # No signing_key
@@ -558,9 +538,7 @@ class TestLandscapeExporterSigning:
         with pytest.raises(ValueError, match="no signing_key provided"):
             list(exporter.export_run(run_id, sign=True))
 
-    def test_exporter_manifest_record_count_matches(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_manifest_record_count_matches(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """Manifest record_count should match actual record count (excluding manifest)."""
         db, run_id = populated_db
         exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
@@ -572,9 +550,7 @@ class TestLandscapeExporterSigning:
 
         assert manifest["record_count"] == non_manifest_count
 
-    def test_exporter_signatures_are_deterministic(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_signatures_are_deterministic(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """Same data with same key should produce same signatures."""
         db, run_id = populated_db
         exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
@@ -587,9 +563,7 @@ class TestLandscapeExporterSigning:
             if r1["record_type"] != "manifest":
                 assert r1["signature"] == r2["signature"]
 
-    def test_exporter_different_keys_produce_different_signatures(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_different_keys_produce_different_signatures(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """Different signing keys should produce different signatures."""
         db, run_id = populated_db
         exporter1 = LandscapeExporter(db, signing_key=b"key-one")
@@ -604,9 +578,7 @@ class TestLandscapeExporterSigning:
 
         assert r1["signature"] != r2["signature"]
 
-    def test_exporter_manifest_includes_algorithm_metadata(
-        self, populated_db: tuple[LandscapeDB, str]
-    ) -> None:
+    def test_exporter_manifest_includes_algorithm_metadata(self, populated_db: tuple[LandscapeDB, str]) -> None:
         """Manifest should document algorithms used for forensic verification."""
         db, run_id = populated_db
         exporter = LandscapeExporter(db, signing_key=b"test-key-for-hmac")
@@ -666,9 +638,7 @@ class TestLandscapeExporterSigning:
 
             # Multiple tokens per row (tests get_tokens ordering)
             for j in range(2):
-                token = recorder.create_token(
-                    row_id=row.row_id, branch_name=f"branch_{j}"
-                )
+                token = recorder.create_token(row_id=row.row_id, branch_name=f"branch_{j}")
 
                 # Multiple states per token (tests get_node_states_for_token ordering)
                 for k, node_id in enumerate(["node_0", "node_1"]):
@@ -681,9 +651,7 @@ class TestLandscapeExporterSigning:
                     recorder.complete_node_state(
                         state.state_id,
                         status="completed",
-                        output_data={
-                            "result": i * j + k
-                        },  # Required for COMPLETED states
+                        output_data={"result": i * j + k},  # Required for COMPLETED states
                         duration_ms=5.0,
                     )
 
@@ -716,8 +684,7 @@ class TestLandscapeExporterSigning:
 
         # All final hashes must be identical
         assert len(set(final_hashes)) == 1, (
-            f"Non-deterministic export detected! Got {len(set(final_hashes))} "
-            f"different hashes: {final_hashes}"
+            f"Non-deterministic export detected! Got {len(set(final_hashes))} different hashes: {final_hashes}"
         )
 
     def test_exporter_record_order_is_stable(self) -> None:
@@ -752,6 +719,4 @@ class TestLandscapeExporterSigning:
             exports.append(tuple(node_ids))
 
         # All exports should produce the same order
-        assert (
-            len(set(exports)) == 1
-        ), f"Record order changed between exports: {exports}"
+        assert len(set(exports)) == 1, f"Record order changed between exports: {exports}"

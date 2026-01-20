@@ -77,9 +77,7 @@ def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
         output_sink = ""
 
     if output_sink:
-        graph.add_edge(
-            prev, sink_ids[output_sink], label="continue", mode=RoutingMode.MOVE
-        )
+        graph.add_edge(prev, sink_ids[output_sink], label="continue", mode=RoutingMode.MOVE)
 
     # Populate internal ID maps
     graph._sink_id_map = sink_ids
@@ -157,9 +155,7 @@ class TestTransformErrorSinkValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -237,9 +233,7 @@ class TestTransformErrorSinkValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -321,9 +315,7 @@ class TestTransformErrorSinkValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -394,9 +386,7 @@ class TestTransformErrorSinkValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -467,9 +457,7 @@ class TestTransformErrorSinkValidation:
 
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -561,9 +549,7 @@ class TestTransformErrorSinkValidation:
             def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
                 call_tracking["sink_write_called"] = True
                 self.results.extend(rows)
-                return ArtifactDescriptor.for_file(
-                    path="memory", size_bytes=0, content_hash=""
-                )
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
 
             def close(self) -> None:
                 pass
@@ -585,12 +571,6 @@ class TestTransformErrorSinkValidation:
             orchestrator.run(config, graph=_build_test_graph(config))
 
         # Verify NOTHING was processed - validation caught error before processing started
-        assert not call_tracking[
-            "source_load_called"
-        ], "source.load() should NOT be called"
-        assert not call_tracking[
-            "transform_process_called"
-        ], "transform.process() should NOT be called"
-        assert not call_tracking[
-            "sink_write_called"
-        ], "sink.write() should NOT be called"
+        assert not call_tracking["source_load_called"], "source.load() should NOT be called"
+        assert not call_tracking["transform_process_called"], "transform.process() should NOT be called"
+        assert not call_tracking["sink_write_called"], "sink.write() should NOT be called"

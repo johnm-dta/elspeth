@@ -297,9 +297,7 @@ class TestCallVerifier:
         request2 = {"id": 2}
         request3 = {"id": 3}
 
-        def find_call_side_effect(
-            run_id: str, call_type: str, request_hash: str
-        ) -> Call | None:
+        def find_call_side_effect(run_id: str, call_type: str, request_hash: str) -> Call | None:
             # First two requests have recordings, third doesn't
             if request_hash == stable_hash(request3):
                 return None

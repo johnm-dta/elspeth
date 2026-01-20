@@ -308,10 +308,7 @@ class AzureBlobSource(BaseSource):
         except Exception as e:
             # Azure SDK errors (ResourceNotFoundError, ClientAuthenticationError, etc.)
             # are external system errors - propagate with context
-            raise type(e)(
-                f"Failed to download blob '{self._blob_path}' from container "
-                f"'{self._container}': {e}"
-            ) from e
+            raise type(e)(f"Failed to download blob '{self._blob_path}' from container '{self._container}': {e}") from e
 
         # Parse blob content based on format
         if self._format == "csv":
@@ -357,9 +354,7 @@ class AzureBlobSource(BaseSource):
             row = {str(k): v for k, v in record.items()}
             yield from self._validate_and_yield(row, ctx)
 
-    def _load_json_array(
-        self, blob_data: bytes, ctx: PluginContext
-    ) -> Iterator[SourceRow]:
+    def _load_json_array(self, blob_data: bytes, ctx: PluginContext) -> Iterator[SourceRow]:
         """Load rows from JSON array blob data.
 
         Args:
@@ -388,9 +383,7 @@ class AzureBlobSource(BaseSource):
         # Extract from nested key if specified
         if data_key:
             if not isinstance(data, dict) or data_key not in data:
-                raise ValueError(
-                    f"Expected JSON object with key '{data_key}', got {type(data).__name__}"
-                )
+                raise ValueError(f"Expected JSON object with key '{data_key}', got {type(data).__name__}")
             data = data[data_key]
 
         if not isinstance(data, list):

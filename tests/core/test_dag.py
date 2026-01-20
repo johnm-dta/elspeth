@@ -270,16 +270,8 @@ class TestExecutionGraphAccessors:
 
         assert len(edges) == 2
         # Each edge is EdgeInfo (not tuple)
-        assert (
-            EdgeInfo(
-                from_node="a", to_node="b", label="continue", mode=RoutingMode.MOVE
-            )
-            in edges
-        )
-        assert (
-            EdgeInfo(from_node="b", to_node="c", label="output", mode=RoutingMode.COPY)
-            in edges
-        )
+        assert EdgeInfo(from_node="a", to_node="b", label="continue", mode=RoutingMode.MOVE) in edges
+        assert EdgeInfo(from_node="b", to_node="c", label="output", mode=RoutingMode.COPY) in edges
 
     def test_get_edges_empty_graph(self) -> None:
         """Empty graph returns empty list."""
@@ -836,9 +828,7 @@ class TestCoalesceNodes:
 
         # Verify edges from fork gate to coalesce node
         edges = graph.get_edges()
-        gate_to_coalesce_edges = [
-            e for e in edges if e.from_node == gate_id and e.to_node == coalesce_id
-        ]
+        gate_to_coalesce_edges = [e for e in edges if e.from_node == gate_id and e.to_node == coalesce_id]
 
         # Should have two edges (path_a and path_b) with COPY mode
         assert len(gate_to_coalesce_edges) == 2
@@ -892,17 +882,13 @@ class TestCoalesceNodes:
 
         # Verify path_c goes to output sink, not coalesce
         edges = graph.get_edges()
-        path_c_edges = [
-            e for e in edges if e.from_node == gate_id and e.label == "path_c"
-        ]
+        path_c_edges = [e for e in edges if e.from_node == gate_id and e.label == "path_c"]
 
         assert len(path_c_edges) == 1
         assert path_c_edges[0].to_node == output_sink_id
 
         # Verify path_a and path_b go to coalesce
-        coalesce_edges = [
-            e for e in edges if e.from_node == gate_id and e.to_node == coalesce_id
-        ]
+        coalesce_edges = [e for e in edges if e.from_node == gate_id and e.to_node == coalesce_id]
         coalesce_labels = {e.label for e in coalesce_edges}
         assert coalesce_labels == {"path_a", "path_b"}
 
@@ -1046,11 +1032,7 @@ class TestCoalesceNodes:
 
         # Verify edge from coalesce to output sink
         edges = graph.get_edges()
-        coalesce_to_sink_edges = [
-            e
-            for e in edges
-            if e.from_node == coalesce_id and e.to_node == output_sink_id
-        ]
+        coalesce_to_sink_edges = [e for e in edges if e.from_node == coalesce_id and e.to_node == output_sink_id]
 
         assert len(coalesce_to_sink_edges) == 1
         assert coalesce_to_sink_edges[0].label == "continue"

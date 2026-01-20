@@ -133,8 +133,7 @@ class OpenRouterLLMTransform(BaseTransform):
         # Create client using context's recorder and state_id
         if ctx.landscape is None or ctx.state_id is None:
             raise RuntimeError(
-                "OpenRouter transform requires landscape recorder and state_id. "
-                "Ensure transform is executed through the engine."
+                "OpenRouter transform requires landscape recorder and state_id. Ensure transform is executed through the engine."
             )
 
         http_client = AuditedHTTPClient(
@@ -198,9 +197,7 @@ class OpenRouterLLMTransform(BaseTransform):
                 {
                     "reason": "malformed_response",
                     "error": f"{type(e).__name__}: {e}",
-                    "response_keys": list(data.keys())
-                    if isinstance(data, dict)
-                    else None,
+                    "response_keys": list(data.keys()) if isinstance(data, dict) else None,
                 },
                 retryable=False,
             )

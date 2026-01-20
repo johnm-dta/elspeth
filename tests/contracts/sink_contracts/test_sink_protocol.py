@@ -115,9 +115,7 @@ class SinkContractTestBase(ABC):
     ) -> None:
         """Contract: write() MUST return ArtifactDescriptor."""
         result = sink.write(sample_rows, ctx)
-        assert isinstance(
-            result, ArtifactDescriptor
-        ), f"write() returned {type(result).__name__}, expected ArtifactDescriptor"
+        assert isinstance(result, ArtifactDescriptor), f"write() returned {type(result).__name__}, expected ArtifactDescriptor"
 
     def test_artifact_has_content_hash(
         self,
@@ -128,9 +126,7 @@ class SinkContractTestBase(ABC):
         """Contract: ArtifactDescriptor MUST have content_hash (audit integrity!)."""
         result = sink.write(sample_rows, ctx)
 
-        assert (
-            result.content_hash is not None
-        ), "ArtifactDescriptor.content_hash is None - REQUIRED for audit integrity"
+        assert result.content_hash is not None, "ArtifactDescriptor.content_hash is None - REQUIRED for audit integrity"
         assert isinstance(result.content_hash, str)
 
     def test_content_hash_is_sha256_hex(
@@ -142,12 +138,8 @@ class SinkContractTestBase(ABC):
         """Contract: content_hash MUST be a valid SHA-256 hex string (64 chars)."""
         result = sink.write(sample_rows, ctx)
 
-        assert (
-            len(result.content_hash) == 64
-        ), f"content_hash has {len(result.content_hash)} chars, expected 64 for SHA-256"
-        assert all(
-            c in "0123456789abcdef" for c in result.content_hash
-        ), f"content_hash contains invalid hex chars: {result.content_hash}"
+        assert len(result.content_hash) == 64, f"content_hash has {len(result.content_hash)} chars, expected 64 for SHA-256"
+        assert all(c in "0123456789abcdef" for c in result.content_hash), f"content_hash contains invalid hex chars: {result.content_hash}"
 
     def test_artifact_has_size_bytes(
         self,
@@ -158,9 +150,7 @@ class SinkContractTestBase(ABC):
         """Contract: ArtifactDescriptor MUST have size_bytes."""
         result = sink.write(sample_rows, ctx)
 
-        assert (
-            result.size_bytes is not None
-        ), "ArtifactDescriptor.size_bytes is None - REQUIRED for verification"
+        assert result.size_bytes is not None, "ArtifactDescriptor.size_bytes is None - REQUIRED for verification"
         assert isinstance(result.size_bytes, int)
         assert result.size_bytes >= 0
 

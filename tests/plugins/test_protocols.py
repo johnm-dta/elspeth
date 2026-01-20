@@ -148,9 +148,7 @@ class TestTransformProtocol:
             def __init__(self, config: dict[str, Any]) -> None:
                 self.config = config
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(
                     {
                         "value": row["value"],
@@ -202,9 +200,7 @@ class TestTransformBatchSupport:
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success({"processed": row["value"]})
 
         transform = SingleTransform({})
@@ -230,9 +226,7 @@ class TestTransformBatchSupport:
             plugin_version = "1.0.0"
             is_batch_aware = True  # Declares batch support
 
-            def process(
-                self, row: dict[str, Any] | list[dict[str, Any]], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any] | list[dict[str, Any]], ctx: PluginContext) -> TransformResult:
                 # When given a list, process as batch
                 if isinstance(row, list):
                     total = sum(r["value"] for r in row)
@@ -264,9 +258,7 @@ class TestTransformBatchSupport:
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
         regular = RegularTransform({})
@@ -290,9 +282,7 @@ class TestTransformBatchSupport:
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
-            def process(
-                self, row: dict[str, Any] | list[dict[str, Any]], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any] | list[dict[str, Any]], ctx: PluginContext) -> TransformResult:
                 if isinstance(row, list):
                     return TransformResult.success({"count": len(row)})
                 return TransformResult.success(row)
@@ -317,17 +307,13 @@ class TestAggregationProtocolDeleted:
         """AggregationProtocol should be deleted (aggregation is structural)."""
         import elspeth.plugins.protocols as protocols
 
-        assert not hasattr(
-            protocols, "AggregationProtocol"
-        ), "AggregationProtocol should be deleted - aggregation is structural"
+        assert not hasattr(protocols, "AggregationProtocol"), "AggregationProtocol should be deleted - aggregation is structural"
 
     def test_base_aggregation_deleted(self) -> None:
         """BaseAggregation should be deleted (aggregation is structural)."""
         import elspeth.plugins.base as base
 
-        assert not hasattr(
-            base, "BaseAggregation"
-        ), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
+        assert not hasattr(base, "BaseAggregation"), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
 
 
 class TestCoalesceProtocol:
@@ -368,9 +354,7 @@ class TestCoalesceProtocol:
             def __init__(self, config: dict[str, Any]) -> None:
                 pass
 
-            def merge(
-                self, branch_outputs: dict[str, dict[str, Any]], ctx: PluginContext
-            ) -> dict[str, Any]:
+            def merge(self, branch_outputs: dict[str, dict[str, Any]], ctx: PluginContext) -> dict[str, Any]:
                 return {"combined": "+".join(branch_outputs.keys())}
 
             def on_start(self, ctx: PluginContext) -> None:
@@ -414,9 +398,7 @@ class TestCoalesceProtocol:
             def __init__(self, config: dict[str, Any]) -> None:
                 pass
 
-            def merge(
-                self, branch_outputs: dict[str, dict[str, Any]], ctx: PluginContext
-            ) -> dict[str, Any]:
+            def merge(self, branch_outputs: dict[str, dict[str, Any]], ctx: PluginContext) -> dict[str, Any]:
                 total = sum(out["value"] for out in branch_outputs.values())
                 return {"total": total}
 
@@ -488,9 +470,7 @@ class TestSinkProtocol:
             def __init__(self, config: dict[str, Any]) -> None:
                 self.rows: list[dict[str, Any]] = []
 
-            def write(
-                self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> ArtifactDescriptor:
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
                 self.rows.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="/tmp/test.json",
@@ -546,9 +526,7 @@ class TestSinkProtocol:
                 self.instance_rows: list[dict[str, Any]] = []
                 self.config = config
 
-            def write(
-                self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> ArtifactDescriptor:
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
                 self.rows.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="/tmp/memory",
@@ -615,9 +593,7 @@ class TestProtocolMetadata:
             determinism = Determinism.DETERMINISTIC
             plugin_version = "1.0.0"
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
         t = MyTransform()
@@ -633,9 +609,7 @@ class TestProtocolMetadata:
             determinism = Determinism.EXTERNAL_CALL
             plugin_version = "0.1.0"
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
         t = LLMTransform()

@@ -215,10 +215,7 @@ class PluginContext:
             return None
 
         if self.state_id is None:
-            raise RuntimeError(
-                "Cannot record call: state_id not set. "
-                "Ensure transform is being executed through the engine."
-            )
+            raise RuntimeError("Cannot record call: state_id not set. Ensure transform is being executed through the engine.")
 
         call_index = self._call_index
         self._call_index += 1

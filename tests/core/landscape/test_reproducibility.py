@@ -30,10 +30,7 @@ class TestReproducibilityGradeComparison:
 
         updated_run = recorder.get_run(run.run_id)
         assert updated_run is not None
-        assert (
-            updated_run.reproducibility_grade
-            == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
-        )
+        assert updated_run.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
 
     def test_update_grade_after_purge_full_reproducible_unchanged(self) -> None:
         """FULL_REPRODUCIBLE grade is not degraded after purge."""
@@ -58,10 +55,7 @@ class TestReproducibilityGradeComparison:
 
         updated_run = recorder.get_run(run.run_id)
         assert updated_run is not None
-        assert (
-            updated_run.reproducibility_grade
-            == ReproducibilityGrade.FULL_REPRODUCIBLE.value
-        )
+        assert updated_run.reproducibility_grade == ReproducibilityGrade.FULL_REPRODUCIBLE.value
 
     def test_update_grade_after_purge_attributable_only_unchanged(self) -> None:
         """ATTRIBUTABLE_ONLY grade is not degraded further."""
@@ -86,10 +80,7 @@ class TestReproducibilityGradeComparison:
 
         updated_run = recorder.get_run(run.run_id)
         assert updated_run is not None
-        assert (
-            updated_run.reproducibility_grade
-            == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
-        )
+        assert updated_run.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY.value
 
     def test_update_grade_after_purge_null_grade_raises(self) -> None:
         """NULL reproducibility_grade in audit data causes fail-fast error.
@@ -110,9 +101,7 @@ class TestReproducibilityGradeComparison:
         # Directly set grade to NULL to simulate corruption
         with db.connection() as conn:
             conn.execute(
-                text(
-                    "UPDATE runs SET reproducibility_grade = NULL WHERE run_id = :run_id"
-                ),
+                text("UPDATE runs SET reproducibility_grade = NULL WHERE run_id = :run_id"),
                 {"run_id": run.run_id},
             )
 
@@ -139,9 +128,7 @@ class TestReproducibilityGradeComparison:
         # Directly set grade to invalid value to simulate corruption
         with db.connection() as conn:
             conn.execute(
-                text(
-                    "UPDATE runs SET reproducibility_grade = 'garbage_value' WHERE run_id = :run_id"
-                ),
+                text("UPDATE runs SET reproducibility_grade = 'garbage_value' WHERE run_id = :run_id"),
                 {"run_id": run.run_id},
             )
 

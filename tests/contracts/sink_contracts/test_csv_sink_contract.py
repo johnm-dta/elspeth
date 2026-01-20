@@ -92,9 +92,7 @@ class TestCSVSinkDeterminism(SinkDeterminismContractTestBase):
         result2 = sink2.write(rows, ctx)
         sink2.close()
 
-        assert (
-            result1.content_hash == result2.content_hash
-        ), "Same data produced different hashes - audit integrity compromised!"
+        assert result1.content_hash == result2.content_hash, "Same data produced different hashes - audit integrity compromised!"
 
 
 class TestCSVSinkAppendMode:
@@ -175,9 +173,7 @@ class TestCSVSinkPropertyBased:
             st.fixed_dictionaries(
                 {
                     "id": st.integers(min_value=1, max_value=1000),
-                    "name": st.text(min_size=1, max_size=20).filter(
-                        lambda s: "\n" not in s and "," not in s and '"' not in s
-                    ),
+                    "name": st.text(min_size=1, max_size=20).filter(lambda s: "\n" not in s and "," not in s and '"' not in s),
                     "value": st.integers(min_value=-(2**53 - 1), max_value=2**53 - 1),
                 }
             ),
@@ -185,12 +181,8 @@ class TestCSVSinkPropertyBased:
             max_size=10,
         )
     )
-    @settings(
-        max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture]
-    )
-    def test_csv_sink_handles_arbitrary_rows(
-        self, tmp_path: Path, rows: list[dict[str, Any]]
-    ) -> None:
+    @settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_csv_sink_handles_arbitrary_rows(self, tmp_path: Path, rows: list[dict[str, Any]]) -> None:
         """Property: CSVSink handles any valid row data."""
         # Use unique path for each test run
         import uuid
@@ -220,21 +212,15 @@ class TestCSVSinkPropertyBased:
             st.fixed_dictionaries(
                 {
                     "id": st.integers(min_value=1, max_value=100),
-                    "data": st.text(min_size=1, max_size=10).filter(
-                        lambda s: "\n" not in s and "," not in s and '"' not in s
-                    ),
+                    "data": st.text(min_size=1, max_size=10).filter(lambda s: "\n" not in s and "," not in s and '"' not in s),
                 }
             ),
             min_size=1,
             max_size=5,
         )
     )
-    @settings(
-        max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture]
-    )
-    def test_csv_sink_hash_determinism_property(
-        self, tmp_path: Path, rows: list[dict[str, Any]]
-    ) -> None:
+    @settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_csv_sink_hash_determinism_property(self, tmp_path: Path, rows: list[dict[str, Any]]) -> None:
         """Property: Same rows always produce same hash."""
         import uuid
 

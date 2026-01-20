@@ -239,9 +239,7 @@ class TestSchemaCompatibility:
         error_msg = str(exc_info.value)
         assert "tokens.expand_group_id" in error_msg
         assert "schema is outdated" in error_msg.lower()
-        assert (
-            "delete the database" in error_msg.lower() or "migrate" in error_msg.lower()
-        )
+        assert "delete the database" in error_msg.lower() or "migrate" in error_msg.lower()
 
     def test_from_url_with_old_schema_fails(self, tmp_path: Path) -> None:
         """Verify from_url() catches old schema before create_all()."""

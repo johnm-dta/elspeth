@@ -335,9 +335,7 @@ class TestBaseLLMTransformProcess:
         """Create a mock LLM client."""
         return Mock(spec=AuditedLLMClient)
 
-    def test_template_rendering_error_returns_transform_error(
-        self, ctx: PluginContext, mock_client: Mock
-    ) -> None:
+    def test_template_rendering_error_returns_transform_error(self, ctx: PluginContext, mock_client: Mock) -> None:
         """Template rendering failure returns TransformResult.error()."""
         TestLLMTransform = create_test_transform_class(mock_client=mock_client)
 
@@ -357,9 +355,7 @@ class TestBaseLLMTransformProcess:
         assert result.reason["reason"] == "template_rendering_failed"
         assert "template_hash" in result.reason
 
-    def test_llm_client_error_returns_transform_error(
-        self, ctx: PluginContext, mock_client: Mock
-    ) -> None:
+    def test_llm_client_error_returns_transform_error(self, ctx: PluginContext, mock_client: Mock) -> None:
         """LLM client failure returns TransformResult.error()."""
         mock_client.chat_completion.side_effect = LLMClientError("API Error")
         TestLLMTransform = create_test_transform_class(mock_client=mock_client)
@@ -380,9 +376,7 @@ class TestBaseLLMTransformProcess:
         assert "API Error" in result.reason["error"]
         assert result.retryable is False
 
-    def test_rate_limit_error_is_retryable(
-        self, ctx: PluginContext, mock_client: Mock
-    ) -> None:
+    def test_rate_limit_error_is_retryable(self, ctx: PluginContext, mock_client: Mock) -> None:
         """Rate limit errors marked retryable=True."""
         mock_client.chat_completion.side_effect = RateLimitError("Rate limit exceeded")
         TestLLMTransform = create_test_transform_class(mock_client=mock_client)
@@ -402,9 +396,7 @@ class TestBaseLLMTransformProcess:
         assert result.reason["reason"] == "rate_limited"
         assert result.retryable is True
 
-    def test_successful_transform_returns_enriched_row(
-        self, ctx: PluginContext, mock_client: Mock
-    ) -> None:
+    def test_successful_transform_returns_enriched_row(self, ctx: PluginContext, mock_client: Mock) -> None:
         """Successful transform returns row with LLM response."""
         mock_client.chat_completion.return_value = LLMResponse(
             content="Analysis result",
@@ -463,9 +455,7 @@ class TestBaseLLMTransformProcess:
         assert "analysis_template_hash" in result.row
         assert "analysis_variables_hash" in result.row
 
-    def test_system_prompt_included_in_messages(
-        self, ctx: PluginContext, mock_client: Mock
-    ) -> None:
+    def test_system_prompt_included_in_messages(self, ctx: PluginContext, mock_client: Mock) -> None:
         """System prompt is included when configured."""
         mock_client.chat_completion.return_value = LLMResponse(
             content="Response",
@@ -494,9 +484,7 @@ class TestBaseLLMTransformProcess:
         assert messages[1]["role"] == "user"
         assert messages[1]["content"] == "hello"
 
-    def test_no_system_prompt_single_message(
-        self, ctx: PluginContext, mock_client: Mock
-    ) -> None:
+    def test_no_system_prompt_single_message(self, ctx: PluginContext, mock_client: Mock) -> None:
         """Without system prompt, only user message is sent."""
         mock_client.chat_completion.return_value = LLMResponse(
             content="Response",
@@ -520,9 +508,7 @@ class TestBaseLLMTransformProcess:
         assert len(messages) == 1
         assert messages[0]["role"] == "user"
 
-    def test_temperature_and_max_tokens_passed_to_client(
-        self, ctx: PluginContext, mock_client: Mock
-    ) -> None:
+    def test_temperature_and_max_tokens_passed_to_client(self, ctx: PluginContext, mock_client: Mock) -> None:
         """Temperature and max_tokens are passed to LLM client."""
         mock_client.chat_completion.return_value = LLMResponse(
             content="Response",
@@ -548,14 +534,10 @@ class TestBaseLLMTransformProcess:
         assert call_args.kwargs["temperature"] == 0.7
         assert call_args.kwargs["max_tokens"] == 500
 
-    def test_retryable_llm_error_propagates_flag(
-        self, ctx: PluginContext, mock_client: Mock
-    ) -> None:
+    def test_retryable_llm_error_propagates_flag(self, ctx: PluginContext, mock_client: Mock) -> None:
         """LLMClientError retryable flag is propagated."""
         # Non-rate-limit but retryable error
-        mock_client.chat_completion.side_effect = LLMClientError(
-            "Server overloaded", retryable=True
-        )
+        mock_client.chat_completion.side_effect = LLMClientError("Server overloaded", retryable=True)
         TestLLMTransform = create_test_transform_class(mock_client=mock_client)
 
         transform = TestLLMTransform(

@@ -157,9 +157,7 @@ class TestCSVSourceConfigValidation:
         from elspeth.plugins.sources.csv_source import CSVSource
 
         with pytest.raises(PluginConfigError, match="path"):
-            CSVSource(
-                {"schema": DYNAMIC_SCHEMA, "on_validation_failure": QUARANTINE_SINK}
-            )
+            CSVSource({"schema": DYNAMIC_SCHEMA, "on_validation_failure": QUARANTINE_SINK})
 
     def test_empty_path_raises_error(self) -> None:
         """Empty path string raises PluginConfigError."""
@@ -196,9 +194,7 @@ class TestCSVSourceConfigValidation:
         from elspeth.plugins.sources.csv_source import CSVSource
 
         with pytest.raises(PluginConfigError, match=r"require.*schema"):
-            CSVSource(
-                {"path": "/tmp/test.csv", "on_validation_failure": QUARANTINE_SINK}
-            )
+            CSVSource({"path": "/tmp/test.csv", "on_validation_failure": QUARANTINE_SINK})
 
     def test_missing_on_validation_failure_raises_error(self) -> None:
         """Missing on_validation_failure raises PluginConfigError."""
@@ -217,9 +213,7 @@ class TestCSVSourceQuarantineYielding:
         """Create a minimal plugin context."""
         return PluginContext(run_id="test-run", config={})
 
-    def test_invalid_row_yields_quarantined_source_row(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_invalid_row_yields_quarantined_source_row(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Invalid row yields SourceRow.quarantined() with error info."""
         from elspeth.contracts import SourceRow
         from elspeth.plugins.sources.csv_source import CSVSource
@@ -260,9 +254,7 @@ class TestCSVSourceQuarantineYielding:
         assert quarantined.quarantine_error is not None
         assert "score" in quarantined.quarantine_error  # Error mentions the field
 
-    def test_discard_mode_does_not_yield_invalid_rows(
-        self, tmp_path: Path, ctx: PluginContext
-    ) -> None:
+    def test_discard_mode_does_not_yield_invalid_rows(self, tmp_path: Path, ctx: PluginContext) -> None:
         """When on_validation_failure='discard', invalid rows are not yielded."""
         from elspeth.contracts import SourceRow
         from elspeth.plugins.sources.csv_source import CSVSource

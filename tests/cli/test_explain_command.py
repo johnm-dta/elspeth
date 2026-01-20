@@ -31,6 +31,4 @@ class TestExplainCommand:
 
         result = runner.invoke(app, ["explain", "--run", "test-run", "--json"])
         # Should output JSON (even if error)
-        assert result.output.strip().startswith(
-            "{"
-        ) or result.output.strip().startswith("[")
+        assert result.output.strip().startswith("{") or result.output.strip().startswith("[")

@@ -60,9 +60,7 @@ class TestAuditedHTTPClient:
         assert call_kwargs["call_type"] == CallType.HTTP
         assert call_kwargs["status"] == CallStatus.SUCCESS
         assert call_kwargs["request_data"]["method"] == "POST"
-        assert (
-            call_kwargs["request_data"]["url"] == "https://api.example.com/v1/process"
-        )
+        assert call_kwargs["request_data"]["url"] == "https://api.example.com/v1/process"
         assert call_kwargs["request_data"]["json"] == {"data": "value"}
         assert call_kwargs["response_data"]["status_code"] == 200
         assert call_kwargs["response_data"]["body"] == {"result": "success"}
@@ -192,9 +190,7 @@ class TestAuditedHTTPClient:
 
         # Verify full URL was recorded
         call_kwargs = recorder.record_call.call_args[1]
-        assert (
-            call_kwargs["request_data"]["url"] == "https://api.example.com/v1/process"
-        )
+        assert call_kwargs["request_data"]["url"] == "https://api.example.com/v1/process"
 
         # Verify httpx was called with full URL
         mock_client.post.assert_called_once()
@@ -298,9 +294,7 @@ class TestAuditedHTTPClient:
 
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.headers = httpx.Headers(
-            {"content-type": "application/json", "x-request-id": "req-456"}
-        )
+        mock_response.headers = httpx.Headers({"content-type": "application/json", "x-request-id": "req-456"})
         mock_response.content = b"{}"
 
         with patch("httpx.Client") as mock_client_class:
@@ -342,10 +336,7 @@ class TestAuditedHTTPClient:
             client.post("https://other-api.example.com/endpoint")
 
         call_kwargs = recorder.record_call.call_args[1]
-        assert (
-            call_kwargs["request_data"]["url"]
-            == "https://other-api.example.com/endpoint"
-        )
+        assert call_kwargs["request_data"]["url"] == "https://other-api.example.com/endpoint"
 
     def test_none_json_body(self) -> None:
         """HTTP call with None json body is handled."""
@@ -514,9 +505,7 @@ class TestAuditedHTTPClient:
         mock_response.status_code = 200
         mock_response.headers = {"content-type": "application/json; charset=utf-8"}
         mock_response.content = b'{"choices": [{"message": {"content": "Hello"}}]}'
-        mock_response.json.return_value = {
-            "choices": [{"message": {"content": "Hello"}}]
-        }
+        mock_response.json.return_value = {"choices": [{"message": {"content": "Hello"}}]}
 
         with patch("httpx.Client") as mock_client_class:
             mock_client = MagicMock()
@@ -528,9 +517,7 @@ class TestAuditedHTTPClient:
             client.post("https://api.example.com/endpoint")
 
         call_kwargs = recorder.record_call.call_args[1]
-        assert call_kwargs["response_data"]["body"] == {
-            "choices": [{"message": {"content": "Hello"}}]
-        }
+        assert call_kwargs["response_data"]["body"] == {"choices": [{"message": {"content": "Hello"}}]}
 
     def test_4xx_response_recorded_as_error(self) -> None:
         """HTTP 4xx responses are recorded with ERROR status."""

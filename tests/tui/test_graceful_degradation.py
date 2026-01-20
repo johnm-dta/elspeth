@@ -31,9 +31,7 @@ optional_field_values = st.one_of(
     st.booleans(),
     # Nested dict for artifact
     st.dictionaries(
-        keys=st.sampled_from(
-            ["artifact_id", "path_or_uri", "content_hash", "size_bytes"]
-        ),
+        keys=st.sampled_from(["artifact_id", "path_or_uri", "content_hash", "size_bytes"]),
         values=st.one_of(st.none(), st.text(max_size=50), st.integers()),
         max_size=4,
     ),
@@ -90,9 +88,7 @@ class TestNodeDetailPanelGracefulDegradation:
 
     @given(node_state=node_state_strategy)
     @settings(max_examples=100)
-    def test_handles_arbitrary_optional_fields(
-        self, node_state: dict[str, Any] | None
-    ) -> None:
+    def test_handles_arbitrary_optional_fields(self, node_state: dict[str, Any] | None) -> None:
         """NodeDetailPanel handles arbitrary optional field values.
 
         Required fields (node_id, plugin_name, node_type) are always present.
@@ -110,9 +106,7 @@ class TestNodeDetailPanelGracefulDegradation:
 
     @given(node_state=node_state_strategy)
     @settings(max_examples=50)
-    def test_update_state_handles_arbitrary_optional_data(
-        self, node_state: dict[str, Any] | None
-    ) -> None:
+    def test_update_state_handles_arbitrary_optional_data(self, node_state: dict[str, Any] | None) -> None:
         """NodeDetailPanel.update_state handles arbitrary optional field values."""
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 

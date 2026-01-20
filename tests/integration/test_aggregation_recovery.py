@@ -133,9 +133,7 @@ class TestAggregationRecoveryIntegration:
         attempts = sorted([b.attempt for b in all_batches])
         assert attempts == [0, 1]
 
-    def test_recovery_with_multiple_aggregations(
-        self, test_env: dict[str, Any]
-    ) -> None:
+    def test_recovery_with_multiple_aggregations(self, test_env: dict[str, Any]) -> None:
         """Verify recovery handles multiple aggregation nodes independently."""
         db = test_env["db"]
         checkpoint_mgr = test_env["checkpoint_manager"]
@@ -207,9 +205,7 @@ class TestAggregationRecoveryIntegration:
         assert incomplete[0].aggregation_node_id == "count_aggregator"
         assert incomplete[0].status == BatchStatus.EXECUTING
 
-    def test_recovery_preserves_batch_member_order(
-        self, test_env: dict[str, Any]
-    ) -> None:
+    def test_recovery_preserves_batch_member_order(self, test_env: dict[str, Any]) -> None:
         """Verify batch member ordinals are preserved through retry."""
         db = test_env["db"]
         checkpoint_mgr = test_env["checkpoint_manager"]
@@ -266,9 +262,7 @@ class TestAggregationRecoveryIntegration:
             assert orig.token_id == retry.token_id
             assert orig.ordinal == retry.ordinal
 
-    def test_recovery_cannot_retry_non_failed_batch(
-        self, test_env: dict[str, Any]
-    ) -> None:
+    def test_recovery_cannot_retry_non_failed_batch(self, test_env: dict[str, Any]) -> None:
         """Verify retry_batch only works on failed batches."""
         db = test_env["db"]
         recorder = test_env["recorder"]

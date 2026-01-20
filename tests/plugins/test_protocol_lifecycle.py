@@ -39,9 +39,7 @@ class TestTransformProtocolLifecycle:
             def __init__(self, config: dict[str, Any]) -> None:
                 self.closed = False
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
             def close(self) -> None:

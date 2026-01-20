@@ -19,9 +19,7 @@ DYNAMIC_SCHEMA = {"fields": "dynamic"}
 QUARANTINE_SINK = "quarantine"
 
 # Standard connection string for tests
-TEST_CONNECTION_STRING = (
-    "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=key"
-)
+TEST_CONNECTION_STRING = "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=key"
 TEST_CONTAINER = "test-container"
 TEST_BLOB_PATH = "data/input.csv"
 
@@ -43,9 +41,7 @@ def ctx() -> PluginContext:
 @pytest.fixture
 def mock_blob_client() -> Generator[MagicMock, None, None]:
     """Create a mock blob client for testing."""
-    with patch(
-        "elspeth.plugins.azure.blob_source.AzureBlobSource._get_blob_client"
-    ) as mock:
+    with patch("elspeth.plugins.azure.blob_source.AzureBlobSource._get_blob_client") as mock:
         yield mock
 
 
@@ -210,9 +206,7 @@ class TestAzureBlobSourceConfigValidation:
 class TestAzureBlobSourceCSV:
     """Tests for CSV loading from Azure Blob."""
 
-    def test_load_csv_from_blob(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_load_csv_from_blob(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """Basic CSV loading from blob."""
         csv_data = b"id,name,value\n1,alice,100\n2,bob,200\n"
         mock_client = MagicMock()
@@ -228,9 +222,7 @@ class TestAzureBlobSourceCSV:
         assert rows[0].row == {"id": "1", "name": "alice", "value": "100"}
         assert rows[1].row == {"id": "2", "name": "bob", "value": "200"}
 
-    def test_csv_with_custom_delimiter(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_csv_with_custom_delimiter(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """CSV with custom delimiter works correctly."""
         csv_data = b"id;name;value\n1;alice;100\n"
         mock_client = MagicMock()
@@ -243,9 +235,7 @@ class TestAzureBlobSourceCSV:
         assert len(rows) == 1
         assert rows[0].row["name"] == "alice"
 
-    def test_csv_without_header(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_csv_without_header(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """CSV without header row uses numeric column names."""
         csv_data = b"1,alice,100\n2,bob,200\n"
         mock_client = MagicMock()
@@ -259,9 +249,7 @@ class TestAzureBlobSourceCSV:
         # Without header, columns are 0, 1, 2
         assert rows[0].row == {"0": "1", "1": "alice", "2": "100"}
 
-    def test_csv_with_encoding(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_csv_with_encoding(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """CSV with non-UTF8 encoding works correctly."""
         csv_data = b"id,name\n1,caf\xe9\n"  # latin-1 encoded "cafe" with e-acute
         mock_client = MagicMock()
@@ -279,9 +267,7 @@ class TestAzureBlobSourceCSV:
 class TestAzureBlobSourceJSON:
     """Tests for JSON loading from Azure Blob."""
 
-    def test_load_json_from_blob(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_load_json_from_blob(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """JSON array loading from blob."""
         json_data = b'[{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]'
         mock_client = MagicMock()
@@ -297,9 +283,7 @@ class TestAzureBlobSourceJSON:
         assert rows[0].row == {"id": 1, "name": "alice"}
         assert rows[1].row == {"id": 2, "name": "bob"}
 
-    def test_load_json_with_data_key(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_load_json_with_data_key(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """JSON with nested data key extraction."""
         json_data = b'{"results": [{"id": 1, "name": "alice"}], "meta": "ignored"}'
         mock_client = MagicMock()
@@ -317,9 +301,7 @@ class TestAzureBlobSourceJSON:
         assert len(rows) == 1
         assert rows[0].row == {"id": 1, "name": "alice"}
 
-    def test_json_not_array_raises_error(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_json_not_array_raises_error(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """JSON that is not an array raises ValueError."""
         json_data = b'{"id": 1, "name": "alice"}'
         mock_client = MagicMock()
@@ -330,9 +312,7 @@ class TestAzureBlobSourceJSON:
         with pytest.raises(ValueError, match="Expected JSON array"):
             list(source.load(ctx))
 
-    def test_json_invalid_raises_error(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_json_invalid_raises_error(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """Invalid JSON raises ValueError."""
         json_data = b'[{"id": 1, "name": "alice"'  # Missing closing brackets
         mock_client = MagicMock()
@@ -347,9 +327,7 @@ class TestAzureBlobSourceJSON:
 class TestAzureBlobSourceJSONL:
     """Tests for JSONL loading from Azure Blob."""
 
-    def test_load_jsonl_from_blob(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_load_jsonl_from_blob(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """JSONL (newline-delimited) loading from blob."""
         jsonl_data = b'{"id": 1, "name": "alice"}\n{"id": 2, "name": "bob"}\n'
         mock_client = MagicMock()
@@ -365,9 +343,7 @@ class TestAzureBlobSourceJSONL:
         assert rows[0].row == {"id": 1, "name": "alice"}
         assert rows[1].row == {"id": 2, "name": "bob"}
 
-    def test_jsonl_skips_empty_lines(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_jsonl_skips_empty_lines(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """JSONL skips empty lines."""
         jsonl_data = b'{"id": 1}\n\n{"id": 2}\n\n'
         mock_client = MagicMock()
@@ -379,9 +355,7 @@ class TestAzureBlobSourceJSONL:
 
         assert len(rows) == 2
 
-    def test_jsonl_invalid_line_raises_error(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_jsonl_invalid_line_raises_error(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """Invalid JSON line in JSONL raises ValueError with line number."""
         jsonl_data = b'{"id": 1}\n{invalid}\n{"id": 3}\n'
         mock_client = MagicMock()
@@ -396,9 +370,7 @@ class TestAzureBlobSourceJSONL:
 class TestAzureBlobSourceValidation:
     """Tests for schema validation and quarantining."""
 
-    def test_validation_failure_quarantines_row(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_validation_failure_quarantines_row(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """Invalid rows are quarantined with error info."""
         csv_data = b"id,name,score\n1,alice,95\n2,bob,bad\n3,carol,92\n"
         mock_client = MagicMock()
@@ -435,9 +407,7 @@ class TestAzureBlobSourceValidation:
         assert quarantined.quarantine_error is not None
         assert "score" in quarantined.quarantine_error
 
-    def test_discard_mode_does_not_yield_invalid_rows(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_discard_mode_does_not_yield_invalid_rows(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """When on_validation_failure='discard', invalid rows are not yielded."""
         csv_data = b"id,name,score\n1,alice,95\n2,bob,bad\n3,carol,92\n"
         mock_client = MagicMock()
@@ -464,24 +434,18 @@ class TestAzureBlobSourceValidation:
 class TestAzureBlobSourceErrors:
     """Tests for error handling."""
 
-    def test_blob_not_found_raises(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_blob_not_found_raises(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """Missing blob raises appropriate error."""
         # Simulate ResourceNotFoundError from Azure SDK
         mock_client = MagicMock()
-        mock_client.download_blob.side_effect = Exception(
-            "The specified blob does not exist"
-        )
+        mock_client.download_blob.side_effect = Exception("The specified blob does not exist")
         mock_blob_client.return_value = mock_client
 
         source = AzureBlobSource(make_config())
         with pytest.raises(Exception, match="specified blob does not exist"):
             list(source.load(ctx))
 
-    def test_connection_error_raises(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_connection_error_raises(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """Connection failures propagate."""
         # Simulate connection error
         mock_client = MagicMock()
@@ -492,9 +456,7 @@ class TestAzureBlobSourceErrors:
         with pytest.raises(Exception, match="Connection refused"):
             list(source.load(ctx))
 
-    def test_encoding_error_raises(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_encoding_error_raises(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """Invalid encoding raises ValueError."""
         # Invalid UTF-8 bytes
         bad_data = b"\xff\xfe"
@@ -516,9 +478,7 @@ class TestAzureBlobSourceLifecycle:
         source.close()
         source.close()  # Should not raise
 
-    def test_close_clears_client(
-        self, mock_blob_client: MagicMock, ctx: PluginContext
-    ) -> None:
+    def test_close_clears_client(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """close() clears the blob client reference."""
         csv_data = b"id,name\n1,alice\n"
         mock_client = MagicMock()
@@ -541,8 +501,7 @@ class TestAzureBlobSourceImportError:
         # Mock the import to fail
         with patch.object(source, "_get_blob_client") as mock_get:
             mock_get.side_effect = ImportError(
-                "azure-storage-blob is required for AzureBlobSource. "
-                "Install with: uv pip install azure-storage-blob"
+                "azure-storage-blob is required for AzureBlobSource. Install with: uv pip install azure-storage-blob"
             )
 
             with pytest.raises(ImportError, match="azure-storage-blob"):
@@ -732,13 +691,9 @@ class TestAzureBlobSourceAuthClientCreation:
             # Verify DefaultAzureCredential was instantiated
             mock_credential_cls.assert_called_once()
             # Verify BlobServiceClient was created with account_url and credential
-            mock_service_client_cls.assert_called_once_with(
-                TEST_ACCOUNT_URL, credential=mock_credential
-            )
+            mock_service_client_cls.assert_called_once_with(TEST_ACCOUNT_URL, credential=mock_credential)
 
-    def test_service_principal_uses_client_secret_credential(
-        self, ctx: PluginContext
-    ) -> None:
+    def test_service_principal_uses_client_secret_credential(self, ctx: PluginContext) -> None:
         """Service principal auth uses ClientSecretCredential."""
         source = AzureBlobSource(
             make_config(
@@ -770,27 +725,19 @@ class TestAzureBlobSourceAuthClientCreation:
                 client_secret=TEST_CLIENT_SECRET,
             )
             # Verify BlobServiceClient was created with account_url and credential
-            mock_service_client_cls.assert_called_once_with(
-                TEST_ACCOUNT_URL, credential=mock_credential
-            )
+            mock_service_client_cls.assert_called_once_with(TEST_ACCOUNT_URL, credential=mock_credential)
 
-    def test_connection_string_uses_from_connection_string(
-        self, ctx: PluginContext
-    ) -> None:
+    def test_connection_string_uses_from_connection_string(self, ctx: PluginContext) -> None:
         """Connection string auth uses from_connection_string factory."""
         source = AzureBlobSource(make_config(connection_string=TEST_CONNECTION_STRING))
 
         # Mock the azure.storage.blob import
         with patch("azure.storage.blob.BlobServiceClient") as mock_service_client_cls:
             mock_service_client = MagicMock()
-            mock_service_client_cls.from_connection_string.return_value = (
-                mock_service_client
-            )
+            mock_service_client_cls.from_connection_string.return_value = mock_service_client
 
             # Trigger client creation
             source._auth_config.create_blob_service_client()
 
             # Verify from_connection_string was called
-            mock_service_client_cls.from_connection_string.assert_called_once_with(
-                TEST_CONNECTION_STRING
-            )
+            mock_service_client_cls.from_connection_string.assert_called_once_with(TEST_CONNECTION_STRING)

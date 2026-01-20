@@ -20,9 +20,7 @@ class TestBaseTransform:
             input_schema = None  # type: ignore[assignment]  # Not needed for this test
             output_schema = None  # type: ignore[assignment]
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(row)
 
         transform = SimpleTransform({})
@@ -40,9 +38,7 @@ class TestBaseTransform:
             input_schema = None  # type: ignore[assignment]
             output_schema = None  # type: ignore[assignment]
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success_multi([row, row])
 
         transform = ExpandingTransform({})
@@ -73,9 +69,7 @@ class TestBaseTransform:
             input_schema = InputSchema
             output_schema = OutputSchema
 
-            def process(
-                self, row: dict[str, Any], ctx: PluginContext
-            ) -> TransformResult:
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
                 return TransformResult.success(
                     {
                         "x": row["x"],
@@ -104,9 +98,7 @@ class TestBaseAggregationDeleted:
         """BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform."""
         import elspeth.plugins.base as base
 
-        assert not hasattr(
-            base, "BaseAggregation"
-        ), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
+        assert not hasattr(base, "BaseAggregation"), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
 
 
 class TestBaseSink:
@@ -129,9 +121,7 @@ class TestBaseSink:
                 super().__init__(config)
                 self.rows: list[dict[str, Any]] = []
 
-            def write(
-                self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> ArtifactDescriptor:
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
                 self.rows.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="/tmp/memory",
@@ -184,9 +174,7 @@ class TestBaseSink:
                 super().__init__(config)
                 self.rows: list[dict[str, Any]] = []
 
-            def write(
-                self, rows: list[dict[str, Any]], ctx: PluginContext
-            ) -> ArtifactDescriptor:
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
                 self.rows.extend(rows)
                 return ArtifactDescriptor.for_file(
                     path="/tmp/batch",

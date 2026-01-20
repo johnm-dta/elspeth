@@ -22,15 +22,11 @@ class TestRecoveryProtocol:
         return CheckpointManager(landscape_db)
 
     @pytest.fixture
-    def recovery_manager(
-        self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager
-    ) -> RecoveryManager:
+    def recovery_manager(self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager) -> RecoveryManager:
         return RecoveryManager(landscape_db, checkpoint_manager)
 
     @pytest.fixture
-    def failed_run_with_checkpoint(
-        self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager
-    ) -> str:
+    def failed_run_with_checkpoint(self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager) -> str:
         """Create a failed run that has checkpoints."""
         from elspeth.core.landscape.schema import (
             nodes_table,
@@ -76,11 +72,7 @@ class TestRecoveryProtocol:
                     created_at=now,
                 )
             )
-            conn.execute(
-                tokens_table.insert().values(
-                    token_id="tok-001", row_id="row-001", created_at=now
-                )
-            )
+            conn.execute(tokens_table.insert().values(token_id="tok-001", row_id="row-001", created_at=now))
             conn.commit()
 
         checkpoint_manager.create_checkpoint(run_id, "tok-001", "node-001", 1)
@@ -160,64 +152,48 @@ class TestRecoveryProtocol:
         assert check.can_resume is True
         assert check.reason is None
 
-    def test_can_resume_returns_false_for_completed_run(
-        self, recovery_manager: RecoveryManager, completed_run: str
-    ) -> None:
+    def test_can_resume_returns_false_for_completed_run(self, recovery_manager: RecoveryManager, completed_run: str) -> None:
         check = recovery_manager.can_resume(completed_run)
         assert check.can_resume is False
         assert check.reason is not None
         assert "completed" in check.reason.lower()
 
-    def test_can_resume_returns_false_without_checkpoint(
-        self, recovery_manager: RecoveryManager, failed_run_no_checkpoint: str
-    ) -> None:
+    def test_can_resume_returns_false_without_checkpoint(self, recovery_manager: RecoveryManager, failed_run_no_checkpoint: str) -> None:
         check = recovery_manager.can_resume(failed_run_no_checkpoint)
         assert check.can_resume is False
         assert check.reason is not None
         assert "no checkpoint" in check.reason.lower()
 
-    def test_can_resume_returns_false_for_running_run(
-        self, recovery_manager: RecoveryManager, running_run: str
-    ) -> None:
+    def test_can_resume_returns_false_for_running_run(self, recovery_manager: RecoveryManager, running_run: str) -> None:
         check = recovery_manager.can_resume(running_run)
         assert check.can_resume is False
         assert check.reason is not None
         assert "in progress" in check.reason.lower()
 
-    def test_can_resume_returns_false_for_nonexistent_run(
-        self, recovery_manager: RecoveryManager
-    ) -> None:
+    def test_can_resume_returns_false_for_nonexistent_run(self, recovery_manager: RecoveryManager) -> None:
         check = recovery_manager.can_resume("nonexistent-run")
         assert check.can_resume is False
         assert check.reason is not None
         assert "not found" in check.reason.lower()
 
-    def test_get_resume_point(
-        self, recovery_manager: RecoveryManager, failed_run_with_checkpoint: str
-    ) -> None:
+    def test_get_resume_point(self, recovery_manager: RecoveryManager, failed_run_with_checkpoint: str) -> None:
         resume_point = recovery_manager.get_resume_point(failed_run_with_checkpoint)
         assert resume_point is not None
         assert resume_point.token_id is not None
         assert resume_point.node_id is not None
         assert resume_point.sequence_number > 0
 
-    def test_get_resume_point_returns_none_for_unresumable_run(
-        self, recovery_manager: RecoveryManager, completed_run: str
-    ) -> None:
+    def test_get_resume_point_returns_none_for_unresumable_run(self, recovery_manager: RecoveryManager, completed_run: str) -> None:
         resume_point = recovery_manager.get_resume_point(completed_run)
         assert resume_point is None
 
-    def test_get_resume_point_includes_checkpoint(
-        self, recovery_manager: RecoveryManager, failed_run_with_checkpoint: str
-    ) -> None:
+    def test_get_resume_point_includes_checkpoint(self, recovery_manager: RecoveryManager, failed_run_with_checkpoint: str) -> None:
         resume_point = recovery_manager.get_resume_point(failed_run_with_checkpoint)
         assert resume_point is not None
         assert resume_point.checkpoint is not None
         assert resume_point.checkpoint.run_id == failed_run_with_checkpoint
 
-    def test_get_resume_point_with_aggregation_state(
-        self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager
-    ) -> None:
+    def test_get_resume_point_with_aggregation_state(self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
         """Resume point includes deserialized aggregation state."""
         from elspeth.core.checkpoint import RecoveryManager
         from elspeth.core.landscape.schema import (
@@ -264,18 +240,12 @@ class TestRecoveryProtocol:
                     created_at=now,
                 )
             )
-            conn.execute(
-                tokens_table.insert().values(
-                    token_id="tok-agg", row_id="row-agg", created_at=now
-                )
-            )
+            conn.execute(tokens_table.insert().values(token_id="tok-agg", row_id="row-agg", created_at=now))
             conn.commit()
 
         # Create checkpoint with aggregation state
         agg_state = {"buffer": [1, 2, 3], "count": 3}
-        checkpoint_manager.create_checkpoint(
-            run_id, "tok-agg", "node-agg", 5, aggregation_state=agg_state
-        )
+        checkpoint_manager.create_checkpoint(run_id, "tok-agg", "node-agg", 5, aggregation_state=agg_state)
 
         recovery_manager = RecoveryManager(landscape_db, checkpoint_manager)
         resume_point = recovery_manager.get_resume_point(run_id)
@@ -298,9 +268,7 @@ class TestGetUnprocessedRows:
         return CheckpointManager(landscape_db)
 
     @pytest.fixture
-    def recovery_manager(
-        self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager
-    ) -> RecoveryManager:
+    def recovery_manager(self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager) -> RecoveryManager:
         return RecoveryManager(landscape_db, checkpoint_manager)
 
     def _setup_run_with_rows(
@@ -369,9 +337,7 @@ class TestGetUnprocessedRows:
 
         if create_checkpoint:
             # Checkpoint at row index 2 (rows 0, 1, 2 are processed)
-            checkpoint_manager.create_checkpoint(
-                run_id, "tok-unproc-002", "node-unproc", 2
-            )
+            checkpoint_manager.create_checkpoint(run_id, "tok-unproc-002", "node-unproc", 2)
 
         return run_id
 
@@ -382,9 +348,7 @@ class TestGetUnprocessedRows:
         recovery_manager: RecoveryManager,
     ) -> None:
         """Returns rows with index > checkpoint.sequence_number."""
-        run_id = self._setup_run_with_rows(
-            landscape_db, checkpoint_manager, create_checkpoint=True
-        )
+        run_id = self._setup_run_with_rows(landscape_db, checkpoint_manager, create_checkpoint=True)
 
         unprocessed = recovery_manager.get_unprocessed_rows(run_id)
 
@@ -400,9 +364,7 @@ class TestGetUnprocessedRows:
         recovery_manager: RecoveryManager,
     ) -> None:
         """Returns empty list when there is no checkpoint for the run."""
-        run_id = self._setup_run_with_rows(
-            landscape_db, checkpoint_manager, create_checkpoint=False
-        )
+        run_id = self._setup_run_with_rows(landscape_db, checkpoint_manager, create_checkpoint=False)
 
         unprocessed = recovery_manager.get_unprocessed_rows(run_id)
 
@@ -415,9 +377,7 @@ class TestGetUnprocessedRows:
         recovery_manager: RecoveryManager,
     ) -> None:
         """Returns empty list when checkpoint is at or beyond all rows."""
-        run_id = self._setup_run_with_rows(
-            landscape_db, checkpoint_manager, create_checkpoint=False
-        )
+        run_id = self._setup_run_with_rows(landscape_db, checkpoint_manager, create_checkpoint=False)
 
         # Create checkpoint at sequence 4 (the last row)
         checkpoint_manager.create_checkpoint(run_id, "tok-unproc-004", "node-unproc", 4)
@@ -426,9 +386,7 @@ class TestGetUnprocessedRows:
 
         assert unprocessed == []
 
-    def test_handles_nonexistent_run_id_gracefully(
-        self, recovery_manager: RecoveryManager
-    ) -> None:
+    def test_handles_nonexistent_run_id_gracefully(self, recovery_manager: RecoveryManager) -> None:
         """Returns empty list for a run_id that does not exist."""
         unprocessed = recovery_manager.get_unprocessed_rows("nonexistent-run-id")
 
@@ -493,9 +451,7 @@ class TestGetUnprocessedRowsForkScenarios:
         return CheckpointManager(landscape_db)
 
     @pytest.fixture
-    def recovery_manager(
-        self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager
-    ) -> RecoveryManager:
+    def recovery_manager(self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager) -> RecoveryManager:
         return RecoveryManager(landscape_db, checkpoint_manager)
 
     def _setup_fork_scenario(
@@ -553,28 +509,14 @@ class TestGetUnprocessedRowsForkScenarios:
                     )
                 )
             # Row 0 forks to 3 tokens (simulating fork gate)
-            conn.execute(
-                tokens_table.insert().values(
-                    token_id="tok-0-a", row_id="row-000", created_at=now
-                )
-            )
-            conn.execute(
-                tokens_table.insert().values(
-                    token_id="tok-0-b", row_id="row-000", created_at=now
-                )
-            )
-            conn.execute(
-                tokens_table.insert().values(
-                    token_id="tok-0-c", row_id="row-000", created_at=now
-                )
-            )
+            conn.execute(tokens_table.insert().values(token_id="tok-0-a", row_id="row-000", created_at=now))
+            conn.execute(tokens_table.insert().values(token_id="tok-0-b", row_id="row-000", created_at=now))
+            conn.execute(tokens_table.insert().values(token_id="tok-0-c", row_id="row-000", created_at=now))
             conn.commit()
 
         # Checkpoint at token tok-0-c with sequence_number=3
         # (simulating 3 terminal token events from one source row)
-        checkpoint_manager.create_checkpoint(
-            run_id, "tok-0-c", "gate-fork", sequence_number=3
-        )
+        checkpoint_manager.create_checkpoint(run_id, "tok-0-c", "gate-fork", sequence_number=3)
 
         return run_id
 
@@ -592,9 +534,7 @@ class TestGetUnprocessedRowsForkScenarios:
         unprocessed = recovery_manager.get_unprocessed_rows(run_id)
 
         # All rows after row 0 should be unprocessed
-        assert (
-            len(unprocessed) == 4
-        ), f"Expected 4 unprocessed rows, got {len(unprocessed)}: {unprocessed}"
+        assert len(unprocessed) == 4, f"Expected 4 unprocessed rows, got {len(unprocessed)}: {unprocessed}"
         assert "row-001" in unprocessed
         assert "row-002" in unprocessed
         assert "row-003" in unprocessed
@@ -614,9 +554,7 @@ class TestGetUnprocessedRowsFailureScenarios:
         return CheckpointManager(landscape_db)
 
     @pytest.fixture
-    def recovery_manager(
-        self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager
-    ) -> RecoveryManager:
+    def recovery_manager(self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager) -> RecoveryManager:
         return RecoveryManager(landscape_db, checkpoint_manager)
 
     def _setup_failure_scenario(
@@ -684,9 +622,7 @@ class TestGetUnprocessedRowsFailureScenarios:
 
         # Checkpoint at row 1 (row 2 failed before it could checkpoint)
         # sequence_number=2 but we're at row_index=1
-        checkpoint_manager.create_checkpoint(
-            run_id, "tok-001", "transform-1", sequence_number=2
-        )
+        checkpoint_manager.create_checkpoint(run_id, "tok-001", "transform-1", sequence_number=2)
 
         return run_id
 
@@ -702,9 +638,7 @@ class TestGetUnprocessedRowsFailureScenarios:
         unprocessed = recovery_manager.get_unprocessed_rows(run_id)
 
         # Rows after row 1 (the checkpointed row) should be unprocessed
-        assert (
-            len(unprocessed) == 3
-        ), f"Expected 3 unprocessed rows, got {len(unprocessed)}: {unprocessed}"
+        assert len(unprocessed) == 3, f"Expected 3 unprocessed rows, got {len(unprocessed)}: {unprocessed}"
         assert "row-002" in unprocessed  # The failed row - must be retried
         assert "row-003" in unprocessed
         assert "row-004" in unprocessed

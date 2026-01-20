@@ -25,9 +25,7 @@ DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
 class TestValidationErrorPersistence:
     """Verify validation errors are persisted to landscape database."""
 
-    def test_validation_error_persisted_to_database(
-        self, landscape_db: LandscapeDB, recorder: LandscapeRecorder
-    ) -> None:
+    def test_validation_error_persisted_to_database(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
         """Validation error from source should be queryable in database."""
         # Arrange: Create a run
         run = recorder.begin_run(
@@ -55,9 +53,7 @@ class TestValidationErrorPersistence:
         # Assert: Error is in database
         with landscape_db.connection() as conn:
             result = conn.execute(
-                select(validation_errors_table).where(
-                    validation_errors_table.c.error_id == error_token.error_id
-                )
+                select(validation_errors_table).where(validation_errors_table.c.error_id == error_token.error_id)
             ).fetchone()
 
         assert result is not None
@@ -67,9 +63,7 @@ class TestValidationErrorPersistence:
         assert result.schema_mode == "strict"
         assert result.destination == "quarantine_sink"
 
-    def test_validation_error_with_discard_still_recorded(
-        self, landscape_db: LandscapeDB, recorder: LandscapeRecorder
-    ) -> None:
+    def test_validation_error_with_discard_still_recorded(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
         """Even 'discard' destination records error for audit completeness."""
         # Arrange: Create a run
         run = recorder.begin_run(
@@ -96,9 +90,7 @@ class TestValidationErrorPersistence:
         # Assert: Still recorded (audit completeness)
         with landscape_db.connection() as conn:
             result = conn.execute(
-                select(validation_errors_table).where(
-                    validation_errors_table.c.error_id == error_token.error_id
-                )
+                select(validation_errors_table).where(validation_errors_table.c.error_id == error_token.error_id)
             ).fetchone()
 
         assert result is not None
@@ -108,9 +100,7 @@ class TestValidationErrorPersistence:
 class TestTransformErrorPersistence:
     """Verify transform errors are persisted to landscape database."""
 
-    def test_transform_error_persisted_to_database(
-        self, landscape_db: LandscapeDB, recorder: LandscapeRecorder
-    ) -> None:
+    def test_transform_error_persisted_to_database(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
         """Transform error should be queryable in database."""
         # Arrange: Create a run
         run = recorder.begin_run(
@@ -139,9 +129,7 @@ class TestTransformErrorPersistence:
         # Assert: Error is in database
         with landscape_db.connection() as conn:
             result = conn.execute(
-                select(transform_errors_table).where(
-                    transform_errors_table.c.error_id == error_token.error_id
-                )
+                select(transform_errors_table).where(transform_errors_table.c.error_id == error_token.error_id)
             ).fetchone()
 
         assert result is not None
@@ -151,9 +139,7 @@ class TestTransformErrorPersistence:
         assert "division_by_zero" in result.error_details_json
         assert result.destination == "failed_calculations"
 
-    def test_transform_error_with_discard_still_recorded(
-        self, landscape_db: LandscapeDB, recorder: LandscapeRecorder
-    ) -> None:
+    def test_transform_error_with_discard_still_recorded(self, landscape_db: LandscapeDB, recorder: LandscapeRecorder) -> None:
         """Even 'discard' destination records TransformErrorEvent."""
         # Arrange: Create a run
         run = recorder.begin_run(
@@ -181,9 +167,7 @@ class TestTransformErrorPersistence:
         # Assert: Still recorded (audit completeness)
         with landscape_db.connection() as conn:
             result = conn.execute(
-                select(transform_errors_table).where(
-                    transform_errors_table.c.error_id == error_token.error_id
-                )
+                select(transform_errors_table).where(transform_errors_table.c.error_id == error_token.error_id)
             ).fetchone()
 
         assert result is not None
@@ -193,9 +177,7 @@ class TestTransformErrorPersistence:
 class TestErrorEventExplainQuery:
     """Verify explain() includes error events in lineage."""
 
-    def test_explain_includes_validation_errors(
-        self, recorder: LandscapeRecorder
-    ) -> None:
+    def test_explain_includes_validation_errors(self, recorder: LandscapeRecorder) -> None:
         """explain() should return validation errors for queried row."""
         # Arrange: Create run and source node
         run = recorder.begin_run(
@@ -253,9 +235,7 @@ class TestErrorEventExplainQuery:
         assert lineage.validation_errors[0].error_id == error_token.error_id
         assert "Expected int" in lineage.validation_errors[0].error
 
-    def test_explain_includes_transform_errors(
-        self, recorder: LandscapeRecorder
-    ) -> None:
+    def test_explain_includes_transform_errors(self, recorder: LandscapeRecorder) -> None:
         """explain() should return transform errors for queried token."""
         # Arrange: Create run, source node, and transform node
         run = recorder.begin_run(
@@ -323,9 +303,7 @@ class TestErrorEventExplainQuery:
         assert lineage.transform_errors[0].error_id == error_token.error_id
         assert lineage.transform_errors[0].token_id == token.token_id
 
-    def test_explain_returns_empty_lists_when_no_errors(
-        self, recorder: LandscapeRecorder
-    ) -> None:
+    def test_explain_returns_empty_lists_when_no_errors(self, recorder: LandscapeRecorder) -> None:
         """explain() should return empty error lists for clean rows."""
         # Arrange: Create run, node, row, token (no errors)
         run = recorder.begin_run(
@@ -364,9 +342,7 @@ class TestErrorEventExplainQuery:
         assert lineage.validation_errors == []
         assert lineage.transform_errors == []
 
-    def test_explain_multiple_errors_for_same_token(
-        self, recorder: LandscapeRecorder
-    ) -> None:
+    def test_explain_multiple_errors_for_same_token(self, recorder: LandscapeRecorder) -> None:
         """explain() should return multiple transform errors for same token."""
         # Arrange: Create run with multiple transforms
         run = recorder.begin_run(

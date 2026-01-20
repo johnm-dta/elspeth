@@ -68,9 +68,7 @@ class TestLLMTransformIntegration:
         return LandscapeRecorder(db)
 
     @pytest.fixture
-    def setup_state(
-        self, recorder: LandscapeRecorder
-    ) -> tuple[str, str, str, str, str]:
+    def setup_state(self, recorder: LandscapeRecorder) -> tuple[str, str, str, str, str]:
         """Create run, node, row, token, and state for testing.
 
         Returns:
@@ -165,9 +163,7 @@ class TestLLMTransformIntegration:
         assert calls[0].latency_ms is not None
         assert calls[0].latency_ms > 0
 
-    def test_audit_trail_records_template_hashes(
-        self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]
-    ) -> None:
+    def test_audit_trail_records_template_hashes(self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]) -> None:
         """Verify template_hash and variables_hash are in output."""
         run_id, _node_id, _row_id, _token_id, state_id = setup_state
 
@@ -214,9 +210,7 @@ class TestLLMTransformIntegration:
         assert isinstance(result.row["llm_response_variables_hash"], str)
         assert len(result.row["llm_response_variables_hash"]) == 64  # SHA-256 hex
 
-    def test_api_error_recorded_in_audit_trail(
-        self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]
-    ) -> None:
+    def test_api_error_recorded_in_audit_trail(self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]) -> None:
         """Verify API errors are recorded in audit trail."""
         run_id, _node_id, _row_id, _token_id, state_id = setup_state
 
@@ -256,17 +250,13 @@ class TestLLMTransformIntegration:
         assert calls[0].error_json is not None
         assert "API server error" in calls[0].error_json
 
-    def test_rate_limit_error_is_retryable(
-        self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]
-    ) -> None:
+    def test_rate_limit_error_is_retryable(self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]) -> None:
         """Verify rate limit errors are marked retryable."""
         run_id, _node_id, _row_id, _token_id, state_id = setup_state
 
         # Mock client that raises rate limit error
         mock_client = MagicMock()
-        mock_client.chat.completions.create.side_effect = Exception(
-            "Error 429: Rate limit exceeded"
-        )
+        mock_client.chat.completions.create.side_effect = Exception("Error 429: Rate limit exceeded")
 
         audited_client = AuditedLLMClient(
             recorder=recorder,
@@ -298,9 +288,7 @@ class TestLLMTransformIntegration:
         assert len(calls) == 1
         assert calls[0].status == CallStatus.ERROR
 
-    def test_system_prompt_included_when_configured(
-        self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]
-    ) -> None:
+    def test_system_prompt_included_when_configured(self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]) -> None:
         """Verify system prompt is included in API call."""
         run_id, _node_id, _row_id, _token_id, state_id = setup_state
 
@@ -386,9 +374,7 @@ class TestOpenRouterLLMTransformIntegration:
         )
         return run.run_id, state.state_id
 
-    def test_http_client_call_and_response_parsing(
-        self, recorder: LandscapeRecorder, setup_state: tuple[str, str]
-    ) -> None:
+    def test_http_client_call_and_response_parsing(self, recorder: LandscapeRecorder, setup_state: tuple[str, str]) -> None:
         """Verify OpenRouter uses HTTP client and parses response."""
         from unittest.mock import patch
 
@@ -427,9 +413,7 @@ class TestOpenRouterLLMTransformIntegration:
         with patch("httpx.Client") as mock_client_class:
             mock_client = MagicMock()
             mock_client.post.return_value = mock_response
-            mock_client_class.return_value.__enter__ = MagicMock(
-                return_value=mock_client
-            )
+            mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_client)
             mock_client_class.return_value.__exit__ = MagicMock(return_value=None)
 
             result = transform.process({"text": "Hello world"}, ctx)
@@ -441,9 +425,7 @@ class TestOpenRouterLLMTransformIntegration:
         assert result.row["llm_response_usage"]["prompt_tokens"] == 15
         assert result.row["llm_response_model"] == "anthropic/claude-3-opus"
 
-    def test_http_error_returns_transform_error(
-        self, recorder: LandscapeRecorder, setup_state: tuple[str, str]
-    ) -> None:
+    def test_http_error_returns_transform_error(self, recorder: LandscapeRecorder, setup_state: tuple[str, str]) -> None:
         """Verify HTTP errors are handled gracefully."""
         from unittest.mock import patch
 
@@ -472,9 +454,7 @@ class TestOpenRouterLLMTransformIntegration:
                 request=MagicMock(),
                 response=MagicMock(status_code=500),
             )
-            mock_client_class.return_value.__enter__ = MagicMock(
-                return_value=mock_client
-            )
+            mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_client)
             mock_client_class.return_value.__exit__ = MagicMock(return_value=None)
 
             result = transform.process({"text": "test"}, ctx)
@@ -485,9 +465,7 @@ class TestOpenRouterLLMTransformIntegration:
         assert result.reason["reason"] == "api_call_failed"
         assert result.retryable is False  # 500 is not rate limit
 
-    def test_rate_limit_http_error_is_retryable(
-        self, recorder: LandscapeRecorder, setup_state: tuple[str, str]
-    ) -> None:
+    def test_rate_limit_http_error_is_retryable(self, recorder: LandscapeRecorder, setup_state: tuple[str, str]) -> None:
         """Verify 429 HTTP errors are marked retryable."""
         from unittest.mock import patch
 
@@ -516,9 +494,7 @@ class TestOpenRouterLLMTransformIntegration:
                 request=MagicMock(),
                 response=MagicMock(status_code=429),
             )
-            mock_client_class.return_value.__enter__ = MagicMock(
-                return_value=mock_client
-            )
+            mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_client)
             mock_client_class.return_value.__exit__ = MagicMock(return_value=None)
 
             result = transform.process({"text": "test"}, ctx)
@@ -553,9 +529,7 @@ class TestAzureBatchLLMTransformIntegration:
             }
         )
 
-    def test_batch_submit_and_checkpoint_flow(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_batch_submit_and_checkpoint_flow(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Verify batch submission creates checkpoint with batch_id."""
         # Mock Azure client
         mock_client = Mock()
@@ -592,9 +566,7 @@ class TestAzureBatchLLMTransformIntegration:
         assert len(checkpoint["row_mapping"]) == 3
         assert "submitted_at" in checkpoint
 
-    def test_batch_resume_and_completion_flow(
-        self, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_batch_resume_and_completion_flow(self, transform: AzureBatchLLMTransform) -> None:
         """Verify batch resume downloads results and maps to correct rows."""
         from datetime import UTC, datetime
 
@@ -690,9 +662,7 @@ class TestAzureBatchLLMTransformIntegration:
         # Checkpoint should be cleared
         assert ctx._checkpoint == {}  # type: ignore[attr-defined]
 
-    def test_batch_partial_template_failures(
-        self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_batch_partial_template_failures(self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform) -> None:
         """Verify partial template failures are tracked and results assembled."""
 
         # Mock Azure client for submission
@@ -726,9 +696,7 @@ class TestAzureBatchLLMTransformIntegration:
         # row_mapping should only have valid rows
         assert len(checkpoint["row_mapping"]) == 2
 
-    def test_batch_api_error_per_row_handled(
-        self, transform: AzureBatchLLMTransform
-    ) -> None:
+    def test_batch_api_error_per_row_handled(self, transform: AzureBatchLLMTransform) -> None:
         """Verify per-row API errors are included in results."""
         from datetime import UTC, datetime
 
@@ -836,9 +804,7 @@ class TestAuditedLLMClientIntegration:
         )
         return state.state_id
 
-    def test_successful_call_recorded_with_all_fields(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_successful_call_recorded_with_all_fields(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Verify successful call records request, response, and latency."""
         mock_client = MagicMock()
         mock_response = MagicMock()
@@ -880,9 +846,7 @@ class TestAuditedLLMClientIntegration:
         assert call.latency_ms > 0
         assert call.error_json is None
 
-    def test_multiple_calls_indexed_correctly(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_multiple_calls_indexed_correctly(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Verify multiple calls have sequential indices."""
         mock_client = MagicMock()
         mock_response = MagicMock()
@@ -902,15 +866,9 @@ class TestAuditedLLMClientIntegration:
         )
 
         # Make 3 calls
-        audited_client.chat_completion(
-            model="gpt-4", messages=[{"role": "user", "content": "First"}]
-        )
-        audited_client.chat_completion(
-            model="gpt-4", messages=[{"role": "user", "content": "Second"}]
-        )
-        audited_client.chat_completion(
-            model="gpt-4", messages=[{"role": "user", "content": "Third"}]
-        )
+        audited_client.chat_completion(model="gpt-4", messages=[{"role": "user", "content": "First"}])
+        audited_client.chat_completion(model="gpt-4", messages=[{"role": "user", "content": "Second"}])
+        audited_client.chat_completion(model="gpt-4", messages=[{"role": "user", "content": "Third"}])
 
         # Verify indices
         calls = recorder.get_calls(state_id)
@@ -919,9 +877,7 @@ class TestAuditedLLMClientIntegration:
         assert calls[1].call_index == 1
         assert calls[2].call_index == 2
 
-    def test_error_call_recorded_with_error_details(
-        self, recorder: LandscapeRecorder, state_id: str
-    ) -> None:
+    def test_error_call_recorded_with_error_details(self, recorder: LandscapeRecorder, state_id: str) -> None:
         """Verify failed calls record error details."""
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = Exception("API down")
@@ -933,9 +889,7 @@ class TestAuditedLLMClientIntegration:
         )
 
         with pytest.raises(LLMClientError) as exc_info:
-            audited_client.chat_completion(
-                model="gpt-4", messages=[{"role": "user", "content": "Test"}]
-            )
+            audited_client.chat_completion(model="gpt-4", messages=[{"role": "user", "content": "Test"}])
 
         assert "API down" in str(exc_info.value)
 

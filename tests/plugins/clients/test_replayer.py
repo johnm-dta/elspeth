@@ -307,9 +307,7 @@ class TestCallReplayer:
         request_data = {"data": "same"}
 
         # Set up mock to return different responses based on call_type
-        def find_call_side_effect(
-            run_id: str, call_type: str, request_hash: str
-        ) -> Call:
+        def find_call_side_effect(run_id: str, call_type: str, request_hash: str) -> Call:
             if call_type == "llm":
                 return Call(
                     call_id="call_llm",

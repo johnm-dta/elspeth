@@ -50,16 +50,12 @@ class TestOrchestratorResumeRowProcessing:
         return CheckpointManager(landscape_db)
 
     @pytest.fixture
-    def recovery_manager(
-        self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager
-    ) -> RecoveryManager:
+    def recovery_manager(self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager) -> RecoveryManager:
         """Create recovery manager."""
         return RecoveryManager(landscape_db, checkpoint_manager)
 
     @pytest.fixture
-    def orchestrator(
-        self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager
-    ) -> Orchestrator:
+    def orchestrator(self, landscape_db: LandscapeDB, checkpoint_manager: CheckpointManager) -> Orchestrator:
         """Create orchestrator with checkpoint manager."""
         return Orchestrator(
             db=landscape_db,

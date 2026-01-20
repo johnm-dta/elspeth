@@ -599,20 +599,14 @@ class TestCoalesceAuditTrail:
 
         with db.connection() as conn:
             # Find coalesce node
-            nodes_result = conn.execute(
-                nodes_table.select().where(nodes_table.c.node_type == "coalesce")
-            ).fetchall()
+            nodes_result = conn.execute(nodes_table.select().where(nodes_table.c.node_type == "coalesce")).fetchall()
 
             assert len(nodes_result) == 1
             coalesce_node = nodes_result[0]
             assert "merge_results" in coalesce_node.plugin_name
 
             # Find node states for coalesce
-            states_result = conn.execute(
-                node_states_table.select().where(
-                    node_states_table.c.node_id == coalesce_node.node_id
-                )
-            ).fetchall()
+            states_result = conn.execute(node_states_table.select().where(node_states_table.c.node_id == coalesce_node.node_id)).fetchall()
 
             # Should have 2 node states (one for each consumed token from path_a and path_b)
             assert len(states_result) == 2

@@ -307,9 +307,7 @@ class TestFindExpiredRowPayloads:
         completed_at = datetime.now(UTC) - timedelta(days=45)
 
         with db.connection() as conn:
-            _create_run(
-                conn, runs_table, run_id, completed_at=completed_at, status="completed"
-            )
+            _create_run(conn, runs_table, run_id, completed_at=completed_at, status="completed")
             _create_node(conn, nodes_table, node_id, run_id)
             _create_row(
                 conn,
@@ -454,11 +452,7 @@ class TestPurgePayloads:
         with db.connection() as conn:
             from sqlalchemy import select
 
-            result = conn.execute(
-                select(rows_table.c.source_data_hash).where(
-                    rows_table.c.row_id == row_id
-                )
-            )
+            result = conn.execute(select(rows_table.c.source_data_hash).where(rows_table.c.row_id == row_id))
             saved_hash = result.scalar()
             assert saved_hash == "original_hash_kept"
 

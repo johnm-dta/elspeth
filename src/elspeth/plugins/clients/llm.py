@@ -42,9 +42,7 @@ class LLMResponse:
     @property
     def total_tokens(self) -> int:
         """Total tokens used (prompt + completion)."""
-        return self.usage.get("prompt_tokens", 0) + self.usage.get(
-            "completion_tokens", 0
-        )
+        return self.usage.get("prompt_tokens", 0) + self.usage.get("completion_tokens", 0)
 
 
 class LLMClientError(Exception):
@@ -199,9 +197,7 @@ class AuditedLLMClient(AuditedClientBase):
                 model=response.model,
                 usage=usage,
                 latency_ms=latency_ms,
-                raw_response=response.model_dump()
-                if hasattr(response, "model_dump")
-                else None,
+                raw_response=response.model_dump() if hasattr(response, "model_dump") else None,
             )
 
         except Exception as e:

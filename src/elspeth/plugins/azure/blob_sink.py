@@ -264,9 +264,7 @@ class AzureBlobSink(BaseSink):
         if self._container_client is None:
             # Use shared auth config to create the service client
             service_client = self._auth_config.create_blob_service_client()
-            self._container_client = service_client.get_container_client(
-                self._container
-            )
+            self._container_client = service_client.get_container_client(self._container)
 
         return self._container_client
 
@@ -344,9 +342,7 @@ class AzureBlobSink(BaseSink):
         lines = [json.dumps(row) for row in rows]
         return "\n".join(lines).encode("utf-8")
 
-    def write(
-        self, rows: list[dict[str, Any]], ctx: PluginContext
-    ) -> ArtifactDescriptor:
+    def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
         """Write a batch of rows to Azure Blob Storage.
 
         Args:
@@ -388,9 +384,7 @@ class AzureBlobSink(BaseSink):
 
             # Check overwrite policy
             if not self._overwrite and blob_client.exists():
-                raise ValueError(
-                    f"Blob '{rendered_path}' already exists and overwrite=False"
-                )
+                raise ValueError(f"Blob '{rendered_path}' already exists and overwrite=False")
 
             # Upload the content
             blob_client.upload_blob(content, overwrite=self._overwrite)
@@ -403,10 +397,7 @@ class AzureBlobSink(BaseSink):
             raise
         except Exception as e:
             # Azure SDK errors are external system errors - propagate with context
-            raise type(e)(
-                f"Failed to upload blob '{rendered_path}' to container "
-                f"'{self._container}': {e}"
-            ) from e
+            raise type(e)(f"Failed to upload blob '{rendered_path}' to container '{self._container}': {e}") from e
 
         return ArtifactDescriptor(
             artifact_type="file",

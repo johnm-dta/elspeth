@@ -87,9 +87,7 @@ class JSONSink(BaseSink):
         self._file: IO[str] | None = None
         self._rows: list[dict[str, Any]] = []  # Buffer for json array format
 
-    def write(
-        self, rows: list[dict[str, Any]], ctx: PluginContext
-    ) -> ArtifactDescriptor:
+    def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
         """Write a batch of rows to the JSON file.
 
         Args:

@@ -43,27 +43,17 @@ class LLMConfig(TransformDataConfig):
     - response_field: Field name for LLM response in output
     """
 
-    model: str = Field(
-        ..., description="Model identifier (e.g., 'gpt-4', 'claude-3-opus')"
-    )
+    model: str = Field(..., description="Model identifier (e.g., 'gpt-4', 'claude-3-opus')")
     template: str = Field(..., description="Jinja2 prompt template")
     system_prompt: str | None = Field(None, description="Optional system prompt")
     temperature: float = Field(0.0, ge=0.0, le=2.0, description="Sampling temperature")
     max_tokens: int | None = Field(None, gt=0, description="Maximum tokens in response")
-    response_field: str = Field(
-        "llm_response", description="Field name for LLM response in output"
-    )
+    response_field: str = Field("llm_response", description="Field name for LLM response in output")
 
     # New fields for file-based templates
-    lookup: dict[str, Any] | None = Field(
-        None, description="Lookup data loaded from YAML file"
-    )
-    template_source: str | None = Field(
-        None, description="Template file path for audit (None if inline)"
-    )
-    lookup_source: str | None = Field(
-        None, description="Lookup file path for audit (None if no lookup)"
-    )
+    lookup: dict[str, Any] | None = Field(None, description="Lookup data loaded from YAML file")
+    template_source: str | None = Field(None, description="Template file path for audit (None if inline)")
+    lookup_source: str | None = Field(None, description="Lookup file path for audit (None if no lookup)")
 
     @field_validator("template")
     @classmethod

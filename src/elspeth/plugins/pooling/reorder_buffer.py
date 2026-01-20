@@ -11,13 +11,10 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from threading import Lock
-from typing import Generic, TypeVar
-
-T = TypeVar("T")
 
 
 @dataclass
-class BufferEntry(Generic[T]):
+class BufferEntry[T]:
     """Entry emitted from the reorder buffer with timing metadata.
 
     Attributes:
@@ -38,7 +35,7 @@ class BufferEntry(Generic[T]):
 
 
 @dataclass
-class _InternalEntry(Generic[T]):
+class _InternalEntry[T]:
     """Internal entry in the reorder buffer."""
 
     submit_index: int
@@ -49,7 +46,7 @@ class _InternalEntry(Generic[T]):
     is_complete: bool = False
 
 
-class ReorderBuffer(Generic[T]):
+class ReorderBuffer[T]:
     """Thread-safe buffer that reorders results to match submission order.
 
     Captures timing metadata for each entry to support audit trail

@@ -319,3 +319,62 @@ class TestRecordTokenOutcome:
                 outcome=RowOutcome.ROUTED,
                 sink_name="errors",
             )
+
+
+class TestGetTokenOutcome:
+    """Test get_token_outcome() method."""
+
+    @pytest.fixture
+    def db(self):
+        from elspeth.core.landscape import LandscapeDB
+
+        return LandscapeDB.in_memory()
+
+    @pytest.fixture
+    def recorder(self, db):
+        from elspeth.core.landscape import LandscapeRecorder
+
+        return LandscapeRecorder(db)
+
+    @pytest.fixture
+    def run_with_outcome(self, recorder):
+        """Create run, token, and outcome for testing."""
+        from elspeth.contracts import Determinism, NodeType, RowOutcome
+        from elspeth.contracts.schema import SchemaConfig
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="src",
+            plugin_name="test",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=SchemaConfig.from_dict({"fields": "dynamic"}),
+        )
+        row = recorder.create_row(run.run_id, "src", 0, {"x": 1})
+        token = recorder.create_token(row.row_id)
+        outcome_id = recorder.record_token_outcome(run.run_id, token.token_id, RowOutcome.COMPLETED, sink_name="out")
+        return run, token, outcome_id
+
+    def test_get_token_outcome_returns_dataclass(self, recorder, run_with_outcome) -> None:
+        from elspeth.contracts import TokenOutcome
+
+        _run, token, _ = run_with_outcome
+        result = recorder.get_token_outcome(token.token_id)
+
+        assert isinstance(result, TokenOutcome)
+        assert result.token_id == token.token_id
+        assert result.outcome.value == "completed"
+
+    def test_get_token_outcome_returns_terminal_over_buffered(self, recorder, run_with_outcome) -> None:
+        """Should return terminal outcome, not BUFFERED."""
+        _run, token, _ = run_with_outcome
+        # The fixture already recorded COMPLETED (terminal)
+        result = recorder.get_token_outcome(token.token_id)
+        assert result.is_terminal is True
+
+    def test_get_nonexistent_returns_none(self, recorder, db) -> None:
+        result = recorder.get_token_outcome("nonexistent_token")
+        assert result is None

@@ -44,6 +44,7 @@ from elspeth.contracts import (
     Run,
     RunStatus,
     Token,
+    TokenOutcome,
     TokenParent,
     TransformErrorRecord,
     ValidationErrorRecord,
@@ -2163,6 +2164,51 @@ class LandscapeRecorder:
             )
 
         return outcome_id
+
+    def get_token_outcome(self, token_id: str) -> TokenOutcome | None:
+        """Get the terminal outcome for a token.
+
+        Returns the terminal outcome if one exists, otherwise the most
+        recent non-terminal outcome (BUFFERED).
+
+        Args:
+            token_id: Token to look up
+
+        Returns:
+            TokenOutcome dataclass or None if no outcome recorded
+        """
+        with self._db.connection() as conn:
+            # Get most recent outcome (terminal preferred)
+            result = conn.execute(
+                select(token_outcomes_table)
+                .where(token_outcomes_table.c.token_id == token_id)
+                .order_by(
+                    token_outcomes_table.c.is_terminal.desc(),  # Terminal first
+                    token_outcomes_table.c.recorded_at.desc(),  # Then by time
+                )
+                .limit(1)
+            ).fetchone()
+
+            if result is None:
+                return None
+
+            # Tier 1 Trust Model: This is OUR data. Trust DB values directly.
+            # If is_terminal is not 0 or 1, that's an audit integrity violation.
+            return TokenOutcome(
+                outcome_id=result.outcome_id,
+                run_id=result.run_id,
+                token_id=result.token_id,
+                outcome=RowOutcome(result.outcome),
+                is_terminal=result.is_terminal == 1,  # DB stores as Integer
+                recorded_at=result.recorded_at,
+                sink_name=result.sink_name,
+                batch_id=result.batch_id,
+                fork_group_id=result.fork_group_id,
+                join_group_id=result.join_group_id,
+                expand_group_id=result.expand_group_id,
+                error_hash=result.error_hash,
+                context_json=result.context_json,
+            )
 
     # === Validation Error Recording (WP-11.99) ===
 

@@ -97,6 +97,42 @@ class PluginContext:
     llm_client: "AuditedLLMClient | None" = None
     http_client: "AuditedHTTPClient | None" = None
 
+    # === Phase 6: Checkpoint API ===
+    # Used by batch transforms (e.g., azure_batch_llm) for crash recovery.
+    # The checkpoint stores batch_id, row_mapping, etc. between invocations.
+    # In production, the engine persists this to durable storage.
+    _checkpoint: dict[str, Any] = field(default_factory=dict)
+
+    def get_checkpoint(self) -> dict[str, Any] | None:
+        """Get checkpoint state for batch transforms.
+
+        Used by batch transforms to recover state after crashes.
+        Returns None if no checkpoint exists (empty dict = no checkpoint).
+
+        Returns:
+            Checkpoint dict with batch state, or None if empty
+        """
+        return self._checkpoint if self._checkpoint else None
+
+    def update_checkpoint(self, data: dict[str, Any]) -> None:
+        """Update checkpoint state with new data.
+
+        Merges the provided data into the existing checkpoint.
+        Used by batch transforms to save progress after submission.
+
+        Args:
+            data: Checkpoint data to merge (batch_id, row_mapping, etc.)
+        """
+        self._checkpoint.update(data)
+
+    def clear_checkpoint(self) -> None:
+        """Clear checkpoint state after batch completion.
+
+        Called when batch processing completes successfully
+        or when starting fresh after a failure.
+        """
+        self._checkpoint.clear()
+
     def get(self, key: str, *, default: Any = None) -> Any:
         """Get a config value by dotted path.
 

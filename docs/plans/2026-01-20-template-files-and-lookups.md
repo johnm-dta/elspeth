@@ -13,7 +13,7 @@
 ## Task 1: Update RenderedPrompt Dataclass
 
 **Files:**
-- Modify: `src/elspeth/plugins/llm/templates.py:21-29`
+- Modify: `src/elspeth/plugins/llm/templates.py:21-28`
 - Test: `tests/plugins/llm/test_templates.py`
 
 **Step 1: Write the failing test**
@@ -79,7 +79,7 @@ git commit -m "feat(templates): add source metadata fields to RenderedPrompt"
 ## Task 2: Update PromptTemplate Constructor
 
 **Files:**
-- Modify: `src/elspeth/plugins/llm/templates.py:61-82`
+- Modify: `src/elspeth/plugins/llm/templates.py:61-83`
 - Test: `tests/plugins/llm/test_templates.py`
 
 **Step 1: Update PromptTemplate.__init__ to accept new parameters**
@@ -109,10 +109,12 @@ def __init__(
     self._template_source = template_source
 
     # Lookup data for two-dimensional lookups
-    self._lookup_data = lookup_data or {}
+    # Note: We distinguish None (no lookup configured) from {} (empty lookup).
+    # Both are valid, but they're semantically different for audit purposes.
+    self._lookup_data = lookup_data if lookup_data is not None else {}
     self._lookup_source = lookup_source
     self._lookup_hash = (
-        _sha256(canonical_json(lookup_data)) if lookup_data else None
+        _sha256(canonical_json(lookup_data)) if lookup_data is not None else None
     )
 
     # Use sandboxed environment for security
@@ -166,20 +168,21 @@ git commit -m "feat(templates): add lookup and source params to PromptTemplate"
 ## Task 3: Update render_with_metadata Method
 
 **Files:**
-- Modify: `src/elspeth/plugins/llm/templates.py:110-133`
+- Modify: `src/elspeth/plugins/llm/templates.py:89-133`
 - Test: `tests/plugins/llm/test_templates.py`
 
 **Step 1: Update render method to use row namespace**
 
-Replace the existing `render` method:
+Replace the existing `render` method. **Note:** Per CLAUDE.md's "No Legacy Code Policy", we do NOT
+add backward compatibility shims. The `**variables` signature is removed entirely and all call
+sites are updated in Tasks 4 and 9.
 
 ```python
-def render(self, row: dict[str, Any] | None = None, **variables: Any) -> str:
-    """Render template with variables.
+def render(self, row: dict[str, Any]) -> str:
+    """Render template with row data.
 
     Args:
         row: Row data (accessed as row.* in template)
-        **variables: Additional template variables (for backward compat)
 
     Returns:
         Rendered prompt string
@@ -188,12 +191,10 @@ def render(self, row: dict[str, Any] | None = None, **variables: Any) -> str:
         TemplateError: If rendering fails (undefined variable, sandbox violation, etc.)
     """
     # Build context with namespaced data
-    context: dict[str, Any] = {}
-    if row is not None:
-        context["row"] = row
-    context["lookup"] = self._lookup_data
-    # Merge any extra variables for backward compatibility
-    context.update(variables)
+    context: dict[str, Any] = {
+        "row": row,
+        "lookup": self._lookup_data,
+    }
 
     try:
         return self._template.render(**context)
@@ -255,6 +256,11 @@ git commit -m "feat(templates): update render methods to use row/lookup namespac
 
 **Files:**
 - Modify: `tests/plugins/llm/test_templates.py`
+- Modify: `tests/plugins/llm/test_base.py`
+- Modify: `tests/plugins/llm/test_azure.py`
+- Modify: `tests/plugins/llm/test_openrouter.py`
+- Modify: `tests/plugins/llm/test_azure_batch.py`
+- Modify: `tests/integration/test_llm_transforms.py`
 
 **Step 1: Run existing tests to see failures**
 
@@ -262,7 +268,7 @@ Run: `pytest tests/plugins/llm/test_templates.py -v`
 
 Expected: Some tests fail because they use old `{{ name }}` syntax instead of `{{ row.name }}`
 
-**Step 2: Update tests to use new namespace**
+**Step 2: Update test_templates.py to use new namespace**
 
 Update `test_simple_variable_substitution`:
 
@@ -331,17 +337,67 @@ def test_undefined_variable_raises_error(self) -> None:
         template.render({})  # No 'name' in row
 ```
 
-**Step 3: Run all template tests**
+**Step 3: Update test_base.py template syntax**
 
-Run: `pytest tests/plugins/llm/test_templates.py -v`
+Find and replace `{{ text }}` with `{{ row.text }}` in test config fixtures:
+
+```python
+# In test fixtures, update template strings from:
+"template": "Analyze: {{ text }}"
+# To:
+"template": "Analyze: {{ row.text }}"
+```
+
+**Step 4: Update test_azure.py template syntax**
+
+Same pattern - update `{{ text }}` to `{{ row.text }}` in all test fixtures.
+
+**Step 5: Update test_openrouter.py template syntax**
+
+Same pattern - update `{{ text }}` to `{{ row.text }}` in all test fixtures.
+
+**Step 6: Update test_azure_batch.py template syntax**
+
+Same pattern - update `{{ text }}` to `{{ row.text }}` in all test fixtures.
+
+**Step 7: Update tests/integration/test_llm_transforms.py template syntax**
+
+This file contains many templates using old syntax. Update all occurrences:
+
+```python
+# Update templates from:
+"template": "Say hello to {{ name }}!"
+"template": "Analyze: {{ text }}"
+"template": "{{ text }}"
+
+# To:
+"template": "Say hello to {{ row.name }}!"
+"template": "Analyze: {{ row.text }}"
+"template": "{{ row.text }}"
+```
+
+Key locations to update (lines are approximate):
+- Line 138: `"Say hello to {{ name }}!"` → `"Say hello to {{ row.name }}!"`
+- Line 197: `"Analyze: {{ text }}"` → `"Analyze: {{ row.text }}"`
+- Lines 239, 284, 331, 403, 457, 501, 554: `"{{ text }}"` → `"{{ row.text }}"`
+
+**Step 8: Run all LLM plugin tests**
+
+Run: `pytest tests/plugins/llm/ -v`
 
 Expected: All PASS
 
-**Step 4: Commit**
+**Step 9: Run integration tests**
+
+Run: `pytest tests/integration/test_llm_transforms.py -v`
+
+Expected: All PASS
+
+**Step 10: Commit**
 
 ```bash
-git add tests/plugins/llm/test_templates.py
-git commit -m "test(templates): update tests for row/lookup namespace"
+git add tests/plugins/llm/ tests/integration/
+git commit -m "test(llm): update all tests for row/lookup namespace"
 ```
 
 ---
@@ -469,11 +525,23 @@ def test_no_lookup_has_none_hash(self) -> None:
     template = PromptTemplate("Hello, {{ row.name }}!")
     assert template.lookup_hash is None
     assert template.lookup_source is None
+
+
+def test_empty_lookup_has_hash(self) -> None:
+    """Template with empty lookup_data={} still gets a hash.
+
+    We distinguish None (no lookup configured) from {} (empty lookup).
+    An empty lookup is still a valid configuration that should be auditable.
+    Per CLAUDE.md: "No inference - if it's not recorded, it didn't happen."
+    """
+    template = PromptTemplate("Hello, {{ row.name }}!", lookup_data={})
+    assert template.lookup_hash is not None  # Empty dict still gets hashed
+    assert template.lookup_source is None  # No source file specified
 ```
 
 **Step 3: Run tests**
 
-Run: `pytest tests/plugins/llm/test_templates.py -v -k "lookup_hash or no_lookup"`
+Run: `pytest tests/plugins/llm/test_templates.py -v -k "lookup_hash or no_lookup or empty_lookup_has"`
 
 Expected: All PASS
 
@@ -489,18 +557,16 @@ git commit -m "test(templates): add lookup hash tests"
 ## Task 7: Update LLMConfig with New Fields
 
 **Files:**
-- Modify: `src/elspeth/plugins/llm/base.py:26-64`
-- Test: `tests/plugins/llm/test_openrouter.py` (or new test file)
+- Modify: `src/elspeth/plugins/llm/base.py:30-68`
+- Test: `tests/plugins/llm/test_base.py`
 
 **Step 1: Write failing test for LLMConfig with lookup**
 
-Create or update test:
+Add to `tests/plugins/llm/test_base.py` in the `TestLLMConfig` class:
 
 ```python
 def test_llm_config_accepts_lookup_fields(self) -> None:
     """LLMConfig accepts lookup and source metadata fields."""
-    from elspeth.plugins.llm.base import LLMConfig
-
     config = LLMConfig.from_dict({
         "model": "test-model",
         "template": "Hello, {{ row.name }}!",
@@ -517,7 +583,7 @@ def test_llm_config_accepts_lookup_fields(self) -> None:
 
 **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/plugins/llm/test_openrouter.py::test_llm_config_accepts_lookup_fields -v`
+Run: `pytest tests/plugins/llm/test_base.py::TestLLMConfig::test_llm_config_accepts_lookup_fields -v`
 
 Expected: FAIL (fields don't exist)
 
@@ -566,14 +632,14 @@ class LLMConfig(TransformDataConfig):
 
 **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/plugins/llm/test_openrouter.py::test_llm_config_accepts_lookup_fields -v`
+Run: `pytest tests/plugins/llm/test_base.py::TestLLMConfig::test_llm_config_accepts_lookup_fields -v`
 
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
-git add src/elspeth/plugins/llm/base.py tests/plugins/llm/test_openrouter.py
+git add src/elspeth/plugins/llm/base.py tests/plugins/llm/test_base.py
 git commit -m "feat(llm): add lookup and source fields to LLMConfig"
 ```
 
@@ -582,7 +648,7 @@ git commit -m "feat(llm): add lookup and source fields to LLMConfig"
 ## Task 8: Update BaseLLMTransform to Use New Fields
 
 **Files:**
-- Modify: `src/elspeth/plugins/llm/base.py:90-112`
+- Modify: `src/elspeth/plugins/llm/base.py:109-130`
 
 **Step 1: Update __init__ to pass new params to PromptTemplate**
 
@@ -633,11 +699,11 @@ git commit -m "feat(llm): pass lookup data to PromptTemplate in BaseLLMTransform
 ## Task 9: Update BaseLLMTransform.process() for New Render Signature
 
 **Files:**
-- Modify: `src/elspeth/plugins/llm/base.py:116-185`
+- Modify: `src/elspeth/plugins/llm/base.py:154-222`
 
 **Step 1: Update process() to use new render signature**
 
-Change line 134 from:
+Change line 172 from:
 ```python
 rendered = self._template.render_with_metadata(**row)
 ```
@@ -649,7 +715,7 @@ rendered = self._template.render_with_metadata(row)
 
 **Step 2: Update audit metadata output**
 
-Update lines 181-183 to include new fields:
+Update lines 218-220 to include new fields:
 
 ```python
 # Add audit metadata for template traceability
@@ -662,7 +728,7 @@ output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
 
 **Step 3: Update error result to include template_source**
 
-Update the error block around line 136-142:
+Update the error block around lines 173-180:
 
 ```python
 except TemplateError as e:
@@ -691,11 +757,172 @@ git commit -m "feat(llm): update process() for new render signature and audit fi
 
 ---
 
+## Task 9a: Update AzureLLMTransform.process() Call Site
+
+**Files:**
+- Modify: `src/elspeth/plugins/llm/azure.py:116-201`
+
+**Step 1: Update render_with_metadata call**
+
+Change line 135 from:
+```python
+rendered = self._template.render_with_metadata(**row)
+```
+
+To:
+```python
+rendered = self._template.render_with_metadata(row)
+```
+
+**Step 2: Update error result to include template_source**
+
+Update the error block (lines 136-143) to include template_source:
+```python
+except TemplateError as e:
+    return TransformResult.error(
+        {
+            "reason": "template_rendering_failed",
+            "error": str(e),
+            "template_hash": self._template.template_hash,
+            "template_source": self._template.template_source,
+        }
+    )
+```
+
+**Step 3: Update audit metadata output**
+
+After lines 197-198, add the new audit fields (before line 199):
+```python
+output[f"{self._response_field}_template_hash"] = rendered.template_hash
+output[f"{self._response_field}_variables_hash"] = rendered.variables_hash
+output[f"{self._response_field}_template_source"] = rendered.template_source
+output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
+output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
+output[f"{self._response_field}_model"] = response.model
+```
+
+**Step 4: Run Azure tests**
+
+Run: `pytest tests/plugins/llm/test_azure.py -v`
+
+Expected: All PASS
+
+**Step 5: Commit**
+
+```bash
+git add src/elspeth/plugins/llm/azure.py
+git commit -m "feat(azure): update process() for new render signature and audit fields"
+```
+
+---
+
+## Task 9b: Update OpenRouterLLMTransform.process() Call Site
+
+**Files:**
+- Modify: `src/elspeth/plugins/llm/openrouter.py:92-211`
+
+**Step 1: Update render_with_metadata call**
+
+Change line 102 from:
+```python
+rendered = self._template.render_with_metadata(**row)
+```
+
+To:
+```python
+rendered = self._template.render_with_metadata(row)
+```
+
+**Step 2: Update error result to include template_source**
+
+Update the error block (lines 103-110) to include template_source:
+```python
+except TemplateError as e:
+    return TransformResult.error(
+        {
+            "reason": "template_rendering_failed",
+            "error": str(e),
+            "template_hash": self._template.template_hash,
+            "template_source": self._template.template_source,
+        }
+    )
+```
+
+**Step 3: Update audit metadata output**
+
+After lines 207-208, add the new audit fields (before line 209):
+```python
+output[f"{self._response_field}_template_hash"] = rendered.template_hash
+output[f"{self._response_field}_variables_hash"] = rendered.variables_hash
+output[f"{self._response_field}_template_source"] = rendered.template_source
+output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
+output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
+output[f"{self._response_field}_model"] = data.get("model", self._model)
+```
+
+**Step 4: Run OpenRouter tests**
+
+Run: `pytest tests/plugins/llm/test_openrouter.py -v`
+
+Expected: All PASS
+
+**Step 5: Commit**
+
+```bash
+git add src/elspeth/plugins/llm/openrouter.py
+git commit -m "feat(openrouter): update process() for new render signature and audit fields"
+```
+
+---
+
+## Task 9c: Update AzureBatchLLMTransform.process() Call Site
+
+**Files:**
+- Modify: `src/elspeth/plugins/llm/azure_batch.py:340`
+
+**Step 1: Update render_with_metadata call**
+
+Change line 340 from:
+```python
+rendered = self._template.render_with_metadata(**row)
+```
+
+To:
+```python
+rendered = self._template.render_with_metadata(row)
+```
+
+**Step 2: Run AzureBatch tests**
+
+Run: `pytest tests/plugins/llm/test_azure_batch.py -v`
+
+Expected: All PASS
+
+**Step 3: Commit**
+
+```bash
+git add src/elspeth/plugins/llm/azure_batch.py
+git commit -m "feat(azure-batch): update process() for new render signature"
+```
+
+---
+
 ## Task 10: Add Config-Time File Expansion
 
 **Files:**
 - Modify: `src/elspeth/core/config.py`
 - Test: `tests/core/test_config.py`
+
+**Step 0: Add yaml import at module level**
+
+At the top of `src/elspeth/core/config.py`, near line 9-11 with other imports, add:
+
+```python
+import yaml
+```
+
+Note: `PyYAML` is already a project dependency, so this import is safe at module level.
+The `yaml` module is lightweight and doesn't have heavy initialization cost.
 
 **Step 1: Write failing test for template file expansion**
 
@@ -1143,12 +1370,15 @@ git commit -m "chore: fix any lint/type issues from template files feature"
 | 1 | Update RenderedPrompt dataclass | templates.py |
 | 2 | Update PromptTemplate constructor | templates.py |
 | 3 | Update render_with_metadata method | templates.py |
-| 4 | Fix existing tests for new namespace | test_templates.py |
+| 4 | Fix existing tests for new namespace | test_templates.py, test_base.py, test_azure.py, test_openrouter.py, test_azure_batch.py, **test_llm_transforms.py** |
 | 5 | Add lookup tests | test_templates.py |
 | 6 | Add lookup hash tests | test_templates.py |
-| 7 | Update LLMConfig with new fields | base.py |
+| 7 | Update LLMConfig with new fields | base.py, test_base.py |
 | 8 | Update BaseLLMTransform init | base.py |
 | 9 | Update BaseLLMTransform.process() | base.py |
+| 9a | Update AzureLLMTransform.process() | azure.py |
+| 9b | Update OpenRouterLLMTransform.process() | openrouter.py |
+| 9c | Update AzureBatchLLMTransform.process() | azure_batch.py |
 | 10 | Add config-time file expansion | config.py |
 | 11 | Add lookup file expansion test | test_config.py |
 | 12 | Add error handling tests | test_config.py |

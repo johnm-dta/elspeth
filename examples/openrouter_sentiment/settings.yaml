@@ -1,0 +1,52 @@
+# ELSPETH OpenRouter Sentiment Analysis Example
+#
+# This pipeline reads text from a CSV, analyzes sentiment using an LLM
+# via OpenRouter, and outputs the results with sentiment scores.
+#
+# Prerequisites:
+#   export OPENROUTER_API_KEY="your-api-key-here"
+#
+# Run with:
+#   uv run elspeth run -s examples/openrouter_sentiment/settings.yaml --execute
+
+datasource:
+  plugin: csv
+  options:
+    path: examples/openrouter_sentiment/input.csv
+    schema:
+      mode: free
+      fields:
+        - "id: int"
+        - "text: str"
+    on_validation_failure: discard
+
+row_plugins:
+  - plugin: openrouter_llm
+    options:
+      api_key: "${OPENROUTER_API_KEY}"
+      model: "openai/gpt-4o-mini"  # Fast and cheap for demos
+      template: |
+        Analyze the sentiment of the following text and respond with ONLY a JSON object.
+
+        Text: {{ text }}
+
+        Respond with exactly this format (no other text):
+        {"sentiment": "positive" or "negative" or "neutral", "confidence": 0.0-1.0, "summary": "brief explanation"}
+      temperature: 0.0  # Deterministic for consistent results
+      response_field: sentiment_analysis
+      schema:
+        fields: dynamic
+
+sinks:
+  output:
+    plugin: csv
+    options:
+      path: examples/openrouter_sentiment/output/results.csv
+      schema:
+        fields: dynamic
+
+output_sink: output
+
+# Audit trail stored in runs/
+landscape:
+  url: sqlite:///examples/openrouter_sentiment/runs/audit.db

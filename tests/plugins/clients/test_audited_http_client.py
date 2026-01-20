@@ -531,3 +531,138 @@ class TestAuditedHTTPClient:
         assert call_kwargs["response_data"]["body"] == {
             "choices": [{"message": {"content": "Hello"}}]
         }
+
+    def test_4xx_response_recorded_as_error(self) -> None:
+        """HTTP 4xx responses are recorded with ERROR status."""
+        recorder = self._create_mock_recorder()
+
+        client = AuditedHTTPClient(
+            recorder=recorder,
+            state_id="state_123",
+        )
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 401
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.content = b'{"error": "Unauthorized"}'
+        mock_response.json.return_value = {"error": "Unauthorized"}
+        mock_response.text = '{"error": "Unauthorized"}'
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value = mock_client
+
+            response = client.post("https://api.example.com/v1/process")
+
+        # Response is still returned (caller decides what to do)
+        assert response.status_code == 401
+
+        # Verify ERROR status was recorded
+        call_kwargs = recorder.record_call.call_args[1]
+        assert call_kwargs["status"] == CallStatus.ERROR
+        assert call_kwargs["response_data"]["status_code"] == 401
+        assert call_kwargs["error"]["type"] == "HTTPError"
+        assert call_kwargs["error"]["status_code"] == 401
+        assert "401" in call_kwargs["error"]["message"]
+
+    def test_5xx_response_recorded_as_error(self) -> None:
+        """HTTP 5xx responses are recorded with ERROR status."""
+        recorder = self._create_mock_recorder()
+
+        client = AuditedHTTPClient(
+            recorder=recorder,
+            state_id="state_123",
+        )
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 503
+        mock_response.headers = {"content-type": "text/plain"}
+        mock_response.content = b"Service Unavailable"
+        mock_response.text = "Service Unavailable"
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value = mock_client
+
+            response = client.post("https://api.example.com/v1/process")
+
+        # Response is still returned
+        assert response.status_code == 503
+
+        # Verify ERROR status was recorded
+        call_kwargs = recorder.record_call.call_args[1]
+        assert call_kwargs["status"] == CallStatus.ERROR
+        assert call_kwargs["response_data"]["status_code"] == 503
+        assert call_kwargs["error"]["type"] == "HTTPError"
+        assert call_kwargs["error"]["status_code"] == 503
+
+    def test_2xx_responses_recorded_as_success(self) -> None:
+        """HTTP 2xx responses (200-299) are recorded with SUCCESS status."""
+        recorder = self._create_mock_recorder()
+
+        client = AuditedHTTPClient(
+            recorder=recorder,
+            state_id="state_123",
+        )
+
+        # Test 201 Created
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 201
+        mock_response.headers = {}
+        mock_response.content = b"{}"
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value = mock_client
+
+            response = client.post("https://api.example.com/v1/resource")
+
+        assert response.status_code == 201
+
+        call_kwargs = recorder.record_call.call_args[1]
+        assert call_kwargs["status"] == CallStatus.SUCCESS
+        assert call_kwargs["error"] is None
+
+    def test_3xx_responses_recorded_as_success(self) -> None:
+        """HTTP 3xx responses (redirects) are currently recorded as non-2xx = ERROR.
+
+        Note: httpx follows redirects by default, so this tests the case
+        when redirects are not followed.
+        """
+        recorder = self._create_mock_recorder()
+
+        client = AuditedHTTPClient(
+            recorder=recorder,
+            state_id="state_123",
+        )
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 302
+        mock_response.headers = {"location": "https://new-location.example.com"}
+        mock_response.content = b""
+        mock_response.text = ""
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value = mock_client
+
+            response = client.post("https://api.example.com/v1/resource")
+
+        assert response.status_code == 302
+
+        # 3xx is not in 2xx range, so recorded as ERROR
+        call_kwargs = recorder.record_call.call_args[1]
+        assert call_kwargs["status"] == CallStatus.ERROR
+        assert call_kwargs["error"]["status_code"] == 302

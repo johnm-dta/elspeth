@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
+import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from elspeth.contracts.enums import RunMode
@@ -774,6 +775,51 @@ class ElspethSettings(BaseModel):
         return v
 
 
+# Regex pattern for ${VAR} or ${VAR:-default} syntax
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _expand_env_vars(config: dict[str, Any]) -> dict[str, Any]:
+    """Recursively expand ${VAR} and ${VAR:-default} patterns in config values.
+
+    Args:
+        config: Configuration dict (may contain nested structures)
+
+    Returns:
+        New dict with environment variables expanded
+    """
+    import os
+
+    def _expand_string(value: str) -> str:
+        """Expand ${VAR} patterns in a string."""
+
+        def replacer(match: re.Match[str]) -> str:
+            var_name = match.group(1)
+            default = match.group(2)  # None if no default specified
+            env_value = os.environ.get(var_name)
+            if env_value is not None:
+                return env_value
+            if default is not None:
+                return default
+            # No env var and no default - keep original (will likely cause error)
+            return match.group(0)
+
+        return _ENV_VAR_PATTERN.sub(replacer, value)
+
+    def _expand_value(value: Any) -> Any:
+        """Expand env vars in a single value."""
+        if isinstance(value, str):
+            return _expand_string(value)
+        elif isinstance(value, dict):
+            return {k: _expand_value(v) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [_expand_value(item) for item in value]
+        else:
+            return value
+
+    return {k: _expand_value(v) for k, v in config.items()}
+
+
 # Secret field names that should be fingerprinted (exact matches)
 _SECRET_FIELD_NAMES = frozenset(
     {"api_key", "token", "password", "secret", "credential"}
@@ -841,8 +887,8 @@ def _fingerprint_secrets(
                     "(not recommended for production)."
                 )
             else:
-                # Dev mode: redact without fingerprint
-                return f"{key}_redacted", "[REDACTED]", True
+                # Dev mode: keep original value (user explicitly opted in)
+                return key, value, False
         else:
             return key, value, False
 
@@ -1035,6 +1081,71 @@ def _fingerprint_config_options(raw_config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+class TemplateFileError(Exception):
+    """Error loading template or lookup file."""
+
+
+def _expand_template_files(
+    options: dict[str, Any],
+    settings_path: Path,
+) -> dict[str, Any]:
+    """Expand template_file and lookup_file to loaded content.
+
+    Args:
+        options: Plugin options dict
+        settings_path: Path to settings file for resolving relative paths
+
+    Returns:
+        New dict with files loaded and paths recorded
+
+    Raises:
+        TemplateFileError: If files not found or invalid
+    """
+    result = dict(options)
+
+    # Handle template_file
+    if "template_file" in result:
+        if "template" in result:
+            raise TemplateFileError(
+                "Cannot specify both 'template' and 'template_file'"
+            )
+        template_file = result.pop("template_file")
+        template_path = Path(template_file)
+        if not template_path.is_absolute():
+            template_path = (settings_path.parent / template_path).resolve()
+
+        if not template_path.exists():
+            raise TemplateFileError(f"Template file not found: {template_path}")
+
+        result["template"] = template_path.read_text(encoding="utf-8")
+        result["template_source"] = template_file
+
+    # Handle lookup_file
+    if "lookup_file" in result:
+        if "lookup" in result:
+            raise TemplateFileError(
+                "Cannot specify both 'lookup' and 'lookup_file'"
+            )
+        lookup_file = result.pop("lookup_file")
+        lookup_path = Path(lookup_file)
+        if not lookup_path.is_absolute():
+            lookup_path = (settings_path.parent / lookup_path).resolve()
+
+        if not lookup_path.exists():
+            raise TemplateFileError(f"Lookup file not found: {lookup_path}")
+
+        try:
+            result["lookup"] = yaml.safe_load(
+                lookup_path.read_text(encoding="utf-8")
+            )
+        except yaml.YAMLError as e:
+            raise TemplateFileError(f"Invalid YAML in lookup file: {e}") from e
+
+        result["lookup_source"] = lookup_file
+
+    return result
+
+
 def load_settings(config_path: Path) -> ElspethSettings:
     """Load settings from YAML file with environment variable overrides.
 
@@ -1078,6 +1189,9 @@ def load_settings(config_path: Path) -> ElspethSettings:
         for k, v in dynaconf_settings.as_dict().items()
         if k not in internal_keys
     }
+
+    # Expand ${VAR} and ${VAR:-default} patterns in config values
+    raw_config = _expand_env_vars(raw_config)
 
     # Fingerprint secrets in plugin options before validation
     raw_config = _fingerprint_config_options(raw_config)

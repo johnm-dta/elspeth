@@ -1868,10 +1868,10 @@ output_sink: output
 
         assert "ELSPETH_FINGERPRINT_KEY" in str(exc_info.value)
 
-    def test_dev_mode_redacts_without_fingerprint(
+    def test_dev_mode_keeps_secrets_unchanged(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """ELSPETH_ALLOW_RAW_SECRETS=true should redact without crashing."""
+        """ELSPETH_ALLOW_RAW_SECRETS=true should keep secrets as-is for dev use."""
         from elspeth.core.config import _fingerprint_secrets
 
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
@@ -1881,13 +1881,14 @@ output_sink: output
 
         result = _fingerprint_secrets(options, fail_if_no_key=False)
 
-        assert "api_key" not in result
-        assert result.get("api_key_redacted") == "[REDACTED]"
+        # In dev mode, secrets are kept unchanged so plugins can use them
+        assert result.get("api_key") == "sk-secret"
+        assert "api_key_redacted" not in result
 
     def test_dev_mode_allows_load_settings(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """ELSPETH_ALLOW_RAW_SECRETS=true should allow load without fingerprint key."""
+        """ELSPETH_ALLOW_RAW_SECRETS=true should allow load and keep secrets as-is."""
         from elspeth.core.config import load_settings
 
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
@@ -1907,8 +1908,9 @@ output_sink: output
 
         settings = load_settings(config_file)
 
-        assert "api_key" not in settings.datasource.options
-        assert settings.datasource.options.get("api_key_redacted") == "[REDACTED]"
+        # In dev mode, secrets are kept unchanged so plugins can use them
+        assert settings.datasource.options.get("api_key") == "sk-secret-key"
+        assert "api_key_redacted" not in settings.datasource.options
 
     # === Tests for DSN password handling ===
 
@@ -2178,6 +2180,47 @@ class TestRunModeSettings:
         assert resolved["run_mode"] == "replay"
         assert "replay_source_run_id" in resolved
         assert resolved["replay_source_run_id"] == "run-abc123"
+
+
+class TestExpandTemplateFiles:
+    """Tests for _expand_template_files function."""
+
+    def test_expand_template_file(self, tmp_path: Path) -> None:
+        """template_file is expanded to template content at config time."""
+        from elspeth.core.config import _expand_template_files
+
+        # Create template file
+        template_file = tmp_path / "prompts" / "test.j2"
+        template_file.parent.mkdir(parents=True)
+        template_file.write_text("Hello, {{ row.name }}!")
+
+        # Create settings file path (for relative resolution)
+        settings_path = tmp_path / "settings.yaml"
+
+        config = {
+            "template_file": "prompts/test.j2",
+        }
+
+        expanded = _expand_template_files(config, settings_path)
+
+        assert "template" in expanded
+        assert expanded["template"] == "Hello, {{ row.name }}!"
+        assert expanded["template_source"] == "prompts/test.j2"
+        assert "template_file" not in expanded  # Original key removed
+
+    def test_expand_lookup_file_with_inline_raises(self, tmp_path: Path) -> None:
+        """Cannot specify both lookup and lookup_file."""
+        from elspeth.core.config import TemplateFileError, _expand_template_files
+
+        settings_path = tmp_path / "settings.yaml"
+        config = {
+            "template": "test",
+            "lookup": {"existing": "data"},
+            "lookup_file": "prompts/lookups.yaml",
+        }
+
+        with pytest.raises(TemplateFileError, match="Cannot specify both"):
+            _expand_template_files(config, settings_path)
 
 
 class TestLoadSettingsWithRunMode:

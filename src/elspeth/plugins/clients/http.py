@@ -177,18 +177,35 @@ class AuditedHTTPClient(AuditedClientBase):
                     else response.text
                 )
 
+            # Determine status based on HTTP response code
+            # 2xx = SUCCESS, 4xx/5xx = ERROR (audit must reflect what application sees)
+            is_success = 200 <= response.status_code < 300
+            call_status = CallStatus.SUCCESS if is_success else CallStatus.ERROR
+
+            response_data: dict[str, Any] = {
+                "status_code": response.status_code,
+                "headers": self._filter_response_headers(dict(response.headers)),
+                "body_size": len(response.content),
+                "body": response_body,
+            }
+
+            # For error responses, also include error details
+            error_data: dict[str, Any] | None = None
+            if not is_success:
+                error_data = {
+                    "type": "HTTPError",
+                    "message": f"HTTP {response.status_code}",
+                    "status_code": response.status_code,
+                }
+
             self._recorder.record_call(
                 state_id=self._state_id,
                 call_index=call_index,
                 call_type=CallType.HTTP,
-                status=CallStatus.SUCCESS,
+                status=call_status,
                 request_data=request_data,
-                response_data={
-                    "status_code": response.status_code,
-                    "headers": self._filter_response_headers(dict(response.headers)),
-                    "body_size": len(response.content),
-                    "body": response_body,
-                },
+                response_data=response_data,
+                error=error_data,
                 latency_ms=latency_ms,
             )
 

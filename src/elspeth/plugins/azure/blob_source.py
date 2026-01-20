@@ -397,10 +397,6 @@ class AzureBlobSource(BaseSource):
             raise ValueError(f"Expected JSON array, got {type(data).__name__}")
 
         for row in data:
-            if not isinstance(row, dict):
-                raise ValueError(
-                    f"Expected JSON object in array, got {type(row).__name__}"
-                )
             yield from self._validate_and_yield(row, ctx)
 
     def _load_jsonl(self, blob_data: bytes, ctx: PluginContext) -> Iterator[SourceRow]:
@@ -432,11 +428,6 @@ class AzureBlobSource(BaseSource):
                 row = json.loads(line)
             except json.JSONDecodeError as e:
                 raise ValueError(f"Invalid JSON on line {line_num}: {e}") from e
-
-            if not isinstance(row, dict):
-                raise ValueError(
-                    f"Expected JSON object on line {line_num}, got {type(row).__name__}"
-                )
 
             yield from self._validate_and_yield(row, ctx)
 

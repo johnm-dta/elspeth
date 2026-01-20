@@ -29,6 +29,7 @@ from elspeth.engine.expression_parser import ExpressionParser
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.triggers import TriggerEvaluator
 from elspeth.plugins.context import PluginContext
+from elspeth.plugins.llm.batch_errors import BatchPendingError
 from elspeth.plugins.protocols import (
     GateProtocol,
     SinkProtocol,
@@ -911,6 +912,13 @@ class AggregationExecutor:
             try:
                 result = transform.process(buffered_rows, ctx)  # type: ignore[arg-type]
                 duration_ms = (time.perf_counter() - start) * 1000
+            except BatchPendingError:
+                # BatchPendingError is a CONTROL-FLOW SIGNAL, not an error.
+                # The batch has been submitted but isn't complete yet.
+                # DO NOT mark as failed, DO NOT reset batch state.
+                # Re-raise for orchestrator to schedule retry.
+                # The batch remains in "executing" status, checkpoint is preserved.
+                raise
             except Exception as e:
                 duration_ms = (time.perf_counter() - start) * 1000
 

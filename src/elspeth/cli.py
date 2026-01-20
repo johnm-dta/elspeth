@@ -235,7 +235,11 @@ def _execute_pipeline(
     from elspeth.plugins.sinks.json_sink import JSONSink
     from elspeth.plugins.sources.csv_source import CSVSource
     from elspeth.plugins.sources.json_source import JSONSource
+    from elspeth.plugins.llm.azure import AzureLLMTransform
+    from elspeth.plugins.llm.azure_batch import AzureBatchLLMTransform
+    from elspeth.plugins.llm.openrouter import OpenRouterLLMTransform
     from elspeth.plugins.transforms import FieldMapper, PassThrough
+    from elspeth.plugins.transforms.batch_replicate import BatchReplicate
     from elspeth.plugins.transforms.batch_stats import BatchStats
     from elspeth.plugins.transforms.json_explode import JSONExplode
 
@@ -245,6 +249,10 @@ def _execute_pipeline(
         "field_mapper": FieldMapper,
         "batch_stats": BatchStats,
         "json_explode": JSONExplode,
+        "batch_replicate": BatchReplicate,
+        "openrouter_llm": OpenRouterLLMTransform,
+        "azure_llm": AzureLLMTransform,
+        "azure_batch_llm": AzureBatchLLMTransform,
     }
 
     # Instantiate source from new schema
@@ -623,8 +631,12 @@ def _build_resume_pipeline_config(
     from elspeth.plugins.sinks.csv_sink import CSVSink
     from elspeth.plugins.sinks.database_sink import DatabaseSink
     from elspeth.plugins.sinks.json_sink import JSONSink
+    from elspeth.plugins.llm.azure import AzureLLMTransform
+    from elspeth.plugins.llm.azure_batch import AzureBatchLLMTransform
+    from elspeth.plugins.llm.openrouter import OpenRouterLLMTransform
     from elspeth.plugins.sources.null_source import NullSource
     from elspeth.plugins.transforms import FieldMapper, PassThrough
+    from elspeth.plugins.transforms.batch_replicate import BatchReplicate
     from elspeth.plugins.transforms.batch_stats import BatchStats
     from elspeth.plugins.transforms.json_explode import JSONExplode
 
@@ -634,6 +646,10 @@ def _build_resume_pipeline_config(
         "field_mapper": FieldMapper,
         "batch_stats": BatchStats,
         "json_explode": JSONExplode,
+        "batch_replicate": BatchReplicate,
+        "openrouter_llm": OpenRouterLLMTransform,
+        "azure_llm": AzureLLMTransform,
+        "azure_batch_llm": AzureBatchLLMTransform,
     }
 
     # Source is NullSource for resume - data comes from payloads

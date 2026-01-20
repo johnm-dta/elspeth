@@ -1,8 +1,21 @@
 """Tests for KeywordFilter transform."""
 
+from typing import TYPE_CHECKING
+from unittest.mock import Mock
+
 import pytest
 
 from elspeth.plugins.config_base import PluginConfigError
+
+if TYPE_CHECKING:
+    from elspeth.plugins.context import PluginContext
+
+
+def make_mock_context() -> "PluginContext":
+    """Create a mock PluginContext for testing."""
+    from elspeth.plugins.context import PluginContext
+
+    return Mock(spec=PluginContext, run_id="test-run")
 
 
 class TestKeywordFilterConfig:
@@ -140,3 +153,153 @@ class TestKeywordFilterInstantiation:
                     "schema": {"fields": "dynamic"},
                 }
             )
+
+
+class TestKeywordFilterProcessing:
+    """Tests for KeywordFilter.process() method."""
+
+    def test_row_without_matches_passes_through(self) -> None:
+        """Rows without pattern matches pass through unchanged."""
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": ["content"],
+                "blocked_patterns": [r"\bpassword\b"],
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        row = {"content": "Hello world", "id": 1}
+        result = transform.process(row, make_mock_context())
+
+        assert result.status == "success"
+        assert result.row == row
+
+    def test_row_with_match_returns_error(self) -> None:
+        """Rows with pattern matches return error result."""
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": ["content"],
+                "blocked_patterns": [r"\bpassword\b"],
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        row = {"content": "My password is secret", "id": 1}
+        result = transform.process(row, make_mock_context())
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "blocked_content"
+        assert result.reason["field"] == "content"
+        assert result.reason["matched_pattern"] == r"\bpassword\b"
+
+    def test_error_includes_context_snippet(self) -> None:
+        """Error result includes surrounding context."""
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": ["content"],
+                "blocked_patterns": [r"\bssn\b"],
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        row = {"content": "Please provide your ssn for verification purposes"}
+        result = transform.process(row, make_mock_context())
+
+        assert result.status == "error"
+        assert "match_context" in result.reason
+        assert "ssn" in result.reason["match_context"]
+
+    def test_scans_multiple_fields(self) -> None:
+        """Transform scans all configured fields."""
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": ["subject", "body"],
+                "blocked_patterns": [r"(?i)confidential"],
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        # Match in second field
+        row = {"subject": "Hello", "body": "This is CONFIDENTIAL"}
+        result = transform.process(row, make_mock_context())
+
+        assert result.status == "error"
+        assert result.reason["field"] == "body"
+
+    def test_all_keyword_scans_string_fields(self) -> None:
+        """'all' keyword scans all string-valued fields."""
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": "all",
+                "blocked_patterns": [r"secret"],
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        row = {"name": "test", "data": "contains secret", "count": 42}
+        result = transform.process(row, make_mock_context())
+
+        assert result.status == "error"
+        assert result.reason["field"] == "data"
+
+    def test_skips_non_string_fields_when_all(self) -> None:
+        """'all' mode skips non-string fields without error."""
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": "all",
+                "blocked_patterns": [r"secret"],
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        row = {"name": "safe", "count": 42, "active": True}
+        result = transform.process(row, make_mock_context())
+
+        assert result.status == "success"
+
+    def test_case_sensitive_by_default(self) -> None:
+        """Pattern matching is case-sensitive by default."""
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": ["content"],
+                "blocked_patterns": [r"Password"],  # Capital P
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        row = {"content": "my password is..."}  # lowercase
+        result = transform.process(row, make_mock_context())
+
+        assert result.status == "success"  # No match - case matters
+
+    def test_case_insensitive_with_flag(self) -> None:
+        """Regex (?i) flag enables case-insensitive matching."""
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": ["content"],
+                "blocked_patterns": [r"(?i)password"],
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        row = {"content": "my PASSWORD is..."}
+        result = transform.process(row, make_mock_context())
+
+        assert result.status == "error"

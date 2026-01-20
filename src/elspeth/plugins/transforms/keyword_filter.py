@@ -98,8 +98,71 @@ class KeywordFilter(BaseTransform):
         row: dict[str, Any],
         ctx: PluginContext,
     ) -> TransformResult:
-        """Process a single row - placeholder for now."""
+        """Scan configured fields for blocked patterns.
+
+        Args:
+            row: Input row data
+            ctx: Plugin context
+
+        Returns:
+            TransformResult.success(row) if no patterns match
+            TransformResult.error(reason) if any pattern matches
+        """
+        fields_to_scan = self._get_fields_to_scan(row)
+
+        for field_name in fields_to_scan:
+            value = row[field_name]
+
+            # Only scan string values
+            if not isinstance(value, str):
+                continue
+
+            # Check each pattern
+            for pattern_str, compiled_pattern in self._compiled_patterns:
+                match = compiled_pattern.search(value)
+                if match:
+                    context = self._extract_context(value, match)
+                    return TransformResult.error(
+                        {
+                            "reason": "blocked_content",
+                            "field": field_name,
+                            "matched_pattern": pattern_str,
+                            "match_context": context,
+                        }
+                    )
+
+        # No matches - pass through unchanged
         return TransformResult.success(row)
+
+    def _get_fields_to_scan(self, row: dict[str, Any]) -> list[str]:
+        """Determine which fields to scan based on config."""
+        if self._fields == "all":
+            # Scan all string-valued fields
+            return [k for k, v in row.items() if isinstance(v, str)]
+        elif isinstance(self._fields, str):
+            return [self._fields]
+        else:
+            return self._fields
+
+    def _extract_context(
+        self,
+        text: str,
+        match: re.Match[str],
+        context_chars: int = 40,
+    ) -> str:
+        """Extract surrounding context around a match."""
+        start = max(0, match.start() - context_chars)
+        end = min(len(text), match.end() + context_chars)
+
+        context = text[start:end]
+
+        # Add ellipsis markers if truncated
+        if start > 0:
+            context = "..." + context
+        if end < len(text):
+            context = context + "..."
+
+        return context
 
     def close(self) -> None:
         """Release resources."""

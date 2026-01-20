@@ -18,7 +18,7 @@ from networkx import MultiDiGraph
 from elspeth.contracts import EdgeInfo, RoutingMode
 
 if TYPE_CHECKING:
-    from elspeth.core.config import ElspethSettings
+    from elspeth.core.config import ElspethSettings, GateSettings
 
 
 class GraphValidationError(Exception):
@@ -330,6 +330,7 @@ class ExecutionGraph:
 
         # Build config-driven gates (processed AFTER transforms and aggregations, BEFORE output sink)
         config_gate_ids: dict[str, str] = {}
+        gate_sequence: list[tuple[str, GateSettings]] = []  # Track for continue edge creation
         for gate_config in config.gates:
             gid = node_id("config_gate", gate_config.name)
             config_gate_ids[gate_config.name] = gid
@@ -395,6 +396,8 @@ class ExecutionGraph:
                 # Store reverse mapping: (gate_node, sink_name) -> route_label
                 graph._route_label_map[(gid, target)] = route_label
 
+            # Track gate for continue edge creation (done after output_sink_node is known)
+            gate_sequence.append((gid, gate_config))
             prev_node_id = gid
 
         # Store explicit mapping for get_config_gate_id_map()
@@ -434,6 +437,23 @@ class ExecutionGraph:
         # Store output_sink for reference
         graph._output_sink = config.output_sink
         output_sink_node = sink_ids[config.output_sink]
+
+        # Create continue edges from gates to their next node (AUD-002: explicit continue routing)
+        # This enables recording routing events when a gate evaluates to "continue"
+        for i, (gate_id, gate_config) in enumerate(gate_sequence):
+            # Check if any route resolves to "continue"
+            has_continue_route = any(target == "continue" for target in gate_config.routes.values())
+
+            if has_continue_route:
+                # Determine next node: next gate or output sink
+                if i + 1 < len(gate_sequence):
+                    next_node = gate_sequence[i + 1][0]  # Next gate
+                else:
+                    next_node = output_sink_node  # Output sink
+
+                # Create continue edge (only if not already exists)
+                if not graph._graph.has_edge(gate_id, next_node, key="continue"):
+                    graph.add_edge(gate_id, next_node, label="continue", mode=RoutingMode.MOVE)
 
         # Create edges from fork gates to coalesce nodes (for branches in coalesce)
         # This overwrites the fallback edges created during gate processing

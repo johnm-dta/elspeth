@@ -557,8 +557,9 @@ class TestGateExecutor:
     """Gate execution with audit and routing."""
 
     def test_execute_gate_continue(self) -> None:
-        """Gate returns continue action - no routing event recorded."""
+        """Gate returns continue action - routing event recorded for audit (AUD-002)."""
         from elspeth.contracts import TokenInfo
+        from elspeth.contracts.enums import RoutingMode
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import GateExecutor
         from elspeth.engine.spans import SpanFactory
@@ -576,6 +577,24 @@ class TestGateExecutor:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
+        # Register a "next node" for continue edge
+        next_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="output",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        # Register continue edge from gate to next node
+        continue_edge = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=next_node.node_id,
+            label="continue",
+            mode=RoutingMode.MOVE,
+        )
+        edge_map = {(gate_node.node_id, "continue"): continue_edge.edge_id}
 
         # Mock gate that continues
         class PassThroughGate:
@@ -590,7 +609,7 @@ class TestGateExecutor:
 
         gate = PassThroughGate()
         ctx = PluginContext(run_id=run.run_id, config={})
-        executor = GateExecutor(recorder, SpanFactory())
+        executor = GateExecutor(recorder, SpanFactory(), edge_map=edge_map)
 
         token = TokenInfo(
             row_id="row-1",
@@ -629,9 +648,11 @@ class TestGateExecutor:
         assert len(states) == 1
         assert states[0].status == "completed"
 
-        # Verify no routing events (continue doesn't create one)
+        # Verify routing event recorded for continue (AUD-002)
         events = recorder.get_routing_events(states[0].state_id)
-        assert len(events) == 0
+        assert len(events) == 1
+        assert events[0].edge_id == continue_edge.edge_id
+        assert events[0].mode == "move"
 
     def test_execute_gate_route(self) -> None:
         """Gate routes to sink via route label - routing event recorded."""
@@ -1091,7 +1112,7 @@ class TestConfigGateExecutor:
     """Config-driven gate execution with ExpressionParser."""
 
     def test_execute_config_gate_continue(self) -> None:
-        """Config gate returns continue destination - no routing event recorded."""
+        """Config gate returns continue destination - routing event recorded for audit (AUD-002)."""
         from elspeth.contracts import TokenInfo
         from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
@@ -1110,6 +1131,25 @@ class TestConfigGateExecutor:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
+        # Register next node in pipeline for continue edge
+        next_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="next_transform",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Register continue edge from gate to next node (AUD-002)
+        continue_edge = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=next_node.node_id,
+            label="continue",
+            mode=RoutingMode.MOVE,
+        )
+        edge_map = {(gate_node.node_id, "continue"): continue_edge.edge_id}
 
         # Config-driven gate that checks confidence
         gate_config = GateSettings(
@@ -1119,7 +1159,7 @@ class TestConfigGateExecutor:
         )
 
         ctx = PluginContext(run_id=run.run_id, config={})
-        executor = GateExecutor(recorder, SpanFactory())
+        executor = GateExecutor(recorder, SpanFactory(), edge_map=edge_map)
 
         token = TokenInfo(
             row_id="row-1",
@@ -1159,9 +1199,10 @@ class TestConfigGateExecutor:
         assert len(states) == 1
         assert states[0].status == "completed"
 
-        # Verify no routing events (continue doesn't create one)
+        # Verify routing event recorded for continue (AUD-002)
         events = recorder.get_routing_events(states[0].state_id)
-        assert len(events) == 0
+        assert len(events) == 1
+        assert events[0].edge_id == continue_edge.edge_id
 
     def test_execute_config_gate_route_to_sink(self) -> None:
         """Config gate routes to sink when condition evaluates to route label."""
@@ -1680,6 +1721,23 @@ class TestConfigGateExecutor:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
+        # Register next node for continue edge (AUD-002)
+        next_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="next_transform",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        continue_edge = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate_node.node_id,
+            to_node_id=next_node.node_id,
+            label="continue",
+            mode=RoutingMode.MOVE,
+        )
+        edge_map = {(gate_node.node_id, "continue"): continue_edge.edge_id}
 
         gate_config = GateSettings(
             name="audit_gate",
@@ -1688,7 +1746,7 @@ class TestConfigGateExecutor:
         )
 
         ctx = PluginContext(run_id=run.run_id, config={})
-        executor = GateExecutor(recorder, SpanFactory())
+        executor = GateExecutor(recorder, SpanFactory(), edge_map=edge_map)
 
         token = TokenInfo(
             row_id="row-1",

@@ -1060,9 +1060,9 @@ class LandscapeRecorder:
             raise ValueError("duration_ms is required when completing a node state")
 
         now = _now()
-        output_hash = stable_hash(output_data) if output_data else None
-        error_json = canonical_json(error) if error else None
-        context_json = canonical_json(context_after) if context_after else None
+        output_hash = stable_hash(output_data) if output_data is not None else None
+        error_json = canonical_json(error) if error is not None else None
+        context_json = canonical_json(context_after) if context_after is not None else None
 
         with self._db.connection() as conn:
             conn.execute(
@@ -1311,6 +1311,7 @@ class LandscapeRecorder:
         batch_id: str,
         status: str,
         *,
+        trigger_type: str | None = None,
         trigger_reason: str | None = None,
         state_id: str | None = None,
     ) -> None:
@@ -1319,11 +1320,14 @@ class LandscapeRecorder:
         Args:
             batch_id: Batch to update
             status: New status (executing, completed, failed)
-            trigger_reason: Why the batch was triggered
+            trigger_type: TriggerType enum value (count, time, end_of_source, manual)
+            trigger_reason: Human-readable reason for the trigger
             state_id: Node state for the flush operation
         """
         updates: dict[str, Any] = {"status": status}
 
+        if trigger_type:
+            updates["trigger_type"] = trigger_type
         if trigger_reason:
             updates["trigger_reason"] = trigger_reason
         if state_id:
@@ -1339,6 +1343,7 @@ class LandscapeRecorder:
         batch_id: str,
         status: str,
         *,
+        trigger_type: str | None = None,
         trigger_reason: str | None = None,
         state_id: str | None = None,
     ) -> Batch:
@@ -1347,7 +1352,8 @@ class LandscapeRecorder:
         Args:
             batch_id: Batch to complete
             status: Final status (completed, failed)
-            trigger_reason: Why the batch was triggered
+            trigger_type: TriggerType enum value (count, time, end_of_source, manual)
+            trigger_reason: Human-readable reason for the trigger
             state_id: Optional node state for the aggregation
 
         Returns:
@@ -1361,6 +1367,7 @@ class LandscapeRecorder:
                 .where(batches_table.c.batch_id == batch_id)
                 .values(
                     status=status,
+                    trigger_type=trigger_type,
                     trigger_reason=trigger_reason,
                     aggregation_state_id=state_id,
                     completed_at=now,
@@ -1392,6 +1399,7 @@ class LandscapeRecorder:
             run_id=row.run_id,
             aggregation_node_id=row.aggregation_node_id,
             aggregation_state_id=row.aggregation_state_id,
+            trigger_type=row.trigger_type,
             trigger_reason=row.trigger_reason,
             attempt=row.attempt,
             status=BatchStatus(row.status),  # Coerce DB string to enum
@@ -1437,6 +1445,7 @@ class LandscapeRecorder:
                 run_id=row.run_id,
                 aggregation_node_id=row.aggregation_node_id,
                 aggregation_state_id=row.aggregation_state_id,
+                trigger_type=row.trigger_type,
                 trigger_reason=row.trigger_reason,
                 attempt=row.attempt,
                 status=BatchStatus(row.status),  # Coerce DB string to enum
@@ -1478,6 +1487,7 @@ class LandscapeRecorder:
                 status=BatchStatus(row.status),
                 created_at=row.created_at,
                 aggregation_state_id=row.aggregation_state_id,
+                trigger_type=row.trigger_type,
                 trigger_reason=row.trigger_reason,
                 completed_at=row.completed_at,
             )

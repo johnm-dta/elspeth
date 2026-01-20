@@ -104,3 +104,60 @@ class TestFilesystemPayloadStore:
         store = FilesystemPayloadStore(base_path=tmp_path)
         result = store.delete("nonexistent" * 4)
         assert result is False
+
+    def test_retrieve_corrupted_file_raises_integrity_error(self, tmp_path: Path) -> None:
+        """Corrupted content must raise IntegrityError, never return silently."""
+        from elspeth.core.payload_store import FilesystemPayloadStore, IntegrityError
+
+        store = FilesystemPayloadStore(base_path=tmp_path)
+        content = b"original content"
+        content_hash = store.store(content)
+
+        # Corrupt the file directly
+        file_path = tmp_path / content_hash[:2] / content_hash
+        file_path.write_bytes(b"corrupted content")
+
+        with pytest.raises(IntegrityError) as exc_info:
+            store.retrieve(content_hash)
+
+        assert "integrity check failed" in str(exc_info.value)
+        assert content_hash in str(exc_info.value)
+
+    def test_retrieve_truncated_file_raises_integrity_error(self, tmp_path: Path) -> None:
+        """Truncated files are also integrity violations."""
+        from elspeth.core.payload_store import FilesystemPayloadStore, IntegrityError
+
+        store = FilesystemPayloadStore(base_path=tmp_path)
+        content = b"this is some longer content that will be truncated"
+        content_hash = store.store(content)
+
+        # Truncate the file
+        file_path = tmp_path / content_hash[:2] / content_hash
+        file_path.write_bytes(content[:10])
+
+        with pytest.raises(IntegrityError):
+            store.retrieve(content_hash)
+
+    def test_integrity_error_includes_actual_hash(self, tmp_path: Path) -> None:
+        """IntegrityError message should include actual hash for investigation."""
+        import hashlib
+
+        from elspeth.core.payload_store import FilesystemPayloadStore, IntegrityError
+
+        store = FilesystemPayloadStore(base_path=tmp_path)
+        original = b"original"
+        content_hash = store.store(original)
+
+        # Replace with different content
+        corrupted = b"different"
+        file_path = tmp_path / content_hash[:2] / content_hash
+        file_path.write_bytes(corrupted)
+
+        corrupted_hash = hashlib.sha256(corrupted).hexdigest()
+
+        with pytest.raises(IntegrityError) as exc_info:
+            store.retrieve(content_hash)
+
+        # Error message should contain both hashes for debugging
+        assert content_hash in str(exc_info.value)  # expected
+        assert corrupted_hash in str(exc_info.value)  # actual

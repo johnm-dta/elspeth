@@ -80,6 +80,8 @@ class RunResult:
     rows_quarantined: int = 0
     rows_forked: int = 0
     rows_coalesced: int = 0
+    rows_expanded: int = 0  # Deaggregation parent tokens
+    rows_buffered: int = 0  # Passthrough mode buffered tokens
 
 
 class RouteValidationError(Exception):
@@ -620,6 +622,11 @@ class Orchestrator:
             _batch_checkpoints=batch_checkpoints or {},
         )
 
+        # Set node_id on context for source validation error attribution
+        # This must be set BEFORE source.load() so that any validation errors
+        # (e.g., malformed CSV rows) can be attributed to the source node
+        ctx.node_id = source_id
+
         # Call on_start for all plugins BEFORE processing
         # Base classes provide no-op implementations, so no hasattr needed
         config.source.on_start(ctx)
@@ -696,6 +703,8 @@ class Orchestrator:
         rows_quarantined = 0
         rows_forked = 0
         rows_coalesced = 0
+        rows_expanded = 0
+        rows_buffered = 0
         pending_tokens: dict[str, list[TokenInfo]] = {name: [] for name in config.sinks}
 
         # Compute default last_node_id for end-of-source checkpointing
@@ -779,6 +788,12 @@ class Orchestrator:
                             # Merged token from coalesce - route to output sink
                             rows_coalesced += 1
                             pending_tokens[output_sink_name].append(result.token)
+                        elif result.outcome == RowOutcome.EXPANDED:
+                            # Deaggregation parent token - children counted separately
+                            rows_expanded += 1
+                        elif result.outcome == RowOutcome.BUFFERED:
+                            # Passthrough mode buffered token
+                            rows_buffered += 1
 
             # ─────────────────────────────────────────────────────────────────
             # CRITICAL: Flush remaining aggregation buffers at end-of-source
@@ -874,6 +889,8 @@ class Orchestrator:
             rows_quarantined=rows_quarantined,
             rows_forked=rows_forked,
             rows_coalesced=rows_coalesced,
+            rows_expanded=rows_expanded,
+            rows_buffered=rows_buffered,
         )
 
     def _export_landscape(
@@ -1253,6 +1270,8 @@ class Orchestrator:
         rows_quarantined = 0
         rows_forked = 0
         rows_coalesced = 0
+        rows_expanded = 0
+        rows_buffered = 0
         pending_tokens: dict[str, list[TokenInfo]] = {name: [] for name in config.sinks}
 
         try:
@@ -1300,6 +1319,10 @@ class Orchestrator:
                     elif result.outcome == RowOutcome.COALESCED:
                         rows_coalesced += 1
                         pending_tokens[output_sink_name].append(result.token)
+                    elif result.outcome == RowOutcome.EXPANDED:
+                        rows_expanded += 1
+                    elif result.outcome == RowOutcome.BUFFERED:
+                        rows_buffered += 1
 
             # ─────────────────────────────────────────────────────────────────
             # CRITICAL: Flush remaining aggregation buffers at end-of-source
@@ -1364,6 +1387,8 @@ class Orchestrator:
             rows_quarantined=rows_quarantined,
             rows_forked=rows_forked,
             rows_coalesced=rows_coalesced,
+            rows_expanded=rows_expanded,
+            rows_buffered=rows_buffered,
         )
 
     def _handle_incomplete_batches(

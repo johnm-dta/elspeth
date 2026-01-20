@@ -398,10 +398,10 @@ class TestAggregationFlushAuditTrail:
             trigger_type=TriggerType.END_OF_SOURCE,
         )
 
-        # Verify trigger reason was recorded
+        # Verify trigger type was recorded
         batch = recorder.get_batch(batch_id)
         assert batch is not None
-        assert batch.trigger_reason == TriggerType.END_OF_SOURCE.value
+        assert batch.trigger_type == TriggerType.END_OF_SOURCE.value
 
     def test_flush_clears_buffers(
         self,

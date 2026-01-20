@@ -532,8 +532,9 @@ class TestEngineIntegration:
                 sink_states = [s for s in states if s.node_id in sink_node_ids]
                 assert len(sink_states) >= 1, f"Token {token.token_id} never reached sink"
 
-        # 2 tokens were routed (even numbers)
-        assert routed_count == 2
+        # AUD-002: All 4 tokens now have routing events recorded
+        # (2 route to even_sink, 2 continue to default_sink)
+        assert routed_count == 4
 
 
 class TestNoSilentAuditLoss:

@@ -265,6 +265,7 @@ class Batch:
     status: BatchStatus  # Strict: enum only
     created_at: datetime
     aggregation_state_id: str | None = None
+    trigger_type: str | None = None  # TriggerType enum value (count, time, end_of_source, manual)
     trigger_reason: str | None = None
     completed_at: datetime | None = None
 

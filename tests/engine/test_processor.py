@@ -432,6 +432,7 @@ class TestRowProcessorGates:
 
     def test_gate_continue_proceeds(self) -> None:
         """Gate returning continue proceeds to completion."""
+        from elspeth.contracts import RoutingMode
         from elspeth.core.config import GateSettings
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.processor import RowProcessor
@@ -465,6 +466,15 @@ class TestRowProcessorGates:
             config={},
             schema_config=DYNAMIC_SCHEMA,
         )
+        # AUD-002: Register continue edge for audit completeness
+        continue_edge = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=gate.node_id,
+            to_node_id=transform.node_id,  # Gate continues to transform
+            label="continue",
+            mode=RoutingMode.MOVE,
+        )
+        edge_map = {(gate.node_id, "continue"): continue_edge.edge_id}
 
         class FinalTransform(BaseTransform):
             name = "final"
@@ -493,6 +503,7 @@ class TestRowProcessorGates:
             source_node_id=source.node_id,
             config_gates=[pass_gate],
             config_gate_id_map={"pass_gate": gate.node_id},
+            edge_map=edge_map,  # AUD-002: Required for continue routing events
         )
 
         results = processor.process_row(

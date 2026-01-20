@@ -40,6 +40,7 @@ from elspeth.core.logging import (
 )
 from elspeth.core.payload_store import (
     FilesystemPayloadStore,
+    IntegrityError,
     PayloadStore,
 )
 
@@ -54,6 +55,7 @@ __all__ = [
     "ExecutionGraph",
     "FilesystemPayloadStore",
     "GraphValidationError",
+    "IntegrityError",
     "LandscapeExportSettings",
     "LandscapeSettings",
     "NodeInfo",

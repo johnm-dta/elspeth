@@ -54,7 +54,7 @@ class CheckpointManager:
         checkpoint_id = f"cp-{uuid.uuid4().hex[:12]}"
         now = datetime.now(UTC)
 
-        agg_json = json.dumps(aggregation_state) if aggregation_state else None
+        agg_json = json.dumps(aggregation_state) if aggregation_state is not None else None
 
         with self._db.engine.connect() as conn:
             conn.execute(

@@ -88,7 +88,13 @@ class RoutingAction:
         *,
         reason: dict[str, Any] | None = None,
     ) -> "RoutingAction":
-        """Fork token to multiple parallel paths (always copy mode)."""
+        """Fork token to multiple parallel paths (always copy mode).
+
+        Raises:
+            ValueError: If paths is empty (fork requires at least one destination).
+        """
+        if not paths:
+            raise ValueError("fork_to_paths requires at least one destination path")
         return cls(
             kind=RoutingKind.FORK_TO_PATHS,
             destinations=tuple(paths),

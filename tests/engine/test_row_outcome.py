@@ -27,18 +27,18 @@ class TestRowResultOutcome:
             )
             assert result.outcome == outcome
 
-    def test_outcome_not_equal_to_string(self) -> None:
-        """Enum values should not equal raw strings."""
+    def test_outcome_equals_string_for_database_storage(self) -> None:
+        """(str, Enum) values equal raw strings for database storage (AUD-001)."""
         token = TokenInfo(row_id="r1", token_id="t1", row_data={}, branch_name=None)
         result = RowResult(
             token=token,
             final_data={},
             outcome=RowOutcome.COMPLETED,
         )
-        # The enum instance is not equal to the raw string
-        # (mypy correctly flags this as non-overlapping comparison - that's the point)
-        assert result.outcome != "completed"  # type: ignore[comparison-overlap]
-        # But value can be accessed
+        # AUD-001: RowOutcome is now (str, Enum) for token_outcomes table storage.
+        # The enum instance IS equal to the raw string for database serialization.
+        assert result.outcome == "completed"  # type: ignore[comparison-overlap]
+        # Value can also be accessed explicitly
         assert result.outcome.value == "completed"
 
     def test_consumed_in_batch_outcome(self) -> None:

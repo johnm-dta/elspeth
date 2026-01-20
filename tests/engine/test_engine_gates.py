@@ -1407,7 +1407,7 @@ class TestEndToEndPipeline:
                 assert state[4] is not None, "output_hash must be recorded"
 
             # 3. Find routing events for the gate evaluations
-            # Only routed tokens (not "continue") generate routing events
+            # AUD-002: Both routed AND continue decisions now generate routing events
             routing_events = conn.execute(
                 text("""
                     SELECT re.event_id, re.state_id, re.edge_id, re.reason_hash,
@@ -1420,12 +1420,14 @@ class TestEndToEndPipeline:
                 {"node_id": gate_node_id},
             ).fetchall()
 
-            # We expect 1 routing event for the "true" -> "urgent" route
-            # The "false" -> "continue" route doesn't generate a routing event
-            # because it just continues to next node
-            assert len(routing_events) == 1, f"Expected 1 routing event for routed token, got {len(routing_events)}"
+            # AUD-002: We expect 2 routing events - one for "true" -> urgent sink,
+            # one for "continue" -> next node
+            assert len(routing_events) == 2, f"Expected 2 routing events (AUD-002), got {len(routing_events)}"
 
-            routing_event = routing_events[0]
+            # Find the "true" route event (routes to sink)
+            route_event = [e for e in routing_events if e[4] == "true"]
+            assert len(route_event) == 1, f"Expected 1 'true' routing event, got {len(route_event)}"
+            routing_event = route_event[0]
             edge_label = routing_event[4]
             assert edge_label == "true", f"Edge label should be 'true', got {edge_label}"
 
@@ -1575,7 +1577,7 @@ class TestGateRuntimeErrors:
         2. row.get('field', default) returns the default for missing fields
         3. The gate evaluates correctly and routes based on the result
         """
-        from elspeth.contracts import TokenInfo
+        from elspeth.contracts import RoutingMode, TokenInfo
         from elspeth.contracts.schema import SchemaConfig
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
         from elspeth.engine.executors import GateExecutor
@@ -1596,12 +1598,28 @@ class TestGateRuntimeErrors:
             config={"condition": "row.get('optional', 0) > 5"},
             schema_config=schema_config,
         )
+        # AUD-002: Register next node and continue edge for audit completeness
+        next_node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="next_transform",
+            node_type="transform",
+            plugin_version="1.0.0",
+            config={},
+            schema_config=schema_config,
+        )
+        continue_edge = recorder.register_edge(
+            run_id=run.run_id,
+            from_node_id=node.node_id,
+            to_node_id=next_node.node_id,
+            label="continue",
+            mode=RoutingMode.MOVE,
+        )
 
         span_factory = SpanFactory()  # No tracer = no-op spans
         executor = GateExecutor(
             recorder=recorder,
             span_factory=span_factory,
-            edge_map={},
+            edge_map={(node.node_id, "continue"): continue_edge.edge_id},
             route_resolution_map={
                 (node.node_id, "true"): "continue",
                 (node.node_id, "false"): "continue",

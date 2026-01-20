@@ -313,6 +313,57 @@ Prior versions silently preserved raw secrets when `ELSPETH_FINGERPRINT_KEY` was
 1. Set `ELSPETH_FINGERPRINT_KEY` (recommended), or
 2. Explicitly opt-in to dev mode with `ELSPETH_ALLOW_RAW_SECRETS=true`
 
+### Automatic .env Loading
+
+ELSPETH automatically loads environment variables from a `.env` file at startup. This means you can store your API keys and secrets in a `.env` file without manually sourcing it before each command.
+
+#### Example .env File
+
+```bash
+# .env - Environment variables for ELSPETH
+# This file is automatically loaded by the CLI
+
+# API Keys for LLM plugins
+OPENROUTER_API_KEY=sk-or-v1-your-key-here
+AZURE_OPENAI_API_KEY=your-azure-key
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+
+# Secret handling
+ELSPETH_FINGERPRINT_KEY=your-stable-fingerprint-key
+
+# Development mode (not for production!)
+# ELSPETH_ALLOW_RAW_SECRETS=true
+
+# Signed exports
+ELSPETH_SIGNING_KEY=your-signing-key
+```
+
+#### How It Works
+
+- The CLI automatically loads `.env` from the current directory (or parent directories)
+- Existing environment variables are **not** overwritten (explicit env vars take precedence)
+- Uses `python-dotenv` under the hood
+
+#### Skipping .env Loading
+
+In CI/CD environments where secrets are injected externally, you may want to skip `.env` loading:
+
+```bash
+# Skip .env loading (useful in CI/CD)
+elspeth --no-dotenv run -s settings.yaml --execute
+```
+
+#### Security Note
+
+**Never commit `.env` files to version control.** Add `.env` to your `.gitignore`:
+
+```gitignore
+# Secrets
+.env
+.env.local
+.env.*.local
+```
+
 ## Architecture
 
 ```

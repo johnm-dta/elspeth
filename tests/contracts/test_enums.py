@@ -39,19 +39,19 @@ class TestDeterminism:
 
 
 class TestRowOutcome:
-    """Tests for RowOutcome enum - derived, not stored."""
+    """Tests for RowOutcome enum - stored in token_outcomes table (AUD-001)."""
 
-    def test_is_not_str_enum(self) -> None:
-        """RowOutcome should NOT be a str subclass - it's derived, not stored."""
-        # RowOutcome.COMPLETED should not be equal to string without .value
-        # Note: mypy correctly detects this comparison can never be equal since
-        # RowOutcome is not a (str, Enum). We cast to Any to verify at runtime.
-        from typing import Any, cast
-
+    def test_is_str_enum(self) -> None:
+        """RowOutcome IS a (str, Enum) for database storage via token_outcomes table."""
+        # AUD-001: RowOutcome is now explicitly recorded, not derived at query time.
+        # The (str, Enum) base allows direct database storage.
         from elspeth.contracts import RowOutcome
 
-        assert cast(Any, RowOutcome.COMPLETED) != "completed"
+        # (str, Enum) allows direct string comparison for database serialization
+        assert RowOutcome.COMPLETED == "completed"  # type: ignore[comparison-overlap]
         assert RowOutcome.COMPLETED.value == "completed"
+        # Can be created from string values (for DB reads)
+        assert RowOutcome("completed") == RowOutcome.COMPLETED
 
     def test_has_all_terminal_states(self) -> None:
         """RowOutcome has all terminal states from architecture."""

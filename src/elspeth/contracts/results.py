@@ -159,9 +159,8 @@ class GateResult:
 class RowResult:
     """Final result of processing a row through the pipeline.
 
-    Uses RowOutcome enum. The outcome is derived at query time
-    from node_states/routing_events/batch_members, but this type
-    is used to communicate the result during processing.
+    Uses RowOutcome enum, which is explicitly recorded in the token_outcomes
+    table (AUD-001) at determination time for complete audit traceability.
 
     Fields:
         token: Token identity for this row instance

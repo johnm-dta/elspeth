@@ -391,8 +391,13 @@ class GateExecutor:
         sink_name: str | None = None
 
         if action.kind == RoutingKind.CONTINUE:
-            # No routing event needed - just continue to next transform
-            pass
+            # Record explicit continue routing for audit completeness (AUD-002)
+            # Preserve gate's reason and mode for full auditability
+            self._record_routing(
+                state_id=state.state_id,
+                node_id=gate.node_id,
+                action=RoutingAction.route("continue", mode=action.mode, reason=dict(action.reason)),
+            )
 
         elif action.kind == RoutingKind.ROUTE:
             # Gate returned a route label - resolve via routes config
@@ -404,8 +409,13 @@ class GateExecutor:
                 raise MissingEdgeError(node_id=gate.node_id, label=route_label)
 
             if destination == "continue":
-                # Route label resolves to "continue" - no routing event
-                pass
+                # Route label resolves to "continue" - record routing event (AUD-002)
+                # Preserve gate's reason and mode for full auditability
+                self._record_routing(
+                    state_id=state.state_id,
+                    node_id=gate.node_id,
+                    action=RoutingAction.route("continue", mode=action.mode, reason=dict(action.reason)),
+                )
             else:
                 # Route label resolves to a sink name
                 sink_name = destination
@@ -563,8 +573,14 @@ class GateExecutor:
         reason = {"condition": gate_config.condition, "result": route_label}
 
         if destination == "continue":
-            # Continue to next node - no routing event needed
+            # Continue to next node - record routing event (AUD-002)
+            # Use CONTINUE kind for GateResult, ROUTE for recording (matches edge label)
             action = RoutingAction.continue_(reason=reason)
+            self._record_routing(
+                state_id=state.state_id,
+                node_id=node_id,
+                action=RoutingAction.route("continue", mode=RoutingMode.MOVE, reason=reason),
+            )
 
         elif destination == "fork":
             # Fork to multiple paths - fork_to guaranteed by GateSettings.validate_fork_consistency()
@@ -882,7 +898,7 @@ class AggregationExecutor:
         self._recorder.update_batch_status(
             batch_id=batch_id,
             status="executing",
-            trigger_reason=trigger_type.value,
+            trigger_type=trigger_type.value,
         )
 
         # Step 2: Begin node state for flush operation
@@ -934,7 +950,7 @@ class AggregationExecutor:
                 self._recorder.complete_batch(
                     batch_id=batch_id,
                     status="failed",
-                    trigger_reason=trigger_type.value,
+                    trigger_type=trigger_type.value,
                     state_id=state.state_id,
                 )
 
@@ -972,7 +988,7 @@ class AggregationExecutor:
             self._recorder.complete_batch(
                 batch_id=batch_id,
                 status="completed",
-                trigger_reason=trigger_type.value,
+                trigger_type=trigger_type.value,
                 state_id=state.state_id,
             )
         else:
@@ -992,7 +1008,7 @@ class AggregationExecutor:
             self._recorder.complete_batch(
                 batch_id=batch_id,
                 status="failed",
-                trigger_reason=trigger_type.value,
+                trigger_type=trigger_type.value,
                 state_id=state.state_id,
             )
 

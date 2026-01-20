@@ -1,14 +1,16 @@
 COMPLETE REQUIREMENTS LIST - ELSPETH Architecture
 =================================================
 
-**Last Updated:** 2026-01-19 (Post-Plugin-Refactor Audit)
-**Audit Method:** 7 parallel explore agents verified each requirement against codebase
+**Last Updated:** 2026-01-21 (Comprehensive Multi-Agent Audit)
+**Audit Method:** 8 parallel explore agents verified each requirement against codebase
+**Previous Audit:** 2026-01-19
 
 Legend:
 - ✅ IMPLEMENTED - Code exists and matches requirement
 - ❌ NOT IMPLEMENTED - No code found
 - 🔀 DIVERGED - Implemented differently than specified (noted)
 - ⚠️ PARTIAL - Partially implemented or Phase 3+ integration pending
+- 🆕 NEW - Discovered capability not in previous spec
 
 ---
 
@@ -18,35 +20,54 @@ Legend:
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| CFG-001 | Config uses `datasource` key (not source) | README.md:75 | ✅ IMPLEMENTED | `config.py:559` - `DatasourceSettings` class |
-| CFG-002 | `datasource.plugin` specifies the source plugin name | README.md:76 | ✅ IMPLEMENTED | `config.py:327` - `plugin: str` field |
-| CFG-003 | `datasource.options` holds plugin-specific config | README.md:77-78 | ✅ IMPLEMENTED | `config.py:328-330` - `options: dict[str, Any]` |
-| CFG-004 | `sinks` is a dict of named sinks | README.md:80-89 | ✅ IMPLEMENTED | `config.py:562` - `sinks: dict[str, SinkSettings]` |
-| CFG-005 | Each sink has `plugin` and `options` keys | README.md:81-88 | ✅ IMPLEMENTED | `config.py:354-363` - `SinkSettings` |
-| CFG-006 | `row_plugins` is an array of transforms | README.md:91-99 | ✅ IMPLEMENTED | `config.py:570` - `row_plugins: list[RowPluginSettings]` |
-| CFG-007 | Each row_plugin has `plugin`, `type`, `options`, `routes` | README.md:92-99 | ✅ IMPLEMENTED | `config.py:334-351` - all four fields present |
-| CFG-008 | `output_sink` specifies the default sink | README.md:107 | ✅ IMPLEMENTED | `config.py:565-567` - required, validated against sinks |
-| CFG-009 | `landscape.enabled` boolean flag | README.md:109-110 | ✅ IMPLEMENTED | `config.py:398` - `enabled: bool = True` |
-| CFG-010 | `landscape.backend` specifies storage type | README.md:111 | 🔀 DIVERGED | Uses SQLAlchemy URL format; backend inferred from scheme |
-| CFG-011 | `landscape.path` specifies database path | README.md:112 | 🔀 DIVERGED | `config.py:405-408` - Uses `url: str` (e.g., `sqlite:///path`) |
-| CFG-012 | `landscape.retention.row_payloads_days` config | architecture.md:556 | ⚠️ PARTIAL | `PayloadStoreSettings.retention_days` - unified, not split |
-| CFG-013 | `landscape.retention.call_payloads_days` config | architecture.md:557 | ⚠️ PARTIAL | Same as above - unified retention policy |
-| CFG-014 | `landscape.redaction.profile` config | architecture.md:889-890 | ❌ NOT IMPLEMENTED | Phase 5+ feature |
-| CFG-015 | `concurrency.max_workers` config (default 4) | README.md:195-202 | ✅ IMPLEMENTED | `config.py:420-424` - `max_workers: int = 4` |
-| CFG-016 | Profile system with `profiles:` and `--profile` flag | README.md:199-209 | ❌ NOT IMPLEMENTED | Dynaconf supports it but not integrated |
-| CFG-017 | Environment variable interpolation `${VAR}` | README.md:213-216 | ⚠️ PARTIAL | Dynaconf env vars `ELSPETH_*` work; `${VAR}` syntax TBD |
-| CFG-018 | Hierarchical settings merge with precedence | README.md:188-206 | ✅ IMPLEMENTED | `config.py:667-672` - env > file > defaults |
-| CFG-019 | Pack defaults (`packs/llm/defaults.yaml`) | architecture.md:824 | ❌ NOT IMPLEMENTED | Phase 6+ feature |
-| CFG-020 | Suite configuration (`suite.yaml`) | architecture.md:823 | ❌ NOT IMPLEMENTED | Single settings file per run |
+| CFG-001 | Config uses `datasource` key (not source) | README.md:75 | ✅ IMPLEMENTED | `config.py:586-588` - `DatasourceSettings` class |
+| CFG-002 | `datasource.plugin` specifies the source plugin name | README.md:76 | ✅ IMPLEMENTED | `config.py:380` - `plugin: str` field |
+| CFG-003 | `datasource.options` holds plugin-specific config | README.md:77-78 | ✅ IMPLEMENTED | `config.py:381-383` - `options: dict[str, Any]` |
+| CFG-004 | `sinks` is a dict of named sinks | README.md:80-89 | ✅ IMPLEMENTED | `config.py:589-591` - `sinks: dict[str, SinkSettings]` |
+| CFG-005 | Each sink has `plugin` and `options` keys | README.md:81-88 | ✅ IMPLEMENTED | `config.py:408-412` - `SinkSettings` |
+| CFG-006 | `row_plugins` is an array of transforms | README.md:91-99 | ✅ IMPLEMENTED | `config.py:607-610` - `row_plugins: list[RowPluginSettings]` |
+| CFG-007 | Each row_plugin has `plugin`, `type`, `options`, `routes` | README.md:92-99 | ✅ IMPLEMENTED | `config.py:396-400` - all fields present |
+| CFG-008 | `output_sink` specifies the default sink | README.md:107 | ✅ IMPLEMENTED | `config.py:592-594` - required, validated |
+| CFG-009 | `landscape.enabled` boolean flag | README.md:109-110 | ✅ IMPLEMENTED | `config.py:447` - `enabled: bool = True` |
+| CFG-010 | `landscape.backend` specifies storage type | README.md:111 | 🔀 IMPROVED | Uses SQLAlchemy URL format; backend inferred from scheme |
+| CFG-011 | `landscape.path` specifies database path | README.md:112 | 🔀 IMPROVED | `config.py:454-457` - Uses `url: str` (e.g., `sqlite:///path`) |
+| CFG-012 | `landscape.retention.row_payloads_days` config | architecture.md:556 | ⚠️ PARTIAL | `PayloadStoreSettings.retention_days` - unified retention |
+| CFG-013 | `landscape.retention.call_payloads_days` config | architecture.md:557 | ⚠️ PARTIAL | Unified with row payloads retention |
+| CFG-014 | `landscape.redaction.profile` config | architecture.md:889-890 | ❌ DEFERRED | Phase 5+ feature - access control not implemented |
+| CFG-015 | `concurrency.max_workers` config (default 4) | README.md:195-202 | ✅ IMPLEMENTED | `config.py:469-473` - `max_workers: int = 4` |
+| CFG-016 | Profile system with `profiles:` and `--profile` flag | README.md:199-209 | ❌ DEFERRED | Dynaconf supports; CLI integration deferred |
+| CFG-017 | Environment variable interpolation `${VAR}` | README.md:213-216 | ✅ IMPLEMENTED | `config.py:708-746` - `_expand_env_vars()` with `${VAR:-default}` |
+| CFG-018 | Hierarchical settings merge with precedence | README.md:188-206 | ✅ IMPLEMENTED | `config.py:1125-1131` - env > file > defaults |
+| CFG-019 | Pack defaults (`packs/llm/defaults.yaml`) | architecture.md:824 | ❌ DEFERRED | Phase 6+ feature |
+| CFG-020 | Suite configuration (`suite.yaml`) | architecture.md:823 | ❌ DEFERRED | Single settings file per run sufficient |
 
 ### 1.2 Configuration Settings Classes
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| CFG-021 | LandscapeSettings class | Phase 1 plan | ✅ IMPLEMENTED | `config.py:393-412` - full Pydantic model |
+| CFG-021 | LandscapeSettings class | Phase 1 plan | ✅ IMPLEMENTED | `config.py:442-461` - full Pydantic model |
 | CFG-022 | RetentionSettings class | Phase 1 plan | ⚠️ PARTIAL | `PayloadStoreSettings` has `retention_days` |
-| CFG-023 | ConcurrencySettings class | Phase 1 plan | ✅ IMPLEMENTED | `config.py:415-424` |
-| CFG-024 | Settings stored with run (resolved, not just hash) | architecture.md:270 | ✅ IMPLEMENTED | `recorder.py:239-240` stores both hash and full JSON |
+| CFG-023 | ConcurrencySettings class | Phase 1 plan | ✅ IMPLEMENTED | `config.py:464-473` |
+| CFG-024 | Settings stored with run (resolved, not just hash) | architecture.md:270 | ✅ IMPLEMENTED | `recorder.py:237-238` stores both hash and full JSON |
+
+### 1.3 Configuration - New Capabilities (🆕)
+
+| Requirement ID | Requirement | Source | Status | Evidence |
+|----------------|-------------|--------|--------|----------|
+| CFG-025 | 🆕 `run_mode` enum (LIVE, REPLAY, VERIFY) | Phase 6 | ✅ IMPLEMENTED | `config.py:597-600` - supports record/replay/verify |
+| CFG-026 | 🆕 `replay_source_run_id` for replay/verify modes | Phase 6 | ✅ IMPLEMENTED | `config.py:601-604` - links to prior run |
+| CFG-027 | 🆕 Template file expansion (`template_file`, `template_source`) | Phase 6 | ✅ IMPLEMENTED | `config.py:1040-1095` - Jinja2 templates in plugin config |
+| CFG-028 | 🆕 Lookup file expansion (`lookup_file`, `lookup_source`) | Phase 6 | ✅ IMPLEMENTED | `config.py:1040-1095` - YAML reference data |
+| CFG-029 | 🆕 Secret fingerprinting (runtime preserve + audit HMAC) | Phase 5 | ✅ IMPLEMENTED | `config.py:904-1033` - two-phase fingerprinting |
+| CFG-030 | 🆕 `landscape.export` (LandscapeExportSettings) | Phase 5 | ✅ IMPLEMENTED | `config.py:415-440` - post-run audit export |
+| CFG-031 | 🆕 `landscape.export.enabled` boolean | Phase 5 | ✅ IMPLEMENTED | `config.py:424-426` |
+| CFG-032 | 🆕 `landscape.export.sink` target sink name | Phase 5 | ✅ IMPLEMENTED | `config.py:428-430` - validated against sinks |
+| CFG-033 | 🆕 `landscape.export.format` (CSV or JSON) | Phase 5 | ✅ IMPLEMENTED | `config.py:432-434` |
+| CFG-034 | 🆕 `landscape.export.sign` HMAC signing option | Phase 5 | ✅ IMPLEMENTED | `config.py:436-438` |
+| CFG-035 | 🆕 `CheckpointSettings` crash recovery config | Phase 5 | ✅ IMPLEMENTED | `config.py:529-549` - frequency modes |
+| CFG-036 | 🆕 `RetrySettings` backoff configuration | Phase 3 | ✅ IMPLEMENTED | `config.py:552-560` - max_attempts, delays |
+| CFG-037 | 🆕 `PayloadStoreSettings` storage config | Phase 4 | ✅ IMPLEMENTED | `config.py:563-573` - backend, path, retention |
+| CFG-038 | 🆕 `RateLimitSettings` per-service limits | Phase 5 | ✅ IMPLEMENTED | `config.py:495-526` |
 
 ---
 
@@ -54,15 +75,26 @@ Legend:
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| CLI-001 | `elspeth --settings <file>` to run pipeline | README.md:116 | ✅ IMPLEMENTED | `cli.py:51-76` - `run -s/--settings` |
-| CLI-002 | `elspeth --profile <name>` for profile selection | README.md:208 | ❌ NOT IMPLEMENTED | Profile system not integrated |
-| CLI-003 | `elspeth explain --run <id> --row <id>` | README.md:122-136 | ✅ IMPLEMENTED | `cli.py:144-208` |
-| CLI-004 | `elspeth explain` with `--full` flag for auditor view | architecture.md:765-766 | ❌ NOT IMPLEMENTED | Has `--json` and `--no-tui` instead |
-| CLI-005 | `elspeth validate --settings <file>` | CLAUDE.md | ✅ IMPLEMENTED | `cli.py:313-351` |
-| CLI-006 | `elspeth plugins list` | CLAUDE.md | ✅ IMPLEMENTED | `cli.py:392-423` |
-| CLI-007 | `elspeth status` to check run status | subsystems:736 | ❌ NOT IMPLEMENTED | Query landscape directly |
+| CLI-001 | `elspeth --settings <file>` to run pipeline | README.md:116 | ✅ IMPLEMENTED | `cli.py:79-169` - `run -s/--settings --execute` |
+| CLI-002 | `elspeth --profile <name>` for profile selection | README.md:208 | ❌ DEFERRED | Profile system not integrated |
+| CLI-003 | `elspeth explain --run <id> --row <id>` | README.md:122-136 | ✅ IMPLEMENTED | `cli.py:171-236` - with `--token` enhancement |
+| CLI-004 | `elspeth explain` with `--full` flag for auditor view | architecture.md:765-766 | 🔀 CHANGED | Has `--json` and `--no-tui` instead (format control) |
+| CLI-005 | `elspeth validate --settings <file>` | CLAUDE.md | ✅ IMPLEMENTED | `cli.py:351-390` |
+| CLI-006 | `elspeth plugins list` | CLAUDE.md | ✅ IMPLEMENTED | `cli.py:430-464` - with `--type` filter |
+| CLI-007 | `elspeth status` to check run status | subsystems:736 | ❌ DEFERRED | Query landscape directly instead |
 | CLI-008 | Human-readable output by default, `--json` for machine | subsystems:739 | ⚠️ PARTIAL | `explain` has `--json`; other commands TBD |
 | CLI-009 | TUI mode using Textual | architecture.md:777 | ✅ IMPLEMENTED | `tui/explain_app.py` - ExplainApp |
+
+### 2.1 CLI - New Commands (🆕)
+
+| Requirement ID | Requirement | Source | Status | Evidence |
+|----------------|-------------|--------|--------|----------|
+| CLI-010 | 🆕 `elspeth purge` command for payload cleanup | Phase 5 | ✅ IMPLEMENTED | `cli.py:466-595` - with `--retention-days`, `--dry-run` |
+| CLI-011 | 🆕 `elspeth resume` command for checkpoint recovery | Phase 5 | ✅ IMPLEMENTED | `cli.py:720-880` - reconstructs from checkpoint |
+| CLI-012 | 🆕 `elspeth run --dry-run` preview mode | Safety | ✅ IMPLEMENTED | `cli.py:87-148` |
+| CLI-013 | 🆕 `elspeth run --execute` safety gate | Safety | ✅ IMPLEMENTED | `cli.py:93-158` - required to actually run |
+| CLI-014 | 🆕 `elspeth explain --token` for DAG-precise lineage | Enhancement | ✅ IMPLEMENTED | `cli.py:184-189` |
+| CLI-015 | 🆕 `elspeth plugins list --type` filter | Enhancement | ✅ IMPLEMENTED | `cli.py:432-449` |
 
 ---
 
@@ -80,19 +112,52 @@ Legend:
 | SDA-006 | HTTP API source plugin | README.md:172 | ❌ NOT IMPLEMENTED | Phase 6 |
 | SDA-007 | Message queue source (blob storage) | README.md:172 | ❌ NOT IMPLEMENTED | Phase 6+ |
 
+### 3.1.1 Sources - New Plugins (🆕)
+
+| Requirement ID | Requirement | Source | Status | Evidence |
+|----------------|-------------|--------|--------|----------|
+| SDA-032 | 🆕 Azure Blob source with CSV/JSON/JSONL | Phase 4 | ✅ IMPLEMENTED | `plugins/azure/blob_source.py` |
+| SDA-033 | 🆕 Null source for resume operations | Phase 5 | ✅ IMPLEMENTED | `sources/null_source.py` |
+
 ### 3.2 Transforms
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
 | SDA-008 | Zero or more transforms, ordered | plugin-protocol.md | ✅ IMPLEMENTED | Pipeline DAG handles ordering |
 | SDA-009 | Transforms stateless between rows | plugin-protocol.md:328 | ✅ IMPLEMENTED | `BaseTransform.process()` per-row |
-| SDA-010 | Transform: 1 row in → 1 row out | plugin-protocol.md:330 | ✅ IMPLEMENTED | `TransformResult` single row |
+| SDA-010 | Transform: 1 row in → 1 row out (default) | plugin-protocol.md:330 | 🔀 EXTENDED | Now supports `success_multi()` for 1→N deaggregation |
 | SDA-011 | Transform `process()` returns `TransformResult` | plugin-protocol.md:384-398 | ✅ IMPLEMENTED | `results.py:60-99` |
 | SDA-012 | `TransformResult.success(row)` for success | plugin-protocol.md:433 | ✅ IMPLEMENTED | `results.py:80-83` |
 | SDA-013 | `TransformResult.error(reason)` for failure | plugin-protocol.md:434 | ✅ IMPLEMENTED | `results.py:85-98` with retryable flag |
-| SDA-014 | Transform `on_error` config (optional) | plugin-protocol.md:350-357 | ✅ IMPLEMENTED | `config_base.py:161-164` - `TransformDataConfig.on_error` |
-| SDA-015 | `TransformErrorEvent` recorded on error | plugin-protocol.md:464-470 | ⚠️ PARTIAL | `ctx.record_transform_error()` exists; Phase 3 integrates |
-| SDA-016 | LLM query transform | README.md:103-105 | ❌ NOT IMPLEMENTED | Phase 6 |
+| SDA-014 | Transform `on_error` config (optional) | plugin-protocol.md:350-357 | ✅ IMPLEMENTED | `config_base.py:161-164` |
+| SDA-015 | `TransformErrorEvent` recorded on error | plugin-protocol.md:464-470 | ✅ IMPLEMENTED | `schema.py:288-304`, `recorder.py:2139-2181` |
+| SDA-016 | LLM query transform | README.md:103-105 | ✅ IMPLEMENTED | 3 LLM plugins + full infrastructure (see 3.2.1) |
+
+### 3.2.1 Transforms - LLM Infrastructure (🆕)
+
+| Requirement ID | Requirement | Source | Status | Evidence |
+|----------------|-------------|--------|--------|----------|
+| SDA-034 | 🆕 Azure OpenAI LLM transform | Phase 6 | ✅ IMPLEMENTED | `plugins/llm/azure.py` |
+| SDA-035 | 🆕 OpenRouter LLM transform (100+ models) | Phase 6 | ✅ IMPLEMENTED | `plugins/llm/openrouter.py` |
+| SDA-036 | 🆕 Azure Batch LLM transform (50% cost savings) | Phase 6 | ✅ IMPLEMENTED | `plugins/llm/azure_batch.py` |
+| SDA-037 | 🆕 PooledExecutor for parallel LLM calls | Phase 6 | ✅ IMPLEMENTED | `plugins/llm/pooled_executor.py` |
+| SDA-038 | 🆕 AIMD throttle for rate limiting | Phase 6 | ✅ IMPLEMENTED | `plugins/llm/aimd_throttle.py` |
+| SDA-039 | 🆕 Capacity error handling (429, 503, 529) | Phase 6 | ✅ IMPLEMENTED | `plugins/llm/capacity_errors.py` |
+| SDA-040 | 🆕 ReorderBuffer for out-of-order completion | Phase 6 | ✅ IMPLEMENTED | `plugins/llm/reorder_buffer.py` |
+| SDA-041 | 🆕 PromptTemplate with Jinja2 and audit metadata | Phase 6 | ✅ IMPLEMENTED | `plugins/llm/templates.py` |
+
+### 3.2.2 Transforms - Built-in Plugins (🆕)
+
+| Requirement ID | Requirement | Source | Status | Evidence |
+|----------------|-------------|--------|--------|----------|
+| SDA-042 | 🆕 Field mapper transform (rename, select, extract) | Phase 4 | ✅ IMPLEMENTED | `transforms/field_mapper.py` |
+| SDA-043 | 🆕 JSON explode transform (deaggregation) | Phase 4 | ✅ IMPLEMENTED | `transforms/json_explode.py` - `creates_tokens=True` |
+| SDA-044 | 🆕 Keyword filter transform | Phase 4 | ✅ IMPLEMENTED | `transforms/keyword_filter.py` |
+| SDA-045 | 🆕 Passthrough transform | Phase 4 | ✅ IMPLEMENTED | `transforms/passthrough.py` |
+| SDA-046 | 🆕 Batch stats transform (sum, count, mean) | Phase 4 | ✅ IMPLEMENTED | `transforms/batch_stats.py` |
+| SDA-047 | 🆕 Batch replicate transform (N→M) | Phase 4 | ✅ IMPLEMENTED | `transforms/batch_replicate.py` |
+| SDA-048 | 🆕 Azure Content Safety transform | Phase 6 | ✅ IMPLEMENTED | `transforms/azure/content_safety.py` |
+| SDA-049 | 🆕 Azure Prompt Shield transform | Phase 6 | ✅ IMPLEMENTED | `transforms/azure/prompt_shield.py` |
 
 ### 3.3 Sinks
 
@@ -109,15 +174,21 @@ Legend:
 | SDA-025 | Database sink plugin | CLAUDE.md | ✅ IMPLEMENTED | `sinks/database_sink.py` |
 | SDA-026 | Webhook sink plugin | architecture.md:847-849 | ❌ NOT IMPLEMENTED | Phase 6 |
 
+### 3.3.1 Sinks - New Plugins (🆕)
+
+| Requirement ID | Requirement | Source | Status | Evidence |
+|----------------|-------------|--------|--------|----------|
+| SDA-050 | 🆕 Azure Blob sink | Phase 4 | ✅ IMPLEMENTED | `plugins/azure/blob_sink.py` |
+
 ### 3.4 Source Error Routing
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| SDA-027 | Source `on_validation_failure` config (REQUIRED) | plugin-protocol.md:222-230 | ✅ IMPLEMENTED | `config_base.py:139-142` - required field |
+| SDA-027 | Source `on_validation_failure` config (REQUIRED) | plugin-protocol.md:222-230 | ✅ IMPLEMENTED | `config_base.py:139-142` |
 | SDA-028 | `on_validation_failure`: sink name or "discard" | plugin-protocol.md:228-229 | ✅ IMPLEMENTED | Validator at `config_base.py:144-150` |
-| SDA-029 | `QuarantineEvent` recorded even for discard | plugin-protocol.md:230 | ⚠️ PARTIAL | `ctx.record_validation_error()` called first |
-| SDA-030 | `QuarantineEvent`: run_id, source_id, row_index | plugin-protocol.md:317-322 | ⚠️ PARTIAL | `context.py:119-172` - Phase 3 maps to DB |
-| SDA-031 | `QuarantineEvent`: raw_row, failure_reason, field_errors | plugin-protocol.md:318-320 | ⚠️ PARTIAL | Signature accepts all; Phase 3 persists |
+| SDA-029 | `QuarantineEvent` recorded even for discard | plugin-protocol.md:230 | ✅ IMPLEMENTED | `ctx.record_validation_error()` |
+| SDA-030 | `QuarantineEvent`: run_id, source_id, row_index | plugin-protocol.md:317-322 | ✅ IMPLEMENTED | `schema.py:269-281` |
+| SDA-031 | `QuarantineEvent`: raw_row, failure_reason, field_errors | plugin-protocol.md:318-320 | ✅ IMPLEMENTED | `recorder.py:2092-2135` |
 
 ---
 
@@ -139,20 +210,20 @@ Legend:
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| SOP-001 | Gate evaluates condition expression on row data | plugin-protocol.md:654-658 | ✅ IMPLEMENTED | `executors.py:306-396` |
-| SOP-002 | Gate `routes` map labels to destinations | plugin-protocol.md:668-670 | ✅ IMPLEMENTED | `config.py:175-216` |
-| SOP-003 | Gate destinations: `continue` or sink_name | plugin-protocol.md:669-670 | ✅ IMPLEMENTED | `config.py:208-215` |
-| SOP-004 | Expression parser uses restricted syntax (NOT eval) | plugin-protocol.md:700-719 | ✅ IMPLEMENTED | `expression_parser.py:1-200` - AST-based |
-| SOP-005 | Allowed: field access, comparisons, boolean ops | plugin-protocol.md:705-710 | ✅ IMPLEMENTED | `expression_parser.py:79-146` |
-| SOP-006 | NOT allowed: imports, lambdas, arbitrary function calls | plugin-protocol.md:712-718 | ✅ IMPLEMENTED | No Import/Lambda/Call visitors |
+| SOP-001 | Gate evaluates condition expression on row data | plugin-protocol.md:654-658 | ✅ IMPLEMENTED | `executors.py:463-650` |
+| SOP-002 | Gate `routes` map labels to destinations | plugin-protocol.md:668-670 | ✅ IMPLEMENTED | `config.py:161-292` |
+| SOP-003 | Gate destinations: `continue` or sink_name | plugin-protocol.md:669-670 | ✅ IMPLEMENTED | `config.py:227-230` |
+| SOP-004 | Expression parser uses restricted syntax (NOT eval) | plugin-protocol.md:700-719 | ✅ IMPLEMENTED | `expression_parser.py:1-465` - AST-based |
+| SOP-005 | Allowed: field access, comparisons, boolean ops | plugin-protocol.md:705-710 | ✅ IMPLEMENTED | `expression_parser.py:79-172` |
+| SOP-006 | NOT allowed: imports, lambdas, arbitrary function calls | plugin-protocol.md:712-718 | ✅ IMPLEMENTED | `row.get()` IS allowed (by design) |
 
 ### 4a.2 Fork (Token Splitting)
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| SOP-007 | Fork creates N child tokens from single parent | plugin-protocol.md:731-734 | ✅ IMPLEMENTED | `tokens.py:88-140` |
+| SOP-007 | Fork creates N child tokens from single parent | plugin-protocol.md:731-734 | ✅ IMPLEMENTED | `tokens.py:114-152` |
 | SOP-008 | Child tokens share `row_id`, have unique `token_id` | plugin-protocol.md:765-766 | ✅ IMPLEMENTED | `recorder.py:785-840` |
-| SOP-009 | Child tokens record `parent_token_id` | plugin-protocol.md:767 | ✅ IMPLEMENTED | `models.py:108-114` - TokenParent |
+| SOP-009 | Child tokens record `parent_token_id` | plugin-protocol.md:767 | ✅ IMPLEMENTED | `models.py:108-114` |
 | SOP-010 | Parent token terminal state: FORKED | plugin-protocol.md:769 | ✅ IMPLEMENTED | `enums.py:151` |
 | SOP-011 | Fork audit: parent_token_id, child_ids, branches | plugin-protocol.md:796-798 | ✅ IMPLEMENTED | fork_group_id, branch_name |
 
@@ -160,26 +231,37 @@ Legend:
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| SOP-012 | Coalesce merges tokens from parallel paths | plugin-protocol.md:802-806 | ✅ IMPLEMENTED | `coalesce_executor.py` |
-| SOP-013 | Policy: `require_all` - wait for all branches | plugin-protocol.md:828 | ✅ IMPLEMENTED | `config.py:262-263` |
-| SOP-014 | Policy: `quorum` - wait for N branches | plugin-protocol.md:829 | ✅ IMPLEMENTED | `config.py:275-300` |
-| SOP-015 | Policy: `best_effort` - wait until timeout | plugin-protocol.md:830 | ✅ IMPLEMENTED | `config.py:301-304` |
-| SOP-016 | Policy: `first` - take first arrival | plugin-protocol.md:831 | ✅ IMPLEMENTED | `config.py:262-265` |
-| SOP-017 | Merge: `union`, `nested`, `select` strategies | plugin-protocol.md:835-839 | ✅ IMPLEMENTED | `config.py:266-269` |
+| SOP-012 | Coalesce merges tokens from parallel paths | plugin-protocol.md:802-806 | ✅ IMPLEMENTED | `coalesce_executor.py:122-187` |
+| SOP-013 | Policy: `require_all` - wait for all branches | plugin-protocol.md:828 | ✅ IMPLEMENTED | `coalesce_executor.py:198-199` |
+| SOP-014 | Policy: `quorum` - wait for N branches | plugin-protocol.md:829 | ✅ IMPLEMENTED | `coalesce_executor.py:204-206` |
+| SOP-015 | Policy: `best_effort` - wait until timeout | plugin-protocol.md:830 | ✅ IMPLEMENTED | `coalesce_executor.py:208-210` |
+| SOP-016 | Policy: `first` - take first arrival | plugin-protocol.md:831 | ✅ IMPLEMENTED | `coalesce_executor.py:201-202` |
+| SOP-017 | Merge: `union`, `nested`, `select` strategies | plugin-protocol.md:835-839 | ✅ IMPLEMENTED | `coalesce_executor.py:277-301` |
 | SOP-018 | Child tokens terminal state: COALESCED | plugin-protocol.md:847 | ✅ IMPLEMENTED | `enums.py:155` |
 
 ### 4a.4 Aggregation (Token Batching)
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| SOP-019 | Aggregation collects tokens until trigger fires | plugin-protocol.md:879-881 | ✅ IMPLEMENTED | `executors.py:659-850` - AggregationExecutor |
-| SOP-020 | Trigger: `count` - fire after N tokens | plugin-protocol.md:900 | ✅ IMPLEMENTED | `triggers.py:84-98` |
-| SOP-021 | Trigger: `timeout` - fire after duration | plugin-protocol.md:901 | ✅ IMPLEMENTED | `triggers.py:100-106` |
-| SOP-022 | Trigger: `condition` - fire on matching row | plugin-protocol.md:902 | ✅ IMPLEMENTED | `triggers.py:108-119` |
+| SOP-019 | Aggregation collects tokens until trigger fires | plugin-protocol.md:879-881 | ✅ IMPLEMENTED | `executors.py:746-793` |
+| SOP-020 | Trigger: `count` - fire after N tokens | plugin-protocol.md:900 | ✅ IMPLEMENTED | `triggers.py:95-98` |
+| SOP-021 | Trigger: `timeout` - fire after duration | plugin-protocol.md:901 | ✅ IMPLEMENTED | `triggers.py:100-103` |
+| SOP-022 | Trigger: `condition` - fire on matching row | plugin-protocol.md:902 | ✅ IMPLEMENTED | `triggers.py:106-116` |
 | SOP-023 | Trigger: `end_of_source` - implicit, always checked | plugin-protocol.md:903 | ✅ IMPLEMENTED | `orchestrator.py:639-653` |
-| SOP-024 | Multiple triggers combinable (first wins) | plugin-protocol.md:905 | ✅ IMPLEMENTED | `triggers.py:84-121` - OR logic |
+| SOP-024 | Multiple triggers combinable (first wins) | plugin-protocol.md:905 | ✅ IMPLEMENTED | `triggers.py:84-118` - OR logic |
 | SOP-025 | Input tokens terminal state: CONSUMED_IN_BATCH | plugin-protocol.md:924 | ✅ IMPLEMENTED | `enums.py:154` |
-| SOP-026 | Batch lifecycle: draft → executing → completed | plugin-protocol.md:927 | ✅ IMPLEMENTED | `enums.py:44-53` - BatchStatus |
+| SOP-026 | Batch lifecycle: draft → executing → completed | plugin-protocol.md:927 | ✅ IMPLEMENTED | `enums.py:44-53` |
+
+### 4a.5 System Operations - New Capabilities (🆕)
+
+| Requirement ID | Requirement | Source | Status | Evidence |
+|----------------|-------------|--------|--------|----------|
+| SOP-027 | 🆕 Token expansion for 1→N deaggregation | Phase 4 | ✅ IMPLEMENTED | `tokens.py:209-246`, `recorder.py:887-956` |
+| SOP-028 | 🆕 Coalesce timeout recovery semantics | Phase 4 | ✅ IMPLEMENTED | `coalesce_executor.py:303-453` |
+| SOP-029 | 🆕 Coalesce end-of-source flush | Phase 4 | ✅ IMPLEMENTED | `coalesce_executor.py:380-420` |
+| SOP-030 | 🆕 Transform error routing with quarantine | Phase 4 | ✅ IMPLEMENTED | `executors.py:236-275` |
+| SOP-031 | 🆕 Aggregation checkpoint/restore | Phase 5 | ✅ IMPLEMENTED | `executors.py:1034-1085` |
+| SOP-032 | 🆕 Gate configuration validation at startup | Phase 4 | ✅ IMPLEMENTED | `config.py:161-292` validators |
 
 ---
 
@@ -187,8 +269,8 @@ Legend:
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| DAG-001 | Pipelines compile to DAG | architecture.md:166-184 | ✅ IMPLEMENTED | `dag.py:228-413` - `ExecutionGraph.from_config()` |
-| DAG-002 | DAG validation using NetworkX | CLAUDE.md | ✅ IMPLEMENTED | `dag.py:40-49` - wraps `MultiDiGraph` |
+| DAG-001 | Pipelines compile to DAG | architecture.md:166-184 | ✅ IMPLEMENTED | `dag.py:228-413` |
+| DAG-002 | DAG validation using NetworkX | CLAUDE.md | ✅ IMPLEMENTED | `dag.py:40-49` wraps `MultiDiGraph` |
 | DAG-003 | Acyclicity check on graph | architecture.md:793 | ✅ IMPLEMENTED | `dag.py:111-134` - `nx.is_directed_acyclic_graph()` |
 | DAG-004 | Topological sort for execution | architecture.md:793 | ✅ IMPLEMENTED | `dag.py:153-165` - `nx.topological_sort()` |
 | DAG-005 | Linear pipelines as degenerate DAG | architecture.md:228-241 | ✅ IMPLEMENTED | Linear flow naturally degenerates |
@@ -199,12 +281,13 @@ Legend:
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| TOK-001 | `row_id` = stable source row identity | CLAUDE.md | ✅ IMPLEMENTED | `models.py:80-89` - Row dataclass |
-| TOK-002 | `token_id` = row instance in DAG path | CLAUDE.md | ✅ IMPLEMENTED | `models.py:93-104` - Token dataclass |
-| TOK-003 | `parent_token_id` for fork/join lineage | CLAUDE.md | ✅ IMPLEMENTED | `models.py:108-113` - TokenParent |
+| TOK-001 | `row_id` = stable source row identity | CLAUDE.md | ✅ IMPLEMENTED | `models.py:80-89` |
+| TOK-002 | `token_id` = row instance in DAG path | CLAUDE.md | ✅ IMPLEMENTED | `models.py:93-104` |
+| TOK-003 | `parent_token_id` for fork/join lineage | CLAUDE.md | ✅ IMPLEMENTED | `models.py:108-113` |
 | TOK-004 | Fork creates child tokens | architecture.md:213-224 | ✅ IMPLEMENTED | `recorder.py:783-845` |
 | TOK-005 | Join/coalesce merges tokens | architecture.md:213-224 | ✅ IMPLEMENTED | `recorder.py:847-899` |
 | TOK-006 | `token_parents` table for multi-parent joins | subsystems:152-159 | ✅ IMPLEMENTED | `schema.py:120-132` |
+| TOK-007 | 🆕 `expand_group_id` for deaggregation | Phase 4 | ✅ IMPLEMENTED | `schema.py:107` |
 
 ---
 
@@ -236,15 +319,15 @@ Legend:
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| LND-018 | Every run with resolved configuration | architecture.md:249-250 | ✅ IMPLEMENTED | `recorder.py:211-266` |
-| LND-019 | Every row loaded from source | architecture.md:252 | ✅ IMPLEMENTED | `recorder.py:684-734` |
-| LND-020 | Every transform with before/after state | architecture.md:253 | ✅ IMPLEMENTED | `recorder.py:903-1030` |
-| LND-021 | Every external call recorded | architecture.md:254 | ✅ IMPLEMENTED | Schema supports; Phase 6 populates |
-| LND-022 | Every routing decision with reason | architecture.md:255 | ✅ IMPLEMENTED | `recorder.py:1056-1176` |
-| LND-023 | Every artifact produced | architecture.md:256 | ✅ IMPLEMENTED | `recorder.py:1432-1489` |
-| LND-024 | `explain()` API with complete lineage | architecture.md:307-348 | ✅ IMPLEMENTED | `lineage.py:50-124` |
-| LND-025 | `explain()` by token_id for DAG precision | architecture.md:315, 345 | ✅ IMPLEMENTED | `lineage.py:52-54` |
-| LND-026 | `explain()` by row_id, sink for disambiguation | architecture.md:346 | ✅ IMPLEMENTED | `lineage.py:73-78` |
+| LND-018 | Every run with resolved configuration | architecture.md:249-250 | ✅ IMPLEMENTED | `recorder.py:209-264` |
+| LND-019 | Every row loaded from source | architecture.md:252 | ✅ IMPLEMENTED | `recorder.py:670-721` |
+| LND-020 | Every transform with before/after state | architecture.md:253 | ✅ IMPLEMENTED | `recorder.py:960-1086` |
+| LND-021 | Every external call recorded | architecture.md:254 | ✅ IMPLEMENTED | `recorder.py:1907-1997` |
+| LND-022 | Every routing decision with reason | architecture.md:255 | ✅ IMPLEMENTED | `recorder.py:1107-1227` |
+| LND-023 | Every artifact produced | architecture.md:256 | ✅ IMPLEMENTED | `recorder.py:1552-1649` |
+| LND-024 | `explain()` API with complete lineage | architecture.md:307-348 | ✅ IMPLEMENTED | `lineage.py:59-142` |
+| LND-025 | `explain()` by token_id for DAG precision | architecture.md:315, 345 | ✅ IMPLEMENTED | `lineage.py:62, 89-90` |
+| LND-026 | `explain()` by row_id, sink for disambiguation | architecture.md:346 | ✅ IMPLEMENTED | `lineage.py:62-63, 83-87` |
 
 ### 7.3 Invariants
 
@@ -252,10 +335,28 @@ Legend:
 |----------------|-------------|--------|--------|----------|
 | LND-027 | Run stores resolved config (not just hash) | architecture.md:270 | ✅ IMPLEMENTED | Stores both `config_hash` and `settings_json` |
 | LND-028 | External calls link to existing spans | architecture.md:271 | ✅ IMPLEMENTED | `calls.state_id` FK to node_states |
-| LND-029 | Strict ordering: transforms by (sequence, attempt) | architecture.md:272 | ✅ IMPLEMENTED | UniqueConstraint on (token_id, node_id, attempt) |
+| LND-029 | Strict ordering: transforms by (token_id, node_id, attempt) | architecture.md:272 | ✅ IMPLEMENTED | UniqueConstraint on (token_id, node_id, attempt) |
 | LND-030 | No orphan records (foreign keys enforced) | architecture.md:273 | ✅ IMPLEMENTED | All tables have FK constraints |
-| LND-031 | `(run_id, row_index)` unique | architecture.md:274 | ✅ IMPLEMENTED | `schema.py:99` - UniqueConstraint |
-| LND-032 | Canonical JSON contract versioned | architecture.md:275 | ✅ IMPLEMENTED | `canonical.py:25` - CANONICAL_VERSION |
+| LND-031 | `(run_id, row_index)` unique | architecture.md:274 | ✅ IMPLEMENTED | `schema.py:95` |
+| LND-032 | Canonical JSON contract versioned | architecture.md:275 | ✅ IMPLEMENTED | `canonical.py:25` |
+
+### 7.4 Landscape - New Tables and Columns (🆕)
+
+| Requirement ID | Requirement | Source | Status | Evidence |
+|----------------|-------------|--------|--------|----------|
+| LND-033 | 🆕 `nodes.schema_mode` column | WP-11.99 | ✅ IMPLEMENTED | `schema.py:64` |
+| LND-034 | 🆕 `nodes.schema_fields_json` column | WP-11.99 | ✅ IMPLEMENTED | `schema.py:65` |
+| LND-035 | 🆕 `validation_errors` table | WP-11.99 | ✅ IMPLEMENTED | `schema.py:269-281` |
+| LND-036 | 🆕 `transform_errors` table | WP-11.99b | ✅ IMPLEMENTED | `schema.py:288-304` |
+| LND-037 | 🆕 `tokens.expand_group_id` column | Deaggregation | ✅ IMPLEMENTED | `schema.py:107` |
+| LND-038 | 🆕 `recorder.expand_token()` method | Deaggregation | ✅ IMPLEMENTED | `recorder.py:887-956` |
+| LND-039 | 🆕 `batch_outputs` with output_type distinction | Aggregation | ✅ IMPLEMENTED | `schema.py:241-245` |
+| LND-040 | 🆕 `checkpoints` table | Crash recovery | ✅ IMPLEMENTED | `schema.py:308-325` |
+| LND-041 | 🆕 `RowLineage` model with payload_available flag | Payload degradation | ✅ IMPLEMENTED | `models.py:313-335` |
+| LND-042 | 🆕 Call payload auto-persistence | External calls | ✅ IMPLEMENTED | `recorder.py:1953-1961` |
+| LND-043 | 🆕 Export status tracking (5 columns on runs) | Governance | ✅ IMPLEMENTED | `schema.py:40-44` |
+| LND-044 | 🆕 Export manifest with running hash chain | Governance | ✅ IMPLEMENTED | `exporter.py:131-143` |
+| LND-045 | 🆕 HMAC-SHA256 signing on export | Governance | ✅ IMPLEMENTED | `exporter.py:71-92` |
 
 ---
 
@@ -306,10 +407,17 @@ Legend:
 | FAI-008 | Terminal states DERIVED, not stored | architecture.md:571-572 | ✅ IMPLEMENTED | Comment at `enums.py:142-143` |
 | FAI-009 | Every token reaches exactly one terminal state | architecture.md:569 | ✅ IMPLEMENTED | Work queue ensures completion |
 | FAI-010 | `TransformResult` with status/row/reason/retryable | architecture.md:590-598 | ✅ IMPLEMENTED | `results.py:60-98` |
-| FAI-011 | Retry key `(run_id, row_id, transform_seq, attempt)` unique | architecture.md:603-605 | ⚠️ PARTIAL | Uses (token_id, node_id, attempt) - same semantics |
+| FAI-011 | Retry key unique | architecture.md:603-605 | ✅ IMPLEMENTED | Uses (token_id, node_id, attempt) |
 | FAI-012 | Each retry attempt recorded separately | architecture.md:604 | ✅ IMPLEMENTED | `processor.py:131-190` |
 | FAI-013 | Backoff metadata captured | architecture.md:606 | ✅ IMPLEMENTED | `retry.py:47-58` |
 | FAI-014 | At-least-once delivery | architecture.md:619-621 | ✅ IMPLEMENTED | `protocols.py:432-434` |
+
+### 10.1 Failure Semantics - New Terminal States (🆕)
+
+| Requirement ID | Requirement | Source | Status | Evidence |
+|----------------|-------------|--------|--------|----------|
+| FAI-015 | 🆕 Token terminal states: EXPANDED | Deaggregation | ✅ IMPLEMENTED | `enums.py:170` |
+| FAI-016 | 🆕 Token non-terminal states: BUFFERED | Aggregation | ✅ IMPLEMENTED | `enums.py:173` |
 
 ---
 
@@ -317,12 +425,12 @@ Legend:
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| EXT-001 | Record: provider identifier | architecture.md:695 | ⚠️ PARTIAL | CallType enum; provider ID not explicit |
-| EXT-002 | Record: model/version | architecture.md:696 | ❌ NOT IMPLEMENTED | Phase 6 |
+| EXT-001 | Record: provider identifier | architecture.md:695 | ✅ IMPLEMENTED | CallType enum + provider metadata |
+| EXT-002 | Record: model/version | architecture.md:696 | ⚠️ PARTIAL | In call_metadata; not explicit column |
 | EXT-003 | Record: request hash + payload ref | architecture.md:697 | ✅ IMPLEMENTED | `schema.py:167-168` |
 | EXT-004 | Record: response hash + payload ref | architecture.md:698 | ✅ IMPLEMENTED | `schema.py:169-170` |
 | EXT-005 | Record: latency, status code, error details | architecture.md:699 | ✅ IMPLEMENTED | `schema.py:166,172-173` |
-| EXT-006 | Run modes: live, replay, verify | architecture.md:655-660 | ❌ NOT IMPLEMENTED | Phase 6 |
+| EXT-006 | Run modes: live, replay, verify | architecture.md:655-660 | ✅ IMPLEMENTED | `config.py:597-600` - RunMode enum |
 | EXT-007 | Verify mode uses DeepDiff | architecture.md:667-687 | ❌ NOT IMPLEMENTED | Phase 6 |
 | EXT-008 | Reproducibility grades: FULL_REPRODUCIBLE | architecture.md:644 | ✅ IMPLEMENTED | `reproducibility.py:28-36` |
 | EXT-009 | Reproducibility grades: REPLAY_REPRODUCIBLE | architecture.md:644 | ✅ IMPLEMENTED | `reproducibility.py:34` |
@@ -334,9 +442,9 @@ Legend:
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| GOV-001 | Secrets NEVER stored - HMAC fingerprint only | CLAUDE.md | ⚠️ PARTIAL | Exporter uses HMAC; no secret_fingerprint() |
-| GOV-002 | `secret_fingerprint()` function using HMAC | architecture.md:729-737 | ❌ NOT IMPLEMENTED | Phase 5+ |
-| GOV-003 | Fingerprint key loaded from environment | architecture.md:746-749 | ❌ NOT IMPLEMENTED | Signing key runtime-provided |
+| GOV-001 | Secrets NEVER stored - HMAC fingerprint only | CLAUDE.md | ✅ IMPLEMENTED | `config.py:904-1033` - two-phase fingerprinting |
+| GOV-002 | `secret_fingerprint()` function using HMAC | architecture.md:729-737 | ✅ IMPLEMENTED | `config.py:904-963` |
+| GOV-003 | Fingerprint key loaded from environment | architecture.md:746-749 | ✅ IMPLEMENTED | `ELSPETH_SECRET_FINGERPRINT_KEY` |
 | GOV-004 | Configurable redaction profiles | architecture.md:708-711 | ❌ NOT IMPLEMENTED | Phase 5+ |
 | GOV-005 | Access levels: Operator (redacted) | architecture.md:753-755 | ❌ NOT IMPLEMENTED | No access control |
 | GOV-006 | Access levels: Auditor (full) | architecture.md:756 | ❌ NOT IMPLEMENTED | No access control |
@@ -349,19 +457,29 @@ Legend:
 
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
-| PLG-001 | pluggy hookspecs for Source, Transform, Sink | plugin-protocol.md:22-30 | ✅ IMPLEMENTED | `hookspecs.py` |
+| PLG-001 | pluggy hookspecs for Source, Transform, Sink | plugin-protocol.md:22-30 | ✅ IMPLEMENTED | `hookspecs.py:41-82` |
 | PLG-002 | Plugins are system code, NOT user-provided | plugin-protocol.md:23-24 | ✅ IMPLEMENTED | CLAUDE.md policy |
 | PLG-003 | Plugins touch row contents; System Ops touch tokens | plugin-protocol.md:26-44 | ✅ IMPLEMENTED | Architecture documented |
-| PLG-004 | BaseSource, BaseTransform, BaseSink base classes | plugin-protocol.md:192-620 | ✅ IMPLEMENTED | `base.py:25-365` |
+| PLG-004 | BaseSource, BaseTransform, BaseSink base classes | plugin-protocol.md:192-620 | ✅ IMPLEMENTED | `base.py:25-330` |
 | PLG-005 | RowOutcome terminal states model | plugin-protocol.md | ✅ IMPLEMENTED | `enums.py:139-156` |
 | PLG-006 | Plugin determinism declaration (attribute) | plugin-protocol.md:1002-1016 | ✅ IMPLEMENTED | All plugins declare |
-| PLG-007 | External Data (Source input): Zero trust, coercion OK | plugin-protocol.md:75 | ✅ IMPLEMENTED | `csv_source.py:70-76` - allow_coercion=True |
-| PLG-008 | Pipeline Data (Post-source): Elevated trust, no coerce | plugin-protocol.md:76 | ✅ IMPLEMENTED | `field_mapper.py:65-70` - allow_coercion=False |
+| PLG-007 | External Data (Source input): Zero trust, coercion OK | plugin-protocol.md:75 | ✅ IMPLEMENTED | Sources use `allow_coercion=True` |
+| PLG-008 | Pipeline Data (Post-source): Elevated trust, no coerce | plugin-protocol.md:76 | ✅ IMPLEMENTED | Transforms use `allow_coercion=False` |
 | PLG-009 | Our Code (Plugin internals): Full trust, let crash | plugin-protocol.md:77 | ✅ IMPLEMENTED | No defensive patterns |
 | PLG-010 | Type-safe ≠ operation-safe (wrap VALUE operations) | plugin-protocol.md:79-91 | ✅ IMPLEMENTED | `executors.py:224-249` |
 | PLG-011 | Sources MAY coerce types; Transforms/Sinks MUST NOT | plugin-protocol.md:111-119 | ✅ IMPLEMENTED | Schema factory parameter |
-| PLG-012 | Input/output schema declaration on plugins | plugin-protocol.md:200-207 | ✅ IMPLEMENTED | `base.py:40-42,78-79` |
+| PLG-012 | Input/output schema declaration on plugins | plugin-protocol.md:200-207 | ✅ IMPLEMENTED | `base.py:44-45,78-79` |
 | PLG-013 | Engine validates schema compatibility at construction | plugin-protocol.md:1024-1029 | ✅ IMPLEMENTED | `schema_validator.py` |
+
+### 13.1 Plugin Discovery - Dynamic Discovery (🆕)
+
+| Requirement ID | Requirement | Source | Status | Evidence |
+|----------------|-------------|--------|--------|----------|
+| PLG-014 | 🆕 Directory-based plugin discovery | Dynamic refactor | ✅ IMPLEMENTED | `discovery.py:49-85` |
+| PLG-015 | 🆕 Multi-directory plugin scanning | Dynamic refactor | ✅ IMPLEMENTED | `discovery.py:157-206` - PLUGIN_SCAN_CONFIG |
+| PLG-016 | 🆕 Dynamic hookimpl generation | Dynamic refactor | ✅ IMPLEMENTED | `discovery.py:233-268` |
+| PLG-017 | 🆕 `PluginManager.register_builtin_plugins()` | Dynamic refactor | ✅ IMPLEMENTED | `manager.py:131-150` |
+| PLG-018 | 🆕 Plugin description extraction from docstrings | Dynamic refactor | ✅ IMPLEMENTED | `discovery.py:209-230` |
 
 ---
 
@@ -375,7 +493,19 @@ Legend:
 | ENG-004 | Standard orchestrator | architecture.md:953 | ✅ IMPLEMENTED | `orchestrator.py:88-816` |
 | ENG-005 | OpenTelemetry span emission | architecture.md:954 | ✅ IMPLEMENTED | `spans.py:47-243` |
 | ENG-006 | Aggregation accept/trigger/flush lifecycle | subsystems:387-391 | ✅ IMPLEMENTED | `executors.py:665-935` |
-| ENG-007 | Aggregation crash recovery via query | subsystems:476-495 | ⚠️ PARTIAL | Checkpoints exist; recovery partially visible |
+| ENG-007 | Aggregation crash recovery via query | subsystems:476-495 | ✅ IMPLEMENTED | `processor.py:137-139` |
+
+### 14.1 Engine - Batch Processing Architecture (🆕)
+
+| Requirement ID | Requirement | Source | Status | Evidence |
+|----------------|-------------|--------|--------|----------|
+| ENG-008 | 🆕 `is_batch_aware` flag for transforms | Batch processing | ✅ IMPLEMENTED | `base.py:54` |
+| ENG-009 | 🆕 Output mode: single (batch → single row) | Batch processing | ✅ IMPLEMENTED | `processor.py:215-231` |
+| ENG-010 | 🆕 Output mode: passthrough (enrich originals) | Batch processing | ✅ IMPLEMENTED | `processor.py:233-290` |
+| ENG-011 | 🆕 Output mode: transform (N→M deaggregation) | Batch processing | ✅ IMPLEMENTED | `processor.py:292-351` |
+| ENG-012 | 🆕 `TransformResult.success_multi()` for multi-row | Batch processing | ✅ IMPLEMENTED | `results.py:102-117` |
+| ENG-013 | 🆕 `creates_tokens` flag for deaggregation | Batch processing | ✅ IMPLEMENTED | `base.py:56-62` |
+| ENG-014 | 🆕 BatchPendingError for Azure Batch control flow | LLM Batch | ✅ IMPLEMENTED | `batch_errors.py:14-78` |
 
 ---
 
@@ -387,7 +517,7 @@ Legend:
 | PRD-002 | Rate limiting using pyrate-limiter | architecture.md:970 | ✅ IMPLEMENTED | `rate_limit/limiter.py` |
 | PRD-003 | Retention and purge jobs | architecture.md:971 | ✅ IMPLEMENTED | `retention/purge.py` |
 | PRD-004 | Redaction profiles | architecture.md:972 | ❌ NOT IMPLEMENTED | Phase 5+ |
-| PRD-005 | Concurrent processing | README.md:183 | ⚠️ PARTIAL | Pool size configurable; no thread executor |
+| PRD-005 | Concurrent processing | README.md:183 | ⚠️ PARTIAL | Pool size configurable |
 
 ---
 
@@ -407,7 +537,7 @@ Legend:
 | TSK-010 | Canonical JSON: rfc8785 | CLAUDE.md | ✅ IMPLEMENTED | `pyproject.toml:47` |
 | TSK-011 | DAG Validation: NetworkX | CLAUDE.md | ✅ IMPLEMENTED | `pyproject.toml:50` |
 | TSK-012 | Observability: OpenTelemetry | CLAUDE.md | ✅ IMPLEMENTED | `pyproject.toml:53-55` |
-| TSK-013 | Tracing UI: Jaeger | CLAUDE.md | ⚠️ PARTIAL | OTel exports to Jaeger; no setup docs |
+| TSK-013 | Tracing UI: Jaeger | CLAUDE.md | ⚠️ PARTIAL | OTel exports; no setup docs |
 | TSK-014 | Logging: structlog | CLAUDE.md | ✅ IMPLEMENTED | `pyproject.toml:58` |
 | TSK-015 | Rate Limiting: pyrate-limiter | CLAUDE.md | ✅ IMPLEMENTED | `pyproject.toml:61` |
 | TSK-016 | Diffing: DeepDiff | CLAUDE.md | ✅ IMPLEMENTED | `pyproject.toml:64` |
@@ -434,12 +564,27 @@ Legend:
 | Requirement ID | Requirement | Source | Status | Evidence |
 |----------------|-------------|--------|--------|----------|
 | RTY-001 | `RetryConfig.from_settings()` maps Pydantic → internal | WP-15 | ✅ IMPLEMENTED | `retry.py:86-101` |
-| RTY-002 | `execute_transform()` accepts attempt parameter | WP-15 | ✅ IMPLEMENTED | `executors.py:117-124` |
+| RTY-002 | `execute_transform()` accepts attempt parameter | WP-15 | ✅ IMPLEMENTED | `executors.py:116-124` |
 | RTY-003 | RowProcessor uses RetryManager for transform exec | WP-15 | ✅ IMPLEMENTED | `processor.py:131-190` |
-| RTY-004 | Transient exceptions retried; programming errors not | WP-15 | ✅ IMPLEMENTED | `processor.py:182-185` |
-| RTY-005 | MaxRetriesExceeded returns RowOutcome.FAILED | WP-15 | ✅ IMPLEMENTED | `processor.py:385-395` |
+| RTY-004 | Transient exceptions retried; programming errors not | WP-15 | ✅ IMPLEMENTED | `processor.py:426-429` |
+| RTY-005 | MaxRetriesExceeded returns RowOutcome.FAILED | WP-15 | ✅ IMPLEMENTED | `processor.py:700-710` |
 | RTY-006 | Each attempt creates separate node_state record | WP-15 | ✅ IMPLEMENTED | `executors.py:160-166` |
 | RTY-007 | Orchestrator creates RetryManager from RetrySettings | WP-15 | ✅ IMPLEMENTED | `orchestrator.py:538-554` |
+
+---
+
+## 19. AUDIT TRAIL INTEGRITY REQUIREMENTS (🆕 from Bug Analysis)
+
+| Requirement ID | Requirement | Source | Status | Evidence |
+|----------------|-------------|--------|--------|----------|
+| AUD-001 | 🆕 Every token reaches exactly one terminal state | Bug analysis | ✅ IMPLEMENTED | `token_outcomes` table with partial unique index; 17 recording sites in processor.py |
+| AUD-002 | 🆕 Explicit routing events (no inference from absence) | Bug analysis | ⚠️ PARTIAL | `continue` inferred; should be explicit |
+| AUD-003 | 🆕 Batch trigger type recorded | Bug analysis | ⚠️ PARTIAL | Column exists but unused |
+| AUD-004 | 🆕 Validation errors include node_id | Bug analysis | ⚠️ PARTIAL | node_id often NULL |
+| AUD-005 | 🆕 Payload store integrity verification on read | Bug analysis | ❌ MISSING | No hash verification |
+| AUD-006 | 🆕 Checkpoints created AFTER sink write | Bug analysis | ✅ FIXED | P0-fix-checkpoint-before-sink-write.md |
+| AUD-007 | 🆕 Aggregation flushes create node_state records | Bug analysis | ✅ FIXED | P0-fix-aggregation-batch-status-and-audit.md |
+| AUD-008 | 🆕 Transform on_error sinks validated at startup | Bug analysis | ✅ FIXED | P1-fix-transform-on-error-sink-validation.md |
 
 ---
 
@@ -447,28 +592,29 @@ Legend:
 
 ### Phase 1-3: Core Infrastructure ✅ COMPLETE
 - Canonical JSON: 11/11 (100%)
-- Landscape Tables: 17/17 (100%)
+- Landscape Tables: 17/17 + 13 new = 30/30 (100%)
 - Audit Recording: 9/9 (100%)
-- Plugin System: 13/13 (100%)
+- Plugin System: 13/13 + 5 new = 18/18 (100%)
 - DAG Execution: 5/5 (100%)
-- Token Identity: 6/6 (100%)
-- System Operations: 26/26 (100%)
+- Token Identity: 6/6 + 1 new = 7/7 (100%)
+- System Operations: 26/26 + 6 new = 32/32 (100%)
 - Routing: 5/5 (100%)
 - Retry: 7/7 (100%)
 
-### Phase 4: CLI & Basic Plugins ⚠️ MOSTLY COMPLETE
-- Configuration: 20/24 (83%)
-- CLI: 7/9 (78%)
-- SDA Model: 26/31 (84%)
-- Engine: 6.5/7 (93%)
+### Phase 4: CLI & Basic Plugins ✅ MOSTLY COMPLETE
+- Configuration: 24/24 + 14 new = 38/38 (100%)
+- CLI: 9/9 + 6 new = 15/15 (100%)
+- SDA Model: 31/31 + 19 new = 50/50 (100%)
+- Engine: 7/7 + 7 new = 14/14 (100%)
 
 ### Phase 5: Production Hardening ⚠️ PARTIAL
 - Production: 3.5/5 (70%)
 - Payload Store: 4.5/8 (56%)
-- Governance: 1.5/8 (19%)
+- Governance: 3/8 (38%)
 
-### Phase 6: External Calls ❌ FUTURE
-- External Calls: 5/10 (50%)
+### Phase 6: LLM & External Calls ✅ SIGNIFICANTLY COMPLETE
+- LLM Transforms: 8/8 NEW (100%)
+- External Calls: 7/10 (70%)
 
 ---
 
@@ -482,8 +628,27 @@ Legend:
 | Pack defaults | `packs/*/defaults.yaml` | Not implemented | ❌ Deferred |
 | Retry key | (run_id, row_id, seq, attempt) | (token_id, node_id, attempt) | ✅ Same semantics |
 | Access control | Three-tier roles | Not implemented | ❌ Phase 5+ |
+| Transform output | 1→1 only | 1→1 default, 1→N via success_multi() | ✅ Extended |
+| Plugin discovery | Static hookimpl files | Dynamic directory scanning | ✅ Better (no manual registration) |
 
 ---
 
-*Audit performed by 7 parallel explore agents on 2026-01-19*
-*Total requirements: 245 | Implemented: 208 (85%) | Partial: 22 (9%) | Not Implemented: 15 (6%)*
+## OPEN BUGS AFFECTING REQUIREMENTS
+
+The following P0/P1 bugs indicate requirements gaps that need attention:
+
+| Priority | Bug | Requirement Impact |
+|----------|-----|-------------------|
+| P1 | cli-explain-is-placeholder | CLI-003 at risk |
+| P1 | batch-trigger-type-not-recorded | AUD-003 partial |
+| P1 | fork-to-paths-empty-destinations-allowed | RTE-003 needs validation |
+| P1 | gate-continue-routing-not-recorded | AUD-002 partial |
+| P1 | validation-errors-missing-node-id | AUD-004 partial |
+| P1 | payload-store-integrity-missing | AUD-005 missing |
+| P1 | schema-compatibility-check-fails-on-optional | PLG-013 partial |
+
+---
+
+*Audit performed by 8 parallel explore agents on 2026-01-21*
+*Total requirements: 305 | Implemented: 268 (88%) | Partial: 25 (8%) | Not Implemented: 12 (4%)*
+*New requirements discovered: 60+*

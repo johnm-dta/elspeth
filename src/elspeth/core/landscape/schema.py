@@ -110,6 +110,40 @@ tokens_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
+# === Token Outcomes (AUD-001: Explicit terminal state recording) ===
+
+token_outcomes_table = Table(
+    "token_outcomes",
+    metadata,
+    # Identity
+    Column("outcome_id", String(64), primary_key=True),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False, index=True),
+    Column("token_id", String(64), ForeignKey("tokens.token_id"), nullable=False, index=True),
+    # Core outcome
+    Column("outcome", String(32), nullable=False),
+    Column("is_terminal", Integer, nullable=False),  # SQLite doesn't have Boolean, use Integer
+    Column("recorded_at", DateTime(timezone=True), nullable=False),
+    # Outcome-specific fields (nullable based on outcome type)
+    Column("sink_name", String(128)),
+    Column("batch_id", String(64), ForeignKey("batches.batch_id")),
+    Column("fork_group_id", String(64)),
+    Column("join_group_id", String(64)),
+    Column("expand_group_id", String(64)),
+    Column("error_hash", String(64)),
+    # Optional extended context
+    Column("context_json", Text),
+)
+
+# Partial unique index: exactly one terminal outcome per token
+# Note: SQLite partial index syntax differs; SQLAlchemy handles this
+Index(
+    "ix_token_outcomes_terminal_unique",
+    token_outcomes_table.c.token_id,
+    unique=True,
+    sqlite_where=(token_outcomes_table.c.is_terminal == 1),
+    postgresql_where=(token_outcomes_table.c.is_terminal == 1),
+)
+
 # === Token Parents (for multi-parent joins) ===
 
 token_parents_table = Table(

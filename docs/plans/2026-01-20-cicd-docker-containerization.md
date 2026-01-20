@@ -7,6 +7,8 @@
 ## Executive Summary
 
 Containerize Elspeth in a single Docker container with a complete CI/CD pipeline supporting:
+- **CLI-first design** - container runs the `elspeth` CLI with arguments passed through
+- **External configuration** - pipeline configs mounted from host filesystem
 - Automated lint, test, build stages
 - Dual registry support (GitHub Container Registry + Azure Container Registry)
 - VM deployment initially, Kubernetes-ready for future migration
@@ -54,15 +56,148 @@ elspeth:latest          # Most recent (avoid in production)
 │ │ • Copy .venv from builder                               │ │
 │ │ • Copy installed elspeth package                        │ │
 │ │ • Non-root user (security)                              │ │
+│ │ • WORKDIR /app                                         │ │
 │ │ • ENTRYPOINT ["elspeth"]                               │ │
+│ │ • CMD ["--help"]  (default if no args)                 │ │
 │ └─────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────┘
 ```
 
 **Benefits of multi-stage:**
 - Smaller runtime image (no build tools, no uv)
 - Reduced attack surface
 - Faster pulls during deployment
+
+### CLI-First Design
+
+The container is designed as a **CLI tool in a box**, not a long-running service:
+
+```bash
+# ENTRYPOINT = elspeth (the CLI binary)
+# CMD = arguments passed to the CLI
+
+# Run with default (--help)
+docker run elspeth
+
+# Run a pipeline with mounted config
+docker run -v /path/to/config:/app/config:ro \
+           -v /path/to/data:/app/data \
+           elspeth run --settings /app/config/pipeline.yaml
+
+# Check version
+docker run elspeth --version
+
+# Explain a specific row
+docker run -v /path/to/data:/app/data \
+           elspeth explain --run latest --row 42
+```
+
+**Key principle:** Arguments after the image name are passed directly to the `elspeth` CLI.
+
+### Volume Mounts & External Configuration
+
+The container expects configuration and data to be mounted from the host:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  HOST FILESYSTEM                    CONTAINER                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  /srv/elspeth/                                                  │
+│  ├── config/          ──────────▶  /app/config/  (read-only)    │
+│  │   ├── pipeline.yaml            Pipeline definitions           │
+│  │   ├── settings.yaml            Runtime settings               │
+│  │   └── profiles/                Environment-specific configs   │
+│  │                                                               │
+│  ├── input/           ──────────▶  /app/input/   (read-only)    │
+│  │   ├── customers.csv            Source data files              │
+│  │   └── orders.json              (CSV, JSON, etc.)              │
+│  │                                                               │
+│  ├── output/          ──────────▶  /app/output/  (read-write)   │
+│  │   ├── results.csv              Sink output files              │
+│  │   └── reports/                 Generated artifacts            │
+│  │                                                               │
+│  ├── state/           ──────────▶  /app/state/   (read-write)   │
+│  │   └── landscape.db             Audit database (if SQLite)     │
+│  │                                                               │
+│  └── secrets/         ──────────▶  /app/secrets/ (read-only)    │
+│      └── .env                     Environment secrets            │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Standard mount points:**
+
+| Host Path | Container Path | Mode | Purpose |
+|-----------|----------------|------|---------|
+| `./config` | `/app/config` | `ro` | Pipeline YAML, settings |
+| `./input` | `/app/input` | `ro` | Source data files (CSV, JSON, etc.) |
+| `./output` | `/app/output` | `rw` | Sink output files |
+| `./state` | `/app/state` | `rw` | SQLite landscape DB, checkpoints |
+| `./secrets` | `/app/secrets` | `ro` | Sensitive config (optional) |
+
+**Example usage:**
+
+```bash
+# Full pipeline run with all mounts
+docker run --rm \
+  -v $(pwd)/config:/app/config:ro \
+  -v $(pwd)/input:/app/input:ro \
+  -v $(pwd)/output:/app/output \
+  -v $(pwd)/state:/app/state \
+  -e DATABASE_URL=${DATABASE_URL} \
+  elspeth:0.1.0 run --settings /app/config/pipeline.yaml
+
+# Query audit trail (read-only access)
+docker run --rm \
+  -v $(pwd)/state:/app/state:ro \
+  elspeth:0.1.0 explain --run latest --row 42
+
+# Validate config without running (no data mounts needed)
+docker run --rm \
+  -v $(pwd)/config:/app/config:ro \
+  elspeth:0.1.0 validate --settings /app/config/pipeline.yaml
+```
+
+**Path resolution in config files:**
+
+Config files should use absolute container paths:
+
+```yaml
+# pipeline.yaml
+source:
+  type: csv
+  path: /app/input/customers.csv    # Source reads from /app/input
+
+transforms:
+  - type: field_mapper
+    # ...
+
+sinks:
+  - name: results
+    type: csv
+    path: /app/output/results.csv   # Sink writes to /app/output
+
+landscape:
+  database_url: sqlite:///app/state/landscape.db  # Or use DATABASE_URL env var
+```
+
+**Why separate input/output directories?**
+
+| Reason | Benefit |
+|--------|---------|
+| Clear data flow | Obvious which files are source vs generated |
+| Security | Input can be mounted read-only |
+| Cleanup | Output can be cleared without affecting sources |
+| Audit | Easy to verify what was input vs what was produced |
+
+**Environment variables vs mounted secrets:**
+
+| Method | Use When |
+|--------|----------|
+| `-e VAR=value` | Non-sensitive config, CI/CD pipelines |
+| `--env-file` | Multiple env vars, local development |
+| Mounted secrets file | Sensitive credentials, production |
 
 ---
 
@@ -228,17 +363,22 @@ Uses same deployment flow as staging with additional monitoring.
 
 ### Phase 1: Linux VM (Current Target)
 
+Since Elspeth is a **CLI tool** (not a daemon), deployment means updating the image that gets invoked by cron jobs, scripts, or manual runs:
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  LINUX VM DEPLOYMENT                                             │
+│  LINUX VM DEPLOYMENT (CLI Tool)                                  │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │  Docker Compose                                            │  │
-│  │  • elspeth container                                       │  │
-│  │  • postgres container (or external DB)                     │  │
-│  │  • traefik/nginx for TLS + health routing (optional)       │  │
+│  │  /srv/elspeth/                                             │  │
+│  │  ├── docker-compose.yaml   # Defines image + mounts        │  │
+│  │  ├── config/               # Pipeline configurations        │  │
+│  │  ├── data/                 # Input/output data              │  │
+│  │  └── elspeth.sh            # Wrapper script                │  │
 │  │                                                            │  │
-│  │  Deployment: docker compose pull && docker compose up -d   │  │
-│  │  Rollback: docker compose up -d (with previous image tag)  │  │
+│  │  Pipelines invoked by:                                     │  │
+│  │  • Cron jobs (scheduled processing)                        │  │
+│  │  • Manual runs (ad-hoc analysis)                           │  │
+│  │  • External triggers (webhooks, file watchers)             │  │
 │  └───────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -246,24 +386,43 @@ Uses same deployment flow as staging with additional monitoring.
 **VM Deployment Flow:**
 
 ```bash
-# 1. Pull new image
+#!/bin/bash
+# scripts/deploy-vm.sh
+
+set -e
+
+IMAGE_TAG="${1:?Usage: deploy-vm.sh <image-tag>}"
+DEPLOY_DIR="/srv/elspeth"
+
+cd "$DEPLOY_DIR"
+
+# 1. Record current image for rollback
+PREVIOUS_TAG=$(grep 'IMAGE_TAG=' .env | cut -d= -f2 || echo "none")
+echo "Previous image: $PREVIOUS_TAG"
+
+# 2. Update image tag
+sed -i "s/IMAGE_TAG=.*/IMAGE_TAG=$IMAGE_TAG/" .env
+
+# 3. Pull new image
 docker compose pull
 
-# 2. Run migrations (if any)
+# 4. Run migrations (if any)
 docker compose run --rm elspeth alembic upgrade head
 
-# 3. Recreate container
-docker compose up -d --force-recreate
+# 5. Verify new image works (smoke test)
+echo "Running smoke tests..."
+docker compose run --rm elspeth --version
+docker compose run --rm elspeth validate --settings /app/config/pipeline.yaml
+docker compose run --rm elspeth health
 
-# 4. Health check loop (30 sec timeout)
-until curl -f http://localhost:8080/health; do sleep 2; done
+echo "=== Deployment successful: $IMAGE_TAG ==="
 
-# 5. If health fails: rollback
-docker compose pull elspeth:previous-sha
-docker compose up -d --force-recreate
+# 6. If smoke tests fail, the script exits (set -e) and manual rollback is needed:
+# sed -i "s/IMAGE_TAG=.*/IMAGE_TAG=$PREVIOUS_TAG/" .env
+# docker compose pull
 ```
 
-**Downtime:** ~5-10 seconds during container restart. Acceptable for initial deployment.
+**No downtime:** CLI tools aren't "restarted" — the new image is simply used for the next invocation.
 
 ### Phase 2: Kubernetes (Future)
 
@@ -316,38 +475,124 @@ For breaking schema changes, use 3-deployment pattern:
 
 ## 6. Verification & Health Checks
 
-### Health Check Endpoint
+### CLI-Based Health Checks
 
-**Required:** `/health` endpoint (or CLI command) returning:
+Since Elspeth is a **CLI tool** (not a long-running service), health checks verify the container can execute successfully:
+
+```bash
+# Basic health check: can the CLI run?
+docker run --rm elspeth --version
+
+# Database connectivity check
+docker run --rm \
+  -v ./data:/app/data:ro \
+  -e DATABASE_URL=${DATABASE_URL} \
+  elspeth health
+
+# Full health check with output
+docker run --rm \
+  -v ./config:/app/config:ro \
+  -v ./data:/app/data:ro \
+  -e DATABASE_URL=${DATABASE_URL} \
+  elspeth health --json
+```
+
+**Health command output:**
 
 ```json
 {
   "status": "healthy",
   "version": "0.1.0",
   "commit": "abc123f",
-  "database": "connected",
-  "uptime_seconds": 3600
+  "checks": {
+    "database": "connected",
+    "config_readable": true,
+    "data_dir_writable": true
+  }
 }
 ```
 
 ### Smoke Tests
 
-Post-deployment verification:
+Post-deployment verification (run as part of CI/CD):
 
-| Test | Description | Fail Action |
-|------|-------------|-------------|
-| Health check | `GET /health` returns 200 | Rollback |
-| CLI invocation | `elspeth --version` succeeds | Rollback |
-| DB connectivity | Can query Landscape tables | Rollback |
-| Sample pipeline | Run minimal Source→Sink | Rollback |
+| Test | Command | Fail Action |
+|------|---------|-------------|
+| CLI runs | `docker run --rm elspeth --version` | Rollback |
+| Config validation | `docker run --rm -v ./config:/app/config:ro elspeth validate --settings /app/config/test.yaml` | Rollback |
+| DB connectivity | `docker run --rm -e DATABASE_URL=... elspeth health` | Rollback |
+| Sample pipeline | `docker run --rm -v ... elspeth run --settings /app/config/smoke-test.yaml` | Rollback |
 
-### Auto-Rollback Triggers
+### Smoke Test Pipeline
 
-| Condition | Threshold | Action |
+Create a minimal pipeline specifically for deployment verification:
+
+```yaml
+# config/smoke-test.yaml
+# Minimal pipeline that exercises core functionality
+
+source:
+  type: inline  # Or a small CSV committed to the repo
+  data:
+    - { id: 1, value: "test" }
+
+transforms: []  # No transforms needed for smoke test
+
+sinks:
+  - name: null_sink
+    type: null  # Discards output, just verifies pipeline runs
+
+landscape:
+  database_url: ${DATABASE_URL}
+```
+
+### Deployment Verification Script
+
+```bash
+#!/bin/bash
+# scripts/smoke-test.sh
+
+set -e
+
+IMAGE="${1:-elspeth:latest}"
+
+echo "=== Smoke Test: ${IMAGE} ==="
+
+echo "1. Version check..."
+docker run --rm "$IMAGE" --version
+
+echo "2. Config validation..."
+docker run --rm \
+  -v "$(pwd)/config:/app/config:ro" \
+  "$IMAGE" validate --settings /app/config/smoke-test.yaml
+
+echo "3. Database connectivity..."
+docker run --rm \
+  -e DATABASE_URL="${DATABASE_URL}" \
+  "$IMAGE" health
+
+echo "4. Sample pipeline run..."
+docker run --rm \
+  -v "$(pwd)/config:/app/config:ro" \
+  -v "$(pwd)/data:/app/data" \
+  -e DATABASE_URL="${DATABASE_URL}" \
+  "$IMAGE" run --settings /app/config/smoke-test.yaml
+
+echo "=== All smoke tests passed ==="
+```
+
+### Rollback Criteria
+
+For CLI tools, rollback is triggered by deployment verification failures:
+
+| Condition | Detection | Action |
 |-----------|-----------|--------|
-| Health check failure | 2 consecutive fails | Auto-rollback |
-| Error rate | > 5% for 3 minutes | Auto-rollback |
-| Response time | > 2x baseline p95 | Alert + manual review |
+| CLI won't start | `--version` fails | Rollback immediately |
+| Config parsing broken | `validate` fails | Rollback immediately |
+| DB connection fails | `health` fails | Rollback immediately |
+| Pipeline execution fails | smoke test fails | Rollback immediately |
+
+**Note:** Unlike long-running services, there's no "error rate over time" or "response latency" — the container either works or it doesn't.
 
 ---
 
@@ -461,40 +706,99 @@ Post-deployment verification:
 ## Appendix A: docker-compose.yaml Template
 
 ```yaml
+# docker-compose.yaml
+#
+# This compose file supports two usage patterns:
+# 1. One-shot CLI runs: docker compose run --rm elspeth <command>
+# 2. Scheduled/batch runs via cron or external scheduler
+
 services:
   elspeth:
     image: ${REGISTRY:-ghcr.io/your-org}/elspeth:${IMAGE_TAG:-latest}
-    restart: unless-stopped
+    # No 'restart' - this is a CLI tool, not a daemon
     environment:
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///app/state/landscape.db}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_ENDPOINT:-}
-    ports:
-      - "8080:8080"
-    healthcheck:
-      test: ["CMD", "elspeth", "health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+      - ELSPETH_LOG_LEVEL=${LOG_LEVEL:-INFO}
+    working_dir: /app
     volumes:
-      - ./data:/app/data  # For file-based sources/sinks
-      - ./config:/app/config:ro  # Pipeline configurations
+      # Configuration (read-only)
+      - ./config:/app/config:ro
+      # Source data files (read-only)
+      - ./input:/app/input:ro
+      # Sink output files (read-write)
+      - ./output:/app/output
+      # State: SQLite DB, checkpoints (read-write)
+      - ./state:/app/state
+      # Optional: secrets file
+      # - ./secrets:/app/secrets:ro
+    # Default command shows help; override with 'docker compose run'
+    command: ["--help"]
 
-  # Optional: local database for development
+  # Optional: PostgreSQL for production landscape database
   postgres:
     image: postgres:16-alpine
-    profiles: ["dev"]
+    profiles: ["with-postgres"]
     environment:
       POSTGRES_DB: elspeth
       POSTGRES_USER: elspeth
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U elspeth"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres_data:
+```
+
+### CLI Usage Patterns with docker-compose
+
+```bash
+# Run a pipeline
+docker compose run --rm elspeth run --settings /app/config/pipeline.yaml
+
+# Validate configuration
+docker compose run --rm elspeth validate --settings /app/config/pipeline.yaml
+
+# Explain a row from a previous run
+docker compose run --rm elspeth explain --run latest --row 42
+
+# Check version
+docker compose run --rm elspeth --version
+
+# Run with PostgreSQL backend
+docker compose --profile with-postgres up -d postgres
+docker compose run --rm elspeth run --settings /app/config/pipeline.yaml
+
+# Interactive shell for debugging
+docker compose run --rm --entrypoint /bin/bash elspeth
+```
+
+### Wrapper Script (Optional)
+
+For convenience, create a wrapper script `elspeth.sh`:
+
+```bash
+#!/bin/bash
+# elspeth.sh - Run elspeth CLI via Docker
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+exec docker compose run --rm elspeth "$@"
+```
+
+Usage:
+```bash
+./elspeth.sh run --settings /app/config/pipeline.yaml
+./elspeth.sh explain --run latest --row 42
 ```
 
 ---

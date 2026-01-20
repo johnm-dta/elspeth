@@ -9,8 +9,20 @@ Uses content-addressable storage (hash-based) for:
 """
 
 import hashlib
+import hmac
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+
+class IntegrityError(Exception):
+    """Raised when payload content doesn't match expected hash.
+
+    This indicates either filesystem corruption, tampering, or a bug.
+    For an audit system, this is a critical failure that must be
+    investigated - we never silently return corrupted data.
+    """
+
+    pass
 
 
 @runtime_checkable
@@ -33,7 +45,7 @@ class PayloadStore(Protocol):
         ...
 
     def retrieve(self, content_hash: str) -> bytes:
-        """Retrieve content by hash.
+        """Retrieve content by hash with integrity verification.
 
         Args:
             content_hash: SHA-256 hex digest
@@ -43,6 +55,7 @@ class PayloadStore(Protocol):
 
         Raises:
             KeyError: If content not found
+            IntegrityError: If content doesn't match expected hash
         """
         ...
 
@@ -105,11 +118,25 @@ class FilesystemPayloadStore:
         return content_hash
 
     def retrieve(self, content_hash: str) -> bytes:
-        """Retrieve content by hash."""
+        """Retrieve content by hash with integrity verification.
+
+        Raises:
+            KeyError: If content not found
+            IntegrityError: If content doesn't match expected hash
+        """
         path = self._path_for_hash(content_hash)
         if not path.exists():
             raise KeyError(f"Payload not found: {content_hash}")
-        return path.read_bytes()
+
+        content = path.read_bytes()
+        actual_hash = hashlib.sha256(content).hexdigest()
+
+        # Use timing-safe comparison to prevent timing attacks that could
+        # allow an attacker to incrementally discover expected hashes
+        if not hmac.compare_digest(actual_hash, content_hash):
+            raise IntegrityError(f"Payload integrity check failed: expected {content_hash}, got {actual_hash}")
+
+        return content
 
     def exists(self, content_hash: str) -> bool:
         """Check if content exists."""

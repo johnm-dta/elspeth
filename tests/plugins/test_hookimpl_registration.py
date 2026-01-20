@@ -71,6 +71,6 @@ class TestBuiltinPluginDiscovery:
         manager.register_builtin_plugins()
 
         # Second registration should raise because plugins are already registered
-        # pluggy raises "Plugin name already registered" for duplicate registrations
-        with pytest.raises(ValueError, match="already registered"):
+        # Our code raises "Already registered by" for duplicate names
+        with pytest.raises(ValueError, match=r"(?i)already registered"):
             manager.register_builtin_plugins()

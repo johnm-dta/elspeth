@@ -40,9 +40,11 @@ from elspeth.contracts import (
     RoutingSpec,
     Row,
     RowLineage,
+    RowOutcome,
     Run,
     RunStatus,
     Token,
+    TokenOutcome,
     TokenParent,
     TransformErrorRecord,
     ValidationErrorRecord,
@@ -61,6 +63,7 @@ from elspeth.core.landscape.schema import (
     routing_events_table,
     rows_table,
     runs_table,
+    token_outcomes_table,
     token_parents_table,
     tokens_table,
     transform_errors_table,
@@ -1060,9 +1063,9 @@ class LandscapeRecorder:
             raise ValueError("duration_ms is required when completing a node state")
 
         now = _now()
-        output_hash = stable_hash(output_data) if output_data else None
-        error_json = canonical_json(error) if error else None
-        context_json = canonical_json(context_after) if context_after else None
+        output_hash = stable_hash(output_data) if output_data is not None else None
+        error_json = canonical_json(error) if error is not None else None
+        context_json = canonical_json(context_after) if context_after is not None else None
 
         with self._db.connection() as conn:
             conn.execute(
@@ -1311,6 +1314,7 @@ class LandscapeRecorder:
         batch_id: str,
         status: str,
         *,
+        trigger_type: str | None = None,
         trigger_reason: str | None = None,
         state_id: str | None = None,
     ) -> None:
@@ -1319,11 +1323,14 @@ class LandscapeRecorder:
         Args:
             batch_id: Batch to update
             status: New status (executing, completed, failed)
-            trigger_reason: Why the batch was triggered
+            trigger_type: TriggerType enum value (count, time, end_of_source, manual)
+            trigger_reason: Human-readable reason for the trigger
             state_id: Node state for the flush operation
         """
         updates: dict[str, Any] = {"status": status}
 
+        if trigger_type:
+            updates["trigger_type"] = trigger_type
         if trigger_reason:
             updates["trigger_reason"] = trigger_reason
         if state_id:
@@ -1339,6 +1346,7 @@ class LandscapeRecorder:
         batch_id: str,
         status: str,
         *,
+        trigger_type: str | None = None,
         trigger_reason: str | None = None,
         state_id: str | None = None,
     ) -> Batch:
@@ -1347,7 +1355,8 @@ class LandscapeRecorder:
         Args:
             batch_id: Batch to complete
             status: Final status (completed, failed)
-            trigger_reason: Why the batch was triggered
+            trigger_type: TriggerType enum value (count, time, end_of_source, manual)
+            trigger_reason: Human-readable reason for the trigger
             state_id: Optional node state for the aggregation
 
         Returns:
@@ -1361,6 +1370,7 @@ class LandscapeRecorder:
                 .where(batches_table.c.batch_id == batch_id)
                 .values(
                     status=status,
+                    trigger_type=trigger_type,
                     trigger_reason=trigger_reason,
                     aggregation_state_id=state_id,
                     completed_at=now,
@@ -1392,6 +1402,7 @@ class LandscapeRecorder:
             run_id=row.run_id,
             aggregation_node_id=row.aggregation_node_id,
             aggregation_state_id=row.aggregation_state_id,
+            trigger_type=row.trigger_type,
             trigger_reason=row.trigger_reason,
             attempt=row.attempt,
             status=BatchStatus(row.status),  # Coerce DB string to enum
@@ -1437,6 +1448,7 @@ class LandscapeRecorder:
                 run_id=row.run_id,
                 aggregation_node_id=row.aggregation_node_id,
                 aggregation_state_id=row.aggregation_state_id,
+                trigger_type=row.trigger_type,
                 trigger_reason=row.trigger_reason,
                 attempt=row.attempt,
                 status=BatchStatus(row.status),  # Coerce DB string to enum
@@ -1478,6 +1490,7 @@ class LandscapeRecorder:
                 status=BatchStatus(row.status),
                 created_at=row.created_at,
                 aggregation_state_id=row.aggregation_state_id,
+                trigger_type=row.trigger_type,
                 trigger_reason=row.trigger_reason,
                 completed_at=row.completed_at,
             )
@@ -2086,6 +2099,116 @@ class LandscapeRecorder:
         """
         grade = self.compute_reproducibility_grade(run_id)
         return self.complete_run(run_id, status, reproducibility_grade=grade.value)
+
+    # === Token Outcome Recording (AUD-001) ===
+
+    def record_token_outcome(
+        self,
+        run_id: str,
+        token_id: str,
+        outcome: RowOutcome,
+        *,
+        sink_name: str | None = None,
+        batch_id: str | None = None,
+        fork_group_id: str | None = None,
+        join_group_id: str | None = None,
+        expand_group_id: str | None = None,
+        error_hash: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        """Record a token's outcome in the audit trail.
+
+        Called at the moment the outcome is determined in processor.py.
+        For BUFFERED tokens, a second call records the terminal outcome
+        when the batch flushes.
+
+        Args:
+            run_id: Current run ID
+            token_id: Token that reached this outcome
+            outcome: The RowOutcome enum value
+            sink_name: For ROUTED/COMPLETED - which sink
+            batch_id: For CONSUMED_IN_BATCH/BUFFERED - which batch
+            fork_group_id: For FORKED - the fork group
+            join_group_id: For COALESCED - the join group
+            expand_group_id: For EXPANDED - the expand group
+            error_hash: For FAILED/QUARANTINED - hash of error details
+            context: Optional additional context (stored as JSON)
+
+        Returns:
+            outcome_id for tracking
+
+        Raises:
+            IntegrityError: If terminal outcome already exists for token
+        """
+        outcome_id = f"out_{_generate_id()[:12]}"
+        is_terminal = outcome.is_terminal
+        context_json = json.dumps(context) if context else None
+
+        with self._db.connection() as conn:
+            conn.execute(
+                token_outcomes_table.insert().values(
+                    outcome_id=outcome_id,
+                    run_id=run_id,
+                    token_id=token_id,
+                    outcome=outcome.value,
+                    is_terminal=1 if is_terminal else 0,
+                    recorded_at=_now(),
+                    sink_name=sink_name,
+                    batch_id=batch_id,
+                    fork_group_id=fork_group_id,
+                    join_group_id=join_group_id,
+                    expand_group_id=expand_group_id,
+                    error_hash=error_hash,
+                    context_json=context_json,
+                )
+            )
+
+        return outcome_id
+
+    def get_token_outcome(self, token_id: str) -> TokenOutcome | None:
+        """Get the terminal outcome for a token.
+
+        Returns the terminal outcome if one exists, otherwise the most
+        recent non-terminal outcome (BUFFERED).
+
+        Args:
+            token_id: Token to look up
+
+        Returns:
+            TokenOutcome dataclass or None if no outcome recorded
+        """
+        with self._db.connection() as conn:
+            # Get most recent outcome (terminal preferred)
+            result = conn.execute(
+                select(token_outcomes_table)
+                .where(token_outcomes_table.c.token_id == token_id)
+                .order_by(
+                    token_outcomes_table.c.is_terminal.desc(),  # Terminal first
+                    token_outcomes_table.c.recorded_at.desc(),  # Then by time
+                )
+                .limit(1)
+            ).fetchone()
+
+            if result is None:
+                return None
+
+            # Tier 1 Trust Model: This is OUR data. Trust DB values directly.
+            # If is_terminal is not 0 or 1, that's an audit integrity violation.
+            return TokenOutcome(
+                outcome_id=result.outcome_id,
+                run_id=result.run_id,
+                token_id=result.token_id,
+                outcome=RowOutcome(result.outcome),
+                is_terminal=result.is_terminal == 1,  # DB stores as Integer
+                recorded_at=result.recorded_at,
+                sink_name=result.sink_name,
+                batch_id=result.batch_id,
+                fork_group_id=result.fork_group_id,
+                join_group_id=result.join_group_id,
+                expand_group_id=result.expand_group_id,
+                error_hash=result.error_hash,
+                context_json=result.context_json,
+            )
 
     # === Validation Error Recording (WP-11.99) ===
 

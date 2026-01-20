@@ -136,14 +136,12 @@ class RoutingMode(str, Enum):
     COPY = "copy"
 
 
-class RowOutcome(Enum):
+class RowOutcome(str, Enum):
     """Outcome for a token in the pipeline.
 
-    IMPORTANT: These are DERIVED at query time from node_states,
-    routing_events, and batch_members - NOT stored in the database.
-    Therefore this is plain Enum, not (str, Enum).
-
-    If you need the string value, use .value explicitly.
+    These outcomes are explicitly recorded in the `token_outcomes` table
+    (AUD-001) at determination time. The (str, Enum) base allows direct
+    database storage via .value.
 
     Most outcomes are TERMINAL - the token's journey is complete:
     - COMPLETED: Reached output sink successfully

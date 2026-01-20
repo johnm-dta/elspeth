@@ -14,6 +14,7 @@ from elspeth.contracts import (
     RoutingEvent,
     RowLineage,
     Token,
+    TokenOutcome,
     TransformErrorRecord,
     ValidationErrorRecord,
 )
@@ -54,6 +55,9 @@ class LineageResult:
 
     transform_errors: list[TransformErrorRecord] = field(default_factory=list)
     """Transform errors for this token (from transform processing)."""
+
+    outcome: TokenOutcome | None = None
+    """Terminal outcome for this token (COMPLETED, ROUTED, FAILED, etc.)."""
 
 
 def explain(
@@ -129,6 +133,9 @@ def explain(
     # Get transform errors for this token
     transform_errors = recorder.get_transform_errors_for_token(token_id)
 
+    # Get token outcome if recorded
+    outcome = recorder.get_token_outcome(token_id)
+
     return LineageResult(
         token=token,
         source_row=source_row,
@@ -138,4 +145,5 @@ def explain(
         parent_tokens=parent_tokens,
         validation_errors=validation_errors,
         transform_errors=transform_errors,
+        outcome=outcome,
     )

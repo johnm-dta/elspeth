@@ -129,17 +129,25 @@ class PluginManager:
         self._sinks: dict[str, type[SinkProtocol]] = {}
 
     def register_builtin_plugins(self) -> None:
-        """Register all built-in plugin hook implementers.
+        """Discover and register all built-in plugins.
+
+        Scans plugin directories for classes inheriting from base classes
+        and registers them via dynamically-generated hookimpls.
 
         Call this once at startup to make built-in plugins discoverable.
-        """
-        from elspeth.plugins.sinks.hookimpl import builtin_sinks
-        from elspeth.plugins.sources.hookimpl import builtin_sources
-        from elspeth.plugins.transforms.hookimpl import builtin_transforms
 
-        self.register(builtin_sources)
-        self.register(builtin_transforms)
-        self.register(builtin_sinks)
+        NOTE: Gates are NOT registered here. Per docs/contracts/plugin-protocol.md,
+        gates are config-driven system operations handled by the engine, not plugins.
+        """
+        from elspeth.plugins.discovery import create_dynamic_hookimpl, discover_all_plugins
+
+        discovered = discover_all_plugins()
+
+        # Register each plugin type via dynamic hookimpls
+        # (gates excluded - they're system operations, not plugins)
+        self.register(create_dynamic_hookimpl(discovered["sources"], "elspeth_get_source"))
+        self.register(create_dynamic_hookimpl(discovered["transforms"], "elspeth_get_transforms"))
+        self.register(create_dynamic_hookimpl(discovered["sinks"], "elspeth_get_sinks"))
 
     def register(self, plugin: Any) -> None:
         """Register a plugin.

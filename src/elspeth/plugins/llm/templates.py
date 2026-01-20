@@ -62,17 +62,37 @@ class PromptTemplate:
         # result.rendered_hash = hash of final prompt
     """
 
-    def __init__(self, template_string: str) -> None:
+    def __init__(
+        self,
+        template_string: str,
+        *,
+        template_source: str | None = None,
+        lookup_data: dict[str, Any] | None = None,
+        lookup_source: str | None = None,
+    ) -> None:
         """Initialize template.
 
         Args:
             template_string: Jinja2 template string
+            template_source: File path for audit (None if inline)
+            lookup_data: Static lookup data from YAML file
+            lookup_source: Lookup file path for audit (None if no lookup)
 
         Raises:
             TemplateError: If template syntax is invalid
         """
         self._template_string = template_string
         self._template_hash = _sha256(template_string)
+        self._template_source = template_source
+
+        # Lookup data for two-dimensional lookups
+        # Note: We distinguish None (no lookup configured) from {} (empty lookup).
+        # Both are valid, but they're semantically different for audit purposes.
+        self._lookup_data = lookup_data if lookup_data is not None else {}
+        self._lookup_source = lookup_source
+        self._lookup_hash = (
+            _sha256(canonical_json(lookup_data)) if lookup_data is not None else None
+        )
 
         # Use sandboxed environment for security
         self._env = SandboxedEnvironment(
@@ -89,6 +109,21 @@ class PromptTemplate:
     def template_hash(self) -> str:
         """SHA-256 hash of the template string."""
         return self._template_hash
+
+    @property
+    def template_source(self) -> str | None:
+        """File path if loaded from file, None if inline."""
+        return self._template_source
+
+    @property
+    def lookup_hash(self) -> str | None:
+        """SHA-256 hash of canonical JSON lookup data, or None."""
+        return self._lookup_hash
+
+    @property
+    def lookup_source(self) -> str | None:
+        """File path for lookup data, or None."""
+        return self._lookup_source
 
     def render(self, **variables: Any) -> str:
         """Render template with variables.

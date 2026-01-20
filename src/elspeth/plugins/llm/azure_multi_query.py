@@ -282,6 +282,54 @@ class AzureMultiQueryLLMTransform(BaseTransform):
         # Single row processing
         return self._process_single_row(row, ctx)
 
+    def _process_single_row_internal(
+        self,
+        row: dict[str, Any],
+        state_id: str,
+    ) -> TransformResult:
+        """Internal row processing with explicit state_id.
+
+        Used by both single-row and batch processing paths.
+
+        Args:
+            row: Input row with all case study fields
+            state_id: State ID for audit trail
+
+        Returns:
+            TransformResult with all query results merged, or error
+        """
+        # Execute all queries (parallel or sequential)
+        if self._executor is not None:
+            results = self._execute_queries_parallel(row, state_id)
+        else:
+            results = self._execute_queries_sequential(row, state_id)
+
+        # Check for failures (all-or-nothing for this row)
+        failed = [(spec, r) for spec, r in zip(self._query_specs, results, strict=True) if r.status != "success"]
+        if failed:
+            return TransformResult.error(
+                {
+                    "reason": "query_failed",
+                    "failed_queries": [
+                        {"query": spec.output_prefix, "error": r.reason}
+                        for spec, r in failed
+                    ],
+                    "succeeded_count": len(results) - len(failed),
+                    "total_count": len(results),
+                }
+            )
+
+        # Merge all results into output row
+        output = dict(row)
+        for result in results:
+            # Check for row presence: successful results should always have a row,
+            # but TransformResult supports multi-output scenarios where row may be
+            # None even on success. This check is defensive for that edge case.
+            if result.row is not None:
+                output.update(result.row)
+
+        return TransformResult.success(output)
+
     def _process_single_row(
         self,
         row: dict[str, Any],
@@ -306,46 +354,12 @@ class AzureMultiQueryLLMTransform(BaseTransform):
         if self._recorder is None:
             self._recorder = ctx.landscape
 
-        # Execute all queries
-        if self._executor is not None:
-            # Parallel execution via PooledExecutor
-            results = self._execute_queries_parallel(row, ctx.state_id)
-        else:
-            # Sequential fallback
-            results = self._execute_queries_sequential(row, ctx.state_id)
-
-        # Clean up cached clients for this state_id
-        with self._llm_clients_lock:
-            self._llm_clients.pop(ctx.state_id, None)
-
-        # Check for failures (all-or-nothing)
-        failed = [(spec, r) for spec, r in zip(self._query_specs, results, strict=True) if r.status != "success"]
-        if failed:
-            return TransformResult.error(
-                {
-                    "reason": "query_failed",
-                    "failed_queries": [
-                        {
-                            "query": spec.output_prefix,
-                            "error": r.reason,
-                        }
-                        for spec, r in failed
-                    ],
-                    "succeeded_count": len(results) - len(failed),
-                    "total_count": len(results),
-                }
-            )
-
-        # Merge all results into output row
-        output = dict(row)
-        for result in results:
-            # Check for row presence: successful results should always have a row,
-            # but TransformResult supports multi-output scenarios where row may be
-            # None even on success. This check is defensive for that edge case.
-            if result.row is not None:
-                output.update(result.row)
-
-        return TransformResult.success(output)
+        try:
+            return self._process_single_row_internal(row, ctx.state_id)
+        finally:
+            # Clean up cached clients for this state_id
+            with self._llm_clients_lock:
+                self._llm_clients.pop(ctx.state_id, None)
 
     def _execute_queries_parallel(
         self,
@@ -441,9 +455,50 @@ class AzureMultiQueryLLMTransform(BaseTransform):
         rows: list[dict[str, Any]],
         ctx: PluginContext,
     ) -> TransformResult:
-        """Process batch of rows."""
-        # Placeholder - will be implemented in Task 6
-        raise NotImplementedError("_process_batch not yet implemented")
+        """Process batch of rows (aggregation mode).
+
+        Each row is processed independently. Failed rows get _error marker
+        while successful rows continue. This implements partial success semantics
+        for batch processing.
+
+        Args:
+            rows: List of input rows
+            ctx: Plugin context with landscape and state_id
+
+        Returns:
+            TransformResult.success_multi with all row results, or
+            TransformResult.success for empty batch
+        """
+        if not rows:
+            return TransformResult.success({"batch_empty": True, "row_count": 0})
+
+        if ctx.landscape is None or ctx.state_id is None:
+            raise RuntimeError("Batch processing requires landscape recorder and state_id.")
+
+        if self._recorder is None:
+            self._recorder = ctx.landscape
+
+        output_rows: list[dict[str, Any]] = []
+
+        for i, row in enumerate(rows):
+            row_state_id = f"{ctx.state_id}_row{i}"
+
+            try:
+                result = self._process_single_row_internal(row, row_state_id)
+
+                if result.status == "success" and result.row is not None:
+                    output_rows.append(result.row)
+                else:
+                    # Row failed - include original with error marker
+                    error_row = dict(row)
+                    error_row["_error"] = result.reason
+                    output_rows.append(error_row)
+            finally:
+                # Clean up per-row client cache
+                with self._llm_clients_lock:
+                    self._llm_clients.pop(row_state_id, None)
+
+        return TransformResult.success_multi(output_rows)
 
     def close(self) -> None:
         """Release resources."""

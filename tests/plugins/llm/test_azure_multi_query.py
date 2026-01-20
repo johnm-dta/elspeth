@@ -380,3 +380,211 @@ class TestRowProcessing:
             # Entire row fails
             assert result.status == "error"
             assert "query_failed" in result.reason["reason"]
+
+
+class TestBatchProcessing:
+    """Tests for batch processing (aggregation mode)."""
+
+    def test_process_batch_handles_list_input(self) -> None:
+        """Process accepts list of rows for batch aggregation."""
+        # 2 rows x 4 queries each = 8 total LLM calls
+        responses = [{"score": i, "rationale": f"R{i}"} for i in range(8)]
+
+        with mock_azure_openai_responses(responses):
+            transform = AzureMultiQueryLLMTransform(make_config())
+            transform.on_start(make_plugin_context())
+            ctx = make_plugin_context()
+
+            rows = [
+                {
+                    "cs1_bg": "r1",
+                    "cs1_sym": "r1",
+                    "cs1_hist": "r1",
+                    "cs2_bg": "r1",
+                    "cs2_sym": "r1",
+                    "cs2_hist": "r1",
+                },
+                {
+                    "cs1_bg": "r2",
+                    "cs1_sym": "r2",
+                    "cs1_hist": "r2",
+                    "cs2_bg": "r2",
+                    "cs2_sym": "r2",
+                    "cs2_hist": "r2",
+                },
+            ]
+
+            result = transform.process(rows, ctx)
+
+            assert result.status == "success"
+            assert result.is_multi_row
+            assert result.rows is not None
+            assert len(result.rows) == 2
+
+    def test_process_batch_preserves_row_independence(self) -> None:
+        """Each row in batch is processed independently - row 1 succeeds, row 2 fails."""
+        # Test that first row succeeds even when second row fails
+        # Use pool_size=1 for predictable sequential order
+        # Row 1's 4 queries succeed, Row 2's 4th query returns invalid JSON
+        # Result should have 2 rows: row 1 with output fields, row 2 with _error marker
+        call_count = [0]
+
+        def make_response(**kwargs: Any) -> Mock:
+            call_count[0] += 1
+            # First 4 calls (row 1) succeed, 5-7 (row 2) succeed, 8th (row 2) fails
+            if call_count[0] == 8:
+                content = "not valid json"
+            else:
+                content = json.dumps({"score": call_count[0], "rationale": f"R{call_count[0]}"})
+
+            mock_response = Mock()
+            mock_response.choices = [Mock(message=Mock(content=content))]
+            mock_response.model = "gpt-4o"
+            mock_response.usage = Mock(prompt_tokens=10, completion_tokens=5)
+            mock_response.model_dump = Mock(return_value={})
+            return mock_response
+
+        with patch("openai.AzureOpenAI") as mock_azure_class:
+            mock_client = Mock()
+            mock_client.chat.completions.create.side_effect = make_response
+            mock_azure_class.return_value = mock_client
+
+            # Use pool_size=1 for sequential execution within each row
+            transform = AzureMultiQueryLLMTransform(make_config(pool_size=1))
+            transform.on_start(make_plugin_context())
+            ctx = make_plugin_context()
+
+            rows = [
+                {
+                    "cs1_bg": "r1_bg",
+                    "cs1_sym": "r1_sym",
+                    "cs1_hist": "r1_hist",
+                    "cs2_bg": "r1_bg",
+                    "cs2_sym": "r1_sym",
+                    "cs2_hist": "r1_hist",
+                },
+                {
+                    "cs1_bg": "r2_bg",
+                    "cs1_sym": "r2_sym",
+                    "cs1_hist": "r2_hist",
+                    "cs2_bg": "r2_bg",
+                    "cs2_sym": "r2_sym",
+                    "cs2_hist": "r2_hist",
+                },
+            ]
+
+            result = transform.process(rows, ctx)
+
+            # Batch succeeds with partial results
+            assert result.status == "success"
+            assert result.is_multi_row
+            assert result.rows is not None
+            assert len(result.rows) == 2
+
+            # Row 1 should have output fields (succeeded)
+            assert "cs1_diagnosis_score" in result.rows[0]
+            assert "cs1_treatment_score" in result.rows[0]
+
+            # Row 2 should have error marker (failed)
+            assert "_error" in result.rows[1]
+
+    def test_process_batch_empty_list_returns_empty_result(self) -> None:
+        """Empty batch returns success with empty indicator."""
+        with mock_azure_openai_responses([{"score": 1, "rationale": "R"}]):
+            transform = AzureMultiQueryLLMTransform(make_config())
+            transform.on_start(make_plugin_context())
+            ctx = make_plugin_context()
+
+            result = transform.process([], ctx)
+
+            assert result.status == "success"
+            assert result.row is not None
+            assert result.row["batch_empty"] is True
+            assert result.row["row_count"] == 0
+
+    def test_process_batch_uses_per_row_state_ids(self) -> None:
+        """Each row in batch gets unique state_id for audit trail isolation."""
+        # We can verify this by checking that different rows create different
+        # client cache entries (which use state_id as key)
+        responses = [{"score": i, "rationale": f"R{i}"} for i in range(8)]
+        created_state_ids: list[str] = []
+
+        with mock_azure_openai_responses(responses):
+            transform = AzureMultiQueryLLMTransform(make_config())
+            transform.on_start(make_plugin_context())
+
+            # Patch _get_llm_client to track state_ids
+            original_get_client = transform._get_llm_client
+
+            def tracking_get_client(state_id: str) -> Any:
+                created_state_ids.append(state_id)
+                return original_get_client(state_id)
+
+            transform._get_llm_client = tracking_get_client  # type: ignore[method-assign]
+
+            ctx = make_plugin_context(state_id="batch-001")
+
+            rows = [
+                {
+                    "cs1_bg": "r1",
+                    "cs1_sym": "r1",
+                    "cs1_hist": "r1",
+                    "cs2_bg": "r1",
+                    "cs2_sym": "r1",
+                    "cs2_hist": "r1",
+                },
+                {
+                    "cs1_bg": "r2",
+                    "cs1_sym": "r2",
+                    "cs1_hist": "r2",
+                    "cs2_bg": "r2",
+                    "cs2_sym": "r2",
+                    "cs2_hist": "r2",
+                },
+            ]
+
+            transform.process(rows, ctx)
+
+            # Should have state_ids like "batch-001_row0" and "batch-001_row1"
+            # (4 queries per row = 4 calls to _get_llm_client per row)
+            row0_ids = [s for s in created_state_ids if "row0" in s]
+            row1_ids = [s for s in created_state_ids if "row1" in s]
+
+            assert len(row0_ids) > 0, "Row 0 should have unique state_ids"
+            assert len(row1_ids) > 0, "Row 1 should have unique state_ids"
+            assert "batch-001_row0" in row0_ids[0]
+            assert "batch-001_row1" in row1_ids[0]
+
+    def test_process_batch_cleans_up_per_row_clients(self) -> None:
+        """Client cache is cleaned up after each row in batch."""
+        responses = [{"score": i, "rationale": f"R{i}"} for i in range(8)]
+
+        with mock_azure_openai_responses(responses):
+            transform = AzureMultiQueryLLMTransform(make_config())
+            transform.on_start(make_plugin_context())
+            ctx = make_plugin_context(state_id="batch-002")
+
+            rows = [
+                {
+                    "cs1_bg": "r1",
+                    "cs1_sym": "r1",
+                    "cs1_hist": "r1",
+                    "cs2_bg": "r1",
+                    "cs2_sym": "r1",
+                    "cs2_hist": "r1",
+                },
+                {
+                    "cs1_bg": "r2",
+                    "cs1_sym": "r2",
+                    "cs1_hist": "r2",
+                    "cs2_bg": "r2",
+                    "cs2_sym": "r2",
+                    "cs2_hist": "r2",
+                },
+            ]
+
+            transform.process(rows, ctx)
+
+            # After processing, per-row state_ids should be cleaned up
+            assert "batch-002_row0" not in transform._llm_clients
+            assert "batch-002_row1" not in transform._llm_clients

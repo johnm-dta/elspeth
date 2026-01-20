@@ -29,6 +29,15 @@ The following issues from code review have been addressed:
 | Module exports internal classes | Only export public API, keep internals private (Task 13) |
 | Missing timing in reorder buffer | Added `submit_timestamp`/`complete_timestamp` (Task 6) |
 
+**Second Code Review (Pre-Implementation) - Additional Fixes:**
+
+| Issue | Resolution |
+|-------|------------|
+| Semaphore tracking robustness | Added `holding_semaphore` flag for defensive tracking (Task 10) |
+| Missing `threading` import in test | Added `import threading` inside test function (Task 10) |
+| Missing config exports (breaking change) | Preserved `AzureOpenAIConfig`, `OpenRouterConfig`, `AzureBatchConfig` (Task 13) |
+| `on_start` hook concern | Verified: hook EXISTS in `BaseTransform` (line 101) - no change needed |
+
 ---
 
 ## Task 0: Thread-Safe Call Index in AuditedClientBase
@@ -1960,6 +1969,8 @@ class TestPooledExecutorCapacityHandling:
         CRITICAL: Without this, all workers hitting capacity errors would
         deadlock the pool.
         """
+        import threading  # For Event
+
         config = PoolConfig(
             pool_size=2,
             recovery_step_ms=50,
@@ -2049,9 +2060,16 @@ from elspeth.plugins.llm.capacity_errors import CapacityError
         Capacity errors trigger AIMD throttle and are retried until
         max_capacity_retry_seconds is exceeded. Normal errors/results
         are returned as-is.
+
+        Uses holding_semaphore flag for defensive tracking - ensures we
+        only release what we hold, even in edge cases.
         """
         start_time = time.monotonic()
         max_time = start_time + self._max_capacity_retry_seconds
+
+        # Track semaphore state for defensive release
+        # We enter holding the semaphore (acquired in execute_batch)
+        holding_semaphore = True
 
         try:
             while True:
@@ -2083,6 +2101,7 @@ from elspeth.plugins.llm.capacity_errors import CapacityError
                     # CRITICAL: Release semaphore BEFORE sleeping
                     # This allows other workers to make progress while we wait
                     self._semaphore.release()
+                    holding_semaphore = False
 
                     # Wait throttle delay before retry
                     delay_ms = self._throttle.current_delay_ms
@@ -2092,15 +2111,16 @@ from elspeth.plugins.llm.capacity_errors import CapacityError
 
                     # Re-acquire semaphore for retry
                     self._semaphore.acquire()
+                    holding_semaphore = True
 
                     # Retry
                     continue
         finally:
-            # Always release semaphore
-            # Note: During capacity retry, we release before sleep and re-acquire after,
-            # so when we reach this finally block (success, timeout, or other exception),
-            # we always hold the semaphore and need to release it exactly once.
-            self._semaphore.release()
+            # Release semaphore only if we're holding it
+            # This defensive check ensures correctness even if an unexpected
+            # exception occurs between release and re-acquire
+            if holding_semaphore:
+                self._semaphore.release()
 ```
 
 ### Step 4: Run test to verify it passes
@@ -2503,18 +2523,18 @@ Export only public API, keep internal classes private.
 
 Run: `cat src/elspeth/plugins/llm/__init__.py`
 
-### Step 2: Add minimal exports
+### Step 2: Add exports (preserving backward compatibility)
 
 ```python
 # src/elspeth/plugins/llm/__init__.py
 """LLM transform plugins for ELSPETH."""
 
-from elspeth.plugins.llm.azure import AzureLLMTransform
-from elspeth.plugins.llm.azure_batch import AzureBatchLLMTransform
+from elspeth.plugins.llm.azure import AzureLLMTransform, AzureOpenAIConfig
+from elspeth.plugins.llm.azure_batch import AzureBatchConfig, AzureBatchLLMTransform
 from elspeth.plugins.llm.base import BaseLLMTransform, LLMConfig, PoolConfig
 from elspeth.plugins.llm.batch_errors import BatchPendingError
 from elspeth.plugins.llm.capacity_errors import CapacityError
-from elspeth.plugins.llm.openrouter import OpenRouterLLMTransform
+from elspeth.plugins.llm.openrouter import OpenRouterConfig, OpenRouterLLMTransform
 from elspeth.plugins.llm.templates import PromptTemplate, RenderedPrompt, TemplateError
 
 __all__ = [
@@ -2523,12 +2543,15 @@ __all__ = [
     "AzureLLMTransform",
     "BaseLLMTransform",
     "OpenRouterLLMTransform",
-    # Config (public - users may inspect)
+    # Config (public - users may inspect, backward compatibility preserved)
+    "AzureBatchConfig",
+    "AzureOpenAIConfig",
     "LLMConfig",
-    "PoolConfig",
+    "OpenRouterConfig",
+    "PoolConfig",  # NEW for pooled execution
     # Exceptions (public - plugins may catch/raise)
     "BatchPendingError",
-    "CapacityError",
+    "CapacityError",  # NEW for pooled execution
     # Templates (public)
     "PromptTemplate",
     "RenderedPrompt",

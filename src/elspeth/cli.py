@@ -236,6 +236,8 @@ def _execute_pipeline(
     from elspeth.plugins.sources.csv_source import CSVSource
     from elspeth.plugins.sources.json_source import JSONSource
     from elspeth.plugins.transforms import FieldMapper, PassThrough
+    from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+    from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
     from elspeth.plugins.transforms.batch_stats import BatchStats
     from elspeth.plugins.transforms.json_explode import JSONExplode
     from elspeth.plugins.transforms.keyword_filter import KeywordFilter
@@ -247,6 +249,8 @@ def _execute_pipeline(
         "batch_stats": BatchStats,
         "json_explode": JSONExplode,
         "keyword_filter": KeywordFilter,
+        "azure_content_safety": AzureContentSafety,
+        "azure_prompt_shield": AzurePromptShield,
     }
 
     # Instantiate source from new schema
@@ -427,6 +431,14 @@ PLUGIN_REGISTRY: dict[str, list[PluginInfo]] = {
         PluginInfo(
             name="keyword_filter",
             description="Filter rows containing blocked content patterns",
+        ),
+        PluginInfo(
+            name="azure_content_safety",
+            description="Azure Content Safety API for hate, violence, sexual, self-harm detection",
+        ),
+        PluginInfo(
+            name="azure_prompt_shield",
+            description="Azure Prompt Shield API for jailbreak and prompt injection detection",
         ),
     ],
     "sink": [
@@ -631,6 +643,8 @@ def _build_resume_pipeline_config(
     from elspeth.plugins.sinks.json_sink import JSONSink
     from elspeth.plugins.sources.null_source import NullSource
     from elspeth.plugins.transforms import FieldMapper, PassThrough
+    from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+    from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
     from elspeth.plugins.transforms.batch_stats import BatchStats
     from elspeth.plugins.transforms.json_explode import JSONExplode
     from elspeth.plugins.transforms.keyword_filter import KeywordFilter
@@ -642,6 +656,8 @@ def _build_resume_pipeline_config(
         "batch_stats": BatchStats,
         "json_explode": JSONExplode,
         "keyword_filter": KeywordFilter,
+        "azure_content_safety": AzureContentSafety,
+        "azure_prompt_shield": AzurePromptShield,
     }
 
     # Source is NullSource for resume - data comes from payloads

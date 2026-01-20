@@ -90,3 +90,15 @@ class AIMDThrottle:
             # Cap at maximum
             if self._current_delay_ms > self._config.max_dispatch_delay_ms:
                 self._current_delay_ms = float(self._config.max_dispatch_delay_ms)
+
+    def on_success(self) -> None:
+        """Record successful request - subtract recovery step (thread-safe).
+
+        Subtracts recovery_step_ms from current delay, floored at min.
+        """
+        with self._lock:
+            self._current_delay_ms -= self._config.recovery_step_ms
+
+            # Floor at minimum
+            if self._current_delay_ms < self._config.min_dispatch_delay_ms:
+                self._current_delay_ms = float(self._config.min_dispatch_delay_ms)

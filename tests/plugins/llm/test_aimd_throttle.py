@@ -77,3 +77,49 @@ class TestAIMDThrottleBackoff:
             throttle.on_capacity_error()
 
         assert throttle.current_delay_ms == 500
+
+
+class TestAIMDThrottleRecovery:
+    """Test additive increase on success (slow recovery)."""
+
+    def test_success_subtracts_recovery_step(self) -> None:
+        """Each success should subtract recovery_step_ms."""
+        config = ThrottleConfig(recovery_step_ms=50)
+        throttle = AIMDThrottle(config)
+
+        # Set initial delay
+        throttle.on_capacity_error()  # -> 50
+        throttle.on_capacity_error()  # -> 100
+        assert throttle.current_delay_ms == 100
+
+        throttle.on_success()  # 100 - 50 = 50
+        assert throttle.current_delay_ms == 50
+
+        throttle.on_success()  # 50 - 50 = 0
+        assert throttle.current_delay_ms == 0
+
+    def test_delay_floored_at_min(self) -> None:
+        """Delay should not go below min_dispatch_delay_ms."""
+        config = ThrottleConfig(
+            min_dispatch_delay_ms=10,
+            recovery_step_ms=100,
+        )
+        throttle = AIMDThrottle(config)
+
+        # Set initial delay
+        throttle.on_capacity_error()  # -> 100
+
+        # Multiple successes should stop at min
+        for _ in range(5):
+            throttle.on_success()
+
+        assert throttle.current_delay_ms == 10
+
+    def test_success_at_zero_stays_zero(self) -> None:
+        """Success when already at zero should stay at zero."""
+        throttle = AIMDThrottle()
+        assert throttle.current_delay_ms == 0
+
+        throttle.on_success()
+
+        assert throttle.current_delay_ms == 0

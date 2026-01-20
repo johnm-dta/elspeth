@@ -307,6 +307,38 @@ class TestOpenRouterLLMTransformProcess:
         assert result.reason["reason"] == "api_call_failed"
         assert result.retryable is True
 
+    def test_service_unavailable_503_is_retryable(self, ctx: PluginContext, transform: OpenRouterLLMTransform) -> None:
+        """Service unavailable (503) errors are marked retryable for consistency with pooled mode."""
+        with mock_httpx_client(
+            side_effect=httpx.HTTPStatusError(
+                "503 Service Unavailable",
+                request=Mock(),
+                response=Mock(status_code=503),
+            )
+        ):
+            result = transform.process({"text": "hello"}, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "api_call_failed"
+        assert result.retryable is True
+
+    def test_overloaded_529_is_retryable(self, ctx: PluginContext, transform: OpenRouterLLMTransform) -> None:
+        """Overloaded (529) errors are marked retryable for consistency with pooled mode."""
+        with mock_httpx_client(
+            side_effect=httpx.HTTPStatusError(
+                "529 Site is overloaded",
+                request=Mock(),
+                response=Mock(status_code=529),
+            )
+        ):
+            result = transform.process({"text": "hello"}, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "api_call_failed"
+        assert result.retryable is True
+
     def test_request_error_not_retryable(self, ctx: PluginContext, transform: OpenRouterLLMTransform) -> None:
         """Network/connection errors (RequestError) are not retryable."""
         with mock_httpx_client(side_effect=httpx.ConnectError("Connection refused")):

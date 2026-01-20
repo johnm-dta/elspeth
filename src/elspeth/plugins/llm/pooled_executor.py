@@ -244,13 +244,20 @@ class PooledExecutor:
         # We enter holding the semaphore (acquired in execute_batch)
         holding_semaphore = True
 
+        # Track if we just retried - skip pre-dispatch delay after capacity retry
+        # to avoid double-sleeping (we already slept during the retry backoff)
+        just_retried = False
+
         try:
             while True:
                 # Apply throttle delay INSIDE worker (after semaphore acquired)
-                delay_ms = self._throttle.current_delay_ms
-                if delay_ms > 0:
-                    time.sleep(delay_ms / 1000)
-                    self._throttle.record_throttle_wait(delay_ms)
+                # Skip if we just retried - we already slept during retry backoff
+                if not just_retried:
+                    delay_ms = self._throttle.current_delay_ms
+                    if delay_ms > 0:
+                        time.sleep(delay_ms / 1000)
+                        self._throttle.record_throttle_wait(delay_ms)
+                just_retried = False  # Reset for next iteration
 
                 try:
                     result = process_fn(row, state_id)
@@ -291,6 +298,9 @@ class PooledExecutor:
                     # Re-acquire semaphore for retry
                     self._semaphore.acquire()
                     holding_semaphore = True
+
+                    # Mark that we just retried - skip pre-dispatch delay on next iteration
+                    just_retried = True
 
                     # Retry (continue to top of loop)
         finally:

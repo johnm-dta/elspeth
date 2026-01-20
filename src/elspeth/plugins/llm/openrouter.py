@@ -192,11 +192,11 @@ class OpenRouterLLMTransform(BaseTransform):
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            # HTTP error (4xx, 5xx) - check for rate limit
-            is_rate_limit = e.response.status_code == 429
+            # HTTP error (4xx, 5xx) - check for capacity errors (429/503/529)
+            # Use is_capacity_error() for consistency with pooled execution path
             return TransformResult.error(
                 {"reason": "api_call_failed", "error": str(e)},
-                retryable=is_rate_limit,
+                retryable=is_capacity_error(e.response.status_code),
             )
         except httpx.RequestError as e:
             # Network/connection errors - not retryable by default

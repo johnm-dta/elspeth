@@ -224,9 +224,23 @@ Available variables:
 
 ## Pooled Safety Transforms
 
-Prompt Shield also supports pooled execution:
+Both Content Safety and Prompt Shield support pooled execution:
 
 ```yaml
+# Content Safety with pooling
+- plugin: azure_content_safety
+  options:
+    endpoint: "${AZURE_CONTENT_SAFETY_ENDPOINT}"
+    api_key: "${AZURE_CONTENT_SAFETY_KEY}"
+    fields: text
+    thresholds:
+      hate: 2
+      violence: 2
+      sexual: 2
+      self_harm: 0
+    pool_size: 5  # Process 5 rows concurrently
+
+# Prompt Shield with pooling
 - plugin: azure_prompt_shield
   options:
     endpoint: "${AZURE_CONTENT_SAFETY_ENDPOINT}"
@@ -235,7 +249,17 @@ Prompt Shield also supports pooled execution:
     pool_size: 5  # Process 5 rows concurrently
 ```
 
-This significantly reduces pipeline latency when processing large batches.
+**Performance impact** (100 rows at 200ms/call):
+
+| Transform | Sequential | Pooled (pool_size=5) |
+|-----------|------------|----------------------|
+| content_safety | 20s | ~4s |
+| prompt_shield | 20s | ~4s |
+| **Total safety checks** | **40s** | **~8s** |
+
+Pooled transforms use AIMD (Additive Increase, Multiplicative Decrease) throttling
+to automatically back off on rate limits (HTTP 429) and gradually increase
+throughput as capacity allows.
 
 ## Audit Trail
 

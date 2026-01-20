@@ -67,6 +67,7 @@ row_plugins:
       on_error: flagged  # Route flagged content to 'flagged' sink
       schema:
         fields: dynamic
+      pool_size: 5  # Process 5 rows concurrently
 
   # Step 3: Check for prompt injection attacks
   - plugin: azure_prompt_shield

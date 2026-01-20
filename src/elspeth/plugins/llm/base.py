@@ -13,18 +13,57 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from elspeth.contracts import Determinism, TransformResult
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.clients.llm import LLMClientError, RateLimitError
 from elspeth.plugins.config_base import TransformDataConfig
 from elspeth.plugins.context import PluginContext
+from elspeth.plugins.llm.aimd_throttle import ThrottleConfig
 from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
 from elspeth.plugins.schema_factory import create_schema_from_config
 
 if TYPE_CHECKING:
     from elspeth.plugins.clients.llm import AuditedLLMClient
+
+
+class PoolConfig(BaseModel):
+    """Pool configuration for concurrent LLM requests.
+
+    This is a structured representation of pool settings, built from
+    flat config fields in LLMConfig. Only created when pool_size > 1.
+
+    Attributes:
+        pool_size: Number of concurrent requests (must be >= 1)
+        min_dispatch_delay_ms: Floor for delay between dispatches
+        max_dispatch_delay_ms: Ceiling for delay
+        backoff_multiplier: Multiply delay on capacity error (must be > 1)
+        recovery_step_ms: Subtract from delay on success
+        max_capacity_retry_seconds: Max time to retry capacity errors per row
+    """
+
+    model_config = {"extra": "forbid"}
+
+    pool_size: int = Field(1, ge=1, description="Number of concurrent requests")
+    min_dispatch_delay_ms: int = Field(0, ge=0, description="Minimum dispatch delay in milliseconds")
+    max_dispatch_delay_ms: int = Field(5000, ge=0, description="Maximum dispatch delay in milliseconds")
+    backoff_multiplier: float = Field(2.0, gt=1.0, description="Backoff multiplier on capacity error")
+    recovery_step_ms: int = Field(50, ge=0, description="Recovery step in milliseconds")
+    max_capacity_retry_seconds: int = Field(3600, gt=0, description="Max seconds to retry capacity errors")
+
+    def to_throttle_config(self) -> ThrottleConfig:
+        """Convert to ThrottleConfig for runtime use.
+
+        Returns:
+            ThrottleConfig instance with AIMD settings from this pool config.
+        """
+        return ThrottleConfig(
+            min_dispatch_delay_ms=self.min_dispatch_delay_ms,
+            max_dispatch_delay_ms=self.max_dispatch_delay_ms,
+            backoff_multiplier=self.backoff_multiplier,
+            recovery_step_ms=self.recovery_step_ms,
+        )
 
 
 class LLMConfig(TransformDataConfig):
@@ -41,6 +80,14 @@ class LLMConfig(TransformDataConfig):
     - temperature: Sampling temperature (default 0.0 for determinism)
     - max_tokens: Maximum response tokens
     - response_field: Field name for LLM response in output
+
+    Pool configuration (flat fields assembled into PoolConfig when pool_size > 1):
+    - pool_size: Number of concurrent requests (1 = sequential, no pooling)
+    - min_dispatch_delay_ms: Floor for delay between dispatches
+    - max_dispatch_delay_ms: Ceiling for delay
+    - backoff_multiplier: Multiply delay on capacity error (must be > 1)
+    - recovery_step_ms: Subtract from delay on success
+    - max_capacity_retry_seconds: Max time to retry capacity errors per row
     """
 
     model: str = Field(..., description="Model identifier (e.g., 'gpt-4', 'claude-3-opus')")
@@ -54,6 +101,35 @@ class LLMConfig(TransformDataConfig):
     lookup: dict[str, Any] | None = Field(None, description="Lookup data loaded from YAML file")
     template_source: str | None = Field(None, description="Template file path for audit (None if inline)")
     lookup_source: str | None = Field(None, description="Lookup file path for audit (None if no lookup)")
+
+    # Pool configuration fields (flat - assembled into PoolConfig by pool_config property)
+    pool_size: int = Field(1, ge=1, description="Number of concurrent requests (1 = sequential)")
+    min_dispatch_delay_ms: int = Field(0, ge=0, description="Minimum dispatch delay in milliseconds")
+    max_dispatch_delay_ms: int = Field(5000, ge=0, description="Maximum dispatch delay in milliseconds")
+    backoff_multiplier: float = Field(2.0, gt=1.0, description="Backoff multiplier on capacity error")
+    recovery_step_ms: int = Field(50, ge=0, description="Recovery step in milliseconds")
+    max_capacity_retry_seconds: int = Field(3600, gt=0, description="Max seconds to retry capacity errors")
+
+    @property
+    def pool_config(self) -> PoolConfig | None:
+        """Get pool configuration if pooling is enabled.
+
+        Returns None if pool_size <= 1 (sequential mode).
+        Otherwise returns a PoolConfig built from flat fields.
+
+        Returns:
+            PoolConfig instance or None if sequential mode.
+        """
+        if self.pool_size <= 1:
+            return None
+        return PoolConfig(
+            pool_size=self.pool_size,
+            min_dispatch_delay_ms=self.min_dispatch_delay_ms,
+            max_dispatch_delay_ms=self.max_dispatch_delay_ms,
+            backoff_multiplier=self.backoff_multiplier,
+            recovery_step_ms=self.recovery_step_ms,
+            max_capacity_retry_seconds=self.max_capacity_retry_seconds,
+        )
 
     @field_validator("template")
     @classmethod

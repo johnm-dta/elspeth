@@ -901,3 +901,101 @@ class TestAuditedLLMClientIntegration:
         assert call.error_json is not None
         assert "API down" in call.error_json
         assert call.response_hash is None  # No response on error
+
+
+class TestOpenRouterPooledExecution:
+    """Integration tests for OpenRouter with pooled execution."""
+
+    @pytest.fixture
+    def recorder(self) -> LandscapeRecorder:
+        """Create recorder with in-memory DB."""
+        db = LandscapeDB.in_memory()
+        return LandscapeRecorder(db)
+
+    def test_pool_size_1_uses_sequential_processing(self, recorder: LandscapeRecorder) -> None:
+        """pool_size=1 should use existing sequential logic."""
+        from unittest.mock import patch
+
+        # Setup state
+        schema = SchemaConfig.from_dict({"fields": "dynamic"})
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="openrouter_llm",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=schema,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={"text": "test"},
+        )
+        token = recorder.create_token(row_id=row.row_id)
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=node.node_id,
+            step_index=0,
+            input_data={"text": "test"},
+        )
+
+        transform = OpenRouterLLMTransform(
+            {
+                "model": "anthropic/claude-3-opus",
+                "template": "{{ row.text }}",
+                "api_key": "test-key",
+                "schema": {"fields": "dynamic"},
+                "pool_size": 1,  # Sequential
+            }
+        )
+
+        # Verify no executor created
+        assert transform._executor is None
+
+        ctx = PluginContext(
+            run_id=run.run_id,
+            config={},
+            landscape=recorder,
+            state_id=state.state_id,
+        )
+
+        # Mock HTTP and verify single-row processing still works
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "result"}}],
+            "usage": {},
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_response.content = b""
+        mock_response.text = ""
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_client)
+            mock_client_class.return_value.__exit__ = MagicMock(return_value=None)
+
+            result = transform.process({"text": "hello"}, ctx)
+
+        assert result.status == "success"
+
+    def test_pool_size_greater_than_1_creates_executor(self) -> None:
+        """pool_size > 1 should create pooled executor."""
+        transform = OpenRouterLLMTransform(
+            {
+                "model": "anthropic/claude-3-opus",
+                "template": "{{ row.text }}",
+                "api_key": "test-key",
+                "schema": {"fields": "dynamic"},
+                "pool_size": 5,
+            }
+        )
+
+        assert transform._executor is not None
+        assert transform._executor.pool_size == 5
+
+        transform.close()

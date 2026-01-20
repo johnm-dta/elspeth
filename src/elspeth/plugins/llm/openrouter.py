@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from pydantic import Field
@@ -13,8 +13,13 @@ from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.clients.http import AuditedHTTPClient
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.base import LLMConfig
+from elspeth.plugins.llm.capacity_errors import CapacityError, is_capacity_error
+from elspeth.plugins.llm.pooled_executor import PooledExecutor
 from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
 from elspeth.plugins.schema_factory import create_schema_from_config
+
+if TYPE_CHECKING:
+    from elspeth.core.landscape.recorder import LandscapeRecorder
 
 
 class OpenRouterConfig(LLMConfig):
@@ -93,6 +98,19 @@ class OpenRouterLLMTransform(BaseTransform):
         )
         self.input_schema = schema
         self.output_schema = schema
+
+        # Recorder reference for pooled execution (set in on_start)
+        self._recorder: LandscapeRecorder | None = None
+
+        # Create pooled executor if pool_size > 1
+        if cfg.pool_config is not None:
+            self._executor: PooledExecutor | None = PooledExecutor(cfg.pool_config)
+        else:
+            self._executor = None
+
+    def on_start(self, ctx: PluginContext) -> None:
+        """Capture recorder reference for pooled execution."""
+        self._recorder = ctx.landscape
 
     def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
         """Process row via OpenRouter API using audited HTTP client.
@@ -216,6 +234,131 @@ class OpenRouterLLMTransform(BaseTransform):
 
         return TransformResult.success(output)
 
+    def _process_single_with_state(self, row: dict[str, Any], state_id: str) -> TransformResult:
+        """Process a single row via OpenRouter API with explicit state_id.
+
+        This is used by the pooled executor where each row has its own state.
+
+        Args:
+            row: The row data to process
+            state_id: The state ID for audit trail recording
+
+        Returns:
+            TransformResult with processed row or error
+
+        Raises:
+            CapacityError: On 429/503/529 HTTP errors (for pooled retry)
+        """
+        # 1. Render template (THEIR DATA - wrap)
+        try:
+            rendered = self._template.render_with_metadata(row)
+        except TemplateError as e:
+            return TransformResult.error(
+                {
+                    "reason": "template_rendering_failed",
+                    "error": str(e),
+                    "template_hash": self._template.template_hash,
+                    "template_source": self._template.template_source,
+                }
+            )
+
+        # 2. Build request
+        messages: list[dict[str, str]] = []
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": rendered.prompt})
+
+        request_body: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": self._temperature,
+        }
+        if self._max_tokens:
+            request_body["max_tokens"] = self._max_tokens
+
+        # 3. Get recorder from transform's stored reference (set during on_start)
+        if self._recorder is None:
+            raise RuntimeError("OpenRouter transform requires recorder. Ensure on_start was called.")
+
+        http_client = AuditedHTTPClient(
+            recorder=self._recorder,
+            state_id=state_id,
+            timeout=self._timeout,
+            base_url=self._base_url,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+        )
+
+        try:
+            response = http_client.post(
+                "/chat/completions",
+                json=request_body,
+                headers={"Content-Type": "application/json"},
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            # Check for capacity error
+            if is_capacity_error(e.response.status_code):
+                raise CapacityError(e.response.status_code, str(e)) from e
+            # Non-capacity HTTP error
+            return TransformResult.error(
+                {"reason": "api_call_failed", "error": str(e)},
+                retryable=False,
+            )
+        except httpx.RequestError as e:
+            return TransformResult.error(
+                {"reason": "api_call_failed", "error": str(e)},
+                retryable=False,
+            )
+
+        # 4. Parse JSON response (EXTERNAL DATA - wrap)
+        try:
+            data = response.json()
+        except (ValueError, TypeError) as e:
+            return TransformResult.error(
+                {
+                    "reason": "invalid_json_response",
+                    "error": f"Response is not valid JSON: {e}",
+                    "content_type": response.headers.get("content-type", "unknown"),
+                    "body_preview": response.text[:500] if response.text else None,
+                },
+                retryable=False,
+            )
+
+        # 5. Extract content
+        try:
+            choices = data["choices"]
+            if not choices:
+                return TransformResult.error(
+                    {"reason": "empty_choices", "response": data},
+                    retryable=False,
+                )
+            content = choices[0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            return TransformResult.error(
+                {
+                    "reason": "malformed_response",
+                    "error": f"{type(e).__name__}: {e}",
+                    "response_keys": list(data.keys()) if isinstance(data, dict) else None,
+                },
+                retryable=False,
+            )
+
+        usage = data.get("usage", {})
+
+        output = dict(row)
+        output[self._response_field] = content
+        output[f"{self._response_field}_usage"] = usage
+        output[f"{self._response_field}_template_hash"] = rendered.template_hash
+        output[f"{self._response_field}_variables_hash"] = rendered.variables_hash
+        output[f"{self._response_field}_template_source"] = rendered.template_source
+        output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
+        output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
+        output[f"{self._response_field}_model"] = data.get("model", self._model)
+
+        return TransformResult.success(output)
+
     def close(self) -> None:
         """Release resources."""
-        pass
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+        self._recorder = None

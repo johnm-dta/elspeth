@@ -596,19 +596,39 @@ allow_hits:
   # Response fields 'usage' and 'model' are optional per OpenRouter API docs.
   # ============================================================
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=178"
+  # --- process() method ---
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=196"
     owner: "architecture"
     reason: "Trust boundary: HTTP response headers may not include content-type"
     safety: "Graceful default to 'unknown' - used for error reporting only"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=205"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=223"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API 'usage' field is optional in response"
     safety: "Graceful default to {} - usage is metadata, not critical for processing"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=215"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=233"
+    owner: "architecture"
+    reason: "Trust boundary: OpenRouter API may return different model than requested"
+    safety: "Graceful fallback to requested model - audit still captures actual value"
+    expires: null  # Permanent - intentional design
+
+  # --- _process_single_with_state() method (pooled execution) ---
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=321"
+    owner: "architecture"
+    reason: "Trust boundary: HTTP response headers may not include content-type"
+    safety: "Graceful default to 'unknown' - used for error reporting only"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=346"
+    owner: "architecture"
+    reason: "Trust boundary: OpenRouter API 'usage' field is optional in response"
+    safety: "Graceful default to {} - usage is metadata, not critical for processing"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:_process_single_with_state:line=356"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API may return different model than requested"
     safety: "Graceful fallback to requested model - audit still captures actual value"

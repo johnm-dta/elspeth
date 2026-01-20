@@ -56,15 +56,39 @@ class TestPluginInfo:
         plugin_set = {plugin1, plugin2}
         assert len(plugin_set) == 1
 
-    def test_plugin_registry_uses_plugin_info(self) -> None:
-        """PLUGIN_REGISTRY entries are PluginInfo instances."""
-        from elspeth.cli import PLUGIN_REGISTRY, PluginInfo
+    def test_build_plugin_registry_returns_plugin_info(self) -> None:
+        """_build_plugin_registry returns PluginInfo instances."""
+        from elspeth.cli import PluginInfo, _build_plugin_registry
 
-        for plugin_type, plugins in PLUGIN_REGISTRY.items():
+        registry = _build_plugin_registry()
+
+        for plugin_type, plugins in registry.items():
             for plugin in plugins:
                 assert isinstance(plugin, PluginInfo), f"Plugin in {plugin_type} is not PluginInfo: {plugin}"
                 assert isinstance(plugin.name, str)
                 assert isinstance(plugin.description, str)
+
+    def test_build_plugin_registry_includes_all_discovered_plugins(self) -> None:
+        """_build_plugin_registry includes all plugins from PluginManager."""
+        from elspeth.cli import _build_plugin_registry, _get_plugin_manager
+
+        registry = _build_plugin_registry()
+        manager = _get_plugin_manager()
+
+        # All discovered sources should be in registry
+        source_names = {p.name for p in registry["source"]}
+        for source_cls in manager.get_sources():
+            assert source_cls.name in source_names, f"Missing source: {source_cls.name}"
+
+        # All discovered transforms should be in registry
+        transform_names = {p.name for p in registry["transform"]}
+        for transform_cls in manager.get_transforms():
+            assert transform_cls.name in transform_names, f"Missing transform: {transform_cls.name}"
+
+        # All discovered sinks should be in registry
+        sink_names = {p.name for p in registry["sink"]}
+        for sink_cls in manager.get_sinks():
+            assert sink_cls.name in sink_names, f"Missing sink: {sink_cls.name}"
 
 
 class TestPluginsListCommand:

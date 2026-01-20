@@ -407,35 +407,24 @@ class PluginInfo:
     description: str
 
 
-# Registry of built-in plugins (static for Phase 4)
-PLUGIN_REGISTRY: dict[str, list[PluginInfo]] = {
-    "source": [
-        PluginInfo(name="csv", description="Load rows from CSV files"),
-        PluginInfo(name="json", description="Load rows from JSON/JSONL files"),
-    ],
-    "transform": [
-        PluginInfo(name="passthrough", description="Pass rows through unchanged"),
-        PluginInfo(name="field_mapper", description="Rename, select, and reorganize fields"),
-        PluginInfo(name="json_explode", description="Explode array field into multiple rows"),
-        PluginInfo(
-            name="keyword_filter",
-            description="Filter rows containing blocked content patterns",
-        ),
-        PluginInfo(
-            name="azure_content_safety",
-            description="Azure Content Safety API for hate, violence, sexual, self-harm detection",
-        ),
-        PluginInfo(
-            name="azure_prompt_shield",
-            description="Azure Prompt Shield API for jailbreak and prompt injection detection",
-        ),
-    ],
-    "sink": [
-        PluginInfo(name="csv", description="Write rows to CSV files"),
-        PluginInfo(name="json", description="Write rows to JSON/JSONL files"),
-        PluginInfo(name="database", description="Write rows to database tables"),
-    ],
-}
+def _build_plugin_registry() -> dict[str, list[PluginInfo]]:
+    """Build plugin registry dynamically from discovered plugins.
+
+    Uses PluginManager to discover all plugins and extracts descriptions
+    from their docstrings.
+
+    Returns:
+        Dict mapping plugin type to list of PluginInfo for each plugin.
+    """
+    from elspeth.plugins.discovery import get_plugin_description
+
+    manager = _get_plugin_manager()
+
+    return {
+        "source": [PluginInfo(name=cls.name, description=get_plugin_description(cls)) for cls in manager.get_sources()],
+        "transform": [PluginInfo(name=cls.name, description=get_plugin_description(cls)) for cls in manager.get_transforms()],
+        "sink": [PluginInfo(name=cls.name, description=get_plugin_description(cls)) for cls in manager.get_sinks()],
+    }
 
 
 @plugins_app.command("list")
@@ -448,23 +437,25 @@ def plugins_list(
     ),
 ) -> None:
     """List available plugins."""
-    valid_types = set(PLUGIN_REGISTRY.keys())
+    # Build registry dynamically from discovered plugins
+    registry = _build_plugin_registry()
+    valid_types = set(registry.keys())
 
     if plugin_type and plugin_type not in valid_types:
         typer.echo(f"Error: Invalid type '{plugin_type}'.", err=True)
         typer.echo(f"Valid types: {', '.join(sorted(valid_types))}", err=True)
         raise typer.Exit(1)
 
-    types_to_show = [plugin_type] if plugin_type else list(PLUGIN_REGISTRY.keys())
+    types_to_show = [plugin_type] if plugin_type else list(registry.keys())
 
     for ptype in types_to_show:
-        # types_to_show only contains keys from PLUGIN_REGISTRY (either filtered by validated plugin_type
-        # or directly from PLUGIN_REGISTRY.keys()), so direct access is safe
-        plugins = PLUGIN_REGISTRY[ptype]
+        # types_to_show only contains keys from registry (either filtered by validated plugin_type
+        # or directly from registry.keys()), so direct access is safe
+        plugins = registry[ptype]
         if plugins:
             typer.echo(f"\n{ptype.upper()}S:")
             for plugin in plugins:
-                typer.echo(f"  {plugin.name:12} - {plugin.description}")
+                typer.echo(f"  {plugin.name:20} - {plugin.description}")
         else:
             typer.echo(f"\n{ptype.upper()}S:")
             typer.echo("  (none available)")

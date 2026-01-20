@@ -43,7 +43,7 @@ jobs:
       - name: Run no-bug-hiding check
         run: |
           python scripts/cicd/no_bug_hiding.py check \
-            --root src \
+            --root src/elspeth \
             --allowlist config/cicd/no_bug_hiding.yaml \
             --exclude "**/__pycache__/*" \
             --format text
@@ -52,7 +52,7 @@ jobs:
         if: failure()
         run: |
           python scripts/cicd/no_bug_hiding.py check \
-            --root src \
+            --root src/elspeth \
             --allowlist config/cicd/no_bug_hiding.yaml \
             --exclude "**/__pycache__/*" \
             --format json > no-bug-hiding-report.json || true

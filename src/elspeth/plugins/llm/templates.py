@@ -43,23 +43,33 @@ class PromptTemplate:
     Uses sandboxed environment to prevent dangerous operations.
     Tracks hashes of template, variables, and rendered output for audit.
 
+    Templates access row data via the `row` namespace and lookup data via
+    the `lookup` namespace:
+        - {{ row.field_name }} - access row fields
+        - {{ lookup.key }} - access lookup data
+
     Example:
-        template = PromptTemplate('''
+        template = PromptTemplate(
+            '''
             Analyze the following product:
-            Name: {{ product.name }}
-            Description: {{ product.description }}
+            Name: {{ row.name }}
+            Description: {{ row.description }}
 
             Provide a quality score from 1-10.
-        ''')
+            ''',
+            lookup_data={"scale": "1-10"},
+            lookup_source="lookups.yaml",
+        )
 
         result = template.render_with_metadata(
-            product={"name": "Widget", "description": "A useful widget"}
+            {"name": "Widget", "description": "A useful widget"}
         )
 
         # result.prompt = rendered string
         # result.template_hash = hash of template
-        # result.variables_hash = hash of input variables
+        # result.variables_hash = hash of row data
         # result.rendered_hash = hash of final prompt
+        # result.lookup_hash = hash of lookup data
     """
 
     def __init__(
@@ -125,11 +135,11 @@ class PromptTemplate:
         """File path for lookup data, or None."""
         return self._lookup_source
 
-    def render(self, **variables: Any) -> str:
-        """Render template with variables.
+    def render(self, row: dict[str, Any]) -> str:
+        """Render template with row data.
 
         Args:
-            **variables: Template variables
+            row: Row data (accessed as row.* in template)
 
         Returns:
             Rendered prompt string
@@ -137,8 +147,14 @@ class PromptTemplate:
         Raises:
             TemplateError: If rendering fails (undefined variable, sandbox violation, etc.)
         """
+        # Build context with namespaced data
+        context: dict[str, Any] = {
+            "row": row,
+            "lookup": self._lookup_data,
+        }
+
         try:
-            return self._template.render(**variables)
+            return self._template.render(**context)
         except UndefinedError as e:
             raise TemplateError(f"Undefined variable: {e}") from e
         except SecurityError as e:
@@ -146,20 +162,19 @@ class PromptTemplate:
         except Exception as e:
             raise TemplateError(f"Template rendering failed: {e}") from e
 
-    def render_with_metadata(self, **variables: Any) -> RenderedPrompt:
+    def render_with_metadata(self, row: dict[str, Any]) -> RenderedPrompt:
         """Render template and return with audit metadata.
 
         Args:
-            **variables: Template variables
+            row: Row data (accessed as row.* in template)
 
         Returns:
             RenderedPrompt with prompt string and all hashes
         """
-        prompt = self.render(**variables)
+        prompt = self.render(row)
 
-        # Compute variables hash using canonical JSON
-        variables_canonical = canonical_json(variables)
-        variables_hash = _sha256(variables_canonical)
+        # Compute variables hash using canonical JSON (row data only)
+        variables_hash = _sha256(canonical_json(row))
 
         # Compute rendered prompt hash
         rendered_hash = _sha256(prompt)
@@ -169,4 +184,7 @@ class PromptTemplate:
             template_hash=self._template_hash,
             variables_hash=variables_hash,
             rendered_hash=rendered_hash,
+            template_source=self._template_source,
+            lookup_hash=self._lookup_hash,
+            lookup_source=self._lookup_source,
         )

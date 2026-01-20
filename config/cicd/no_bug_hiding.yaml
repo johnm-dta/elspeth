@@ -872,3 +872,30 @@ allow_hits:
     reason: "Trust boundary: plugin manager initialization may fail due to misconfiguration"
     safety: "Error recorded in checks dict with status='error' - health check reports plugins as unhealthy"
     expires: null  # Permanent - intentional design
+
+  # ============================================================
+  # FINGERPRINT KEY RETRIEVAL (Permanent)
+  # ============================================================
+  # get_fingerprint_key() checks optional environment variables to determine
+  # which key source to use (env var vs Azure Key Vault). These are external
+  # configuration inputs with explicit fallback logic - if neither is set,
+  # ValueError is raised with clear guidance.
+  # ============================================================
+
+  - key: "core/security/fingerprint.py:R1:get_fingerprint_key:line=77"
+    owner: "architecture"
+    reason: "Trust boundary: ELSPETH_FINGERPRINT_KEY is optional external input (dev mode)"
+    safety: "Explicit check: if not set, falls through to Key Vault check or raises ValueError"
+    expires: null  # Permanent - intentional design
+
+  - key: "core/security/fingerprint.py:R1:get_fingerprint_key:line=82"
+    owner: "architecture"
+    reason: "Trust boundary: ELSPETH_KEYVAULT_URL is optional external input (production mode)"
+    safety: "Explicit check: if not set, raises ValueError with guidance on configuration"
+    expires: null  # Permanent - intentional design
+
+  - key: "core/security/fingerprint.py:R1:get_fingerprint_key:line=84"
+    owner: "architecture"
+    reason: "Trust boundary: ELSPETH_KEYVAULT_SECRET_NAME is optional with sensible default"
+    safety: "Default 'elspeth-fingerprint-key' used when not set - documented behavior"
+    expires: null  # Permanent - intentional design

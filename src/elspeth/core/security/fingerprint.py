@@ -20,27 +20,83 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from azure.keyvault.secrets import SecretClient
 
 _ENV_VAR = "ELSPETH_FINGERPRINT_KEY"
+_KEYVAULT_URL_VAR = "ELSPETH_KEYVAULT_URL"
+_KEYVAULT_SECRET_NAME_VAR = "ELSPETH_KEYVAULT_SECRET_NAME"
+_DEFAULT_SECRET_NAME = "elspeth-fingerprint-key"
+
+
+def _get_keyvault_client(vault_url: str) -> SecretClient:
+    """Create a Key Vault SecretClient using DefaultAzureCredential.
+
+    Args:
+        vault_url: The Key Vault URL (e.g., https://my-vault.vault.azure.net)
+
+    Returns:
+        SecretClient configured with DefaultAzureCredential
+
+    Raises:
+        ImportError: If azure-keyvault-secrets or azure-identity not installed
+    """
+    try:
+        from azure.identity import DefaultAzureCredential
+        from azure.keyvault.secrets import SecretClient
+    except ImportError as e:
+        raise ImportError(
+            "azure-keyvault-secrets and azure-identity are required for Key Vault support. Install with: uv pip install 'elspeth[azure]'"
+        ) from e
+
+    credential = DefaultAzureCredential()
+    return SecretClient(vault_url=vault_url, credential=credential)
 
 
 def get_fingerprint_key() -> bytes:
-    """Get the fingerprint key from environment.
+    """Get the fingerprint key from environment or Azure Key Vault.
+
+    Resolution order:
+    1. ELSPETH_FINGERPRINT_KEY environment variable (immediate, for dev/testing)
+    2. Azure Key Vault (if ELSPETH_KEYVAULT_URL is set)
+
+    Environment variables:
+    - ELSPETH_FINGERPRINT_KEY: Direct key value (takes precedence)
+    - ELSPETH_KEYVAULT_URL: Key Vault URL (e.g., https://my-vault.vault.azure.net)
+    - ELSPETH_KEYVAULT_SECRET_NAME: Secret name in Key Vault (default: elspeth-fingerprint-key)
 
     Returns:
         The fingerprint key as bytes
 
     Raises:
-        ValueError: If ELSPETH_FINGERPRINT_KEY is not set
+        ValueError: If neither env var nor Key Vault is configured, or Key Vault retrieval fails
     """
-    try:
-        key = os.environ[_ENV_VAR]
-    except KeyError:
-        raise ValueError(
-            f"Environment variable {_ENV_VAR} must be set for secret fingerprinting. "
-            "Generate a random key and set it in your deployment environment."
-        ) from None
-    return key.encode("utf-8")
+    # Priority 1: Environment variable (fast path for dev/testing)
+    env_key = os.environ.get(_ENV_VAR)
+    if env_key:
+        return env_key.encode("utf-8")
+
+    # Priority 2: Azure Key Vault
+    vault_url = os.environ.get(_KEYVAULT_URL_VAR)
+    if vault_url:
+        secret_name = os.environ.get(_KEYVAULT_SECRET_NAME_VAR, _DEFAULT_SECRET_NAME)
+        try:
+            client = _get_keyvault_client(vault_url)
+            secret = client.get_secret(secret_name)
+            if secret.value is None:
+                raise ValueError(f"Secret '{secret_name}' has no value")
+            return secret.value.encode("utf-8")
+        except ImportError:
+            raise  # Re-raise ImportError as-is
+        except Exception as e:
+            raise ValueError(f"Failed to retrieve fingerprint key from Key Vault (url={vault_url}, secret={secret_name}): {e}") from e
+
+    # Neither configured
+    raise ValueError(
+        f"Fingerprint key not configured. Set {_ENV_VAR} (dev/testing) or {_KEYVAULT_URL_VAR} (production with Azure Key Vault)."
+    )
 
 
 def secret_fingerprint(secret: str, *, key: bytes | None = None) -> str:

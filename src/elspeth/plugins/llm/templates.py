@@ -26,6 +26,10 @@ class RenderedPrompt:
     template_hash: str
     variables_hash: str
     rendered_hash: str
+    # New fields for file-based templates
+    template_source: str | None = None  # File path or None if inline
+    lookup_hash: str | None = None  # Hash of lookup data or None
+    lookup_source: str | None = None  # File path or None
 
 
 def _sha256(content: str) -> str:

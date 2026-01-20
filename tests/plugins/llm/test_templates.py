@@ -75,3 +75,17 @@ Analyze these items:
         # SecurityError is wrapped in TemplateError with "Sandbox violation" message
         with pytest.raises(TemplateError, match="Sandbox violation"):
             dangerous.render()
+
+    def test_rendered_prompt_includes_source_metadata(self) -> None:
+        """RenderedPrompt includes template and lookup source paths."""
+        template = PromptTemplate(
+            "Hello, {{ row.name }}!",
+            template_source="prompts/greeting.j2",
+            lookup_data={"greetings": ["Hi", "Hello"]},
+            lookup_source="prompts/lookups.yaml",
+        )
+        result = template.render_with_metadata({"name": "World"})
+
+        assert result.template_source == "prompts/greeting.j2"
+        assert result.lookup_hash is not None
+        assert result.lookup_source == "prompts/lookups.yaml"

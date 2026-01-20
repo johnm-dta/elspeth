@@ -72,15 +72,11 @@ def discover_plugins_in_directory(
         if py_file.name in EXCLUDED_FILES:
             continue
 
-        try:
-            plugins = _discover_in_file(py_file, base_class)
-            discovered.extend(plugins)
-        except ImportError as e:
-            # Import errors are recoverable - missing optional dependencies
-            logger.warning("Import error scanning %s for plugins: %s", py_file, e)
-        except SyntaxError as e:
-            # Syntax errors are bugs - log at error level but don't crash discovery
-            logger.error("Syntax error in plugin file %s: %s", py_file, e)
+        # Plugin code is SYSTEM-OWNED, not user-provided.
+        # Import/Syntax errors indicate bugs in our code - crash immediately.
+        # DO NOT catch exceptions here - let them propagate to surface the real bug.
+        plugins = _discover_in_file(py_file, base_class)
+        discovered.extend(plugins)
 
     return discovered
 
@@ -193,11 +189,18 @@ def discover_all_plugins() -> dict[str, list[type]]:
             discovered = discover_plugins_in_directory(directory, base_class)
 
             for cls in discovered:
-                # Skip duplicates (same class discovered from different logic)
                 # NOTE: cls.name is guaranteed to exist by _discover_in_file validation
                 cls_name: str = cls.name  # type: ignore[attr-defined]
+
+                # Duplicate plugin names are bugs - crash immediately to surface collision
                 if cls_name in seen_names:
-                    continue
+                    existing_cls = next(c for c in all_discovered if c.name == cls_name)  # type: ignore[attr-defined]
+                    raise ValueError(
+                        f"Duplicate {plugin_type} plugin name '{cls_name}': "
+                        f"found in both {existing_cls.__module__} and {cls.__module__}. "
+                        f"Plugin names must be unique within each type."
+                    )
+
                 seen_names.add(cls_name)
                 all_discovered.append(cls)
 

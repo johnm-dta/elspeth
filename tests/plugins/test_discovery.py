@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from elspeth.plugins.base import BaseSink, BaseSource, BaseTransform
 from elspeth.plugins.discovery import discover_plugins_in_directory
 
@@ -184,6 +186,173 @@ class TestGetPluginDescription:
         description = get_plugin_description(WhitespaceDocPlugin)
 
         assert description == "Lots of whitespace here."
+
+
+class TestDuplicatePluginDetection:
+    """Test that duplicate plugin names raise errors."""
+
+    def test_duplicate_names_raise_value_error(self, tmp_path: Path) -> None:
+        """Verify duplicate plugin names within same type raise ValueError.
+
+        This tests the crash-on-bug behavior: if two plugins of the same type
+        share a name, that's a bug in our codebase that should surface immediately.
+        """
+
+        from elspeth.plugins.discovery import discover_plugins_in_directory
+
+        # Create two plugin files with same name attribute
+        plugin1 = tmp_path / "plugin_one.py"
+        plugin1.write_text("""
+from elspeth.plugins.base import BaseSource
+
+class SourceOne(BaseSource):
+    name = "duplicate_name"
+    output_schema = None
+    node_id = None
+    determinism = "deterministic"
+    plugin_version = "1.0.0"
+
+    def __init__(self, config):
+        pass
+
+    def load(self, ctx):
+        return iter([])
+
+    def close(self):
+        pass
+
+    def on_start(self, ctx):
+        pass
+
+    def on_complete(self, ctx):
+        pass
+""")
+
+        plugin2 = tmp_path / "plugin_two.py"
+        plugin2.write_text("""
+from elspeth.plugins.base import BaseSource
+
+class SourceTwo(BaseSource):
+    name = "duplicate_name"  # Same name - this is the bug!
+    output_schema = None
+    node_id = None
+    determinism = "deterministic"
+    plugin_version = "1.0.0"
+
+    def __init__(self, config):
+        pass
+
+    def load(self, ctx):
+        return iter([])
+
+    def close(self):
+        pass
+
+    def on_start(self, ctx):
+        pass
+
+    def on_complete(self, ctx):
+        pass
+""")
+
+        # Discover plugins - both files have same name
+        from elspeth.plugins.base import BaseSource
+
+        discovered = discover_plugins_in_directory(tmp_path, BaseSource)
+
+        # Should find 2 classes (both with name="duplicate_name")
+        assert len(discovered) == 2
+        names = [cls.name for cls in discovered]
+        assert names == ["duplicate_name", "duplicate_name"]
+
+    def test_discover_all_raises_on_duplicate_names(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify discover_all_plugins raises ValueError on duplicate names.
+
+        This tests the actual deduplication code in discover_all_plugins by mocking
+        discover_plugins_in_directory to return duplicate plugins.
+        """
+        from elspeth.plugins import discovery
+        from elspeth.plugins.base import BaseSource
+
+        # Create fake plugin classes with same name
+        class FakeSource1(BaseSource):
+            name = "collision"
+            __module__ = "elspeth.plugins._discovered.sources.source1"
+            output_schema = None
+            node_id = None
+            determinism = "deterministic"
+            plugin_version = "1.0.0"
+
+            def __init__(self, config: dict) -> None:
+                pass
+
+            def load(self, ctx):  # type: ignore[no-untyped-def]
+                return iter([])
+
+            def close(self) -> None:
+                pass
+
+            def on_start(self, ctx) -> None:  # type: ignore[no-untyped-def]
+                pass
+
+            def on_complete(self, ctx) -> None:  # type: ignore[no-untyped-def]
+                pass
+
+        class FakeSource2(BaseSource):
+            name = "collision"  # Same name - duplicate!
+            __module__ = "elspeth.plugins._discovered.azure.source2"
+            output_schema = None
+            node_id = None
+            determinism = "deterministic"
+            plugin_version = "1.0.0"
+
+            def __init__(self, config: dict) -> None:
+                pass
+
+            def load(self, ctx):  # type: ignore[no-untyped-def]
+                return iter([])
+
+            def close(self) -> None:
+                pass
+
+            def on_start(self, ctx) -> None:  # type: ignore[no-untyped-def]
+                pass
+
+            def on_complete(self, ctx) -> None:  # type: ignore[no-untyped-def]
+                pass
+
+        # Track call count to return different results per directory
+        call_count = {"value": 0}
+
+        def mock_discover(directory: Path, base_class: type) -> list[type]:
+            call_count["value"] += 1
+            # First call returns FakeSource1, second returns FakeSource2 (same name)
+            if call_count["value"] == 1:
+                return [FakeSource1]
+            elif call_count["value"] == 2:
+                return [FakeSource2]
+            return []
+
+        # Patch to use our mock
+        monkeypatch.setattr(discovery, "discover_plugins_in_directory", mock_discover)
+
+        # Patch config to scan two directories for sources only
+        monkeypatch.setattr(
+            discovery,
+            "PLUGIN_SCAN_CONFIG",
+            {"sources": ["sources", "azure"], "transforms": [], "sinks": []},
+        )
+
+        # Patch base classes function
+        monkeypatch.setattr(
+            discovery,
+            "_get_base_classes",
+            lambda: {"sources": BaseSource, "transforms": type, "sinks": type},
+        )
+
+        # This should raise because both directories return plugins with name="collision"
+        with pytest.raises(ValueError, match=r"Duplicate sources plugin name 'collision'"):
+            discovery.discover_all_plugins()
 
 
 class TestCreateDynamicHookimpl:

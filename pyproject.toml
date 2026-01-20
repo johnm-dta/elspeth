@@ -96,6 +96,7 @@ azure = [
     # Phase 7: Azure plugin pack
     "azure-storage-blob>=12.19",
     "azure-identity>=1.15",
+    "azure-keyvault-secrets>=4.7",  # Key Vault support for fingerprint key
     "jinja2>=3.1",  # Used by AzureBlobSink for path templating
 ]
 

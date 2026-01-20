@@ -62,6 +62,12 @@ class AIMDThrottle:
         self._current_delay_ms: float = 0.0
         self._lock = Lock()
 
+        # Statistics for audit trail
+        self._capacity_retries = 0
+        self._successes = 0
+        self._peak_delay_ms: float = 0.0
+        self._total_throttle_time_ms: float = 0.0
+
     @property
     def config(self) -> ThrottleConfig:
         """Get throttle configuration."""
@@ -91,6 +97,11 @@ class AIMDThrottle:
             if self._current_delay_ms > self._config.max_dispatch_delay_ms:
                 self._current_delay_ms = float(self._config.max_dispatch_delay_ms)
 
+            # Track stats
+            self._capacity_retries += 1
+            if self._current_delay_ms > self._peak_delay_ms:
+                self._peak_delay_ms = self._current_delay_ms
+
     def on_success(self) -> None:
         """Record successful request - subtract recovery step (thread-safe).
 
@@ -102,3 +113,42 @@ class AIMDThrottle:
             # Floor at minimum
             if self._current_delay_ms < self._config.min_dispatch_delay_ms:
                 self._current_delay_ms = float(self._config.min_dispatch_delay_ms)
+
+            # Track stats
+            self._successes += 1
+
+    def record_throttle_wait(self, wait_ms: float) -> None:
+        """Record time spent waiting due to throttle (thread-safe).
+
+        Args:
+            wait_ms: Milliseconds spent waiting
+        """
+        with self._lock:
+            self._total_throttle_time_ms += wait_ms
+
+    def get_stats(self) -> dict[str, float | int]:
+        """Get throttle statistics for audit trail (thread-safe).
+
+        Returns:
+            Dict with capacity_retries, successes, peak_delay_ms, current_delay_ms,
+            total_throttle_time_ms
+        """
+        with self._lock:
+            return {
+                "capacity_retries": self._capacity_retries,
+                "successes": self._successes,
+                "peak_delay_ms": self._peak_delay_ms,
+                "current_delay_ms": self._current_delay_ms,
+                "total_throttle_time_ms": self._total_throttle_time_ms,
+            }
+
+    def reset_stats(self) -> None:
+        """Reset statistics counters (thread-safe).
+
+        Note: Does NOT reset current_delay - only resets counters.
+        """
+        with self._lock:
+            self._capacity_retries = 0
+            self._successes = 0
+            self._peak_delay_ms = self._current_delay_ms
+            self._total_throttle_time_ms = 0.0

@@ -123,3 +123,65 @@ class TestAIMDThrottleRecovery:
         throttle.on_success()
 
         assert throttle.current_delay_ms == 0
+
+
+class TestAIMDThrottleStats:
+    """Test statistics tracking for audit."""
+
+    def test_stats_track_capacity_retries(self) -> None:
+        """Stats should count capacity retries."""
+        throttle = AIMDThrottle()
+
+        throttle.on_capacity_error()
+        throttle.on_capacity_error()
+        throttle.on_success()
+        throttle.on_capacity_error()
+
+        stats = throttle.get_stats()
+        assert stats["capacity_retries"] == 3
+        assert stats["successes"] == 1
+
+    def test_stats_track_peak_delay(self) -> None:
+        """Stats should track peak delay reached."""
+        config = ThrottleConfig(
+            max_dispatch_delay_ms=1000,
+            backoff_multiplier=2.0,
+            recovery_step_ms=50,
+        )
+        throttle = AIMDThrottle(config)
+
+        throttle.on_capacity_error()  # 50
+        throttle.on_capacity_error()  # 100
+        throttle.on_capacity_error()  # 200
+        throttle.on_success()  # 150
+        throttle.on_success()  # 100
+
+        stats = throttle.get_stats()
+        assert stats["peak_delay_ms"] == 200
+        assert stats["current_delay_ms"] == 100
+
+    def test_stats_track_total_throttle_time(self) -> None:
+        """Stats should track total time spent throttled."""
+        throttle = AIMDThrottle()
+
+        # Record some throttle time manually (simulating waits)
+        throttle.record_throttle_wait(100.0)
+        throttle.record_throttle_wait(50.0)
+
+        stats = throttle.get_stats()
+        assert stats["total_throttle_time_ms"] == 150.0
+
+    def test_stats_reset(self) -> None:
+        """Stats can be reset."""
+        throttle = AIMDThrottle()
+
+        throttle.on_capacity_error()
+        throttle.on_success()
+
+        throttle.reset_stats()
+
+        stats = throttle.get_stats()
+        assert stats["capacity_retries"] == 0
+        assert stats["successes"] == 0
+        # current_delay is NOT reset - only counters
+        assert stats["current_delay_ms"] == 0  # Was recovered to 0

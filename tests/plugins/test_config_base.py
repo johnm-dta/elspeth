@@ -264,7 +264,7 @@ class TestPluginConfigWithSchema:
             path: str
 
         # Should fail without schema - from_dict wraps in PluginConfigError
-        with pytest.raises(PluginConfigError, match="require.*schema"):
+        with pytest.raises(PluginConfigError, match=r"require.*schema"):
             SourceConfig.from_dict({"path": "data.csv"})
 
         # Should succeed with schema
@@ -292,7 +292,9 @@ class TestPluginConfigWithSchema:
                 },
             }
         )
+        assert config.schema_config is not None
         assert config.schema_config.mode == "strict"
+        assert config.schema_config.fields is not None  # strict mode has fields
         assert len(config.schema_config.fields) == 2
 
 
@@ -304,7 +306,7 @@ class TestSourceDataConfig:
         from elspeth.plugins.config_base import SourceDataConfig
 
         with pytest.raises(ValidationError) as exc_info:
-            SourceDataConfig(
+            SourceDataConfig(  # type: ignore[call-arg]  # testing missing required arg
                 path="data.csv",
                 schema_config=None,  # Will fail DataPluginConfig validation too
             )

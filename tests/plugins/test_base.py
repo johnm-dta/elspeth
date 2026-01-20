@@ -17,8 +17,8 @@ class TestBaseTransform:
 
         class SimpleTransform(BaseTransform):
             name = "simple"
-            input_schema = None  # Not needed for this test
-            output_schema = None
+            input_schema = None  # type: ignore[assignment]  # Not needed for this test
+            output_schema = None  # type: ignore[assignment]
 
             def process(
                 self, row: dict[str, Any], ctx: PluginContext
@@ -37,8 +37,8 @@ class TestBaseTransform:
         class ExpandingTransform(BaseTransform):
             name = "expander"
             creates_tokens = True  # Deaggregation transform
-            input_schema = None
-            output_schema = None
+            input_schema = None  # type: ignore[assignment]
+            output_schema = None  # type: ignore[assignment]
 
             def process(
                 self, row: dict[str, Any], ctx: PluginContext
@@ -278,7 +278,7 @@ class TestBaseSource:
             determinism = Determinism.DETERMINISTIC
             plugin_version = "2.0.0"
 
-            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
+            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:  # type: ignore[override]
                 yield {"value": 1}
 
             def close(self) -> None:

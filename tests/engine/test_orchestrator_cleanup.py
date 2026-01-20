@@ -14,6 +14,7 @@ from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.results import TransformResult
+from tests.conftest import as_sink, as_source
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
@@ -201,9 +202,9 @@ class TestOrchestratorCleanup:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform_1, transform_2],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -231,9 +232,9 @@ class TestOrchestratorCleanup:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform_1, transform_2],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -277,9 +278,9 @@ class TestOrchestratorCleanup:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -306,9 +307,9 @@ class TestOrchestratorCleanup:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform_1, transform_2],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)

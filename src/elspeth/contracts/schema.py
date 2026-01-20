@@ -178,7 +178,7 @@ class SchemaConfig:
         mode = config["mode"]
         if mode not in ("strict", "free"):
             raise ValueError(
-                f"Invalid schema mode '{mode}'. " f"Expected 'strict' or 'free'."
+                f"Invalid schema mode '{mode}'. Expected 'strict' or 'free'."
             )
 
         # Parse field list

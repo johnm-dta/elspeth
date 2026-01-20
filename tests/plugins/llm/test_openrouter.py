@@ -1,8 +1,8 @@
 # tests/plugins/llm/test_openrouter.py
 """Tests for OpenRouter LLM transform."""
 
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Generator
 from unittest.mock import Mock, patch
 
 import httpx

@@ -240,7 +240,7 @@ class TestRowPluginSettings:
         from elspeth.core.config import RowPluginSettings
 
         with pytest.raises(ValidationError):
-            RowPluginSettings(options={})
+            RowPluginSettings(options={})  # type: ignore[call-arg]
 
 
 class TestSinkSettings:
@@ -2341,7 +2341,7 @@ class TestRunModeSettings:
         )
 
         with pytest.raises(ValidationError):
-            settings.run_mode = "replay"  # type: ignore[misc]
+            settings.run_mode = "replay"  # type: ignore[misc,assignment]
 
     def test_resolve_config_includes_run_mode(self) -> None:
         """resolve_config includes run_mode settings."""

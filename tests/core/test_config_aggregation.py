@@ -71,7 +71,7 @@ class TestTriggerConfig:
         from elspeth.core.config import TriggerConfig
 
         # Invalid Python syntax
-        with pytest.raises(ValidationError, match="Invalid.*syntax"):
+        with pytest.raises(ValidationError, match=r"Invalid.*syntax"):
             TriggerConfig(condition="batch_count >=")
 
     def test_count_must_be_positive(self) -> None:
@@ -216,7 +216,7 @@ class TestAggregationSettings:
         from elspeth.core.config import AggregationSettings, TriggerConfig
 
         with pytest.raises(ValidationError, match="name"):
-            AggregationSettings(
+            AggregationSettings(  # type: ignore[call-arg]
                 plugin="stats_aggregation",
                 trigger=TriggerConfig(count=100),
             )

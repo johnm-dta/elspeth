@@ -11,56 +11,18 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
+from elspeth.contracts import PluginSchema, RoutingMode, SourceRow
 from elspeth.core.config import GateSettings
+from tests.conftest import (
+    _TestSinkBase,
+    _TestSourceBase,
+    as_sink,
+    as_source,
+)
 
 if TYPE_CHECKING:
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
-
-
-# ============================================================================
-# Test Fixture Base Classes
-# ============================================================================
-
-
-class _TestSchema(PluginSchema):
-    """Minimal schema for test fixtures."""
-
-    pass
-
-
-class _TestSourceBase:
-    """Base class providing SourceProtocol required attributes."""
-
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-    def on_start(self, ctx: Any) -> None:
-        pass
-
-    def on_complete(self, ctx: Any) -> None:
-        pass
-
-
-class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes."""
-
-    input_schema = _TestSchema
-    idempotent = True
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0"
-
-    def flush(self) -> None:
-        pass
-
-    def on_start(self, ctx: Any) -> None:
-        pass
-
-    def on_complete(self, ctx: Any) -> None:
-        pass
 
 
 def _build_test_graph_with_config_gates(
@@ -196,9 +158,9 @@ class TestConfigGateIntegration:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
             gates=[gate],
         )
 
@@ -269,9 +231,9 @@ class TestConfigGateIntegration:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink, "high": high_sink},
+            sinks={"default": as_sink(default_sink), "high": as_sink(high_sink)},
             gates=[gate],
         )
 
@@ -371,9 +333,9 @@ class TestConfigGateIntegration:
 
         # Build PipelineConfig with actual plugin instances
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"a_sink": a_sink, "b_sink": b_sink},
+            sinks={"a_sink": as_sink(a_sink), "b_sink": as_sink(b_sink)},
             gates=settings.gates,
         )
 
@@ -476,9 +438,12 @@ class TestConfigGateIntegration:
 
         # Build PipelineConfig with actual plugin instances
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"priority_1": priority_1_sink, "priority_2": priority_2_sink},
+            sinks={
+                "priority_1": as_sink(priority_1_sink),
+                "priority_2": as_sink(priority_2_sink),
+            },
             gates=settings.gates,
         )
 
@@ -547,9 +512,9 @@ class TestConfigGateIntegration:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
             gates=[gate],
         )
 
@@ -559,7 +524,7 @@ class TestConfigGateIntegration:
         )
 
         # Query Landscape for registered nodes
-        with db._engine.connect() as conn:
+        with db.engine.connect() as conn:
             from sqlalchemy import text
 
             nodes = conn.execute(
@@ -751,9 +716,13 @@ class TestMultipleConfigGates:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink, "low": low_sink, "mid": mid_sink},
+            sinks={
+                "default": as_sink(default_sink),
+                "low": as_sink(low_sink),
+                "mid": as_sink(mid_sink),
+            },
             gates=[gate1, gate2],
         )
 

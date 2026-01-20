@@ -52,10 +52,11 @@ class TestSourceProtocol:
         # IMPORTANT: Verify protocol conformance at runtime
         # This is why we use @runtime_checkable
         assert isinstance(
-            source, SourceProtocol
+            source,
+            SourceProtocol,  # type: ignore[unreachable]
         ), "Source must conform to SourceProtocol"
 
-        ctx = PluginContext(run_id="test", config={})
+        ctx = PluginContext(run_id="test", config={})  # type: ignore[unreachable]
 
         rows = list(source.load(ctx))
         assert len(rows) == 3
@@ -112,8 +113,8 @@ class TestSourceProtocol:
                 pass
 
         source = MetadataSource({})
-        assert isinstance(source, SourceProtocol)
-        assert source.determinism == Determinism.IO_READ
+        assert isinstance(source, SourceProtocol)  # type: ignore[unreachable]
+        assert source.determinism == Determinism.IO_READ  # type: ignore[unreachable]
         assert source.plugin_version == "1.0.0"
 
 
@@ -170,10 +171,11 @@ class TestTransformProtocol:
 
         # IMPORTANT: Verify protocol conformance at runtime
         assert isinstance(
-            transform, TransformProtocol
+            transform,
+            TransformProtocol,  # type: ignore[unreachable]
         ), "Must conform to TransformProtocol"
 
-        ctx = PluginContext(run_id="test", config={})
+        ctx = PluginContext(run_id="test", config={})  # type: ignore[unreachable]
 
         result = transform.process({"value": 21}, ctx)
         assert result.status == "success"
@@ -383,8 +385,9 @@ class TestCoalesceProtocol:
         # mypy may report this as unreachable due to structural subtyping analysis
         # but runtime_checkable protocols DO work at runtime
         assert isinstance(
-            coalesce, CoalesceProtocol
-        ), "Must conform to CoalesceProtocol"  # type: ignore[unreachable]
+            coalesce,
+            CoalesceProtocol,  # type: ignore[unreachable]
+        ), "Must conform to CoalesceProtocol"
 
         assert coalesce.quorum_threshold == 2  # type: ignore[unreachable]
         assert len(coalesce.expected_branches) == 3  # type: ignore[unreachable]
@@ -508,9 +511,9 @@ class TestSinkProtocol:
                 pass
 
         sink = BatchMemorySink({})
-        assert isinstance(sink, SinkProtocol)
+        assert isinstance(sink, SinkProtocol)  # type: ignore[unreachable]
 
-        ctx = PluginContext(run_id="test", config={})
+        ctx = PluginContext(run_id="test", config={})  # type: ignore[unreachable]
         artifact = sink.write([{"value": 1}, {"value": 2}], ctx)
 
         assert isinstance(artifact, ArtifactDescriptor)
@@ -568,9 +571,9 @@ class TestSinkProtocol:
         sink = MemorySink({})
 
         # IMPORTANT: Verify protocol conformance at runtime
-        assert isinstance(sink, SinkProtocol), "Must conform to SinkProtocol"
+        assert isinstance(sink, SinkProtocol), "Must conform to SinkProtocol"  # type: ignore[unreachable]
 
-        ctx = PluginContext(run_id="test", config={})
+        ctx = PluginContext(run_id="test", config={})  # type: ignore[unreachable]
 
         # Batch write
         artifact = sink.write([{"value": 1}, {"value": 2}], ctx)

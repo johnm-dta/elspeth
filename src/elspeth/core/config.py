@@ -895,7 +895,7 @@ def _fingerprint_secrets(
     def _recurse(d: dict[str, Any]) -> dict[str, Any]:
         result = {}
         for key, value in d.items():
-            new_key, new_value, was_secret = _process_value(key, value)
+            new_key, new_value, _was_secret = _process_value(key, value)
             result[new_key] = new_value
         return result
 

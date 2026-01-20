@@ -8,6 +8,7 @@ import pytest
 
 from elspeth.contracts import Determinism, NodeType
 from elspeth.contracts.enums import BatchStatus
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
@@ -158,6 +159,7 @@ class TestOrchestratorResume:
         recorder = LandscapeRecorder(landscape_db)
 
         original_batch = recorder.get_batch(original_batch_id)
+        assert original_batch is not None
         assert original_batch.status == BatchStatus.FAILED
 
         # Find retry batch
@@ -205,8 +207,6 @@ class TestOrchestratorResume:
         return ExecutionGraph.from_config(settings)
 
 
-def _make_dynamic_schema():
+def _make_dynamic_schema() -> SchemaConfig:
     """Create a dynamic schema config for test nodes."""
-    from elspeth.contracts.schema import SchemaConfig
-
     return SchemaConfig(mode=None, fields=None, is_dynamic=True)

@@ -34,7 +34,7 @@ class TestNodeIdProtocol:
             name = "test"
             output_schema = TestSchema
 
-            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:
+            def load(self, ctx: PluginContext) -> Iterator[dict[str, Any]]:  # type: ignore[override]
                 yield {}
 
             def close(self) -> None:
@@ -163,7 +163,7 @@ class TestNodeIdProtocol:
             name = "test"
             input_schema = TestSchema
 
-            def write(self, row: dict[str, Any], ctx: PluginContext) -> None:
+            def write(self, row: dict[str, Any], ctx: PluginContext) -> None:  # type: ignore[override]
                 pass
 
             def flush(self) -> None:

@@ -1,4 +1,11 @@
-"""Tests for schema factory - creates Pydantic models from config."""
+"""Tests for schema factory - creates Pydantic models from config.
+
+Note: These tests create dynamic schemas at runtime and access their fields.
+Mypy cannot know about dynamically-created attributes, so we use type: ignore
+for attribute access on generated schema instances.
+"""
+
+# mypy: disable-error-code="attr-defined"
 
 import pytest
 from pydantic import ValidationError

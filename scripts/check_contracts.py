@@ -106,19 +106,21 @@ def _is_dict_str_any(annotation: ast.expr | None) -> bool:
         return False
 
     # dict[str, Any] - modern syntax
-    if isinstance(annotation, ast.Subscript):
-        if isinstance(annotation.value, ast.Name) and annotation.value.id in (
-            "dict",
-            "Dict",
+    if (
+        isinstance(annotation, ast.Subscript)
+        and isinstance(annotation.value, ast.Name)
+        and annotation.value.id in ("dict", "Dict")
+        and isinstance(annotation.slice, ast.Tuple)
+        and len(annotation.slice.elts) == 2
+    ):
+        key_type, value_type = annotation.slice.elts
+        if (
+            isinstance(key_type, ast.Name)
+            and key_type.id == "str"
+            and isinstance(value_type, ast.Name)
+            and value_type.id == "Any"
         ):
-            if (
-                isinstance(annotation.slice, ast.Tuple)
-                and len(annotation.slice.elts) == 2
-            ):
-                key_type, value_type = annotation.slice.elts
-                if isinstance(key_type, ast.Name) and key_type.id == "str":
-                    if isinstance(value_type, ast.Name) and value_type.id == "Any":
-                        return True
+            return True
     return False
 
 
@@ -127,12 +129,12 @@ def _is_list_of_dict_str_any(annotation: ast.expr | None) -> bool:
     if annotation is None:
         return False
 
-    if isinstance(annotation, ast.Subscript):
-        if isinstance(annotation.value, ast.Name) and annotation.value.id in (
-            "list",
-            "List",
-        ):
-            return _is_dict_str_any(annotation.slice)
+    if (
+        isinstance(annotation, ast.Subscript)
+        and isinstance(annotation.value, ast.Name)
+        and annotation.value.id in ("list", "List")
+    ):
+        return _is_dict_str_any(annotation.slice)
     return False
 
 
@@ -357,24 +359,24 @@ def main() -> int:
 
     if violations:
         has_violations = True
-        print("❌ Type definition violations found:\n")  # noqa: T201
+        print("❌ Type definition violations found:\n")
         for v in violations:
-            print(f"  {v.file}:{v.line}: {v.kind} '{v.type_name}'")  # noqa: T201
-            print(f"    Used in: {', '.join(v.used_in)}")  # noqa: T201
+            print(f"  {v.file}:{v.line}: {v.kind} '{v.type_name}'")
+            print(f"    Used in: {', '.join(v.used_in)}")
             fix_msg = "    Fix: Move to src/elspeth/contracts/ or add to .contracts-whitelist.yaml\n"
-            print(fix_msg)  # noqa: T201
+            print(fix_msg)
 
     if dict_violations:
         has_violations = True
-        print("❌ dict[str, Any] violations found:\n")  # noqa: T201
+        print("❌ dict[str, Any] violations found:\n")
         for dv in dict_violations:
-            print(f"  {dv.file}:{dv.line}: {dv.context} - {dv.param_name}")  # noqa: T201
-            print("    Fix: Use TypedDict/dataclass or add to allowed_dict_patterns\n")  # noqa: T201
+            print(f"  {dv.file}:{dv.line}: {dv.context} - {dv.param_name}")
+            print("    Fix: Use TypedDict/dataclass or add to allowed_dict_patterns\n")
 
     if has_violations:
         return 1
 
-    print("✅ All cross-boundary types are properly centralized in contracts/")  # noqa: T201
+    print("✅ All cross-boundary types are properly centralized in contracts/")
     return 0
 
 

@@ -2557,6 +2557,7 @@ class TestTransformErrorRecording:
             )
             row = result.fetchone()
 
+        assert row is not None
         assert row.row_hash == expected_hash
 
     def test_record_transform_error_discard_destination(self) -> None:
@@ -2589,6 +2590,7 @@ class TestTransformErrorRecording:
             )
             row = result.fetchone()
 
+        assert row is not None
         assert row.destination == "discard"
 
 

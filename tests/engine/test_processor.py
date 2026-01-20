@@ -11,7 +11,7 @@ See TestProcessorBatchTransforms for the new approach.
 """
 
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from elspeth.contracts import PluginSchema, RoutingMode
 from elspeth.contracts.schema import SchemaConfig
@@ -30,7 +30,7 @@ DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
 class _TestSchema(PluginSchema):
     """Dynamic schema for test plugins."""
 
-    model_config = {"extra": "allow"}  # noqa: RUF012
+    model_config: ClassVar[dict[str, Any]] = {"extra": "allow"}
 
 
 class TestRowProcessor:
@@ -2555,7 +2555,7 @@ class TestRowProcessorRetry:
         # Track call count
         call_count = 0
 
-        def flaky_execute(*args, **kwargs):
+        def flaky_execute(*args: Any, **kwargs: Any) -> tuple[Any, Any, None]:
             nonlocal call_count
             call_count += 1
             if call_count < 3:

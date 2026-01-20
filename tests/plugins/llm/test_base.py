@@ -1,7 +1,6 @@
 # tests/plugins/llm/test_base.py
 """Tests for base LLM transform."""
 
-from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -52,7 +51,7 @@ def create_test_transform_class(
                 return _mock_client  # type: ignore[return-value]
             if not hasattr(ctx, "_test_llm_client"):
                 ctx._test_llm_client = Mock(spec=AuditedLLMClient)  # type: ignore[attr-defined]
-            return ctx._test_llm_client  # type: ignore[return-value]
+            return ctx._test_llm_client  # type: ignore[attr-defined, return-value, no-any-return]
 
     return TestLLMTransform
 
@@ -230,14 +229,16 @@ class TestLLMConfig:
 
     def test_llm_config_accepts_lookup_fields(self) -> None:
         """LLMConfig accepts lookup and source metadata fields."""
-        config = LLMConfig.from_dict({
-            "model": "test-model",
-            "template": "Hello, {{ row.name }}!",
-            "template_source": "prompts/test.j2",
-            "lookup": {"key": "value"},
-            "lookup_source": "prompts/lookups.yaml",
-            "schema": {"fields": "dynamic"},
-        })
+        config = LLMConfig.from_dict(
+            {
+                "model": "test-model",
+                "template": "Hello, {{ row.name }}!",
+                "template_source": "prompts/test.j2",
+                "lookup": {"key": "value"},
+                "lookup_source": "prompts/lookups.yaml",
+                "schema": {"fields": "dynamic"},
+            }
+        )
 
         assert config.template_source == "prompts/test.j2"
         assert config.lookup == {"key": "value"}
@@ -435,9 +436,7 @@ class TestBaseLLMTransformProcess:
         # Original data preserved
         assert result.row["text"] == "hello"
 
-    def test_custom_response_field(
-        self, ctx: PluginContext, mock_client: Mock
-    ) -> None:
+    def test_custom_response_field(self, ctx: PluginContext, mock_client: Mock) -> None:
         """Custom response_field name is used."""
         mock_client.chat_completion.return_value = LLMResponse(
             content="Result",

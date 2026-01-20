@@ -21,6 +21,7 @@ from elspeth.engine.executors import AggregationExecutor
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.results import TransformResult
+from tests.conftest import _TestTransformBase, as_transform
 
 # Dynamic schema for tests that don't care about specific fields
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
@@ -31,11 +32,10 @@ DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
 # for TransformProtocol without needing full PluginSchema types.
 
 
-class MockBatchTransform:
+class MockBatchTransform(_TestTransformBase):
     """Mock batch-aware transform that sums values for testing."""
 
     name = "mock_batch_transform"
-    node_id: str | None = None
 
     def process(
         self,
@@ -51,11 +51,10 @@ class MockBatchTransform:
         return TransformResult.success(row)
 
 
-class FailingBatchTransform:
+class FailingBatchTransform(_TestTransformBase):
     """Mock batch-aware transform that always raises an exception."""
 
     name = "failing_batch_transform"
-    node_id: str | None = None
 
     def process(
         self,
@@ -66,11 +65,10 @@ class FailingBatchTransform:
         raise RuntimeError("intentional failure")
 
 
-class ErrorResultTransform:
+class ErrorResultTransform(_TestTransformBase):
     """Mock batch-aware transform that returns an error result (doesn't raise)."""
 
     name = "error_result_transform"
-    node_id: str | None = None
 
     def process(
         self,
@@ -222,7 +220,7 @@ class TestAggregationFlushAuditTrail:
         # Execute flush
         result, _consumed_tokens = aggregation_executor.execute_flush(
             node_id=aggregation_node_id,
-            transform=transform,
+            transform=as_transform(transform),
             ctx=ctx,
             step_in_pipeline=1,
             trigger_type=TriggerType.COUNT,
@@ -271,7 +269,7 @@ class TestAggregationFlushAuditTrail:
 
         aggregation_executor.execute_flush(
             node_id=aggregation_node_id,
-            transform=transform,
+            transform=as_transform(transform),
             ctx=ctx,
             step_in_pipeline=1,
             trigger_type=TriggerType.COUNT,
@@ -307,7 +305,7 @@ class TestAggregationFlushAuditTrail:
         with pytest.raises(RuntimeError, match="intentional failure"):
             aggregation_executor.execute_flush(
                 node_id=aggregation_node_id,
-                transform=transform,
+                transform=as_transform(transform),
                 ctx=ctx,
                 step_in_pipeline=1,
                 trigger_type=TriggerType.COUNT,
@@ -348,7 +346,7 @@ class TestAggregationFlushAuditTrail:
 
         result, _consumed_tokens = aggregation_executor.execute_flush(
             node_id=aggregation_node_id,
-            transform=transform,
+            transform=as_transform(transform),
             ctx=ctx,
             step_in_pipeline=1,
             trigger_type=TriggerType.COUNT,
@@ -396,7 +394,7 @@ class TestAggregationFlushAuditTrail:
 
         aggregation_executor.execute_flush(
             node_id=aggregation_node_id,
-            transform=transform,
+            transform=as_transform(transform),
             ctx=ctx,
             step_in_pipeline=1,
             trigger_type=TriggerType.END_OF_SOURCE,
@@ -435,7 +433,7 @@ class TestAggregationFlushAuditTrail:
 
         aggregation_executor.execute_flush(
             node_id=aggregation_node_id,
-            transform=transform,
+            transform=as_transform(transform),
             ctx=ctx,
             step_in_pipeline=1,
             trigger_type=TriggerType.COUNT,
@@ -474,7 +472,7 @@ class TestAggregationFlushAuditTrail:
 
         _result, consumed_tokens = aggregation_executor.execute_flush(
             node_id=aggregation_node_id,
-            transform=transform,
+            transform=as_transform(transform),
             ctx=ctx,
             step_in_pipeline=1,
             trigger_type=TriggerType.COUNT,

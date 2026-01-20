@@ -1,5 +1,9 @@
 """Tests for node detail panel widget."""
 
+from typing import cast
+
+from elspeth.tui.types import NodeStateInfo
+
 
 class TestNodeDetailPanel:
     """Tests for NodeDetailPanel widget."""
@@ -14,20 +18,23 @@ class TestNodeDetailPanel:
         """Display details for a transform node state."""
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
-        node_state = {
-            "state_id": "state-001",
-            "node_id": "node-001",
-            "token_id": "token-001",
-            "plugin_name": "filter",
-            "node_type": "transform",
-            "status": "completed",
-            "input_hash": "abc123",
-            "output_hash": "def456",
-            "duration_ms": 12.5,
-            "started_at": "2024-01-01T10:00:00Z",
-            "completed_at": "2024-01-01T10:00:00.012Z",
-            "error_json": None,
-        }
+        node_state = cast(
+            NodeStateInfo,
+            {
+                "state_id": "state-001",
+                "node_id": "node-001",
+                "token_id": "token-001",
+                "plugin_name": "filter",
+                "node_type": "transform",
+                "status": "completed",
+                "input_hash": "abc123",
+                "output_hash": "def456",
+                "duration_ms": 12.5,
+                "started_at": "2024-01-01T10:00:00Z",
+                "completed_at": "2024-01-01T10:00:00.012Z",
+                "error_json": None,
+            },
+        )
 
         panel = NodeDetailPanel(node_state)
         content = panel.render_content()
@@ -41,20 +48,23 @@ class TestNodeDetailPanel:
         """Display details for a failed node state with error."""
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
-        node_state = {
-            "state_id": "state-002",
-            "node_id": "node-001",
-            "token_id": "token-001",
-            "plugin_name": "transform",
-            "node_type": "transform",
-            "status": "failed",
-            "input_hash": "abc123",
-            "output_hash": None,
-            "duration_ms": 5.2,
-            "started_at": "2024-01-01T10:00:00Z",
-            "completed_at": "2024-01-01T10:00:00.005Z",
-            "error_json": '{"type": "ValueError", "message": "Invalid input"}',
-        }
+        node_state = cast(
+            NodeStateInfo,
+            {
+                "state_id": "state-002",
+                "node_id": "node-001",
+                "token_id": "token-001",
+                "plugin_name": "transform",
+                "node_type": "transform",
+                "status": "failed",
+                "input_hash": "abc123",
+                "output_hash": None,
+                "duration_ms": 5.2,
+                "started_at": "2024-01-01T10:00:00Z",
+                "completed_at": "2024-01-01T10:00:00.005Z",
+                "error_json": '{"type": "ValueError", "message": "Invalid input"}',
+            },
+        )
 
         panel = NodeDetailPanel(node_state)
         content = panel.render_content()
@@ -67,20 +77,23 @@ class TestNodeDetailPanel:
         """Display details for a source node."""
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
-        node_state = {
-            "state_id": "state-003",
-            "node_id": "source-001",
-            "token_id": "token-001",
-            "plugin_name": "csv_source",
-            "node_type": "source",
-            "status": "completed",
-            "input_hash": None,  # Sources have no input
-            "output_hash": "xyz789",
-            "duration_ms": 100.0,
-            "started_at": "2024-01-01T10:00:00Z",
-            "completed_at": "2024-01-01T10:00:00.100Z",
-            "error_json": None,
-        }
+        node_state = cast(
+            NodeStateInfo,
+            {
+                "state_id": "state-003",
+                "node_id": "source-001",
+                "token_id": "token-001",
+                "plugin_name": "csv_source",
+                "node_type": "source",
+                "status": "completed",
+                "input_hash": None,  # Sources have no input
+                "output_hash": "xyz789",
+                "duration_ms": 100.0,
+                "started_at": "2024-01-01T10:00:00Z",
+                "completed_at": "2024-01-01T10:00:00.100Z",
+                "error_json": None,
+            },
+        )
 
         panel = NodeDetailPanel(node_state)
         content = panel.render_content()
@@ -92,26 +105,29 @@ class TestNodeDetailPanel:
         """Display details for a sink node."""
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
-        node_state = {
-            "state_id": "state-004",
-            "node_id": "sink-001",
-            "token_id": "token-001",
-            "plugin_name": "csv_sink",
-            "node_type": "sink",
-            "status": "completed",
-            "input_hash": "final123",
-            "output_hash": None,  # Sinks produce artifacts, not output_hash
-            "duration_ms": 25.0,
-            "started_at": "2024-01-01T10:00:00Z",
-            "completed_at": "2024-01-01T10:00:00.025Z",
-            "error_json": None,
-            "artifact": {
-                "artifact_id": "artifact-001",
-                "path_or_uri": "/output/result.csv",
-                "content_hash": "artifact_hash_789",
-                "size_bytes": 1024,
+        node_state = cast(
+            NodeStateInfo,
+            {
+                "state_id": "state-004",
+                "node_id": "sink-001",
+                "token_id": "token-001",
+                "plugin_name": "csv_sink",
+                "node_type": "sink",
+                "status": "completed",
+                "input_hash": "final123",
+                "output_hash": None,  # Sinks produce artifacts, not output_hash
+                "duration_ms": 25.0,
+                "started_at": "2024-01-01T10:00:00Z",
+                "completed_at": "2024-01-01T10:00:00.025Z",
+                "error_json": None,
+                "artifact": {
+                    "artifact_id": "artifact-001",
+                    "path_or_uri": "/output/result.csv",
+                    "content_hash": "artifact_hash_789",
+                    "size_bytes": 1024,
+                },
             },
-        }
+        )
 
         panel = NodeDetailPanel(node_state)
         content = panel.render_content()
@@ -177,17 +193,20 @@ class TestNodeDetailPanel:
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
         malformed_json = "not valid json {{{{"
-        node_state = {
-            "state_id": "state-005",
-            "node_id": "node-001",
-            "token_id": "token-001",
-            "plugin_name": "transform",
-            "node_type": "transform",
-            "status": "failed",
-            "input_hash": "abc123",
-            "output_hash": None,
-            "error_json": malformed_json,
-        }
+        node_state = cast(
+            NodeStateInfo,
+            {
+                "state_id": "state-005",
+                "node_id": "node-001",
+                "token_id": "token-001",
+                "plugin_name": "transform",
+                "node_type": "transform",
+                "status": "failed",
+                "input_hash": "abc123",
+                "output_hash": None,
+                "error_json": malformed_json,
+            },
+        )
 
         mock_logger = MagicMock()
         with patch("elspeth.tui.widgets.node_detail.logger", mock_logger):

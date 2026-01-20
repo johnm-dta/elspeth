@@ -1,14 +1,14 @@
 # tests/plugins/llm/test_azure.py
 """Tests for Azure OpenAI LLM transform."""
 
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Generator
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
 
 from elspeth.contracts import Determinism
-from elspeth.plugins.clients.llm import LLMClientError, RateLimitError
 from elspeth.plugins.config_base import PluginConfigError
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.azure import AzureLLMTransform, AzureOpenAIConfig
@@ -437,9 +437,7 @@ class TestAzureLLMTransformProcess:
         with pytest.raises(RuntimeError, match="requires landscape recorder"):
             transform.process({"text": "hello"}, ctx)
 
-    def test_system_prompt_included_in_messages(
-        self, ctx: PluginContext
-    ) -> None:
+    def test_system_prompt_included_in_messages(self, ctx: PluginContext) -> None:
         """System prompt is included when configured."""
         transform = AzureLLMTransform(
             {
@@ -633,4 +631,5 @@ class TestAzureLLMTransformIntegration:
             transform.process({"text": "hello"}, ctx)
 
         # Verify record_call was called (by AuditedLLMClient)
-        assert ctx.landscape.record_call.called
+        assert ctx.landscape is not None
+        assert ctx.landscape.record_call.called  # type: ignore[attr-defined]

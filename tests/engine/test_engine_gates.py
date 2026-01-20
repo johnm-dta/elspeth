@@ -17,56 +17,13 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
+from elspeth.contracts import PluginSchema, RoutingMode, SourceRow
 from elspeth.core.config import GateSettings
+from tests.conftest import _TestSinkBase, _TestSourceBase, as_source
 
 if TYPE_CHECKING:
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
-
-
-# ============================================================================
-# Test Fixture Base Classes
-# ============================================================================
-
-
-class _TestSchema(PluginSchema):
-    """Minimal schema for test fixtures."""
-
-    pass
-
-
-class _TestSourceBase:
-    """Base class providing SourceProtocol required attributes."""
-
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-    def on_start(self, ctx: Any) -> None:
-        pass
-
-    def on_complete(self, ctx: Any) -> None:
-        pass
-
-
-class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes."""
-
-    input_schema = _TestSchema
-    idempotent = True
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0"
-
-    def flush(self) -> None:
-        pass
-
-    def on_start(self, ctx: Any) -> None:
-        pass
-
-    def on_complete(self, ctx: Any) -> None:
-        pass
 
 
 def _build_test_graph_with_config_gates(
@@ -220,7 +177,7 @@ class TestCompositeConditions:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"match": match_sink, "no_match": no_match_sink},
             gates=[gate],
@@ -298,7 +255,7 @@ class TestCompositeConditions:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": pass_sink, "fail": fail_sink},
             gates=[gate],
@@ -374,7 +331,7 @@ class TestCompositeConditions:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": allowed_sink, "blocked": blocked_sink},
             gates=[gate],
@@ -451,7 +408,7 @@ class TestCompositeConditions:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": missing_optional_sink, "has_optional": has_optional_sink},
             gates=[gate],
@@ -606,7 +563,7 @@ class TestRouteLabelResolution:
         standard_sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"premium_sink": premium_sink, "standard_sink": standard_sink},
             gates=settings.gates,
@@ -786,7 +743,7 @@ class TestForkCreatesChildTokens:
         graph = ExecutionGraph.from_config(settings)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"path_a": path_a_sink, "path_b": path_b_sink},
             gates=settings.gates,
@@ -890,7 +847,7 @@ class TestForkCreatesChildTokens:
         graph = ExecutionGraph.from_config(settings)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": default_sink, "alerts": alerts_sink},
             gates=settings.gates,
@@ -996,7 +953,7 @@ class TestForkCreatesChildTokens:
         graph = ExecutionGraph.from_config(settings)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"analysis": analysis_sink, "archive": archive_sink},
             gates=settings.gates,
@@ -1232,7 +1189,7 @@ class TestEndToEndPipeline:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": high_conf_sink, "low_conf": low_conf_sink},
             gates=[gate],
@@ -1343,7 +1300,7 @@ class TestEndToEndPipeline:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": sink, "reject": CollectSink()},
             gates=[gate],
@@ -1355,7 +1312,7 @@ class TestEndToEndPipeline:
         )
 
         # Query Landscape for registered nodes
-        with db._engine.connect() as conn:
+        with db.engine.connect() as conn:
             from sqlalchemy import text
 
             nodes = conn.execute(
@@ -1437,7 +1394,7 @@ class TestEndToEndPipeline:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": default_sink, "urgent": urgent_sink},
             gates=[gate],
@@ -1458,7 +1415,7 @@ class TestEndToEndPipeline:
         assert default_sink.results[0]["priority"] == 2
 
         # Query the database to verify audit trail completeness
-        with db._engine.connect() as conn:
+        with db.engine.connect() as conn:
             # 1. Find the gate node
             gate_node = conn.execute(
                 text("""
@@ -1643,7 +1600,7 @@ class TestGateRuntimeErrors:
         assert "nonexistent" in str(exc_info.value)
 
         # Verify the failure was recorded in the audit trail
-        with db._engine.connect() as conn:
+        with db.engine.connect() as conn:
             from sqlalchemy import text
 
             states = conn.execute(
@@ -1805,7 +1762,7 @@ class TestGateRuntimeErrors:
         assert outcome_low.result.action.reason["result"] == "false"
 
         # Verify all node states are completed (not failed)
-        with db._engine.connect() as conn:
+        with db.engine.connect() as conn:
             from sqlalchemy import text
 
             states = conn.execute(

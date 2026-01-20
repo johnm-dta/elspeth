@@ -453,7 +453,7 @@ class TestExcepthookSuppression:
         limiter_module._original_excepthook = lambda args: original_called.append(True)
 
         try:
-            _custom_excepthook(MockArgs())
+            _custom_excepthook(MockArgs())  # type: ignore[arg-type]
             # Original hook should have been called
             assert len(original_called) == 1
         finally:
@@ -493,7 +493,7 @@ class TestExcepthookSuppression:
             )
 
             try:
-                _custom_excepthook(MockArgsValueError())
+                _custom_excepthook(MockArgsValueError())  # type: ignore[arg-type]
                 # Original hook should have been called (not suppressed)
                 assert len(original_called) == 1
             finally:
@@ -532,7 +532,7 @@ class TestExcepthookSuppression:
         limiter_module._original_excepthook = lambda args: original_called.append(True)
 
         try:
-            _custom_excepthook(MockArgs())
+            _custom_excepthook(MockArgs())  # type: ignore[arg-type]
             # Original hook should NOT have been called (suppressed)
             assert len(original_called) == 0
 

@@ -8,56 +8,24 @@ because the processor uses isinstance() for type-safe plugin detection.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
+from elspeth.contracts import Determinism, RoutingMode, SourceRow
 from elspeth.plugins.base import BaseGate, BaseTransform
+from tests.conftest import (
+    _TestSchema,
+    _TestSinkBase,
+    _TestSourceBase,
+    as_sink,
+    as_source,
+)
 
 if TYPE_CHECKING:
     from elspeth.contracts.results import TransformResult
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
-
-
-# ============================================================================
-# Test Fixture Base Classes
-# ============================================================================
-# These provide the required protocol attributes so inline test classes
-# don't need to repeat them.
-
-
-class _TestSchema(PluginSchema):
-    """Minimal schema for test fixtures."""
-
-    pass
-
-
-class _TestSourceBase:
-    """Base class providing SourceProtocol required attributes.
-
-    Note: output_schema is NOT provided here because child classes override it
-    with their own schemas, and mypy's type invariance would flag that as a conflict.
-    Each test class must provide its own output_schema.
-    """
-
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-
-class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes."""
-
-    input_schema = _TestSchema  # Required by protocol
-    idempotent = True
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0"
-
-    def flush(self) -> None:
-        pass
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
@@ -238,7 +206,7 @@ def _build_fork_test_graph(
             # Add edge for each fork path (needed for edge_map lookup)
             # Fork paths go to the NEXT transform (or sink if last)
             next_node = (
-                f"transform_{i+1}"
+                f"transform_{i + 1}"
                 if i + 1 < len(config.transforms)
                 else sink_ids["default"]
             )
@@ -327,9 +295,9 @@ class TestOrchestrator:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -402,9 +370,9 @@ class TestOrchestrator:
         high_sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink, "high": high_sink},
+            sinks={"default": as_sink(default_sink), "high": as_sink(high_sink)},
             gates=[threshold_gate],
         )
 
@@ -487,9 +455,9 @@ class TestOrchestratorAuditTrail:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -583,9 +551,9 @@ class TestOrchestratorErrorHandling:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -690,9 +658,9 @@ class TestOrchestratorMultipleTransforms:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform1, transform2],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -761,9 +729,9 @@ class TestOrchestratorEmptyPipeline:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -837,9 +805,9 @@ class TestOrchestratorEmptyPipeline:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -922,9 +890,9 @@ class TestOrchestratorInvalidRouting:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": sink},  # Note: "nonexistent_sink" is NOT here
+            sinks={"default": as_sink(sink)},  # Note: "nonexistent_sink" is NOT here
             gates=[misrouting_gate],
         )
 
@@ -1053,9 +1021,9 @@ class TestOrchestratorAcceptsGraph:
                 pass
 
         config = PipelineConfig(
-            source=DummySource(),
+            source=as_source(DummySource()),
             transforms=[],
-            sinks={"default": DummySink()},
+            sinks={"default": as_sink(DummySink())},
         )
 
         orchestrator = Orchestrator(db)
@@ -1232,7 +1200,7 @@ class TestLifecycleHooks:
         from elspeth.contracts import PluginSchema, SourceRow
 
         class TestSchema(PluginSchema):
-            model_config = {"extra": "allow"}  # noqa: RUF012
+            model_config: ClassVar[dict[str, Any]] = {"extra": "allow"}
 
         class TrackedTransform(BaseTransform):
             name = "tracked"
@@ -1305,7 +1273,7 @@ class TestLifecycleHooks:
         call_order: list[str] = []
 
         class TestSchema(PluginSchema):
-            model_config = {"extra": "allow"}  # noqa: RUF012
+            model_config: ClassVar[dict[str, Any]] = {"extra": "allow"}
 
         class TrackedTransform(BaseTransform):
             name = "tracked"
@@ -1386,7 +1354,7 @@ class TestLifecycleHooks:
         completed: list[bool] = []
 
         class TestSchema(PluginSchema):
-            model_config = {"extra": "allow"}  # noqa: RUF012
+            model_config: ClassVar[dict[str, Any]] = {"extra": "allow"}
 
         class FailingTransform(BaseTransform):
             name = "failing"
@@ -1541,11 +1509,11 @@ class TestOrchestratorLandscapeExport:
         source = ListSource([{"value": 42}])
 
         pipeline = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={
-                "output": output_sink,
-                "audit_export": export_sink,
+                "output": as_sink(output_sink),
+                "audit_export": as_sink(export_sink),
             },
         )
 
@@ -1657,11 +1625,11 @@ class TestOrchestratorLandscapeExport:
         source = ListSource([{"value": 42}])
 
         pipeline = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={
-                "output": output_sink,
-                "audit_export": export_sink,
+                "output": as_sink(output_sink),
+                "audit_export": as_sink(export_sink),
             },
         )
 
@@ -1770,11 +1738,11 @@ class TestOrchestratorLandscapeExport:
         source = ListSource([{"value": 42}])
 
         pipeline = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={
-                "output": output_sink,
-                "audit_export": export_sink,
+                "output": as_sink(output_sink),
+                "audit_export": as_sink(export_sink),
             },
         )
 
@@ -1870,11 +1838,11 @@ class TestOrchestratorLandscapeExport:
         source = ListSource([{"value": 42}])
 
         pipeline = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={
-                "output": output_sink,
-                "audit": audit_sink,
+                "output": as_sink(output_sink),
+                "audit": as_sink(audit_sink),
             },
         )
 
@@ -1934,9 +1902,9 @@ class TestSourceLifecycleHooks:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"output": mock_sink},
+            sinks={"output": as_sink(mock_sink)},
         )
 
         # Minimal graph
@@ -2054,7 +2022,7 @@ class TestSinkLifecycleHooks:
         completed: list[str] = []
 
         class TestSchema(PluginSchema):
-            model_config = {"extra": "allow"}  # noqa: RUF012
+            model_config: ClassVar[dict[str, Any]] = {"extra": "allow"}
 
         class FailingTransform(BaseTransform):
             name = "failing"
@@ -2229,9 +2197,9 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -2324,9 +2292,9 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -2410,9 +2378,9 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -2539,9 +2507,9 @@ class TestOrchestratorCheckpointing:
         bad_sink = BadSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"good": good_sink, "bad": bad_sink},
+            sinks={"good": as_sink(good_sink), "bad": as_sink(bad_sink)},
             gates=[gate_config],
         )
 
@@ -2689,9 +2657,9 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -2776,9 +2744,9 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         # No checkpoint_manager passed - should work without checkpointing
@@ -2871,9 +2839,9 @@ class TestOrchestratorConfigRecording:
         }
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
             config=resolved_config,  # Pass the resolved config
         )
 
@@ -2948,9 +2916,9 @@ class TestOrchestratorConfigRecording:
 
         # No config passed - should default to empty dict
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
             # config not passed - defaults to {}
         )
 
@@ -3051,9 +3019,9 @@ class TestNodeMetadataFromPlugin:
         sink = VersionedSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         # Build graph
@@ -3174,9 +3142,9 @@ class TestNodeMetadataFromPlugin:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         # Build graph
@@ -3281,9 +3249,12 @@ class TestRouteValidation:
         quarantine_sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink, "quarantine": quarantine_sink},
+            sinks={
+                "default": as_sink(default_sink),
+                "quarantine": as_sink(quarantine_sink),
+            },
             gates=[routing_gate],
         )
 
@@ -3364,9 +3335,9 @@ class TestRouteValidation:
         # Note: NO quarantine sink provided!
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink},  # Only default, no quarantine
+            sinks={"default": as_sink(default_sink)},  # Only default, no quarantine
             gates=[safety_gate],
         )
 
@@ -3454,9 +3425,9 @@ class TestRouteValidation:
         default_sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink, "errors": CollectSink()},
+            sinks={"default": as_sink(default_sink), "errors": as_sink(CollectSink())},
             gates=[threshold_gate],
         )
 
@@ -3539,9 +3510,9 @@ class TestRouteValidation:
         default_sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
-            sinks={"default": default_sink},
+            sinks={"default": as_sink(default_sink)},
             gates=[filter_gate],
         )
 
@@ -3639,9 +3610,9 @@ class TestOrchestratorForkExecution:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         graph = _build_test_graph(config)
@@ -3751,9 +3722,9 @@ class TestOrchestratorQuarantineMetrics:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(db)
@@ -3868,9 +3839,9 @@ class TestOrchestratorRetry:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         # Use _build_test_graph to create graph matching PipelineConfig
@@ -3973,9 +3944,9 @@ class TestOrchestratorRetry:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         # Use _build_test_graph to create graph matching PipelineConfig

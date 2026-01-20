@@ -163,8 +163,8 @@ class TestTriggerType:
         from elspeth.contracts.enums import TriggerType
 
         # (str, Enum) allows direct string comparison for database serialization
-        assert TriggerType.COUNT == "count"
-        assert TriggerType.TIMEOUT == "timeout"
+        assert TriggerType.COUNT == "count"  # type: ignore[comparison-overlap]
+        assert TriggerType.TIMEOUT == "timeout"  # type: ignore[unreachable]
         # Can be created from string values (for DB reads)
         assert TriggerType("count") == TriggerType.COUNT
         assert TriggerType("end_of_source") == TriggerType.END_OF_SOURCE

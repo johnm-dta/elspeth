@@ -232,6 +232,7 @@ class TestFieldMapper:
         # String passes through without validation
         result = transform.process({"count": "not_an_int"}, ctx)
         assert result.status == "success"
+        assert result.row is not None
         assert result.row["count"] == "not_an_int"
 
     def test_validate_input_skipped_for_dynamic_schema(

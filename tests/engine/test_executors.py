@@ -7,6 +7,7 @@ import pytest
 
 from elspeth.contracts import RoutingMode
 from elspeth.contracts.schema import SchemaConfig
+from tests.conftest import as_gate, as_sink, as_transform
 
 # Dynamic schema for tests that don't care about specific fields
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
@@ -66,7 +67,7 @@ class TestTransformExecutor:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         result, _updated_token, _error_sink = executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,  # First transform is at step 1 (source=0)
@@ -128,7 +129,7 @@ class TestTransformExecutor:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         result, _, _error_sink = executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -187,7 +188,7 @@ class TestTransformExecutor:
 
         with pytest.raises(RuntimeError, match="kaboom"):
             executor.execute_transform(
-                transform=transform,
+                transform=as_transform(transform),
                 token=token,
                 ctx=ctx,
                 step_in_pipeline=1,
@@ -250,7 +251,7 @@ class TestTransformExecutor:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         _result, updated_token, _error_sink = executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -311,7 +312,7 @@ class TestTransformExecutor:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -378,7 +379,7 @@ class TestTransformExecutor:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         result, _updated_token, error_sink = executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -437,7 +438,7 @@ class TestTransformExecutor:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         result, _updated_token, error_sink = executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -495,7 +496,7 @@ class TestTransformExecutor:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         result, _updated_token, error_sink = executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -559,7 +560,7 @@ class TestTransformExecutor:
             recorder, "begin_node_state", wraps=recorder.begin_node_state
         ) as mock:
             executor.execute_transform(
-                transform=transform,
+                transform=as_transform(transform),
                 token=token,
                 ctx=ctx,
                 step_in_pipeline=0,
@@ -626,7 +627,7 @@ class TestGateExecutor:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         outcome = executor.execute_gate(
-            gate=gate,
+            gate=as_gate(gate),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -732,7 +733,7 @@ class TestGateExecutor:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         outcome = executor.execute_gate(
-            gate=gate,
+            gate=as_gate(gate),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -810,7 +811,7 @@ class TestGateExecutor:
 
         with pytest.raises(MissingEdgeError) as exc_info:
             executor.execute_gate(
-                gate=gate,
+                gate=as_gate(gate),
                 token=token,
                 ctx=ctx,
                 step_in_pipeline=1,
@@ -916,7 +917,7 @@ class TestGateExecutor:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         outcome = executor.execute_gate(
-            gate=gate,
+            gate=as_gate(gate),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -1038,7 +1039,7 @@ class TestGateExecutor:
         # Call without token_manager - should raise RuntimeError
         with pytest.raises(RuntimeError, match="audit integrity would be compromised"):
             executor.execute_gate(
-                gate=gate,
+                gate=as_gate(gate),
                 token=token,
                 ctx=ctx,
                 step_in_pipeline=1,
@@ -1093,7 +1094,7 @@ class TestGateExecutor:
 
         with pytest.raises(RuntimeError, match="gate evaluation failed"):
             executor.execute_gate(
-                gate=gate,
+                gate=as_gate(gate),
                 token=token,
                 ctx=ctx,
                 step_in_pipeline=1,
@@ -1879,7 +1880,7 @@ class TestSinkExecutor:
 
         # Write tokens to sink
         artifact = executor.write(
-            sink=sink,
+            sink=as_sink(sink),
             tokens=tokens,
             ctx=ctx,
             step_in_pipeline=5,
@@ -1943,7 +1944,7 @@ class TestSinkExecutor:
 
         # Write with empty tokens
         artifact = executor.write(
-            sink=sink,
+            sink=as_sink(sink),
             tokens=[],
             ctx=ctx,
             step_in_pipeline=5,
@@ -2010,7 +2011,7 @@ class TestSinkExecutor:
         # Write should raise
         with pytest.raises(RuntimeError, match="disk full"):
             executor.write(
-                sink=sink,
+                sink=as_sink(sink),
                 tokens=tokens,
                 ctx=ctx,
                 step_in_pipeline=5,
@@ -2091,7 +2092,7 @@ class TestSinkExecutor:
                 tokens.append(token)
 
             artifact = executor.write(
-                sink=sink,
+                sink=as_sink(sink),
                 tokens=tokens,
                 ctx=ctx,
                 step_in_pipeline=5,
@@ -2165,7 +2166,7 @@ class TestSinkExecutor:
             tokens.append(token)
 
         artifact = executor.write(
-            sink=sink,
+            sink=as_sink(sink),
             tokens=tokens,
             ctx=ctx,
             step_in_pipeline=5,

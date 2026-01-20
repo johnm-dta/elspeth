@@ -71,8 +71,8 @@ __all__ = [
     "LLMClientError",
     "LLMResponse",
     "RateLimitError",
-    "ReplayedCall",
     "ReplayMissError",
+    "ReplayedCall",
     "VerificationReport",
     "VerificationResult",
 ]

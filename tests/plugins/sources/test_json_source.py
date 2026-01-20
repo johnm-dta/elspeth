@@ -265,7 +265,7 @@ class TestJSONSourceConfigValidation:
         from elspeth.plugins.config_base import PluginConfigError
         from elspeth.plugins.sources.json_source import JSONSource
 
-        with pytest.raises(PluginConfigError, match="require.*schema"):
+        with pytest.raises(PluginConfigError, match=r"require.*schema"):
             JSONSource(
                 {"path": "/tmp/test.json", "on_validation_failure": QUARANTINE_SINK}
             )
@@ -334,6 +334,7 @@ class TestJSONSourceQuarantineYielding:
         assert quarantined.row["name"] == "bob"
         assert quarantined.row["score"] == "bad"  # Original value preserved
         assert quarantined.quarantine_destination == "quarantine"
+        assert quarantined.quarantine_error is not None
         assert "score" in quarantined.quarantine_error  # Error mentions the field
 
     def test_discard_mode_does_not_yield_invalid_rows(

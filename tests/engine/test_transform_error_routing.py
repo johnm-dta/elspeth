@@ -16,16 +16,16 @@ from elspeth.contracts import TokenInfo
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.context import PluginContext, TransformErrorToken
 from elspeth.plugins.results import TransformResult
+from tests.conftest import _TestTransformBase, as_transform
 
 # Dynamic schema for tests that don't care about specific fields
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"fields": "dynamic"})
 
 
-class MockTransform:
+class MockTransform(_TestTransformBase):
     """Mock transform for testing error routing."""
 
     name = "mock_transform"
-    node_id: str | None = None
 
     def __init__(self, result: TransformResult, on_error: str | None = None) -> None:
         self._result = result
@@ -39,7 +39,7 @@ class TestTransformErrorRouting:
     """Tests for routing TransformResult.error() rows."""
 
     @pytest.fixture
-    def setup_landscape(self):
+    def setup_landscape(self) -> tuple[Any, Any, Any]:
         """Set up LandscapeDB, recorder, and run for tests."""
         from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
 
@@ -48,12 +48,14 @@ class TestTransformErrorRouting:
         run = recorder.begin_run(config={}, canonical_version="v1")
         return db, recorder, run
 
-    def test_success_result_returns_row_unchanged(self, setup_landscape) -> None:
+    def test_success_result_returns_row_unchanged(
+        self, setup_landscape: tuple[Any, Any, Any]
+    ) -> None:
         """TransformResult.success() returns the transformed row normally."""
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
 
-        db, recorder, run = setup_landscape
+        _db, recorder, run = setup_landscape
 
         node = recorder.register_node(
             run_id=run.run_id,
@@ -92,7 +94,7 @@ class TestTransformErrorRouting:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         result, updated_token, _ = executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -102,12 +104,14 @@ class TestTransformErrorRouting:
         assert result.row == {"value": 42}
         assert updated_token.row_data == {"value": 42}
 
-    def test_error_result_with_on_error_routes_to_sink(self, setup_landscape) -> None:
+    def test_error_result_with_on_error_routes_to_sink(
+        self, setup_landscape: tuple[Any, Any, Any]
+    ) -> None:
         """TransformResult.error() with on_error routes to configured sink."""
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
 
-        db, recorder, run = setup_landscape
+        _db, recorder, run = setup_landscape
 
         node = recorder.register_node(
             run_id=run.run_id,
@@ -134,7 +138,7 @@ class TestTransformErrorRouting:
             landscape=recorder,
         )
         # Override route_to_sink to track calls
-        ctx.route_to_sink = lambda sink_name, row, metadata=None: routed.append(
+        ctx.route_to_sink = lambda sink_name, row, metadata=None: routed.append(  # type: ignore[method-assign]
             {"sink": sink_name, "row": row, "metadata": metadata}
         )
 
@@ -155,7 +159,7 @@ class TestTransformErrorRouting:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         result, _, _error_sink = executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -166,12 +170,14 @@ class TestTransformErrorRouting:
         assert routed[0]["sink"] == "error_sink"
         assert routed[0]["row"] == {"input": 1}
 
-    def test_error_result_with_discard_does_not_route(self, setup_landscape) -> None:
+    def test_error_result_with_discard_does_not_route(
+        self, setup_landscape: tuple[Any, Any, Any]
+    ) -> None:
         """TransformResult.error() with discard does NOT call route_to_sink."""
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
 
-        db, recorder, run = setup_landscape
+        _db, recorder, run = setup_landscape
 
         node = recorder.register_node(
             run_id=run.run_id,
@@ -195,7 +201,7 @@ class TestTransformErrorRouting:
             node_id=node.node_id,
             landscape=recorder,
         )
-        ctx.route_to_sink = lambda sink_name, row, metadata=None: routed.append(
+        ctx.route_to_sink = lambda sink_name, row, metadata=None: routed.append(  # type: ignore[method-assign]
             sink_name
         )
 
@@ -216,7 +222,7 @@ class TestTransformErrorRouting:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         result, _, _error_sink = executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -225,12 +231,14 @@ class TestTransformErrorRouting:
         assert result.status == "error"
         assert routed == []  # Nothing routed for discard
 
-    def test_error_without_on_error_raises_runtime_error(self, setup_landscape) -> None:
+    def test_error_without_on_error_raises_runtime_error(
+        self, setup_landscape: tuple[Any, Any, Any]
+    ) -> None:
         """TransformResult.error() without on_error raises RuntimeError."""
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
 
-        db, recorder, run = setup_landscape
+        _db, recorder, run = setup_landscape
 
         node = recorder.register_node(
             run_id=run.run_id,
@@ -271,18 +279,20 @@ class TestTransformErrorRouting:
 
         with pytest.raises(RuntimeError, match="on_error"):
             executor.execute_transform(
-                transform=transform,
+                transform=as_transform(transform),
                 token=token,
                 ctx=ctx,
                 step_in_pipeline=1,
             )
 
-    def test_error_event_recorded_for_sink_destination(self, setup_landscape) -> None:
+    def test_error_event_recorded_for_sink_destination(
+        self, setup_landscape: tuple[Any, Any, Any]
+    ) -> None:
         """record_transform_error called when routing to sink."""
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
 
-        db, recorder, run = setup_landscape
+        _db, recorder, run = setup_landscape
 
         node = recorder.register_node(
             run_id=run.run_id,
@@ -329,8 +339,8 @@ class TestTransformErrorRouting:
             node_id=node.node_id,
             landscape=recorder,
         )
-        ctx.record_transform_error = capture_record
-        ctx.route_to_sink = lambda sink_name, row, metadata=None: None
+        ctx.record_transform_error = capture_record  # type: ignore[method-assign]
+        ctx.route_to_sink = lambda sink_name, row, metadata=None: None  # type: ignore[method-assign]
 
         executor = TransformExecutor(recorder, SpanFactory())
 
@@ -349,7 +359,7 @@ class TestTransformErrorRouting:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -361,12 +371,14 @@ class TestTransformErrorRouting:
         assert recorded[0]["token_id"] == "tok_123"
         assert recorded[0]["error_details"] == {"reason": "Test error"}
 
-    def test_error_event_recorded_for_discard(self, setup_landscape) -> None:
+    def test_error_event_recorded_for_discard(
+        self, setup_landscape: tuple[Any, Any, Any]
+    ) -> None:
         """record_transform_error called even when discarding."""
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
 
-        db, recorder, run = setup_landscape
+        _db, recorder, run = setup_landscape
 
         node = recorder.register_node(
             run_id=run.run_id,
@@ -405,7 +417,7 @@ class TestTransformErrorRouting:
             node_id=node.node_id,
             landscape=recorder,
         )
-        ctx.record_transform_error = capture_record
+        ctx.record_transform_error = capture_record  # type: ignore[method-assign]
 
         executor = TransformExecutor(recorder, SpanFactory())
 
@@ -424,7 +436,7 @@ class TestTransformErrorRouting:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -434,7 +446,9 @@ class TestTransformErrorRouting:
         assert len(recorded) == 1
         assert recorded[0]["destination"] == "discard"
 
-    def test_exception_in_transform_propagates(self, setup_landscape) -> None:
+    def test_exception_in_transform_propagates(
+        self, setup_landscape: tuple[Any, Any, Any]
+    ) -> None:
         """Exception in transform propagates (does NOT route to on_error).
 
         This enforces CLAUDE.md's rule: bugs crash, they don't get silently routed.
@@ -442,7 +456,7 @@ class TestTransformErrorRouting:
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
 
-        db, recorder, run = setup_landscape
+        _db, recorder, run = setup_landscape
 
         node = recorder.register_node(
             run_id=run.run_id,
@@ -453,11 +467,10 @@ class TestTransformErrorRouting:
             schema_config=DYNAMIC_SCHEMA,
         )
 
-        class BuggyTransform:
+        class BuggyTransform(_TestTransformBase):
             """Transform with a bug that raises an exception."""
 
             name = "buggy"
-            node_id: str | None = node.node_id
             _on_error = "error_sink"  # Configured but should NOT be used for bugs
 
             def process(
@@ -466,6 +479,7 @@ class TestTransformErrorRouting:
                 raise KeyError("nonexistent_field")  # BUG!
 
         transform = BuggyTransform()
+        transform.node_id = node.node_id
         ctx = PluginContext(
             run_id=run.run_id,
             config={},
@@ -491,18 +505,20 @@ class TestTransformErrorRouting:
         # Exception propagates - not caught and routed
         with pytest.raises(KeyError):
             executor.execute_transform(
-                transform=transform,
+                transform=as_transform(transform),
                 token=token,
                 ctx=ctx,
                 step_in_pipeline=1,
             )
 
-    def test_error_routing_preserves_original_row(self, setup_landscape) -> None:
+    def test_error_routing_preserves_original_row(
+        self, setup_landscape: tuple[Any, Any, Any]
+    ) -> None:
         """Error routing sends the original input row, not None."""
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
 
-        db, recorder, run = setup_landscape
+        _db, recorder, run = setup_landscape
 
         node = recorder.register_node(
             run_id=run.run_id,
@@ -528,7 +544,7 @@ class TestTransformErrorRouting:
             node_id=node.node_id,
             landscape=recorder,
         )
-        ctx.route_to_sink = lambda sink_name, row, metadata=None: routed_rows.append(
+        ctx.route_to_sink = lambda sink_name, row, metadata=None: routed_rows.append(  # type: ignore[method-assign]
             row
         )
 
@@ -549,7 +565,7 @@ class TestTransformErrorRouting:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,
@@ -559,13 +575,13 @@ class TestTransformErrorRouting:
         assert routed_rows[0] == original_row
 
     def test_error_metadata_includes_transform_error_details(
-        self, setup_landscape
+        self, setup_landscape: tuple[Any, Any, Any]
     ) -> None:
         """Routed error includes metadata with transform error reason."""
         from elspeth.engine.executors import TransformExecutor
         from elspeth.engine.spans import SpanFactory
 
-        db, recorder, run = setup_landscape
+        _db, recorder, run = setup_landscape
 
         node = recorder.register_node(
             run_id=run.run_id,
@@ -591,7 +607,7 @@ class TestTransformErrorRouting:
             node_id=node.node_id,
             landscape=recorder,
         )
-        ctx.route_to_sink = (
+        ctx.route_to_sink = (  # type: ignore[method-assign]
             lambda sink_name, row, metadata=None: routed_metadata.append(metadata)
         )
 
@@ -612,7 +628,7 @@ class TestTransformErrorRouting:
         recorder.create_token(row_id=row.row_id, token_id=token.token_id)
 
         executor.execute_transform(
-            transform=transform,
+            transform=as_transform(transform),
             token=token,
             ctx=ctx,
             step_in_pipeline=1,

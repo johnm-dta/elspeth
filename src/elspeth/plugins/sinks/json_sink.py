@@ -142,7 +142,8 @@ class JSONSink(BaseSink):
     def _write_jsonl_batch(self, rows: list[dict[str, Any]]) -> None:
         """Write rows as JSONL (append mode)."""
         if self._file is None:
-            self._file = open(self._path, "w", encoding=self._encoding)  # noqa: SIM115 - lifecycle managed by class
+            # Handle kept open for streaming writes, closed in close()
+            self._file = open(self._path, "w", encoding=self._encoding)  # noqa: SIM115
 
         for row in rows:
             json.dump(row, self._file)
@@ -151,7 +152,8 @@ class JSONSink(BaseSink):
     def _write_json_array(self) -> None:
         """Write buffered rows as JSON array (rewrite mode)."""
         if self._file is None:
-            self._file = open(self._path, "w", encoding=self._encoding)  # noqa: SIM115 - lifecycle managed by class
+            # Handle kept open for streaming writes, closed in close()
+            self._file = open(self._path, "w", encoding=self._encoding)  # noqa: SIM115
         self._file.seek(0)
         self._file.truncate()
         json.dump(self._rows, self._file, indent=self._indent)

@@ -19,6 +19,7 @@ garbage into a valid-looking value, we've committed fraud.
 from __future__ import annotations
 
 import string
+from enum import Enum
 from typing import Any
 
 import pytest
@@ -46,7 +47,7 @@ from elspeth.contracts.enums import (
 
 # These enums use (str, Enum) and are stored in the database.
 # Invalid string values MUST crash, not silently coerce.
-DATABASE_STORED_ENUMS: list[type] = [
+DATABASE_STORED_ENUMS: list[type[Enum]] = [
     RunStatus,
     NodeStateStatus,
     ExportStatus,
@@ -62,7 +63,7 @@ DATABASE_STORED_ENUMS: list[type] = [
 
 # RowOutcome is plain Enum (derived at query time, not stored)
 # It has different behavior - we test it separately
-DERIVED_ENUMS: list[type] = [
+DERIVED_ENUMS: list[type[Enum]] = [
     RowOutcome,
 ]
 
@@ -72,17 +73,17 @@ DERIVED_ENUMS: list[type] = [
 # =============================================================================
 
 
-def valid_enum_values(enum_type: type) -> st.SearchStrategy[Any]:
+def valid_enum_values(enum_type: type[Enum]) -> st.SearchStrategy[Any]:
     """Strategy that generates valid members of an enum type."""
     return st.sampled_from(list(enum_type))
 
 
-def valid_enum_strings(enum_type: type) -> st.SearchStrategy[str]:
+def valid_enum_strings(enum_type: type[Enum]) -> st.SearchStrategy[str]:
     """Strategy that generates valid string values for an enum type."""
     return st.sampled_from([e.value for e in enum_type])
 
 
-def invalid_enum_strings(enum_type: type) -> st.SearchStrategy[str]:
+def invalid_enum_strings(enum_type: type[Enum]) -> st.SearchStrategy[str]:
     """Strategy that generates INVALID string values for an enum type.
 
     These should all raise ValueError when passed to the enum constructor.
@@ -370,14 +371,14 @@ class TestAllDatabaseEnumsConsistent:
     """Parametrized tests that verify consistent behavior across all enums."""
 
     @pytest.mark.parametrize("enum_type", DATABASE_STORED_ENUMS)
-    def test_all_members_have_string_values(self, enum_type: type) -> None:
+    def test_all_members_have_string_values(self, enum_type: type[Enum]) -> None:
         """All enum members have non-empty string values."""
         for member in enum_type:
             assert isinstance(member.value, str)
             assert len(member.value) > 0
 
     @pytest.mark.parametrize("enum_type", DATABASE_STORED_ENUMS)
-    def test_all_values_are_lowercase(self, enum_type: type) -> None:
+    def test_all_values_are_lowercase(self, enum_type: type[Enum]) -> None:
         """All enum values are lowercase (database convention)."""
         for member in enum_type:
             assert (
@@ -385,7 +386,7 @@ class TestAllDatabaseEnumsConsistent:
             ), f"{enum_type.__name__}.{member.name} has non-lowercase value: {member.value}"
 
     @pytest.mark.parametrize("enum_type", DATABASE_STORED_ENUMS)
-    def test_no_duplicate_values(self, enum_type: type) -> None:
+    def test_no_duplicate_values(self, enum_type: type[Enum]) -> None:
         """All enum values are unique within the type."""
         values = [m.value for m in enum_type]
         assert len(values) == len(
@@ -393,7 +394,7 @@ class TestAllDatabaseEnumsConsistent:
         ), f"{enum_type.__name__} has duplicate values"
 
     @pytest.mark.parametrize("enum_type", DATABASE_STORED_ENUMS)
-    def test_string_conversion_roundtrips(self, enum_type: type) -> None:
+    def test_string_conversion_roundtrips(self, enum_type: type[Enum]) -> None:
         """All members roundtrip through string conversion."""
         for member in enum_type:
             string_value = member.value
@@ -401,13 +402,13 @@ class TestAllDatabaseEnumsConsistent:
             assert recovered is member
 
     @pytest.mark.parametrize("enum_type", DATABASE_STORED_ENUMS)
-    def test_invalid_empty_string_rejected(self, enum_type: type) -> None:
+    def test_invalid_empty_string_rejected(self, enum_type: type[Enum]) -> None:
         """Empty string is always rejected."""
         with pytest.raises(ValueError):
             enum_type("")
 
     @pytest.mark.parametrize("enum_type", DATABASE_STORED_ENUMS)
-    def test_invalid_uppercase_variant_rejected(self, enum_type: type) -> None:
+    def test_invalid_uppercase_variant_rejected(self, enum_type: type[Enum]) -> None:
         """Uppercase variants of valid values are rejected (case-sensitive)."""
         # Get first member
         first_member = next(iter(enum_type))
@@ -419,7 +420,7 @@ class TestAllDatabaseEnumsConsistent:
                 enum_type(uppercase_value)
 
     @pytest.mark.parametrize("enum_type", DATABASE_STORED_ENUMS)
-    def test_invalid_whitespace_variant_rejected(self, enum_type: type) -> None:
+    def test_invalid_whitespace_variant_rejected(self, enum_type: type[Enum]) -> None:
         """Whitespace variants of valid values are rejected."""
         first_member = next(iter(enum_type))
         whitespace_value = f" {first_member.value} "

@@ -289,7 +289,7 @@ class TestOrchestratorResumeRowProcessing:
         assert resume_point is not None
 
         # Create config and graph
-        config, output_path = self._create_test_config(tmp_path)
+        config, _output_path = self._create_test_config(tmp_path)
         graph = self._create_test_graph()
 
         # Act: Resume with payload store
@@ -366,11 +366,11 @@ class TestOrchestratorResumeRowProcessing:
         assert resume_point is not None
 
         # Create config and graph
-        config, output_path = self._create_test_config(tmp_path)
+        config, _output_path = self._create_test_config(tmp_path)
         graph = self._create_test_graph()
 
         # Act & Assert: Should raise without payload_store
-        with pytest.raises(ValueError, match="payload_store.*required"):
+        with pytest.raises(ValueError, match=r"payload_store.*required"):
             orchestrator.resume(resume_point, config, graph)
 
     def test_resume_returns_run_result_with_status(
@@ -389,7 +389,7 @@ class TestOrchestratorResumeRowProcessing:
         assert resume_point is not None
 
         # Create config and graph
-        config, output_path = self._create_test_config(tmp_path)
+        config, _output_path = self._create_test_config(tmp_path)
         graph = self._create_test_graph()
 
         # Act

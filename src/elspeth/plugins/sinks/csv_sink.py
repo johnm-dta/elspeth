@@ -166,7 +166,7 @@ class CSVSink(BaseSink):
             if existing_fieldnames:
                 # Use existing headers, append mode (no header write)
                 self._fieldnames = list(existing_fieldnames)
-                self._file = open(  # noqa: SIM115 - lifecycle managed by class
+                self._file = open(  # noqa: SIM115 - handle kept open for streaming writes, closed in close()
                     self._path, "a", encoding=self._encoding, newline=""
                 )
                 self._writer = csv.DictWriter(
@@ -180,7 +180,7 @@ class CSVSink(BaseSink):
         # Write mode OR append to non-existent/empty file
         # In both cases: determine fieldnames from first row, write header
         self._fieldnames = list(rows[0].keys())
-        self._file = open(  # noqa: SIM115 - lifecycle managed by class
+        self._file = open(  # noqa: SIM115 - handle kept open for streaming writes, closed in close()
             self._path, "w", encoding=self._encoding, newline=""
         )
         self._writer = csv.DictWriter(

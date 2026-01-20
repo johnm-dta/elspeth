@@ -355,9 +355,7 @@ class TestOpenRouterLLMTransformIntegration:
         return LandscapeRecorder(db)
 
     @pytest.fixture
-    def setup_state(
-        self, recorder: LandscapeRecorder
-    ) -> tuple[str, str]:
+    def setup_state(self, recorder: LandscapeRecorder) -> tuple[str, str]:
         """Create run and state for testing.
 
         Returns:
@@ -603,18 +601,20 @@ class TestAzureBatchLLMTransformIntegration:
         # Set up context with existing checkpoint for resume test
         ctx = PluginContext(run_id="test-run", config={})
         recent_timestamp = datetime.now(UTC).isoformat()
-        ctx._checkpoint.update({
-            "batch_id": "batch-xyz789",
-            "input_file_id": "file-abc123",
-            "row_mapping": {
-                "row-0-aaa": 0,
-                "row-1-bbb": 1,
-                "row-2-ccc": 2,
-            },
-            "template_errors": [],
-            "submitted_at": recent_timestamp,
-            "row_count": 3,
-        })
+        ctx._checkpoint.update(
+            {
+                "batch_id": "batch-xyz789",
+                "input_file_id": "file-abc123",
+                "row_mapping": {
+                    "row-0-aaa": 0,
+                    "row-1-bbb": 1,
+                    "row-2-ccc": 2,
+                },
+                "template_errors": [],
+                "submitted_at": recent_timestamp,
+                "row_count": 3,
+            }
+        )
 
         # Mock completed batch
         mock_client = Mock()
@@ -735,17 +735,19 @@ class TestAzureBatchLLMTransformIntegration:
         ctx = PluginContext(run_id="test-run", config={})
         # Pre-populate checkpoint for resume test
         recent_timestamp = datetime.now(UTC).isoformat()
-        ctx._checkpoint.update({
-            "batch_id": "batch-xyz789",
-            "input_file_id": "file-abc123",
-            "row_mapping": {
-                "row-0-aaa": 0,
-                "row-1-bbb": 1,
-            },
-            "template_errors": [],
-            "submitted_at": recent_timestamp,
-            "row_count": 2,
-        })
+        ctx._checkpoint.update(
+            {
+                "batch_id": "batch-xyz789",
+                "input_file_id": "file-abc123",
+                "row_mapping": {
+                    "row-0-aaa": 0,
+                    "row-1-bbb": 1,
+                },
+                "template_errors": [],
+                "submitted_at": recent_timestamp,
+                "row_count": 2,
+            }
+        )
 
         mock_client = Mock()
         mock_batch = Mock()

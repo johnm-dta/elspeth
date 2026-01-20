@@ -162,6 +162,7 @@ class AzureAuthConfig(BaseModel):
 
             credential = DefaultAzureCredential()
             # account_url is validated to be not None by the model_validator
+            assert self.account_url is not None  # Validated by model_validator
             return BlobServiceClient(self.account_url, credential=credential)
 
         else:
@@ -175,12 +176,16 @@ class AzureAuthConfig(BaseModel):
                 ) from e
 
             # All fields are validated to be not None by the model_validator
-            credential = ClientSecretCredential(
-                tenant_id=self.tenant_id,  # type: ignore[arg-type]
-                client_id=self.client_id,  # type: ignore[arg-type]
-                client_secret=self.client_secret,  # type: ignore[arg-type]
+            assert self.tenant_id is not None  # Validated by model_validator
+            assert self.client_id is not None  # Validated by model_validator
+            assert self.client_secret is not None  # Validated by model_validator
+            assert self.account_url is not None  # Validated by model_validator
+            sp_credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
             )
-            return BlobServiceClient(self.account_url, credential=credential)
+            return BlobServiceClient(self.account_url, credential=sp_credential)
 
     @property
     def auth_method(self) -> str:

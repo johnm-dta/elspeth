@@ -17,53 +17,21 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
+from elspeth.contracts import RoutingMode, SourceRow
 from elspeth.core.config import GateSettings
 from elspeth.plugins.base import BaseTransform
+from tests.conftest import (
+    _TestSchema,
+    _TestSinkBase,
+    _TestSourceBase,
+    as_source,
+    as_transform,
+)
 
 if TYPE_CHECKING:
     from elspeth.contracts.results import ArtifactDescriptor, TransformResult
     from elspeth.core.dag import ExecutionGraph
     from elspeth.engine.orchestrator import PipelineConfig
-
-
-# ============================================================================
-# Test Fixture Base Classes
-# ============================================================================
-# These provide the required protocol attributes so inline test classes
-# don't need to repeat them.
-
-
-class _TestSchema(PluginSchema):
-    """Minimal schema for test fixtures."""
-
-    pass
-
-
-class _TestSourceBase:
-    """Base class providing SourceProtocol required attributes.
-
-    Note: output_schema is NOT provided here because child classes override it
-    with their own schemas, and mypy's type invariance would flag that as a conflict.
-    Each test class must provide its own output_schema.
-    """
-
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-
-class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes."""
-
-    input_schema = _TestSchema  # Required by protocol
-    idempotent = True
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0"
-
-    def flush(self) -> None:
-        pass
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
@@ -271,7 +239,7 @@ class TestEngineIntegration:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -396,7 +364,7 @@ class TestEngineIntegration:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[t1, t2],
             sinks={"default": sink},
         )
@@ -534,7 +502,7 @@ class TestEngineIntegration:
         even_sink = CollectSink("even_sink")
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": default_sink, "even": even_sink},
             gates=[even_odd_gate],
@@ -671,7 +639,7 @@ class TestNoSilentAuditLoss:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": sink},  # Note: "phantom" is NOT configured
             gates=[misrouting_gate],
@@ -775,7 +743,7 @@ class TestNoSilentAuditLoss:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -854,7 +822,7 @@ class TestNoSilentAuditLoss:
         sink = ExplodingSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -940,7 +908,7 @@ class TestAuditTrailCompleteness:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -1025,7 +993,7 @@ class TestAuditTrailCompleteness:
         high_sink = CollectSink("high_output")
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[],
             sinks={"default": default_sink, "high": high_sink},
             gates=[split_gate],
@@ -1556,7 +1524,7 @@ class TestForkCoalescePipelineIntegration:
         # Process sentiment branch
         sentiment_result, sentiment_token_updated, _ = (
             transform_executor.execute_transform(
-                transform=sentiment,
+                transform=as_transform(sentiment),
                 token=sentiment_token,
                 ctx=ctx,
                 step_in_pipeline=2,
@@ -1564,6 +1532,7 @@ class TestForkCoalescePipelineIntegration:
         )
         assert sentiment_result.status == "success"
         # Update token with transformed data while preserving branch_name
+        assert sentiment_result.row is not None
         sentiment_token_processed = TokenInfo(
             row_id=sentiment_token_updated.row_id,
             token_id=sentiment_token_updated.token_id,
@@ -1573,13 +1542,14 @@ class TestForkCoalescePipelineIntegration:
 
         # Process entity branch
         entity_result, entity_token_updated, _ = transform_executor.execute_transform(
-            transform=entity,
+            transform=as_transform(entity),
             token=entity_token,
             ctx=ctx,
             step_in_pipeline=2,
         )
         assert entity_result.status == "success"
         # Update token with transformed data while preserving branch_name
+        assert entity_result.row is not None
         entity_token_processed = TokenInfo(
             row_id=entity_token_updated.row_id,
             token_id=entity_token_updated.token_id,
@@ -2167,13 +2137,14 @@ class TestComplexDAGIntegration:
         # Sentiment branch
         sentiment_result, sentiment_token_updated, _ = (
             transform_executor.execute_transform(
-                transform=sentiment_transform,
+                transform=as_transform(sentiment_transform),
                 token=sentiment_token,
                 ctx=ctx,
                 step_in_pipeline=2,
             )
         )
         assert sentiment_result.status == "success"
+        assert sentiment_result.row is not None
         sentiment_token_processed = TokenInfo(
             row_id=sentiment_token_updated.row_id,
             token_id=sentiment_token_updated.token_id,
@@ -2183,12 +2154,13 @@ class TestComplexDAGIntegration:
 
         # Entity branch
         entity_result, entity_token_updated, _ = transform_executor.execute_transform(
-            transform=entity_transform,
+            transform=as_transform(entity_transform),
             token=entity_token,
             ctx=ctx,
             step_in_pipeline=2,
         )
         assert entity_result.status == "success"
+        assert entity_result.row is not None
         entity_token_processed = TokenInfo(
             row_id=entity_token_updated.row_id,
             token_id=entity_token_updated.token_id,
@@ -2439,7 +2411,7 @@ class TestComplexDAGIntegration:
         )
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": default_sink, "routed": routed_sink},
             gates=[routing_gate],
@@ -2653,7 +2625,7 @@ class TestRetryIntegration:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -2827,7 +2799,7 @@ class TestRetryIntegration:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -3174,11 +3146,11 @@ class TestExplainQuery:
 
         # Verify we can trace from each batch member back to its source row
         for member in batch_members:
-            token = recorder.get_token(member.token_id)
-            assert token is not None, f"Token {member.token_id} should exist"
+            token_info = recorder.get_token(member.token_id)
+            assert token_info is not None, f"Token {member.token_id} should exist"
 
-            row = recorder.get_row(token.row_id)
-            assert row is not None, f"Row {token.row_id} should exist"
+            row = recorder.get_row(token_info.row_id)
+            assert row is not None, f"Row {token_info.row_id} should exist"
             assert (
                 row.source_node_id == source_node.node_id
             ), "Row should trace to source node"
@@ -3514,7 +3486,7 @@ class TestErrorRecovery:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )
@@ -3650,7 +3622,7 @@ class TestErrorRecovery:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
             sinks={"default": sink},
         )

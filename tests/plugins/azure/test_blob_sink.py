@@ -1,6 +1,8 @@
 """Tests for Azure Blob Storage sink plugin."""
 
 import hashlib
+from collections.abc import Generator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -37,7 +39,7 @@ def ctx() -> PluginContext:
 
 
 @pytest.fixture
-def mock_container_client():
+def mock_container_client() -> Generator[MagicMock, None, None]:
     """Create a mock container client for testing."""
     with patch(
         "elspeth.plugins.azure.blob_sink.AzureBlobSink._get_container_client"
@@ -61,15 +63,15 @@ def make_config(
     blob_path: str = TEST_BLOB_PATH,
     format: str = "csv",
     overwrite: bool = True,
-    csv_options: dict | None = None,
-    schema: dict | None = None,
-) -> dict:
+    csv_options: dict[str, Any] | None = None,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Helper to create config dicts with defaults.
 
     By default uses connection_string auth. Pass connection_string=None
     and set other auth options for managed identity or service principal.
     """
-    config: dict = {
+    config: dict[str, Any] = {
         "container": container,
         "blob_path": blob_path,
         "format": format,
@@ -486,7 +488,7 @@ class TestAzureBlobSinkEmptyRows:
     ) -> None:
         """Empty rows list returns descriptor with empty content hash."""
         sink = AzureBlobSink(make_config())
-        rows: list[dict] = []
+        rows: list[dict[str, Any]] = []
 
         result = sink.write(rows, ctx)
 

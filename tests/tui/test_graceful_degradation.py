@@ -101,7 +101,8 @@ class TestNodeDetailPanelGracefulDegradation:
         """
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
-        panel = NodeDetailPanel(node_state)
+        # Intentionally passing arbitrary dict for property-based testing
+        panel = NodeDetailPanel(node_state)  # type: ignore[arg-type]
         # Should render without raising
         content = panel.render_content()
         # Must return a string (even if mostly defaults)
@@ -116,8 +117,8 @@ class TestNodeDetailPanelGracefulDegradation:
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
         panel = NodeDetailPanel(None)
-        # Update to state with arbitrary optional fields
-        panel.update_state(node_state)
+        # Intentionally passing arbitrary dict for property-based testing
+        panel.update_state(node_state)  # type: ignore[arg-type]
         # Should render without raising
         content = panel.render_content()
         assert isinstance(content, str)
@@ -135,10 +136,11 @@ class TestNodeDetailPanelGracefulDegradation:
         """Transitioning between any two states should not crash."""
         from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
-        panel = NodeDetailPanel(initial_state)
+        # Intentionally passing arbitrary dicts for property-based testing
+        panel = NodeDetailPanel(initial_state)  # type: ignore[arg-type]
         content1 = panel.render_content()
         assert isinstance(content1, str)
 
-        panel.update_state(updated_state)
+        panel.update_state(updated_state)  # type: ignore[arg-type]
         content2 = panel.render_content()
         assert isinstance(content2, str)

@@ -112,12 +112,14 @@ class TestCheckpointAPI:
         assert ctx.get_checkpoint() is None
 
         # Save checkpoint after batch submission
-        ctx.update_checkpoint({
-            "batch_id": "batch-xyz789",
-            "input_file_id": "file-abc123",
-            "row_mapping": {"row-0": 0, "row-1": 1},
-            "submitted_at": "2024-01-01T00:00:00Z",
-        })
+        ctx.update_checkpoint(
+            {
+                "batch_id": "batch-xyz789",
+                "input_file_id": "file-abc123",
+                "row_mapping": {"row-0": 0, "row-1": 1},
+                "submitted_at": "2024-01-01T00:00:00Z",
+            }
+        )
 
         # Phase 2: Resume - checkpoint exists
         checkpoint = ctx.get_checkpoint()

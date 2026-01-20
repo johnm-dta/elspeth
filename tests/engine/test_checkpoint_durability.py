@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import Determinism, PluginSchema, RoutingMode, SourceRow
+from elspeth.contracts import PluginSchema, RoutingMode, SourceRow
 from elspeth.core.checkpoint import CheckpointManager
 from elspeth.core.config import CheckpointSettings
 from elspeth.core.dag import ExecutionGraph
@@ -33,37 +33,12 @@ from elspeth.engine.artifacts import ArtifactDescriptor
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.results import TransformResult
-
-# ============================================================================
-# Test Fixture Base Classes
-# ============================================================================
-
-
-class _TestSchema(PluginSchema):
-    """Minimal schema for test fixtures."""
-
-    pass
-
-
-class _TestSourceBase:
-    """Base class providing SourceProtocol required attributes."""
-
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0.0"
-
-
-class _TestSinkBase:
-    """Base class providing SinkProtocol required attributes."""
-
-    input_schema = _TestSchema
-    idempotent = True
-    node_id: str | None = None
-    determinism = Determinism.DETERMINISTIC
-    plugin_version = "1.0"
-
-    def flush(self) -> None:
-        pass
+from tests.conftest import (
+    _TestSinkBase,
+    _TestSourceBase,
+    as_sink,
+    as_source,
+)
 
 
 def _build_test_graph(config: PipelineConfig) -> ExecutionGraph:
@@ -123,7 +98,8 @@ def _get_latest_run_id(db: LandscapeDB) -> str:
         ).fetchone()
         if result is None:
             raise ValueError("No runs found in database")
-        return result.run_id
+        run_id: str = result.run_id
+        return run_id
 
 
 # ============================================================================
@@ -217,9 +193,9 @@ class TestCheckpointDurability:
         sink = TrackingSink(checkpoint_manager, db)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -448,9 +424,9 @@ class TestCheckpointDurability:
         sink = TrackingSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -563,9 +539,9 @@ class TestCheckpointDurability:
         sink = FailingSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -663,9 +639,9 @@ class TestCheckpointDurability:
         sink = CapturingSink(checkpoint_manager, db)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         graph = _build_test_graph(config)
@@ -779,9 +755,9 @@ class TestCheckpointDurability:
         sink = TimingSink(checkpoint_manager, db)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -889,9 +865,9 @@ class TestCheckpointTimingInvariants:
         sink = CapturingSink(checkpoint_manager, db)
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -982,9 +958,9 @@ class TestCheckpointTimingInvariants:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         orchestrator = Orchestrator(
@@ -1064,9 +1040,9 @@ class TestCheckpointTimingInvariants:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=source,
+            source=as_source(source),
             transforms=[transform],
-            sinks={"default": sink},
+            sinks={"default": as_sink(sink)},
         )
 
         # No checkpoint_manager, but settings enabled - should not crash

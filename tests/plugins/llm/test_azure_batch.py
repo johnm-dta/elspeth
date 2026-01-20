@@ -617,14 +617,16 @@ class TestAzureBatchLLMTransformResume:
         ctx = PluginContext(run_id="test-run", config={})
         # Pre-populate checkpoint for resume scenario (recent timestamp to avoid timeout)
         recent_timestamp = datetime.now(UTC).isoformat()
-        ctx._checkpoint.update({
-            "batch_id": "batch-456",
-            "input_file_id": "file-123",
-            "row_mapping": {"row-0-abc12345": 0},
-            "template_errors": [],
-            "submitted_at": recent_timestamp,
-            "row_count": 1,
-        })
+        ctx._checkpoint.update(
+            {
+                "batch_id": "batch-456",
+                "input_file_id": "file-123",
+                "row_mapping": {"row-0-abc12345": 0},
+                "template_errors": [],
+                "submitted_at": recent_timestamp,
+                "row_count": 1,
+            }
+        )
         return ctx
 
     @pytest.fixture
@@ -820,14 +822,16 @@ class TestAzureBatchLLMTransformTimeout:
         """Batch exceeding max_wait_hours returns error."""
         ctx = PluginContext(run_id="test-run", config={})
         # Pre-populate checkpoint from old timestamp for timeout test
-        ctx._checkpoint.update({
-            "batch_id": "batch-456",
-            "input_file_id": "file-123",
-            "row_mapping": {},
-            "template_errors": [],
-            "submitted_at": "2020-01-01T10:00:00+00:00",  # Old timestamp
-            "row_count": 1,
-        })
+        ctx._checkpoint.update(
+            {
+                "batch_id": "batch-456",
+                "input_file_id": "file-123",
+                "row_mapping": {},
+                "template_errors": [],
+                "submitted_at": "2020-01-01T10:00:00+00:00",  # Old timestamp
+                "row_count": 1,
+            }
+        )
 
         mock_client = Mock()
         mock_batch = Mock()
@@ -920,18 +924,20 @@ class TestAzureBatchLLMTransformResultAssembly:
         ctx = PluginContext(run_id="test-run", config={})
         # Pre-populate checkpoint for resume test
         recent_timestamp = datetime.now(UTC).isoformat()
-        ctx._checkpoint.update({
-            "batch_id": "batch-456",
-            "input_file_id": "file-123",
-            "row_mapping": {
-                "row-0-aaa": 0,
-                "row-1-bbb": 1,
-                "row-2-ccc": 2,
-            },
-            "template_errors": [],
-            "submitted_at": recent_timestamp,
-            "row_count": 3,
-        })
+        ctx._checkpoint.update(
+            {
+                "batch_id": "batch-456",
+                "input_file_id": "file-123",
+                "row_mapping": {
+                    "row-0-aaa": 0,
+                    "row-1-bbb": 1,
+                    "row-2-ccc": 2,
+                },
+                "template_errors": [],
+                "submitted_at": recent_timestamp,
+                "row_count": 3,
+            }
+        )
 
         mock_client = Mock()
         mock_batch = Mock()
@@ -1001,14 +1007,16 @@ class TestAzureBatchLLMTransformResultAssembly:
         ctx = PluginContext(run_id="test-run", config={})
         # Pre-populate checkpoint for resume test
         recent_timestamp = datetime.now(UTC).isoformat()
-        ctx._checkpoint.update({
-            "batch_id": "batch-456",
-            "input_file_id": "file-123",
-            "row_mapping": {"row-0-aaa": 0, "row-1-bbb": 1},
-            "template_errors": [],
-            "submitted_at": recent_timestamp,
-            "row_count": 2,
-        })
+        ctx._checkpoint.update(
+            {
+                "batch_id": "batch-456",
+                "input_file_id": "file-123",
+                "row_mapping": {"row-0-aaa": 0, "row-1-bbb": 1},
+                "template_errors": [],
+                "submitted_at": recent_timestamp,
+                "row_count": 2,
+            }
+        )
 
         mock_client = Mock()
         mock_batch = Mock()

@@ -1,5 +1,7 @@
 """Tests for Azure Blob Storage source plugin."""
 
+from collections.abc import Generator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -39,7 +41,7 @@ def ctx() -> PluginContext:
 
 
 @pytest.fixture
-def mock_blob_client():
+def mock_blob_client() -> Generator[MagicMock, None, None]:
     """Create a mock blob client for testing."""
     with patch(
         "elspeth.plugins.azure.blob_source.AzureBlobSource._get_blob_client"
@@ -62,17 +64,17 @@ def make_config(
     container: str = TEST_CONTAINER,
     blob_path: str = TEST_BLOB_PATH,
     format: str = "csv",
-    csv_options: dict | None = None,
-    json_options: dict | None = None,
-    schema: dict | None = None,
+    csv_options: dict[str, Any] | None = None,
+    json_options: dict[str, Any] | None = None,
+    schema: dict[str, Any] | None = None,
     on_validation_failure: str = QUARANTINE_SINK,
-) -> dict:
+) -> dict[str, Any]:
     """Helper to create config dicts with defaults.
 
     By default uses connection_string auth. Pass connection_string=None
     and set other auth options for managed identity or service principal.
     """
-    config: dict = {
+    config: dict[str, Any] = {
         "container": container,
         "blob_path": blob_path,
         "format": format,
@@ -430,6 +432,7 @@ class TestAzureBlobSourceValidation:
         assert quarantined.row["name"] == "bob"
         assert quarantined.row["score"] == "bad"  # Original value preserved
         assert quarantined.quarantine_destination == "quarantine"
+        assert quarantined.quarantine_error is not None
         assert "score" in quarantined.quarantine_error
 
     def test_discard_mode_does_not_yield_invalid_rows(

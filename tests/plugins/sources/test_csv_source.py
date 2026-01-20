@@ -195,7 +195,7 @@ class TestCSVSourceConfigValidation:
         from elspeth.plugins.config_base import PluginConfigError
         from elspeth.plugins.sources.csv_source import CSVSource
 
-        with pytest.raises(PluginConfigError, match="require.*schema"):
+        with pytest.raises(PluginConfigError, match=r"require.*schema"):
             CSVSource(
                 {"path": "/tmp/test.csv", "on_validation_failure": QUARANTINE_SINK}
             )
@@ -257,6 +257,7 @@ class TestCSVSourceQuarantineYielding:
         assert quarantined.row["name"] == "bob"
         assert quarantined.row["score"] == "bad"  # Original value preserved
         assert quarantined.quarantine_destination == "quarantine"
+        assert quarantined.quarantine_error is not None
         assert "score" in quarantined.quarantine_error  # Error mentions the field
 
     def test_discard_mode_does_not_yield_invalid_rows(

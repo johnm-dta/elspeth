@@ -21,7 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.11"
+  PYTHON_VERSION: "3.12"
   UV_VERSION: "0.5"
 
 jobs:
@@ -102,11 +102,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12", "3.13"]
         include:
-          - python-version: "3.11"
-            coverage: true
           - python-version: "3.12"
+            coverage: true
+          - python-version: "3.13"
             coverage: false
 
     steps:

@@ -21,7 +21,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, Self
 
-from jinja2 import Template
+from jinja2 import Environment, StrictUndefined
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from elspeth.contracts import ArtifactDescriptor, PluginSchema
@@ -278,8 +278,16 @@ class AzureBlobSink(BaseSink):
 
         Returns:
             Rendered blob path string.
+
+        Raises:
+            jinja2.UndefinedError: If template references undefined variables.
+                This is intentional fail-fast behavior to catch config typos
+                (e.g., {{ runid }} instead of {{ run_id }}).
         """
-        template = Template(self._blob_path_template)
+        # Use StrictUndefined to fail fast on typos in blob_path template.
+        # A typo like {{ runid }} should error, not silently become empty.
+        env = Environment(undefined=StrictUndefined)
+        template = env.from_string(self._blob_path_template)
         return template.render(
             run_id=ctx.run_id,
             timestamp=datetime.now(tz=UTC).isoformat(),

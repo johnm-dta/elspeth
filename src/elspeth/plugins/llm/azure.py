@@ -96,7 +96,12 @@ class AzureLLMTransform(BaseTransform):
 
         # Store common LLM settings (from LLMConfig)
         self._model = cfg.model or cfg.deployment_name
-        self._template = PromptTemplate(cfg.template)
+        self._template = PromptTemplate(
+            cfg.template,
+            template_source=cfg.template_source,
+            lookup_data=cfg.lookup,
+            lookup_source=cfg.lookup_source,
+        )
         self._system_prompt = cfg.system_prompt
         self._temperature = cfg.temperature
         self._max_tokens = cfg.max_tokens

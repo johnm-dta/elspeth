@@ -1603,12 +1603,17 @@ class TestElspethSettingsWithCoalesce:
 
 
 class TestSecretFieldFingerprinting:
-    """Test that secret fields are fingerprinted during config load."""
+    """Test that secret fields are preserved at load time and fingerprinted for audit.
 
-    def test_api_key_is_fingerprinted(
+    IMPORTANT: Secrets are kept in ElspethSettings for runtime use (transforms
+    need actual credentials). Fingerprinting happens only in resolve_config()
+    when creating the audit copy for Landscape storage.
+    """
+
+    def test_api_key_preserved_at_load_time(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """API keys in config should be fingerprinted, not stored raw."""
+        """API keys in config should be preserved for runtime use."""
         from elspeth.core.config import load_settings
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
@@ -1630,18 +1635,48 @@ output_sink: output
 
         settings = load_settings(config_file)
 
-        # API key should be removed (not stored raw)
-        assert "api_key" not in settings.datasource.options
+        # API key should be preserved for runtime (transforms need it!)
+        assert "api_key" in settings.datasource.options
+        assert settings.datasource.options["api_key"] == "sk-secret-key-12345"
+
+    def test_api_key_is_fingerprinted_in_resolve_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """API keys should be fingerprinted when creating audit copy."""
+        from elspeth.core.config import load_settings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: http_source
+  options:
+    api_key: sk-secret-key-12345
+    url: https://api.example.com
+sinks:
+  output:
+    plugin: csv_sink
+    options:
+      path: output.csv
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+        audit_config = resolve_config(settings)
+
+        # API key should be removed in audit copy
+        assert "api_key" not in audit_config["datasource"]["options"]
         # Should have a 64-char hex fingerprint
-        fingerprint = settings.datasource.options.get("api_key_fingerprint")
+        fingerprint = audit_config["datasource"]["options"].get("api_key_fingerprint")
         assert fingerprint is not None
         assert len(fingerprint) == 64
         assert all(c in "0123456789abcdef" for c in fingerprint)
 
-    def test_token_is_fingerprinted(
+    def test_token_preserved_at_load_time(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Token fields should be fingerprinted."""
+        """Token fields should be preserved for runtime use."""
         from elspeth.core.config import load_settings
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
@@ -1660,13 +1695,39 @@ output_sink: output
 
         settings = load_settings(config_file)
 
-        assert "token" not in settings.datasource.options
-        assert "token_fingerprint" in settings.datasource.options
+        assert "token" in settings.datasource.options
+        assert settings.datasource.options["token"] == "bearer-token-xyz"
 
-    def test_secret_suffix_is_fingerprinted(
+    def test_token_is_fingerprinted_in_resolve_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Fields ending in _secret should be fingerprinted."""
+        """Token fields should be fingerprinted in audit copy."""
+        from elspeth.core.config import load_settings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: webhook_source
+  options:
+    token: bearer-token-xyz
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+        audit_config = resolve_config(settings)
+
+        assert "token" not in audit_config["datasource"]["options"]
+        assert "token_fingerprint" in audit_config["datasource"]["options"]
+
+    def test_secret_suffix_preserved_at_load_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fields ending in _secret should be preserved for runtime."""
         from elspeth.core.config import load_settings
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
@@ -1685,13 +1746,39 @@ output_sink: output
 
         settings = load_settings(config_file)
 
-        assert "database_secret" not in settings.datasource.options
-        assert "database_secret_fingerprint" in settings.datasource.options
+        assert "database_secret" in settings.datasource.options
+        assert settings.datasource.options["database_secret"] == "my-db-password"
 
-    def test_sink_options_are_fingerprinted(
+    def test_secret_suffix_is_fingerprinted_in_resolve_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Secret fields in sink options should also be fingerprinted."""
+        """Fields ending in _secret should be fingerprinted in audit copy."""
+        from elspeth.core.config import load_settings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: custom_source
+  options:
+    database_secret: my-db-password
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+        audit_config = resolve_config(settings)
+
+        assert "database_secret" not in audit_config["datasource"]["options"]
+        assert "database_secret_fingerprint" in audit_config["datasource"]["options"]
+
+    def test_sink_options_preserved_at_load_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Secret fields in sink options should be preserved for runtime."""
         from elspeth.core.config import load_settings
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
@@ -1710,8 +1797,34 @@ output_sink: output
 
         settings = load_settings(config_file)
 
-        assert "password" not in settings.sinks["output"].options
-        assert "password_fingerprint" in settings.sinks["output"].options
+        assert "password" in settings.sinks["output"].options
+        assert settings.sinks["output"].options["password"] == "super-secret-password"
+
+    def test_sink_options_are_fingerprinted_in_resolve_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Secret fields in sink options should be fingerprinted in audit copy."""
+        from elspeth.core.config import load_settings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv_source
+sinks:
+  output:
+    plugin: database_sink
+    options:
+      password: super-secret-password
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+        audit_config = resolve_config(settings)
+
+        assert "password" not in audit_config["sinks"]["output"]["options"]
+        assert "password_fingerprint" in audit_config["sinks"]["output"]["options"]
 
     def test_non_secret_fields_preserved(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1742,10 +1855,10 @@ output_sink: output
         assert settings.datasource.options["path"] == "input.csv"
         assert settings.datasource.options["delimiter"] == ","
 
-    def test_row_plugin_options_are_fingerprinted(
+    def test_row_plugin_options_preserved_at_load_time(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Secret fields in row_plugins options should be fingerprinted."""
+        """Secret fields in row_plugins options should be preserved for runtime."""
         from elspeth.core.config import load_settings
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
@@ -1767,10 +1880,42 @@ row_plugins:
 
         settings = load_settings(config_file)
 
-        assert "api_key" not in settings.row_plugins[0].options
-        assert "api_key_fingerprint" in settings.row_plugins[0].options
+        # Secrets preserved for runtime
+        assert "api_key" in settings.row_plugins[0].options
+        assert settings.row_plugins[0].options["api_key"] == "openai-key-123"
         # Non-secret field preserved
         assert settings.row_plugins[0].options["model"] == "gpt-4"
+
+    def test_row_plugin_options_are_fingerprinted_in_resolve_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Secret fields in row_plugins options should be fingerprinted in audit copy."""
+        from elspeth.core.config import load_settings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: csv_source
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+row_plugins:
+  - plugin: llm_transform
+    options:
+      api_key: openai-key-123
+      model: gpt-4
+""")
+
+        settings = load_settings(config_file)
+        audit_config = resolve_config(settings)
+
+        assert "api_key" not in audit_config["row_plugins"][0]["options"]
+        assert "api_key_fingerprint" in audit_config["row_plugins"][0]["options"]
+        # Non-secret field preserved
+        assert audit_config["row_plugins"][0]["options"]["model"] == "gpt-4"
 
     # === Tests for recursive/nested fingerprinting ===
 
@@ -1842,11 +1987,16 @@ row_plugins:
         assert "ELSPETH_FINGERPRINT_KEY" in str(exc_info.value)
         assert "api_key" in str(exc_info.value)
 
-    def test_missing_key_raises_error_on_load_settings(
+    def test_load_settings_allows_secrets_without_fingerprint_key(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """load_settings should raise SecretFingerprintError when key missing."""
-        from elspeth.core.config import SecretFingerprintError, load_settings
+        """load_settings should allow secrets without fingerprint key (for runtime).
+
+        Secrets are preserved at load time for transforms to use. The
+        fingerprint key is only required when calling resolve_config()
+        to create the audit copy.
+        """
+        from elspeth.core.config import load_settings
 
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
         monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
@@ -1863,8 +2013,39 @@ sinks:
 output_sink: output
 """)
 
+        # load_settings succeeds even without fingerprint key
+        settings = load_settings(config_file)
+        assert settings.datasource.options["api_key"] == "sk-secret-key"
+
+    def test_missing_key_raises_error_on_resolve_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """resolve_config should raise SecretFingerprintError when key missing."""
+        from elspeth.core.config import (
+            SecretFingerprintError,
+            load_settings,
+            resolve_config,
+        )
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+datasource:
+  plugin: http_source
+  options:
+    api_key: sk-secret-key
+sinks:
+  output:
+    plugin: csv_sink
+output_sink: output
+""")
+
+        settings = load_settings(config_file)
+
         with pytest.raises(SecretFingerprintError) as exc_info:
-            load_settings(config_file)
+            resolve_config(settings)
 
         assert "ELSPETH_FINGERPRINT_KEY" in str(exc_info.value)
 
@@ -1979,19 +2160,19 @@ output_sink: output
     def test_landscape_url_password_fingerprinted(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """landscape.url password should be fingerprinted."""
-        from elspeth.core.config import _fingerprint_config_options
+        """landscape.url password should be fingerprinted in audit copy."""
+        from elspeth.core.config import _fingerprint_config_for_audit
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
 
-        raw_config = {
+        config_dict = {
             "landscape": {"url": "postgresql://user:mysecret@host/db"},
             "datasource": {"plugin": "csv", "options": {}},
             "sinks": {"output": {"plugin": "csv_sink"}},
             "output_sink": "output",
         }
 
-        result = _fingerprint_config_options(raw_config)
+        result = _fingerprint_config_for_audit(config_dict)
 
         assert "mysecret" not in result["landscape"]["url"]
         assert "***" not in result["landscape"]["url"]
@@ -2002,19 +2183,19 @@ output_sink: output
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """landscape.url password should be redacted (with flag) in dev mode."""
-        from elspeth.core.config import _fingerprint_config_options
+        from elspeth.core.config import _fingerprint_config_for_audit
 
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
         monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
 
-        raw_config = {
+        config_dict = {
             "landscape": {"url": "postgresql://user:mysecret@host/db"},
             "datasource": {"plugin": "csv", "options": {}},
             "sinks": {"output": {"plugin": "csv_sink"}},
             "output_sink": "output",
         }
 
-        result = _fingerprint_config_options(raw_config)
+        result = _fingerprint_config_for_audit(config_dict)
 
         assert "mysecret" not in result["landscape"]["url"]
         assert "url_password_fingerprint" not in result["landscape"]

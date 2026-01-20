@@ -75,6 +75,17 @@ class AzureBatchConfig(TransformDataConfig):
         24, ge=1, le=24, description="Maximum batch wait time in hours"
     )
 
+    # Template metadata fields for audit trail (matching LLMConfig)
+    lookup: dict[str, Any] | None = Field(
+        None, description="Lookup data loaded from YAML file"
+    )
+    template_source: str | None = Field(
+        None, description="Template file path for audit (None if inline)"
+    )
+    lookup_source: str | None = Field(
+        None, description="Lookup file path for audit (None if no lookup)"
+    )
+
 
 class AzureBatchLLMTransform(BaseTransform):
     """Batch LLM transform using Azure OpenAI Batch API.
@@ -134,7 +145,12 @@ class AzureBatchLLMTransform(BaseTransform):
         self._endpoint = cfg.endpoint.rstrip("/")
         self._api_key = cfg.api_key
         self._api_version = cfg.api_version
-        self._template = PromptTemplate(cfg.template)
+        self._template = PromptTemplate(
+            cfg.template,
+            template_source=cfg.template_source,
+            lookup_data=cfg.lookup,
+            lookup_source=cfg.lookup_source,
+        )
         self._system_prompt = cfg.system_prompt
         self._temperature = cfg.temperature
         self._max_tokens = cfg.max_tokens
@@ -436,10 +452,13 @@ class AzureBatchLLMTransform(BaseTransform):
         self._update_checkpoint(ctx, checkpoint_data)
 
         # 5. Raise BatchPendingError - engine handles retry scheduling
+        # Include checkpoint and node_id so caller can persist and restore
         raise BatchPendingError(
             batch.id,
             "submitted",
             check_after_seconds=self._poll_interval,
+            checkpoint=checkpoint_data,
+            node_id=self.node_id,
         )
 
     def _check_batch_status(
@@ -544,10 +563,13 @@ class AzureBatchLLMTransform(BaseTransform):
                     )
 
             # Still waiting - raise BatchPendingError for retry
+            # Include checkpoint and node_id so caller can persist and restore
             raise BatchPendingError(
                 batch_id,
                 batch.status,
                 check_after_seconds=self._poll_interval,
+                checkpoint=checkpoint,
+                node_id=self.node_id,
             )
 
     def _download_results(

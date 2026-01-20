@@ -199,7 +199,7 @@ allow_hits:
   # whole cleanup process.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=189"
+  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=190"
     owner: "architecture"
     reason: "Best-effort cleanup: one plugin failure shouldn't prevent others from cleanup"
     safety: "Logged with warning, other plugins still get close() called"
@@ -212,19 +212,19 @@ allow_hits:
   # messages. These lookups are for UI/diagnostic purposes only.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=226"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=227"
     owner: "architecture"
     reason: "Building lookup for gate names - only gates (not transforms) are in map"
     safety: "None means 'not a gate at this sequence' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=233"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=234"
     owner: "architecture"
     reason: "Building lookup for config gate names"
     safety: "None means 'not a config gate at this name' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=249"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=250"
     owner: "architecture"
     reason: "Fallback for error message - use node_id if gate name not found"
     safety: "Error message still produced with node_id as fallback"
@@ -237,7 +237,7 @@ allow_hits:
   # others use dynamic. The default value is well-defined.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_execute_run:line=532"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_execute_run:line=555"
     owner: "architecture"
     reason: "Optional schema config with explicit default - not all nodes define schemas"
     safety: "Default value is well-defined: dynamic fields"
@@ -551,7 +551,7 @@ allow_hits:
     safety: "Explicit None check follows; falls back to default or keeps original for later error"
     expires: null  # Permanent - intentional design
 
-  - key: "core/config.py:R1:_fingerprint_config_options:line=1012"
+  - key: "core/config.py:R1:_fingerprint_config_for_audit:line=1054"
     owner: "architecture"
     reason: "Optional env var: ELSPETH_ALLOW_RAW_SECRETS is not required in production"
     safety: "Missing env var = empty string = False = production mode (fail-closed)"
@@ -596,19 +596,19 @@ allow_hits:
   # Response fields 'usage' and 'model' are optional per OpenRouter API docs.
   # ============================================================
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=173"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=179"
     owner: "architecture"
     reason: "Trust boundary: HTTP response headers may not include content-type"
     safety: "Graceful default to 'unknown' - used for error reporting only"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=202"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=208"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API 'usage' field is optional in response"
     safety: "Graceful default to {} - usage is metadata, not critical for processing"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=212"
+  - key: "plugins/llm/openrouter.py:R1:OpenRouterLLMTransform:process:line=218"
     owner: "architecture"
     reason: "Trust boundary: OpenRouter API may return different model than requested"
     safety: "Graceful fallback to requested model - audit still captures actual value"
@@ -627,100 +627,100 @@ allow_hits:
   # ============================================================
 
   # --- Checkpoint API capability checks (fail-fast if missing) ---
-  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_get_checkpoint:line=274"
+  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_get_checkpoint:line=290"
     owner: "architecture"
     reason: "Capability check: verify checkpoint API exists before using it"
     safety: "Raises RuntimeError if method doesn't exist - fail-fast, not silent degradation"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_update_checkpoint:line=291"
+  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_update_checkpoint:line=307"
     owner: "architecture"
     reason: "Capability check: verify checkpoint API exists before using it"
     safety: "Raises RuntimeError if method doesn't exist - fail-fast, not silent degradation"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_clear_checkpoint:line=307"
+  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_clear_checkpoint:line=323"
     owner: "architecture"
     reason: "Capability check: verify checkpoint API exists before using it"
     safety: "Raises RuntimeError if method doesn't exist - fail-fast, not silent degradation"
     expires: null  # Permanent - intentional design
 
   # --- Checkpoint data access ---
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_process_batch:line=255"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_process_batch:line=271"
     owner: "architecture"
     reason: "Checkpoint may be None or empty dict - checking for batch_id existence"
     safety: "None/missing batch_id means PHASE 1 (fresh submit), explicit logic follows"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_check_batch_status:line=528"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_check_batch_status:line=547"
     owner: "architecture"
     reason: "submitted_at may not exist in old checkpoint format"
     safety: "Missing submitted_at skips timeout check - graceful degradation"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=572"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=594"
     owner: "architecture"
     reason: "row_mapping may not exist in corrupted checkpoint"
     safety: "Empty dict default allows graceful recovery - rows return with error"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=573"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=595"
     owner: "architecture"
     reason: "template_errors may not exist in old checkpoint format"
     safety: "Empty list default means no template errors tracked - graceful degradation"
     expires: null  # Permanent - intentional design
 
   # --- Reverse lookup for row index to custom_id ---
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=629"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=651"
     owner: "architecture"
     reason: "Intentional Optional API: rows with template errors aren't in mapping"
     safety: "None is checked explicitly on next line with 'if custom_id is None'"
     expires: null  # Permanent - intentional design
 
   # --- Azure Batch API response trust boundary ---
-  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_check_batch_status:line=498"
+  - key: "plugins/llm/azure_batch.py:R3:AzureBatchLLMTransform:_check_batch_status:line=517"
     owner: "architecture"
     reason: "Trust boundary: Azure batch.errors may not exist on all batch statuses"
     safety: "Graceful handling - error info still returned without detailed errors"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R2:AzureBatchLLMTransform:_check_batch_status:line=481"
+  - key: "plugins/llm/azure_batch.py:R2:AzureBatchLLMTransform:_check_batch_status:line=500"
     owner: "architecture"
     reason: "Trust boundary: Azure batch.output_file_id only exists on completed batches"
     safety: "Recorded as None in audit trail - field is informational only"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=645"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=667"
     owner: "architecture"
     reason: "Trust boundary: Azure batch result 'error' field is optional"
     safety: "Graceful handling - checks for error before extracting response"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=659"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=681"
     owner: "architecture"
     reason: "Trust boundary: Azure batch result 'response' field structure varies"
     safety: "Graceful default to {} - handles missing/malformed responses"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=660"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=682"
     owner: "architecture"
     reason: "Trust boundary: Azure batch response 'body' field may be missing"
     safety: "Graceful default to {} - handles missing/malformed responses"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=661"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=683"
     owner: "architecture"
     reason: "Trust boundary: Azure batch response 'choices' field may be missing"
     safety: "Graceful default to [] - explicit check for empty choices follows"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=664"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=686"
     owner: "architecture"
     reason: "Trust boundary: Azure choice 'message.content' structure may vary"
     safety: "Graceful default to '' - empty content is valid for audit trail"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=665"
+  - key: "plugins/llm/azure_batch.py:R1:AzureBatchLLMTransform:_download_results:line=687"
     owner: "architecture"
     reason: "Trust boundary: Azure response 'usage' field is optional"
     safety: "Graceful default to {} - usage is metadata, not critical"

@@ -355,6 +355,7 @@ class Orchestrator:
         config: PipelineConfig,
         graph: ExecutionGraph | None = None,
         settings: "ElspethSettings | None" = None,
+        batch_checkpoints: dict[str, dict[str, Any]] | None = None,
     ) -> RunResult:
         """Execute a pipeline run.
 
@@ -362,6 +363,10 @@ class Orchestrator:
             config: Pipeline configuration with plugins
             graph: Pre-validated execution graph (required)
             settings: Full settings (for post-run hooks like export)
+            batch_checkpoints: Batch transform checkpoints to restore (from
+                previous BatchPendingError). Maps node_id -> checkpoint_data.
+                Used when retrying a run after a batch transform raised
+                BatchPendingError.
 
         Raises:
             ValueError: If graph is not provided
@@ -402,7 +407,7 @@ class Orchestrator:
         try:
             with self._span_factory.run_span(run.run_id):
                 result = self._execute_run(
-                    recorder, run.run_id, config, graph, settings
+                    recorder, run.run_id, config, graph, settings, batch_checkpoints
                 )
 
             # Complete run
@@ -468,6 +473,7 @@ class Orchestrator:
         config: PipelineConfig,
         graph: ExecutionGraph,
         settings: "ElspethSettings | None" = None,
+        batch_checkpoints: dict[str, dict[str, Any]] | None = None,
     ) -> RunResult:
         """Execute the run using the execution graph.
 
@@ -475,6 +481,14 @@ class Orchestrator:
         - Node IDs and metadata via topological_order() and get_node_info()
         - Edges via get_edges()
         - Explicit ID mappings via get_sink_id_map() and get_transform_id_map()
+
+        Args:
+            recorder: LandscapeRecorder for audit trail
+            run_id: Run identifier
+            config: Pipeline configuration
+            graph: Execution graph
+            settings: Full settings (optional)
+            batch_checkpoints: Restored batch checkpoints (maps node_id -> checkpoint_data)
         """
         # Get execution order from graph
         execution_order = graph.topological_order()
@@ -609,10 +623,12 @@ class Orchestrator:
         )
 
         # Create context with the LandscapeRecorder
+        # Restore batch checkpoints if provided (from previous BatchPendingError)
         ctx = PluginContext(
             run_id=run_id,
             config=config.config,
             landscape=recorder,
+            _batch_checkpoints=batch_checkpoints or {},
         )
 
         # Call on_start for all plugins BEFORE processing

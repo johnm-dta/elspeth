@@ -100,8 +100,15 @@ class PluginContext:
     # === Phase 6: Checkpoint API ===
     # Used by batch transforms (e.g., azure_batch_llm) for crash recovery.
     # The checkpoint stores batch_id, row_mapping, etc. between invocations.
-    # In production, the engine persists this to durable storage.
+    #
+    # Checkpoints are keyed by node_id to support multiple batch transforms.
+    # The orchestrator restores these from the BatchPendingError.checkpoint
+    # when scheduling retries.
     _checkpoint: dict[str, Any] = field(default_factory=dict)
+
+    # Batch checkpoints restored from previous BatchPendingError
+    # Maps node_id -> checkpoint_data for each batch transform
+    _batch_checkpoints: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def get_checkpoint(self) -> dict[str, Any] | None:
         """Get checkpoint state for batch transforms.
@@ -109,9 +116,19 @@ class PluginContext:
         Used by batch transforms to recover state after crashes.
         Returns None if no checkpoint exists (empty dict = no checkpoint).
 
+        First checks for a restored batch checkpoint (from a previous
+        BatchPendingError), then falls back to the local checkpoint.
+
         Returns:
             Checkpoint dict with batch state, or None if empty
         """
+        # First check for restored batch checkpoint (keyed by node_id)
+        if self.node_id and self.node_id in self._batch_checkpoints:
+            restored = self._batch_checkpoints[self.node_id]
+            if restored:
+                return restored
+
+        # Fall back to local checkpoint
         return self._checkpoint if self._checkpoint else None
 
     def update_checkpoint(self, data: dict[str, Any]) -> None:

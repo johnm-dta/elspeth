@@ -979,44 +979,87 @@ def _sanitize_dsn(
     return str(sanitized), password_fingerprint, True
 
 
-def _fingerprint_config_options(
+def _expand_config_templates(
     raw_config: dict[str, Any],
     settings_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Walk config and fingerprint secrets in all plugin options.
+    """Expand template_file and lookup_file references in config.
 
-    Also expands template_file and lookup_file references if settings_path provided.
-
-    Processes:
-    - datasource.options
-    - sinks.*.options
-    - row_plugins[*].options (template file expansion + secrets)
-    - aggregations[*].options
-    - landscape.url (DSN password)
+    This function is called at load time to expand file references into
+    their contents. Secrets are NOT fingerprinted here - that happens
+    in resolve_config() when creating the audit copy.
 
     Args:
         raw_config: Raw config dict from Dynaconf
         settings_path: Path to settings file for resolving relative template paths
 
     Returns:
-        Config with secrets fingerprinted and template files expanded
+        Config with template files expanded (secrets still present)
+
+    Raises:
+        TemplateFileError: If template/lookup files not found or invalid
+    """
+    if settings_path is None:
+        return raw_config
+
+    config = dict(raw_config)
+
+    # === Row plugin options - expand template files ===
+    if "row_plugins" in config and isinstance(config["row_plugins"], list):
+        plugins = []
+        for plugin_config in config["row_plugins"]:
+            if isinstance(plugin_config, dict):
+                plugin = dict(plugin_config)
+                if "options" in plugin and isinstance(plugin["options"], dict):
+                    plugin["options"] = _expand_template_files(
+                        plugin["options"], settings_path
+                    )
+                plugins.append(plugin)
+            else:
+                plugins.append(plugin_config)
+        config["row_plugins"] = plugins
+
+    return config
+
+
+def _fingerprint_config_for_audit(
+    config_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Fingerprint secrets in config for audit storage.
+
+    Called by resolve_config() to create a copy safe for audit storage.
+    The original config (with secrets) is untouched.
+
+    Processes:
+    - datasource.options
+    - sinks.*.options
+    - row_plugins[*].options
+    - aggregations[*].options
+    - landscape.url (DSN password)
+
+    Args:
+        config_dict: Config dict to fingerprint (will be copied)
+
+    Returns:
+        Deep copy with secrets fingerprinted
 
     Raises:
         SecretFingerprintError: If secrets found but no fingerprint key
                                 and ELSPETH_ALLOW_RAW_SECRETS is not set
-        TemplateFileError: If template/lookup files not found or invalid
     """
+    import copy
     import os
 
     # Check dev mode override
     allow_raw = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS", "").lower() == "true"
     fail_if_no_key = not allow_raw
 
-    config = dict(raw_config)
+    # Deep copy to avoid mutating the original
+    config = copy.deepcopy(config_dict)
 
     # === Landscape URL (DSN password) ===
     if "landscape" in config and isinstance(config["landscape"], dict):
-        landscape = dict(config["landscape"])
+        landscape = config["landscape"]
         if "url" in landscape and isinstance(landscape["url"], str):
             # _sanitize_dsn returns (sanitized_url, fingerprint, had_password)
             sanitized_url, password_fp, had_password = _sanitize_dsn(
@@ -1029,67 +1072,50 @@ def _fingerprint_config_options(
             elif had_password and not fail_if_no_key:
                 # Dev mode: password was removed but not fingerprinted
                 landscape["url_password_redacted"] = True
-        config["landscape"] = landscape
 
     # === Datasource options ===
     if "datasource" in config and isinstance(config["datasource"], dict):
-        ds = dict(config["datasource"])
+        ds = config["datasource"]
         if "options" in ds and isinstance(ds["options"], dict):
             ds["options"] = _fingerprint_secrets(
                 ds["options"], fail_if_no_key=fail_if_no_key
             )
-        config["datasource"] = ds
 
     # === Sink options ===
     if "sinks" in config and isinstance(config["sinks"], dict):
-        sinks = {}
-        for name, sink_config in config["sinks"].items():
-            if isinstance(sink_config, dict):
-                sink = dict(sink_config)
-                if "options" in sink and isinstance(sink["options"], dict):
-                    sink["options"] = _fingerprint_secrets(
-                        sink["options"], fail_if_no_key=fail_if_no_key
-                    )
-                sinks[name] = sink
-            else:
-                sinks[name] = sink_config
-        config["sinks"] = sinks
+        for sink in config["sinks"].values():
+            if (
+                isinstance(sink, dict)
+                and "options" in sink
+                and isinstance(sink["options"], dict)
+            ):
+                sink["options"] = _fingerprint_secrets(
+                    sink["options"], fail_if_no_key=fail_if_no_key
+                )
 
     # === Row plugin options ===
     if "row_plugins" in config and isinstance(config["row_plugins"], list):
-        plugins = []
-        for plugin_config in config["row_plugins"]:
-            if isinstance(plugin_config, dict):
-                plugin = dict(plugin_config)
-                if "options" in plugin and isinstance(plugin["options"], dict):
-                    # Expand template files first (if settings_path available)
-                    if settings_path is not None:
-                        plugin["options"] = _expand_template_files(
-                            plugin["options"], settings_path
-                        )
-                    # Then fingerprint secrets
-                    plugin["options"] = _fingerprint_secrets(
-                        plugin["options"], fail_if_no_key=fail_if_no_key
-                    )
-                plugins.append(plugin)
-            else:
-                plugins.append(plugin_config)
-        config["row_plugins"] = plugins
+        for plugin in config["row_plugins"]:
+            if (
+                isinstance(plugin, dict)
+                and "options" in plugin
+                and isinstance(plugin["options"], dict)
+            ):
+                plugin["options"] = _fingerprint_secrets(
+                    plugin["options"], fail_if_no_key=fail_if_no_key
+                )
 
     # === Aggregation options ===
     if "aggregations" in config and isinstance(config["aggregations"], list):
-        aggs = []
-        for agg_config in config["aggregations"]:
-            if isinstance(agg_config, dict):
-                agg = dict(agg_config)
-                if "options" in agg and isinstance(agg["options"], dict):
-                    agg["options"] = _fingerprint_secrets(
-                        agg["options"], fail_if_no_key=fail_if_no_key
-                    )
-                aggs.append(agg)
-            else:
-                aggs.append(agg_config)
-        config["aggregations"] = aggs
+        for agg in config["aggregations"]:
+            if (
+                isinstance(agg, dict)
+                and "options" in agg
+                and isinstance(agg["options"], dict)
+            ):
+                agg["options"] = _fingerprint_secrets(
+                    agg["options"], fail_if_no_key=fail_if_no_key
+                )
 
     return config
 
@@ -1202,8 +1228,10 @@ def load_settings(config_path: Path) -> ElspethSettings:
     # Expand ${VAR} and ${VAR:-default} patterns in config values
     raw_config = _expand_env_vars(raw_config)
 
-    # Expand template files and fingerprint secrets in plugin options before validation
-    raw_config = _fingerprint_config_options(raw_config, settings_path=config_path)
+    # Expand template files in plugin options before validation
+    # NOTE: Secrets are NOT fingerprinted here - they stay available for runtime.
+    # Fingerprinting happens in resolve_config() when creating the audit copy.
+    raw_config = _expand_config_templates(raw_config, settings_path=config_path)
 
     return ElspethSettings(**raw_config)
 
@@ -1214,10 +1242,16 @@ def resolve_config(settings: ElspethSettings) -> dict[str, Any]:
     This is the resolved configuration that gets stored in Landscape
     for reproducibility. It includes all settings (explicit + defaults).
 
+    IMPORTANT: This function fingerprints secrets before returning.
+    The returned dict is safe for audit storage but should NOT be used
+    for runtime operations that need actual secret values.
+
     Args:
         settings: Validated ElspethSettings instance
 
     Returns:
-        Dict representation suitable for JSON serialization
+        Dict representation suitable for JSON serialization (secrets fingerprinted)
     """
-    return settings.model_dump(mode="json")
+    config_dict = settings.model_dump(mode="json")
+    # Fingerprint secrets for audit storage
+    return _fingerprint_config_for_audit(config_dict)

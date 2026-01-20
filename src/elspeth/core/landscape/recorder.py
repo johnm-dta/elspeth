@@ -40,6 +40,7 @@ from elspeth.contracts import (
     RoutingSpec,
     Row,
     RowLineage,
+    RowOutcome,
     Run,
     RunStatus,
     Token,
@@ -61,6 +62,7 @@ from elspeth.core.landscape.schema import (
     routing_events_table,
     rows_table,
     runs_table,
+    token_outcomes_table,
     token_parents_table,
     tokens_table,
     transform_errors_table,
@@ -2096,6 +2098,71 @@ class LandscapeRecorder:
         """
         grade = self.compute_reproducibility_grade(run_id)
         return self.complete_run(run_id, status, reproducibility_grade=grade.value)
+
+    # === Token Outcome Recording (AUD-001) ===
+
+    def record_token_outcome(
+        self,
+        run_id: str,
+        token_id: str,
+        outcome: RowOutcome,
+        *,
+        sink_name: str | None = None,
+        batch_id: str | None = None,
+        fork_group_id: str | None = None,
+        join_group_id: str | None = None,
+        expand_group_id: str | None = None,
+        error_hash: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        """Record a token's outcome in the audit trail.
+
+        Called at the moment the outcome is determined in processor.py.
+        For BUFFERED tokens, a second call records the terminal outcome
+        when the batch flushes.
+
+        Args:
+            run_id: Current run ID
+            token_id: Token that reached this outcome
+            outcome: The RowOutcome enum value
+            sink_name: For ROUTED/COMPLETED - which sink
+            batch_id: For CONSUMED_IN_BATCH/BUFFERED - which batch
+            fork_group_id: For FORKED - the fork group
+            join_group_id: For COALESCED - the join group
+            expand_group_id: For EXPANDED - the expand group
+            error_hash: For FAILED/QUARANTINED - hash of error details
+            context: Optional additional context (stored as JSON)
+
+        Returns:
+            outcome_id for tracking
+
+        Raises:
+            IntegrityError: If terminal outcome already exists for token
+        """
+        outcome_id = f"out_{_generate_id()[:12]}"
+        is_terminal = outcome.is_terminal
+        context_json = json.dumps(context) if context else None
+
+        with self._db.connection() as conn:
+            conn.execute(
+                token_outcomes_table.insert().values(
+                    outcome_id=outcome_id,
+                    run_id=run_id,
+                    token_id=token_id,
+                    outcome=outcome.value,
+                    is_terminal=1 if is_terminal else 0,
+                    recorded_at=_now(),
+                    sink_name=sink_name,
+                    batch_id=batch_id,
+                    fork_group_id=fork_group_id,
+                    join_group_id=join_group_id,
+                    expand_group_id=expand_group_id,
+                    error_hash=error_hash,
+                    context_json=context_json,
+                )
+            )
+
+        return outcome_id
 
     # === Validation Error Recording (WP-11.99) ===
 

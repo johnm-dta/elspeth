@@ -190,3 +190,132 @@ class TestTokenOutcomesTableSchema:
         token_id_col = token_outcomes_table.c.token_id
         fk_targets = [fk.target_fullname for fk in token_id_col.foreign_keys]
         assert "tokens.token_id" in fk_targets
+
+
+class TestRecordTokenOutcome:
+    """Test record_token_outcome() method."""
+
+    @pytest.fixture
+    def db(self):
+        """Create in-memory database with schema."""
+        from elspeth.core.landscape import LandscapeDB
+
+        db = LandscapeDB.in_memory()
+        return db
+
+    @pytest.fixture
+    def recorder(self, db):
+        """Create recorder with test database."""
+        from elspeth.core.landscape import LandscapeRecorder
+
+        return LandscapeRecorder(db)
+
+    @pytest.fixture
+    def run_with_token(self, recorder):
+        """Create a run with a token for testing."""
+        from elspeth.contracts import Determinism, NodeType
+        from elspeth.contracts.schema import SchemaConfig
+
+        # Begin run
+        run = recorder.begin_run(config={"test": True}, canonical_version="v1")
+
+        # Register source node
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="source_1",
+            plugin_name="test_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=SchemaConfig.from_dict({"fields": "dynamic"}),
+        )
+
+        # Create row and token
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id="source_1",
+            row_index=0,
+            data={"id": 1},
+        )
+        token = recorder.create_token(
+            row_id=row.row_id,
+        )
+
+        return run, token
+
+    def test_record_completed_outcome(self, recorder, run_with_token) -> None:
+        from elspeth.contracts import RowOutcome
+
+        run, token = run_with_token
+
+        outcome_id = recorder.record_token_outcome(
+            run_id=run.run_id,
+            token_id=token.token_id,
+            outcome=RowOutcome.COMPLETED,
+            sink_name="output",
+        )
+
+        assert outcome_id is not None
+        assert outcome_id.startswith("out_")
+
+    def test_record_routed_outcome(self, recorder, run_with_token) -> None:
+        from elspeth.contracts import RowOutcome
+
+        run, token = run_with_token
+
+        outcome_id = recorder.record_token_outcome(
+            run_id=run.run_id,
+            token_id=token.token_id,
+            outcome=RowOutcome.ROUTED,
+            sink_name="errors",
+        )
+
+        assert outcome_id is not None
+
+    def test_record_buffered_then_terminal(self, recorder, run_with_token) -> None:
+        """BUFFERED followed by terminal should succeed."""
+        from elspeth.contracts import RowOutcome
+
+        run, token = run_with_token
+
+        # First record BUFFERED (non-terminal) - no batch_id needed
+        recorder.record_token_outcome(
+            run_id=run.run_id,
+            token_id=token.token_id,
+            outcome=RowOutcome.BUFFERED,
+        )
+
+        # Then record terminal outcome - should succeed
+        outcome_id = recorder.record_token_outcome(
+            run_id=run.run_id,
+            token_id=token.token_id,
+            outcome=RowOutcome.CONSUMED_IN_BATCH,
+        )
+
+        assert outcome_id is not None
+
+    def test_duplicate_terminal_raises(self, recorder, run_with_token) -> None:
+        """Two terminal outcomes for same token should raise IntegrityError."""
+        from sqlalchemy.exc import IntegrityError
+
+        from elspeth.contracts import RowOutcome
+
+        run, token = run_with_token
+
+        # First terminal outcome
+        recorder.record_token_outcome(
+            run_id=run.run_id,
+            token_id=token.token_id,
+            outcome=RowOutcome.COMPLETED,
+            sink_name="output",
+        )
+
+        # Second terminal outcome should fail
+        with pytest.raises(IntegrityError):
+            recorder.record_token_outcome(
+                run_id=run.run_id,
+                token_id=token.token_id,
+                outcome=RowOutcome.ROUTED,
+                sink_name="errors",
+            )

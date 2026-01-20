@@ -238,6 +238,7 @@ def _execute_pipeline(
     from elspeth.plugins.transforms import FieldMapper, PassThrough
     from elspeth.plugins.transforms.batch_stats import BatchStats
     from elspeth.plugins.transforms.json_explode import JSONExplode
+    from elspeth.plugins.transforms.keyword_filter import KeywordFilter
 
     # Plugin registries
     TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
@@ -245,6 +246,7 @@ def _execute_pipeline(
         "field_mapper": FieldMapper,
         "batch_stats": BatchStats,
         "json_explode": JSONExplode,
+        "keyword_filter": KeywordFilter,
     }
 
     # Instantiate source from new schema
@@ -421,6 +423,10 @@ PLUGIN_REGISTRY: dict[str, list[PluginInfo]] = {
         ),
         PluginInfo(
             name="json_explode", description="Explode array field into multiple rows"
+        ),
+        PluginInfo(
+            name="keyword_filter",
+            description="Filter rows containing blocked content patterns",
         ),
     ],
     "sink": [
@@ -627,6 +633,7 @@ def _build_resume_pipeline_config(
     from elspeth.plugins.transforms import FieldMapper, PassThrough
     from elspeth.plugins.transforms.batch_stats import BatchStats
     from elspeth.plugins.transforms.json_explode import JSONExplode
+    from elspeth.plugins.transforms.keyword_filter import KeywordFilter
 
     # Plugin registries (same as _execute_pipeline)
     TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
@@ -634,6 +641,7 @@ def _build_resume_pipeline_config(
         "field_mapper": FieldMapper,
         "batch_stats": BatchStats,
         "json_explode": JSONExplode,
+        "keyword_filter": KeywordFilter,
     }
 
     # Source is NullSource for resume - data comes from payloads

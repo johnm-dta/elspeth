@@ -14,9 +14,10 @@ class ElspethBuiltinTransforms:
         from elspeth.plugins.transforms.batch_stats import BatchStats
         from elspeth.plugins.transforms.field_mapper import FieldMapper
         from elspeth.plugins.transforms.json_explode import JSONExplode
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
         from elspeth.plugins.transforms.passthrough import PassThrough
 
-        return [PassThrough, FieldMapper, BatchStats, JSONExplode]
+        return [PassThrough, FieldMapper, BatchStats, JSONExplode, KeywordFilter]
 
 
 # Singleton instance for registration

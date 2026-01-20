@@ -378,3 +378,66 @@ class TestGetTokenOutcome:
     def test_get_nonexistent_returns_none(self, recorder, db) -> None:
         result = recorder.get_token_outcome("nonexistent_token")
         assert result is None
+
+
+class TestExplainIncludesOutcome:
+    """Test that explain() returns recorded outcomes."""
+
+    def test_explain_returns_outcome(self) -> None:
+        from elspeth.contracts import Determinism, NodeType, RowOutcome
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.core.landscape.lineage import explain
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="src",
+            plugin_name="test",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=SchemaConfig.from_dict({"fields": "dynamic"}),
+        )
+        row = recorder.create_row(run.run_id, "src", 0, {"x": 1})
+        token = recorder.create_token(row.row_id)
+        recorder.record_token_outcome(run.run_id, token.token_id, RowOutcome.COMPLETED, sink_name="out")
+
+        result = explain(recorder, run.run_id, token_id=token.token_id)
+
+        assert result is not None
+        assert result.outcome is not None
+        assert result.outcome.outcome == RowOutcome.COMPLETED
+
+    def test_explain_returns_none_outcome_when_not_recorded(self) -> None:
+        from elspeth.contracts import Determinism, NodeType
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.core.landscape.lineage import explain
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        recorder.register_node(
+            run_id=run.run_id,
+            node_id="src",
+            plugin_name="test",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=SchemaConfig.from_dict({"fields": "dynamic"}),
+        )
+        row = recorder.create_row(run.run_id, "src", 0, {"x": 1})
+        token = recorder.create_token(row.row_id)
+        # No outcome recorded
+
+        result = explain(recorder, run.run_id, token_id=token.token_id)
+
+        assert result is not None
+        assert result.outcome is None

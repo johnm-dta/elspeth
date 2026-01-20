@@ -117,6 +117,7 @@ class AuditedHTTPClient(AuditedClientBase):
         *,
         json: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> httpx.Response:
         """Make POST request with automatic audit recording.
 
@@ -124,6 +125,7 @@ class AuditedHTTPClient(AuditedClientBase):
             url: URL path (appended to base_url if configured)
             json: JSON body to send (optional)
             headers: Additional headers for this request
+            timeout: Request timeout in seconds (uses client default if None)
 
         Returns:
             httpx.Response object
@@ -135,6 +137,7 @@ class AuditedHTTPClient(AuditedClientBase):
 
         full_url = f"{self._base_url}{url}" if self._base_url else url
         merged_headers = {**self._default_headers, **(headers or {})}
+        effective_timeout = timeout if timeout is not None else self._timeout
 
         # Filter sensitive headers from recorded request
         request_data = {
@@ -147,7 +150,7 @@ class AuditedHTTPClient(AuditedClientBase):
         start = time.perf_counter()
 
         try:
-            with httpx.Client(timeout=self._timeout) as client:
+            with httpx.Client(timeout=effective_timeout) as client:
                 response = client.post(
                     full_url,
                     json=json,

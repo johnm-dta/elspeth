@@ -608,3 +608,32 @@ class TestOpenRouterLLMTransformIntegration:
         assert result.reason["reason"] == "api_call_failed"
         assert "connect" in result.reason["error"].lower()
         assert result.retryable is False  # Connection errors not auto-retryable
+
+    def test_timeout_passed_to_http_client(self, ctx: PluginContext) -> None:
+        """Custom timeout_seconds is passed to HTTP client post call."""
+        transform = OpenRouterLLMTransform(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "template": "{{ text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "timeout_seconds": 120.0,  # Custom timeout
+            }
+        )
+
+        ctx.http_client = Mock()
+        response = Mock(spec=httpx.Response)
+        response.status_code = 200
+        response.json.return_value = {
+            "choices": [{"message": {"content": "Response"}}],
+            "model": "openai/gpt-4",
+            "usage": {},
+        }
+        response.raise_for_status = Mock()
+        ctx.http_client.post.return_value = response
+
+        transform.process({"text": "hello"}, ctx)
+
+        # Verify timeout was passed to the HTTP client
+        call_kwargs = ctx.http_client.post.call_args.kwargs
+        assert call_kwargs["timeout"] == 120.0

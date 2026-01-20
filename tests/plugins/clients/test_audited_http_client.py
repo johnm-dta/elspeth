@@ -413,3 +413,60 @@ class TestAuditedHTTPClient:
         # Non-sensitive headers SHOULD be recorded
         assert response_headers["content-type"] == "application/json"
         assert response_headers["x-request-id"] == "req-456"
+
+    def test_per_request_timeout_overrides_default(self) -> None:
+        """Per-request timeout overrides the client's default timeout."""
+        recorder = self._create_mock_recorder()
+
+        # Client has default timeout of 30s
+        client = AuditedHTTPClient(
+            recorder=recorder,
+            state_id="state_123",
+            timeout=30.0,
+        )
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b""
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value = mock_client
+
+            # Request with per-request timeout of 120s
+            client.post("https://api.example.com/endpoint", timeout=120.0)
+
+        # Verify per-request timeout was used instead of default
+        mock_client_class.assert_called_once_with(timeout=120.0)
+
+    def test_none_timeout_uses_default(self) -> None:
+        """When timeout=None is passed, the client's default timeout is used."""
+        recorder = self._create_mock_recorder()
+
+        client = AuditedHTTPClient(
+            recorder=recorder,
+            state_id="state_123",
+            timeout=45.0,  # Default
+        )
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b""
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value = mock_client
+
+            # Request without explicit timeout
+            client.post("https://api.example.com/endpoint")
+
+        # Verify default timeout was used
+        mock_client_class.assert_called_once_with(timeout=45.0)

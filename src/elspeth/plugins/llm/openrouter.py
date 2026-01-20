@@ -135,6 +135,7 @@ class OpenRouterLLMTransform(BaseTransform):
                     "Authorization": f"Bearer {self._api_key}",
                     "Content-Type": "application/json",
                 },
+                timeout=self._timeout,
             )
             response.raise_for_status()
             data = response.json()

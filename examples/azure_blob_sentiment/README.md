@@ -180,6 +180,52 @@ datasource:
     blob_path: "data/input.csv"
 ```
 
+## Secret Management with Azure Key Vault
+
+For production deployments, store the ELSPETH fingerprint key in Azure Key Vault instead of environment variables.
+
+### Setup
+
+1. Create a Key Vault and add a secret:
+```bash
+# Create Key Vault (if needed)
+az keyvault create --name my-elspeth-vault --resource-group my-rg --location eastus
+
+# Add the fingerprint key secret
+az keyvault secret set \
+  --vault-name my-elspeth-vault \
+  --name elspeth-fingerprint-key \
+  --value "$(openssl rand -base64 32)"
+```
+
+2. Grant access to your workload identity:
+```bash
+# For Managed Identity (recommended for Azure-hosted workloads)
+az keyvault set-policy --name my-elspeth-vault \
+  --object-id <managed-identity-object-id> \
+  --secret-permissions get
+
+# For Service Principal
+az keyvault set-policy --name my-elspeth-vault \
+  --spn <service-principal-app-id> \
+  --secret-permissions get
+```
+
+3. Configure ELSPETH:
+```bash
+export ELSPETH_KEYVAULT_URL="https://my-elspeth-vault.vault.azure.net"
+# Optional: custom secret name (default: elspeth-fingerprint-key)
+# export ELSPETH_KEYVAULT_SECRET_NAME="my-custom-secret-name"
+```
+
+### Resolution Order
+
+ELSPETH checks for the fingerprint key in this order:
+1. `ELSPETH_FINGERPRINT_KEY` environment variable (for dev/testing)
+2. Azure Key Vault (if `ELSPETH_KEYVAULT_URL` is set)
+
+This allows local development with env vars while production uses Key Vault.
+
 ## Supported Formats
 
 Both source and sink support:

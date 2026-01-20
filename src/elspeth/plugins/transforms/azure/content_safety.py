@@ -143,6 +143,7 @@ class AzureContentSafety(BaseTransform):
                         "error_type": "rate_limited" if is_rate_limit else "http_error",
                         "status_code": e.response.status_code,
                         "message": str(e),
+                        "retryable": is_rate_limit,
                     },
                     retryable=is_rate_limit,
                 )
@@ -152,6 +153,7 @@ class AzureContentSafety(BaseTransform):
                         "reason": "api_error",
                         "error_type": "network_error",
                         "message": str(e),
+                        "retryable": True,
                     },
                     retryable=True,
                 )

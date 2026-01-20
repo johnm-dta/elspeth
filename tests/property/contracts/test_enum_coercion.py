@@ -59,13 +59,13 @@ DATABASE_STORED_ENUMS: list[type[Enum]] = [
     RoutingMode,
     CallType,
     CallStatus,
+    RowOutcome,  # AUD-001: Now stored in token_outcomes table
 ]
 
-# RowOutcome is plain Enum (derived at query time, not stored)
-# It has different behavior - we test it separately
-DERIVED_ENUMS: list[type[Enum]] = [
-    RowOutcome,
-]
+# Note: All enums are now (str, Enum) for database storage.
+# Previously RowOutcome was plain Enum (derived at query time),
+# but AUD-001 changed this to explicit storage in token_outcomes table.
+DERIVED_ENUMS: list[type[Enum]] = []
 
 
 # =============================================================================
@@ -330,26 +330,41 @@ class TestExportStatusCoercion:
 
 
 # =============================================================================
-# Property Tests for Derived Enums (not stored in DB)
+# Property Tests for RowOutcome (stored in token_outcomes table - AUD-001)
 # =============================================================================
 
 
 class TestRowOutcomeCoercion:
     """Property tests for RowOutcome enum.
 
-    RowOutcome is a plain Enum (not str, Enum) because it's DERIVED
-    at query time from node_states, routing_events, and batch_members,
-    NOT stored directly in the database.
-
-    Different behavior: we access .value explicitly when needed.
+    AUD-001: RowOutcome is now a (str, Enum) stored in the token_outcomes table.
+    Previously it was derived at query time from node_states, routing_events,
+    and batch_members. Now outcomes are explicitly recorded at determination time.
     """
 
     @given(outcome=valid_enum_values(RowOutcome))
     @settings(max_examples=50)
-    def test_valid_enum_member_has_value(self, outcome: RowOutcome) -> None:
-        """Property: RowOutcome members have string values."""
-        assert isinstance(outcome.value, str)
-        assert len(outcome.value) > 0
+    def test_valid_enum_member_roundtrips(self, outcome: RowOutcome) -> None:
+        """Property: RowOutcome member -> string -> RowOutcome is identity."""
+        string_value = outcome.value
+        recovered = RowOutcome(string_value)
+        assert recovered == outcome
+        assert recovered is outcome  # Same object (enum singleton)
+
+    @given(string_value=valid_enum_strings(RowOutcome))
+    @settings(max_examples=50)
+    def test_valid_string_coerces_to_enum(self, string_value: str) -> None:
+        """Property: Valid string values coerce to correct enum member."""
+        result = RowOutcome(string_value)
+        assert isinstance(result, RowOutcome)
+        assert result.value == string_value
+
+    @given(invalid=invalid_enum_strings(RowOutcome))
+    @settings(max_examples=100)
+    def test_invalid_string_raises_valueerror(self, invalid: str) -> None:
+        """Property: Invalid strings MUST raise ValueError (Tier 1 integrity)."""
+        with pytest.raises(ValueError):
+            RowOutcome(invalid)
 
     @given(outcome=valid_enum_values(RowOutcome))
     @settings(max_examples=50)

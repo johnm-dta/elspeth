@@ -91,3 +91,48 @@ Analyze these entries:
         assert result.template_source == "prompts/greeting.j2"
         assert result.lookup_hash is not None
         assert result.lookup_source == "prompts/lookups.yaml"
+
+    def test_lookup_simple_access(self) -> None:
+        """Templates can access lookup data."""
+        template = PromptTemplate(
+            "Category: {{ lookup.categories[0] }}",
+            lookup_data={"categories": ["Electronics", "Clothing", "Food"]},
+        )
+        result = template.render({})
+        assert result == "Category: Electronics"
+
+    def test_lookup_two_dimensional(self) -> None:
+        """Templates can do two-dimensional lookups: lookup.X[row.Y]."""
+        template = PromptTemplate(
+            "Tone: {{ lookup.tones[row.tone_id] }}",
+            lookup_data={"tones": {"0": "formal", "1": "casual", "2": "technical"}},
+        )
+        result = template.render({"tone_id": "1"})
+        assert result == "Tone: casual"
+
+    def test_lookup_missing_key_raises_error(self) -> None:
+        """Missing lookup key raises TemplateError (strict mode)."""
+        template = PromptTemplate(
+            "Category: {{ lookup.categories[row.cat_id] }}",
+            lookup_data={"categories": {"0": "A", "1": "B"}},
+        )
+        with pytest.raises(TemplateError):
+            template.render({"cat_id": "99"})  # No key "99"
+
+    def test_lookup_iteration(self) -> None:
+        """Templates can iterate over lookup data."""
+        template = PromptTemplate(
+            """Categories:
+{% for cat in lookup.categories %}
+- {{ cat.name }}
+{% endfor %}""",
+            lookup_data={
+                "categories": [
+                    {"name": "Electronics"},
+                    {"name": "Clothing"},
+                ]
+            },
+        )
+        result = template.render({})
+        assert "- Electronics" in result
+        assert "- Clothing" in result

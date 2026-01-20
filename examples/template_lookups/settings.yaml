@@ -1,16 +1,24 @@
 # Template Lookups Example
 # Demonstrates external template files and two-dimensional lookups
 
+landscape:
+  url: sqlite:///examples/template_lookups/runs/audit.db
+
 datasource:
-  plugin: csv_local
+  plugin: csv
   options:
     path: examples/template_lookups/input.csv
+    on_validation_failure: discard
+    schema:
+      fields: dynamic
 
 sinks:
   output:
-    plugin: csv_local
+    plugin: csv
     options:
       path: examples/template_lookups/output/results.csv
+      schema:
+        fields: dynamic
 
 output_sink: output
 

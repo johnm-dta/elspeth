@@ -68,10 +68,14 @@ This ensures every classification can be traced back to the exact template and l
 ```bash
 # Set your API key
 export OPENROUTER_API_KEY="your-key-here"
+export ELSPETH_ALLOW_RAW_SECRETS=true  # For development only
 
 # Run the pipeline
-elspeth --settings examples/template_lookups/settings.yaml
+python -m elspeth.cli run --settings examples/template_lookups/settings.yaml --execute --verbose
 
 # Check results
 cat examples/template_lookups/output/results.csv
+
+# Check landscape database
+sqlite3 examples/template_lookups/runs/audit.db "SELECT run_id, status FROM runs;"
 ```

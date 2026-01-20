@@ -571,6 +571,18 @@ allow_hits:
     safety: "None is safe for raw_response - only used for debugging, not audit"
     expires: null  # Permanent - intentional design
 
+  - key: "plugins/clients/http.py:R1:AuditedHTTPClient:post:line=165"
+    owner: "architecture"
+    reason: "Trust boundary: HTTP response headers from external server may lack content-type"
+    safety: "Graceful default to empty string - treats as non-JSON, still records body"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/clients/http.py:R4:AuditedHTTPClient:post:line=169"
+    owner: "architecture"
+    reason: "Trust boundary: external HTTP response may claim JSON but contain invalid JSON"
+    safety: "Falls back to text storage - body is still recorded for audit"
+    expires: null  # Permanent - intentional design
+
   # ============================================================
   # OPENROUTER LLM TRANSFORM TRUST BOUNDARY (Permanent)
   # ============================================================

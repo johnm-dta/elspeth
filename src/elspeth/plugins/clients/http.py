@@ -159,6 +159,24 @@ class AuditedHTTPClient(AuditedClientBase):
 
             latency_ms = (time.perf_counter() - start) * 1000
 
+            # Build response data with full body for audit trail
+            # Try to decode as JSON for structured storage, fall back to text
+            response_body: Any = None
+            content_type = response.headers.get("content-type", "")
+            if "application/json" in content_type:
+                try:
+                    response_body = response.json()
+                except Exception:
+                    # If JSON decode fails, store as text
+                    response_body = response.text
+            else:
+                # For non-JSON, store text (truncated for very large responses)
+                response_body = (
+                    response.text[:100_000]
+                    if len(response.text) > 100_000
+                    else response.text
+                )
+
             self._recorder.record_call(
                 state_id=self._state_id,
                 call_index=call_index,
@@ -169,6 +187,7 @@ class AuditedHTTPClient(AuditedClientBase):
                     "status_code": response.status_code,
                     "headers": self._filter_response_headers(dict(response.headers)),
                     "body_size": len(response.content),
+                    "body": response_body,
                 },
                 latency_ms=latency_ms,
             )

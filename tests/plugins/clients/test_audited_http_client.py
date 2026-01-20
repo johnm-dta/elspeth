@@ -20,7 +20,7 @@ class TestAuditedHTTPClient:
         return recorder
 
     def test_successful_post_records_to_audit_trail(self) -> None:
-        """Successful HTTP POST is recorded to audit trail."""
+        """Successful HTTP POST is recorded to audit trail with full response body."""
         recorder = self._create_mock_recorder()
 
         client = AuditedHTTPClient(
@@ -29,11 +29,13 @@ class TestAuditedHTTPClient:
             timeout=30.0,
         )
 
-        # Mock httpx.Client
+        # Mock httpx.Client with JSON response
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
         mock_response.headers = {"content-type": "application/json"}
         mock_response.content = b'{"result": "success"}'
+        mock_response.json.return_value = {"result": "success"}
+        mock_response.text = '{"result": "success"}'
 
         with patch("httpx.Client") as mock_client_class:
             mock_client = MagicMock()
@@ -63,6 +65,7 @@ class TestAuditedHTTPClient:
         )
         assert call_kwargs["request_data"]["json"] == {"data": "value"}
         assert call_kwargs["response_data"]["status_code"] == 200
+        assert call_kwargs["response_data"]["body"] == {"result": "success"}
         assert call_kwargs["latency_ms"] > 0
 
     def test_call_index_increments(self) -> None:
@@ -470,3 +473,61 @@ class TestAuditedHTTPClient:
 
         # Verify default timeout was used
         mock_client_class.assert_called_once_with(timeout=45.0)
+
+    def test_non_json_response_body_recorded_as_text(self) -> None:
+        """Non-JSON response body is recorded as text."""
+        recorder = self._create_mock_recorder()
+
+        client = AuditedHTTPClient(
+            recorder=recorder,
+            state_id="state_123",
+        )
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {"content-type": "text/plain"}
+        mock_response.content = b"Plain text response"
+        mock_response.text = "Plain text response"
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value = mock_client
+
+            client.post("https://api.example.com/endpoint")
+
+        call_kwargs = recorder.record_call.call_args[1]
+        assert call_kwargs["response_data"]["body"] == "Plain text response"
+
+    def test_json_response_body_recorded_as_dict(self) -> None:
+        """JSON response body is recorded as parsed dict."""
+        recorder = self._create_mock_recorder()
+
+        client = AuditedHTTPClient(
+            recorder=recorder,
+            state_id="state_123",
+        )
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {"content-type": "application/json; charset=utf-8"}
+        mock_response.content = b'{"choices": [{"message": {"content": "Hello"}}]}'
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "Hello"}}]
+        }
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value = mock_client
+
+            client.post("https://api.example.com/endpoint")
+
+        call_kwargs = recorder.record_call.call_args[1]
+        assert call_kwargs["response_data"]["body"] == {
+            "choices": [{"message": {"content": "Hello"}}]
+        }

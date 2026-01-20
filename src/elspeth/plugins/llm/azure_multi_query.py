@@ -287,9 +287,154 @@ class AzureMultiQueryLLMTransform(BaseTransform):
         row: dict[str, Any],
         ctx: PluginContext,
     ) -> TransformResult:
-        """Process a single row with all queries."""
-        # Placeholder - will be implemented in Task 4
-        raise NotImplementedError("_process_single_row not yet implemented")
+        """Process a single row with all queries in parallel.
+
+        Executes all (case_study x criterion) queries for this row.
+        All-or-nothing: if any query fails, the entire row fails.
+
+        Args:
+            row: Input row with all case study fields
+            ctx: Plugin context with landscape and state_id
+
+        Returns:
+            TransformResult with all query results merged, or error
+        """
+        if ctx.landscape is None or ctx.state_id is None:
+            raise RuntimeError("Multi-query transform requires landscape recorder and state_id.")
+
+        # Capture recorder for pooled execution
+        if self._recorder is None:
+            self._recorder = ctx.landscape
+
+        # Execute all queries
+        if self._executor is not None:
+            # Parallel execution via PooledExecutor
+            results = self._execute_queries_parallel(row, ctx.state_id)
+        else:
+            # Sequential fallback
+            results = self._execute_queries_sequential(row, ctx.state_id)
+
+        # Clean up cached clients for this state_id
+        with self._llm_clients_lock:
+            self._llm_clients.pop(ctx.state_id, None)
+
+        # Check for failures (all-or-nothing)
+        failed = [(spec, r) for spec, r in zip(self._query_specs, results, strict=True) if r.status != "success"]
+        if failed:
+            return TransformResult.error(
+                {
+                    "reason": "query_failed",
+                    "failed_queries": [
+                        {
+                            "query": spec.output_prefix,
+                            "error": r.reason,
+                        }
+                        for spec, r in failed
+                    ],
+                    "succeeded_count": len(results) - len(failed),
+                    "total_count": len(results),
+                }
+            )
+
+        # Merge all results into output row
+        output = dict(row)
+        for result in results:
+            # Check for row presence: successful results should always have a row,
+            # but TransformResult supports multi-output scenarios where row may be
+            # None even on success. This check is defensive for that edge case.
+            if result.row is not None:
+                output.update(result.row)
+
+        return TransformResult.success(output)
+
+    def _execute_queries_parallel(
+        self,
+        row: dict[str, Any],
+        state_id: str,
+    ) -> list[TransformResult]:
+        """Execute queries in parallel via ThreadPoolExecutor.
+
+        This method uses ThreadPoolExecutor directly for per-row query parallelism
+        rather than PooledExecutor.execute_batch(). The distinction:
+
+        - PooledExecutor.execute_batch(): Designed for cross-row batching with AIMD
+          throttling to adaptively manage rate limits across many rows.
+        - ThreadPoolExecutor here: Simple parallel execution within a single row.
+          All queries share the same underlying AzureOpenAI client which handles
+          its own rate limiting, so AIMD overhead is unnecessary.
+
+        Args:
+            row: The input row data
+            state_id: State ID for audit trail
+
+        Returns:
+            List of TransformResults in query spec order
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Type narrowing - caller ensures executor is not None
+        assert self._executor is not None
+
+        results_by_index: dict[int, TransformResult] = {}
+
+        with ThreadPoolExecutor(max_workers=self._executor.pool_size) as executor:
+            futures = {
+                executor.submit(
+                    self._process_single_query,
+                    row,
+                    spec,
+                    state_id,
+                ): i
+                for i, spec in enumerate(self._query_specs)
+            }
+
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results_by_index[idx] = future.result()
+                except CapacityError as e:
+                    # If capacity error escapes, treat as error
+                    results_by_index[idx] = TransformResult.error(
+                        {
+                            "reason": "capacity_exhausted",
+                            "query": self._query_specs[idx].output_prefix,
+                            "error": str(e),
+                        }
+                    )
+
+        # Return in submission order
+        return [results_by_index[i] for i in range(len(self._query_specs))]
+
+    def _execute_queries_sequential(
+        self,
+        row: dict[str, Any],
+        state_id: str,
+    ) -> list[TransformResult]:
+        """Execute queries sequentially (fallback when no executor).
+
+        Args:
+            row: The input row data
+            state_id: State ID for audit trail
+
+        Returns:
+            List of TransformResults in query spec order
+        """
+        results: list[TransformResult] = []
+
+        for spec in self._query_specs:
+            try:
+                result = self._process_single_query(row, spec, state_id)
+            except CapacityError as e:
+                result = TransformResult.error(
+                    {
+                        "reason": "rate_limited",
+                        "error": str(e),
+                        "query": spec.output_prefix,
+                    }
+                )
+            results.append(result)
+
+        return results
 
     def _process_batch(
         self,

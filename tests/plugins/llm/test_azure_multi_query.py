@@ -265,3 +265,118 @@ class TestSingleQueryProcessing:
             transform._get_llm_client("state-123")
 
         assert "recorder" in str(exc_info.value).lower()
+
+
+class TestRowProcessing:
+    """Tests for full row processing (all queries)."""
+
+    def test_process_row_executes_all_queries(self) -> None:
+        """Process executes all (case_study x criterion) queries."""
+        # 2 case studies x 2 criteria = 4 queries
+        responses = [
+            {"score": 85, "rationale": "CS1 diagnosis"},
+            {"score": 90, "rationale": "CS1 treatment"},
+            {"score": 75, "rationale": "CS2 diagnosis"},
+            {"score": 80, "rationale": "CS2 treatment"},
+        ]
+
+        with mock_azure_openai_responses(responses) as mock_client:
+            transform = AzureMultiQueryLLMTransform(make_config())
+            transform.on_start(make_plugin_context())
+            ctx = make_plugin_context()
+
+            row = {
+                "cs1_bg": "case1 bg",
+                "cs1_sym": "case1 sym",
+                "cs1_hist": "case1 hist",
+                "cs2_bg": "case2 bg",
+                "cs2_sym": "case2 sym",
+                "cs2_hist": "case2 hist",
+            }
+
+            result = transform.process(row, ctx)
+
+            assert result.status == "success"
+            assert mock_client.chat.completions.create.call_count == 4
+
+    def test_process_row_merges_all_results(self) -> None:
+        """All query results are merged into single output row."""
+        responses = [
+            {"score": 85, "rationale": "R1"},
+            {"score": 90, "rationale": "R2"},
+            {"score": 75, "rationale": "R3"},
+            {"score": 80, "rationale": "R4"},
+        ]
+
+        with mock_azure_openai_responses(responses):
+            transform = AzureMultiQueryLLMTransform(make_config())
+            transform.on_start(make_plugin_context())
+            ctx = make_plugin_context()
+
+            row = {
+                "cs1_bg": "bg1",
+                "cs1_sym": "sym1",
+                "cs1_hist": "hist1",
+                "cs2_bg": "bg2",
+                "cs2_sym": "sym2",
+                "cs2_hist": "hist2",
+                "original_field": "preserved",
+            }
+
+            result = transform.process(row, ctx)
+
+            assert result.status == "success"
+            output = result.row
+
+            # Original fields preserved
+            assert output["original_field"] == "preserved"
+
+            # All 4 queries produced output (2 fields each = 8 assessment fields)
+            assert "cs1_diagnosis_score" in output
+            assert "cs1_diagnosis_rationale" in output
+            assert "cs1_treatment_score" in output
+            assert "cs2_diagnosis_score" in output
+            assert "cs2_treatment_score" in output
+
+    def test_process_row_fails_if_any_query_fails(self) -> None:
+        """All-or-nothing: if any query fails, entire row fails."""
+        # First 3 succeed, 4th returns invalid JSON
+        call_count = [0]
+
+        def make_response(**kwargs: Any) -> Mock:
+            call_count[0] += 1
+            if call_count[0] == 4:
+                content = "not valid json"
+            else:
+                content = json.dumps({"score": 85, "rationale": "ok"})
+
+            mock_response = Mock()
+            mock_response.choices = [Mock(message=Mock(content=content))]
+            mock_response.model = "gpt-4o"
+            mock_response.usage = Mock(prompt_tokens=10, completion_tokens=5)
+            mock_response.model_dump = Mock(return_value={})
+            return mock_response
+
+        with patch("openai.AzureOpenAI") as mock_azure_class:
+            mock_client = Mock()
+            mock_client.chat.completions.create.side_effect = make_response
+            mock_azure_class.return_value = mock_client
+
+            transform = AzureMultiQueryLLMTransform(make_config())
+            transform.on_start(make_plugin_context())
+            ctx = make_plugin_context()
+
+            row = {
+                "cs1_bg": "bg",
+                "cs1_sym": "sym",
+                "cs1_hist": "hist",
+                "cs2_bg": "bg",
+                "cs2_sym": "sym",
+                "cs2_hist": "hist",
+            }
+
+            result = transform.process(row, ctx)
+
+            # Entire row fails
+            assert result.status == "error"
+            assert "query_failed" in result.reason["reason"]

@@ -224,8 +224,19 @@ class AzureMultiQueryLLMTransform(BaseTransform):
             )
 
         # 6. Parse JSON response (THEIR DATA - wrap)
+        # Strip markdown code blocks if present (common LLM behavior)
+        content = response.content.strip()
+        if content.startswith("```"):
+            # Remove opening fence (```json or ```)
+            first_newline = content.find("\n")
+            if first_newline != -1:
+                content = content[first_newline + 1 :]
+            # Remove closing fence
+            if content.endswith("```"):
+                content = content[:-3].strip()
+
         try:
-            parsed = json.loads(response.content)
+            parsed = json.loads(content)
         except json.JSONDecodeError as e:
             return TransformResult.error(
                 {

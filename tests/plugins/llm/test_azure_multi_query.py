@@ -210,7 +210,7 @@ class TestSingleQueryProcessing:
     def test_process_single_query_raises_capacity_error_on_rate_limit(self) -> None:
         """Rate limit errors are converted to CapacityError for pooled retry."""
         from elspeth.plugins.clients.llm import RateLimitError
-        from elspeth.plugins.llm.capacity_errors import CapacityError
+        from elspeth.plugins.pooling import CapacityError
 
         with patch("openai.AzureOpenAI") as mock_azure_class:
             mock_client = Mock()

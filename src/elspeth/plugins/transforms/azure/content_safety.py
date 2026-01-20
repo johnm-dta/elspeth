@@ -121,6 +121,10 @@ class AzureContentSafetyConfig(TransformDataConfig):
         )
 
 
+# Rebuild model to resolve nested model references
+AzureContentSafetyConfig.model_rebuild()
+
+
 class AzureContentSafety(BaseTransform):
     """Analyze content using Azure Content Safety API.
 

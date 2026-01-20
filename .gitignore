@@ -126,3 +126,6 @@ examples/*/runs/*
 !examples/*/.gitkeep
 !examples/*/output/.gitkeep
 !examples/*/runs/.gitkeep
+
+# Real/production data - never commit
+real/

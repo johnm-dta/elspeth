@@ -23,6 +23,7 @@ class QuerySpec:
         input_fields: List of row field names to map to input_1, input_2, etc.
         output_prefix: Prefix for output fields (e.g., "cs1_diagnosis")
         criterion_data: Full criterion object for template injection
+        case_study_data: Full case study object for template injection
     """
 
     case_study_name: str
@@ -30,17 +31,18 @@ class QuerySpec:
     input_fields: list[str]
     output_prefix: str
     criterion_data: dict[str, Any]
+    case_study_data: dict[str, Any]
 
     def build_template_context(self, row: dict[str, Any]) -> dict[str, Any]:
         """Build template context for this query.
 
-        Maps input_fields to input_1, input_2, etc. and injects criterion data.
+        Maps input_fields to input_1, input_2, etc. and injects criterion and case_study data.
 
         Args:
             row: Full row data
 
         Returns:
-            Context dict with input_N, criterion, and row
+            Context dict with input_N, criterion, case_study, and row
         """
         context: dict[str, Any] = {}
 
@@ -54,6 +56,9 @@ class QuerySpec:
         # Inject criterion data
         context["criterion"] = self.criterion_data
 
+        # Inject case study data (name, context, metadata)
+        context["case_study"] = self.case_study_data
+
         # Include full row for row-based lookups
         context["row"] = row
 
@@ -66,10 +71,14 @@ class CaseStudyConfig(PluginConfig):
     Attributes:
         name: Unique identifier for this case study (used in output field prefix)
         input_fields: Row field names to map to input_1, input_2, etc.
+        context: Context type (e.g., "Capability", "Capacity") for template use
+        description: Human-readable description of this case study type
     """
 
     name: str = Field(..., description="Case study identifier")
     input_fields: list[str] = Field(..., description="Row fields to map to input_N")
+    context: str | None = Field(None, description="Context type (e.g., Capability, Capacity)")
+    description: str | None = Field(None, description="Human-readable description")
 
     @field_validator("input_fields")
     @classmethod
@@ -78,6 +87,15 @@ class CaseStudyConfig(PluginConfig):
         if not v:
             raise ValueError("input_fields cannot be empty")
         return v
+
+    def to_template_data(self) -> dict[str, Any]:
+        """Convert to dict for template injection."""
+        return {
+            "name": self.name,
+            "context": self.context,
+            "description": self.description,
+            "input_fields": self.input_fields,
+        }
 
 
 class CriterionConfig(PluginConfig):
@@ -163,6 +181,7 @@ class MultiQueryConfig(AzureOpenAIConfig):
                     input_fields=case_study.input_fields,
                     output_prefix=f"{case_study.name}_{criterion.name}",
                     criterion_data=criterion.to_template_data(),
+                    case_study_data=case_study.to_template_data(),
                 )
                 specs.append(spec)
 

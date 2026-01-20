@@ -17,19 +17,21 @@ class TestQuerySpec:
             input_fields=["cs1_bg", "cs1_sym", "cs1_hist"],
             output_prefix="cs1_diagnosis",
             criterion_data={"code": "DIAG", "subcriteria": ["accuracy"]},
+            case_study_data={"name": "cs1", "context": "Capability"},
         )
         assert spec.case_study_name == "cs1"
         assert spec.criterion_name == "diagnosis"
         assert spec.output_prefix == "cs1_diagnosis"
 
     def test_query_spec_build_template_context(self) -> None:
-        """QuerySpec builds template context with positional inputs and criterion."""
+        """QuerySpec builds template context with positional inputs, criterion, and case_study."""
         spec = QuerySpec(
             case_study_name="cs1",
             criterion_name="diagnosis",
             input_fields=["cs1_bg", "cs1_sym", "cs1_hist"],
             output_prefix="cs1_diagnosis",
             criterion_data={"code": "DIAG", "subcriteria": ["accuracy"]},
+            case_study_data={"name": "cs1", "context": "Capability", "description": "Technical capability"},
         )
         row = {
             "cs1_bg": "45yo male",
@@ -43,6 +45,8 @@ class TestQuerySpec:
         assert context["input_2"] == "chest pain"
         assert context["input_3"] == "family history"
         assert context["criterion"]["code"] == "DIAG"
+        assert context["case_study"]["name"] == "cs1"
+        assert context["case_study"]["context"] == "Capability"
         assert context["row"] == row  # Full row for row-based lookups
 
     def test_build_template_context_raises_on_missing_field(self) -> None:
@@ -53,6 +57,7 @@ class TestQuerySpec:
             input_fields=["cs1_bg", "missing_field"],
             output_prefix="cs1_diagnosis",
             criterion_data={},
+            case_study_data={"name": "cs1"},
         )
         row = {"cs1_bg": "data"}
 
@@ -63,21 +68,23 @@ class TestQuerySpec:
         assert "cs1_diagnosis" in str(exc_info.value)
 
     def test_build_template_context_empty_input_fields(self) -> None:
-        """Empty input_fields produces context with only criterion and row."""
+        """Empty input_fields produces context with criterion, case_study, and row."""
         spec = QuerySpec(
             case_study_name="cs1",
             criterion_name="diagnosis",
             input_fields=[],
             output_prefix="cs1_diagnosis",
             criterion_data={"code": "DIAG"},
+            case_study_data={"name": "cs1", "context": "Capability"},
         )
         row = {"some_field": "value"}
         context = spec.build_template_context(row)
 
         # No input_N fields
         assert "input_1" not in context
-        # But criterion and row are present
+        # But criterion, case_study, and row are present
         assert context["criterion"] == {"code": "DIAG"}
+        assert context["case_study"] == {"name": "cs1", "context": "Capability"}
         assert context["row"] == row
 
 
@@ -117,6 +124,43 @@ class TestCaseStudyConfig:
 
         with pytest.raises(PluginConfigError):
             CaseStudyConfig.from_dict({"name": "cs1", "input_fields": []})
+
+    def test_case_study_with_context_and_description(self) -> None:
+        """CaseStudyConfig accepts optional context and description."""
+        from elspeth.plugins.llm.multi_query import CaseStudyConfig
+
+        config = CaseStudyConfig.from_dict(
+            {
+                "name": "cs1",
+                "input_fields": ["field_a"],
+                "context": "Capability",
+                "description": "Technical capability demonstration",
+            }
+        )
+        assert config.name == "cs1"
+        assert config.context == "Capability"
+        assert config.description == "Technical capability demonstration"
+
+    def test_case_study_to_template_data(self) -> None:
+        """to_template_data returns dict suitable for template injection."""
+        from elspeth.plugins.llm.multi_query import CaseStudyConfig
+
+        config = CaseStudyConfig.from_dict(
+            {
+                "name": "cs1",
+                "input_fields": ["field_a", "field_b"],
+                "context": "Capability",
+                "description": "Technical capability",
+            }
+        )
+        data = config.to_template_data()
+
+        assert data == {
+            "name": "cs1",
+            "context": "Capability",
+            "description": "Technical capability",
+            "input_fields": ["field_a", "field_b"],
+        }
 
 
 class TestCriterionConfig:

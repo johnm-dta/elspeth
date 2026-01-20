@@ -85,6 +85,7 @@ class AzureLLMTransform(BaseTransform):
     """
 
     name = "azure_llm"
+    is_batch_aware = True  # Enable aggregation buffering
 
     # LLM transforms are non-deterministic by nature
     determinism: Determinism = Determinism.NON_DETERMINISTIC
@@ -155,8 +156,15 @@ class AzureLLMTransform(BaseTransform):
         """
         self._recorder = ctx.landscape
 
-    def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
-        """Process a row through Azure OpenAI.
+    def process(
+        self,
+        row: dict[str, Any] | list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Process row(s) through Azure OpenAI.
+
+        When is_batch_aware=True and used in aggregation, receives list[dict].
+        Otherwise receives single dict.
 
         Routes to pooled or sequential execution based on pool_size config.
 
@@ -166,13 +174,19 @@ class AzureLLMTransform(BaseTransform):
         3. Internal logic (OUR CODE) - let crash
 
         Args:
-            row: Input row matching input_schema
+            row: Single row dict OR list of row dicts (batch aggregation)
             ctx: Plugin context with landscape and state_id
 
         Returns:
-            TransformResult with processed row or error
+            TransformResult with processed row(s) or error
         """
-        # Route to pooled execution if configured
+        # Dispatch to batch processing if given a list
+        # NOTE: This isinstance check is legitimate polymorphic dispatch for
+        # batch-aware transforms, not defensive programming to hide bugs.
+        if isinstance(row, list):
+            return self._process_batch(row, ctx)
+
+        # Route to pooled execution if configured (single row)
         if self._executor is not None:
             if ctx.landscape is None or ctx.state_id is None:
                 raise RuntimeError(
@@ -361,6 +375,199 @@ class AzureLLMTransform(BaseTransform):
         output[f"{self._response_field}_model"] = response.model
 
         return TransformResult.success(output)
+
+    def _process_batch(
+        self,
+        rows: list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Process batch of rows with parallel execution via PooledExecutor.
+
+        Called when transform is used as aggregation node and trigger fires.
+        All rows share the same state_id; call_index provides audit uniqueness.
+
+        Args:
+            rows: List of row dicts from aggregation buffer
+            ctx: Plugin context with shared state_id for entire batch
+
+        Returns:
+            TransformResult.success_multi() with one output row per input
+        """
+        if not rows:
+            return TransformResult.success({"batch_empty": True, "row_count": 0})
+
+        if ctx.landscape is None or ctx.state_id is None:
+            raise RuntimeError(
+                "Batch processing requires landscape recorder and state_id. Ensure transform is executed through the engine."
+            )
+
+        # Ensure we have an executor for parallel processing
+        if self._executor is None:
+            # Fallback: process sequentially if no pool configured
+            return self._process_batch_sequential(rows, ctx)
+
+        # Create contexts - all rows share same state_id (call_index provides uniqueness)
+        contexts = [RowContext(row=row, state_id=ctx.state_id, row_index=i) for i, row in enumerate(rows)]
+
+        # Execute all rows in parallel
+        try:
+            results = self._executor.execute_batch(
+                contexts=contexts,
+                process_fn=self._process_single_with_state,
+            )
+        finally:
+            # Clean up cached clients
+            with self._llm_clients_lock:
+                self._llm_clients.pop(ctx.state_id, None)
+
+        # Assemble output with per-row error tracking
+        return self._assemble_batch_results(rows, results)
+
+    def _process_batch_sequential(
+        self,
+        rows: list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Fallback for batch processing without executor (pool_size=1).
+
+        Processes rows one at a time using existing sequential logic.
+        """
+        results: list[TransformResult] = []
+        for row in rows:
+            # Use the single-row sequential path
+            result = self._process_sequential(row, ctx)
+            results.append(result)
+        return self._assemble_batch_results(rows, results)
+
+    def _process_sequential(
+        self,
+        row: dict[str, Any],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Process a single row sequentially (extracted from process()).
+
+        This is the existing sequential logic, extracted for reuse.
+        """
+        # 1. Render template (THEIR DATA - wrap)
+        try:
+            rendered = self._template.render_with_metadata(row)
+        except TemplateError as e:
+            return TransformResult.error(
+                {
+                    "reason": "template_rendering_failed",
+                    "error": str(e),
+                    "template_hash": self._template.template_hash,
+                    "template_source": self._template.template_source,
+                }
+            )
+
+        # 2. Build messages
+        messages: list[dict[str, str]] = []
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": rendered.prompt})
+
+        # 3. Create audited LLM client (self-contained)
+        # NOTE: ctx.landscape and ctx.state_id are guaranteed non-None here
+        # because _process_sequential is only called from _process_batch_sequential,
+        # which is only called from _process_batch after the None check.
+        assert ctx.landscape is not None and ctx.state_id is not None
+
+        # Import here to avoid hard dependency on openai package
+        from openai import AzureOpenAI
+
+        underlying_client = AzureOpenAI(
+            azure_endpoint=self._azure_endpoint,
+            api_key=self._azure_api_key,
+            api_version=self._azure_api_version,
+        )
+
+        llm_client = AuditedLLMClient(
+            recorder=ctx.landscape,
+            state_id=ctx.state_id,
+            underlying_client=underlying_client,
+            provider="azure",
+        )
+
+        # 4. Call LLM (EXTERNAL - wrap)
+        try:
+            response = llm_client.chat_completion(
+                model=self._model,
+                messages=messages,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
+        except RateLimitError as e:
+            return TransformResult.error(
+                {"reason": "rate_limited", "error": str(e)},
+                retryable=True,
+            )
+        except LLMClientError as e:
+            return TransformResult.error(
+                {"reason": "llm_call_failed", "error": str(e)},
+                retryable=e.retryable,
+            )
+
+        # 5. Build output row (OUR CODE - let exceptions crash)
+        output = dict(row)
+        output[self._response_field] = response.content
+        output[f"{self._response_field}_usage"] = response.usage
+        output[f"{self._response_field}_template_hash"] = rendered.template_hash
+        output[f"{self._response_field}_variables_hash"] = rendered.variables_hash
+        output[f"{self._response_field}_template_source"] = rendered.template_source
+        output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
+        output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
+        output[f"{self._response_field}_model"] = response.model
+
+        return TransformResult.success(output)
+
+    def _assemble_batch_results(
+        self,
+        rows: list[dict[str, Any]],
+        results: list[TransformResult],
+    ) -> TransformResult:
+        """Assemble batch results with per-row error tracking.
+
+        Follows AzureBatchLLMTransform pattern: include all rows in output,
+        mark failures with {response_field}_error instead of failing entire batch.
+        """
+        output_rows: list[dict[str, Any]] = []
+        all_failed = True
+
+        for i, (row, result) in enumerate(zip(rows, results, strict=True)):
+            output_row = dict(row)
+
+            if result.status == "success" and result.row is not None:
+                all_failed = False
+                # Copy response fields from result
+                output_row[self._response_field] = result.row.get(self._response_field)
+                output_row[f"{self._response_field}_usage"] = result.row.get(f"{self._response_field}_usage")
+                output_row[f"{self._response_field}_template_hash"] = result.row.get(f"{self._response_field}_template_hash")
+                output_row[f"{self._response_field}_variables_hash"] = result.row.get(f"{self._response_field}_variables_hash")
+                output_row[f"{self._response_field}_template_source"] = result.row.get(f"{self._response_field}_template_source")
+                output_row[f"{self._response_field}_lookup_hash"] = result.row.get(f"{self._response_field}_lookup_hash")
+                output_row[f"{self._response_field}_lookup_source"] = result.row.get(f"{self._response_field}_lookup_source")
+                output_row[f"{self._response_field}_model"] = result.row.get(f"{self._response_field}_model")
+            else:
+                # Per-row error tracking - don't fail entire batch
+                output_row[self._response_field] = None
+                output_row[f"{self._response_field}_error"] = result.reason or {
+                    "reason": "unknown_error",
+                    "row_index": i,
+                }
+
+            output_rows.append(output_row)
+
+        # Only return error if ALL rows failed
+        if all_failed and output_rows:
+            return TransformResult.error(
+                {
+                    "reason": "all_rows_failed",
+                    "row_count": len(rows),
+                }
+            )
+
+        return TransformResult.success_multi(output_rows)
 
     @property
     def azure_config(self) -> dict[str, Any]:

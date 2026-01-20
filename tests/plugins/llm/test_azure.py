@@ -809,3 +809,172 @@ class TestAzureLLMTransformPooledExecution:
             transform._process_single_with_state({"text": "hello"}, "test-state")
 
         transform.close()
+
+
+class TestAzureBatchProcessing:
+    """Tests for Azure LLM transform batch processing support."""
+
+    @pytest.fixture
+    def mock_recorder(self) -> Mock:
+        """Create mock LandscapeRecorder."""
+        recorder = Mock()
+        recorder.record_call = Mock()
+        return recorder
+
+    @pytest.fixture
+    def ctx(self, mock_recorder: Mock) -> PluginContext:
+        """Create plugin context with landscape and state_id."""
+        return PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_recorder,
+            state_id="test-state-id",
+        )
+
+    @pytest.fixture
+    def transform(self) -> AzureLLMTransform:
+        """Create a basic Azure transform."""
+        return AzureLLMTransform(
+            {
+                "deployment_name": "my-gpt4o-deployment",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "azure-api-key",
+                "template": "Analyze: {{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+    def test_is_batch_aware_is_true(self) -> None:
+        """AzureLLMTransform should have is_batch_aware=True."""
+        transform = AzureLLMTransform(
+            {
+                "deployment_name": "my-gpt4o-deployment",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "azure-api-key",
+                "template": "{{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+        assert transform.is_batch_aware is True
+
+    def test_process_accepts_list_of_rows(self, ctx: PluginContext, transform: AzureLLMTransform) -> None:
+        """process() should accept a list of rows and return success_multi."""
+        rows = [
+            {"text": "hello"},
+            {"text": "world"},
+            {"text": "test"},
+        ]
+
+        with mock_azure_openai_client(
+            content="Response text",
+            model="my-gpt4o-deployment",
+            usage={"prompt_tokens": 10, "completion_tokens": 5},
+        ):
+            result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.rows is not None
+        assert len(result.rows) == 3
+
+        # Each row should have the response fields
+        for i, output_row in enumerate(result.rows):
+            assert output_row["text"] == rows[i]["text"]
+            assert output_row["llm_response"] == "Response text"
+            assert "llm_response_usage" in output_row
+            assert "llm_response_template_hash" in output_row
+            assert "llm_response_model" in output_row
+
+    def test_batch_with_partial_failures(self, ctx: PluginContext) -> None:
+        """Batch processing should handle partial failures gracefully."""
+        transform = AzureLLMTransform(
+            {
+                "deployment_name": "my-gpt4o-deployment",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "azure-api-key",
+                "template": "Analyze: {{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        rows = [
+            {"text": "good1"},
+            {"other_field": "missing_text"},  # Will fail template rendering
+            {"text": "good2"},
+        ]
+
+        with mock_azure_openai_client(
+            content="Success response",
+            model="my-gpt4o-deployment",
+            usage={"prompt_tokens": 10, "completion_tokens": 5},
+        ):
+            result = transform.process(rows, ctx)
+
+        # Should succeed overall because not all rows failed
+        assert result.status == "success"
+        assert result.rows is not None
+        assert len(result.rows) == 3
+
+        # First row should succeed
+        assert result.rows[0]["llm_response"] == "Success response"
+
+        # Second row should have error field
+        assert result.rows[1]["llm_response"] is None
+        assert "llm_response_error" in result.rows[1]
+        assert result.rows[1]["llm_response_error"]["reason"] == "template_rendering_failed"
+
+        # Third row should succeed
+        assert result.rows[2]["llm_response"] == "Success response"
+
+    def test_batch_with_all_failures_returns_error(self, ctx: PluginContext) -> None:
+        """Batch processing should return error if ALL rows fail."""
+        transform = AzureLLMTransform(
+            {
+                "deployment_name": "my-gpt4o-deployment",
+                "endpoint": "https://my-resource.openai.azure.com",
+                "api_key": "azure-api-key",
+                "template": "Analyze: {{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        # All rows missing required 'text' field
+        rows = [
+            {"other": "value1"},
+            {"other": "value2"},
+        ]
+
+        with mock_azure_openai_client():
+            result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "all_rows_failed"
+        assert result.reason["row_count"] == 2
+
+    def test_empty_batch_returns_success(self, ctx: PluginContext, transform: AzureLLMTransform) -> None:
+        """Empty batch should return success with batch_empty flag."""
+        result = transform.process([], ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["batch_empty"] is True
+        assert result.row["row_count"] == 0
+
+    def test_batch_requires_landscape(self, transform: AzureLLMTransform) -> None:
+        """Batch processing requires landscape in context."""
+        ctx = PluginContext(run_id="test-run", config={}, state_id="test-state")
+        ctx.landscape = None
+
+        rows = [{"text": "hello"}]
+
+        with pytest.raises(RuntimeError, match="requires landscape recorder"):
+            transform.process(rows, ctx)
+
+    def test_batch_requires_state_id(self, mock_recorder: Mock, transform: AzureLLMTransform) -> None:
+        """Batch processing requires state_id in context."""
+        ctx = PluginContext(run_id="test-run", config={}, landscape=mock_recorder, state_id=None)
+
+        rows = [{"text": "hello"}]
+
+        with pytest.raises(RuntimeError, match="requires landscape recorder"):
+            transform.process(rows, ctx)

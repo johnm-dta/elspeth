@@ -851,6 +851,63 @@ allow_hits:
     expires: null  # Permanent - intentional design
 
   # ============================================================
+  # AZURE LLM TRANSFORM BATCH PROCESSING (Permanent)
+  # ============================================================
+  # AzureLLMTransform._assemble_batch_results uses .get() to access
+  # result.row fields. The result may come from various processing paths
+  # (pooled, sequential, or mocked in tests), and error rows will not
+  # have all response fields. This is the same pattern as OpenRouter.
+  # ============================================================
+
+  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=543"
+    owner: "architecture"
+    reason: "Result row may not have response field if error occurred during processing"
+    safety: "Graceful default to None - error rows get explicit error tracking"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=544"
+    owner: "architecture"
+    reason: "Result row may not have usage field if error occurred during processing"
+    safety: "Graceful default to None - error rows get explicit error tracking"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=545"
+    owner: "architecture"
+    reason: "Result row may not have template_hash field if error occurred during processing"
+    safety: "Graceful default to None - error rows get explicit error tracking"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=546"
+    owner: "architecture"
+    reason: "Result row may not have variables_hash field if error occurred during processing"
+    safety: "Graceful default to None - error rows get explicit error tracking"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=547"
+    owner: "architecture"
+    reason: "Result row may not have template_source field if error occurred during processing"
+    safety: "Graceful default to None - error rows get explicit error tracking"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=548"
+    owner: "architecture"
+    reason: "Result row may not have lookup_hash field if error occurred during processing"
+    safety: "Graceful default to None - error rows get explicit error tracking"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=549"
+    owner: "architecture"
+    reason: "Result row may not have lookup_source field if error occurred during processing"
+    safety: "Graceful default to None - error rows get explicit error tracking"
+    expires: null  # Permanent - intentional design
+
+  - key: "plugins/llm/azure.py:R1:AzureLLMTransform:_assemble_batch_results:line=550"
+    owner: "architecture"
+    reason: "Result row may not have model field if error occurred during processing"
+    safety: "Graceful default to None - error rows get explicit error tracking"
+    expires: null  # Permanent - intentional design
+
+  # ============================================================
   # AZURE PROMPT SHIELD TRANSFORM
   # ============================================================
   # AzurePromptShield uses FAIL-CLOSED security posture.

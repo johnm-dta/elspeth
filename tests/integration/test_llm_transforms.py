@@ -17,7 +17,6 @@ Test scenarios covered:
 from __future__ import annotations
 
 import json
-from typing import Any
 from unittest.mock import MagicMock, Mock
 
 import httpx
@@ -96,7 +95,7 @@ class TestLLMTransformIntegration:
         self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]
     ) -> None:
         """Verify template renders, API is called, response is parsed."""
-        run_id, node_id, row_id, token_id, state_id = setup_state
+        run_id, _node_id, _row_id, _token_id, state_id = setup_state
 
         # Create mock OpenAI-compatible client
         mock_client = MagicMock()
@@ -160,7 +159,7 @@ class TestLLMTransformIntegration:
         self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]
     ) -> None:
         """Verify template_hash and variables_hash are in output."""
-        run_id, node_id, row_id, token_id, state_id = setup_state
+        run_id, _node_id, _row_id, _token_id, state_id = setup_state
 
         mock_client = MagicMock()
         mock_response = MagicMock()
@@ -209,7 +208,7 @@ class TestLLMTransformIntegration:
         self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]
     ) -> None:
         """Verify API errors are recorded in audit trail."""
-        run_id, node_id, row_id, token_id, state_id = setup_state
+        run_id, _node_id, _row_id, _token_id, state_id = setup_state
 
         # Mock client that raises an error
         mock_client = MagicMock()
@@ -251,7 +250,7 @@ class TestLLMTransformIntegration:
         self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]
     ) -> None:
         """Verify rate limit errors are marked retryable."""
-        run_id, node_id, row_id, token_id, state_id = setup_state
+        run_id, _node_id, _row_id, _token_id, state_id = setup_state
 
         # Mock client that raises rate limit error
         mock_client = MagicMock()
@@ -293,7 +292,7 @@ class TestLLMTransformIntegration:
         self, recorder: LandscapeRecorder, setup_state: tuple[str, str, str, str, str]
     ) -> None:
         """Verify system prompt is included in API call."""
-        run_id, node_id, row_id, token_id, state_id = setup_state
+        run_id, _node_id, _row_id, _token_id, state_id = setup_state
 
         mock_client = MagicMock()
         mock_response = MagicMock()
@@ -494,10 +493,10 @@ class TestAzureBatchLLMTransformIntegration:
         """Create plugin context with checkpoint support."""
 
         ctx = PluginContext(run_id="test-run", config={})
-        ctx._checkpoint: dict[str, Any] = {}
-        ctx.get_checkpoint = lambda: ctx._checkpoint or None  # type: ignore[method-assign]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[method-assign]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[method-assign]
+        ctx._checkpoint = {}  # type: ignore[attr-defined]
+        ctx.get_checkpoint = lambda: ctx._checkpoint or None  # type: ignore[method-assign, attr-defined]
+        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[method-assign, attr-defined]
+        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[method-assign, attr-defined]
         return ctx
 
     @pytest.fixture
@@ -544,7 +543,7 @@ class TestAzureBatchLLMTransformIntegration:
         assert error.status == "submitted"
 
         # Verify checkpoint was saved
-        checkpoint = ctx_with_checkpoint._checkpoint
+        checkpoint = ctx_with_checkpoint._checkpoint  # type: ignore[attr-defined]
         assert checkpoint["batch_id"] == "batch-xyz789"
         assert checkpoint["input_file_id"] == "file-abc123"
         assert checkpoint["row_count"] == 3
@@ -561,7 +560,7 @@ class TestAzureBatchLLMTransformIntegration:
         # Set up context with existing checkpoint
         ctx = PluginContext(run_id="test-run", config={})
         recent_timestamp = datetime.now(UTC).isoformat()
-        ctx._checkpoint: dict[str, Any] = {
+        ctx._checkpoint = {  # type: ignore[attr-defined]
             "batch_id": "batch-xyz789",
             "input_file_id": "file-abc123",
             "row_mapping": {
@@ -573,9 +572,9 @@ class TestAzureBatchLLMTransformIntegration:
             "submitted_at": recent_timestamp,
             "row_count": 3,
         }
-        ctx.get_checkpoint = lambda: ctx._checkpoint if ctx._checkpoint else None  # type: ignore[method-assign]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[method-assign]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[method-assign]
+        ctx.get_checkpoint = lambda: ctx._checkpoint if ctx._checkpoint else None  # type: ignore[method-assign, attr-defined]
+        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[method-assign, attr-defined]
+        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[method-assign, attr-defined]
 
         # Mock completed batch
         mock_client = Mock()
@@ -649,7 +648,7 @@ class TestAzureBatchLLMTransformIntegration:
         assert result.rows[2]["text"] == "Item C"
 
         # Checkpoint should be cleared
-        assert ctx._checkpoint == {}
+        assert ctx._checkpoint == {}  # type: ignore[attr-defined]
 
     def test_batch_partial_template_failures(
         self, ctx_with_checkpoint: PluginContext, transform: AzureBatchLLMTransform
@@ -679,7 +678,7 @@ class TestAzureBatchLLMTransformIntegration:
             transform.process(rows, ctx_with_checkpoint)
 
         # Checkpoint should track template errors
-        checkpoint = ctx_with_checkpoint._checkpoint
+        checkpoint = ctx_with_checkpoint._checkpoint  # type: ignore[attr-defined]
         assert "template_errors" in checkpoint
         assert len(checkpoint["template_errors"]) == 1
         assert checkpoint["template_errors"][0][0] == 1  # Index of failed row
@@ -695,7 +694,7 @@ class TestAzureBatchLLMTransformIntegration:
 
         ctx = PluginContext(run_id="test-run", config={})
         recent_timestamp = datetime.now(UTC).isoformat()
-        ctx._checkpoint: dict[str, Any] = {
+        ctx._checkpoint = {  # type: ignore[attr-defined]
             "batch_id": "batch-xyz789",
             "input_file_id": "file-abc123",
             "row_mapping": {
@@ -706,9 +705,9 @@ class TestAzureBatchLLMTransformIntegration:
             "submitted_at": recent_timestamp,
             "row_count": 2,
         }
-        ctx.get_checkpoint = lambda: ctx._checkpoint if ctx._checkpoint else None  # type: ignore[method-assign]
-        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[method-assign]
-        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[method-assign]
+        ctx.get_checkpoint = lambda: ctx._checkpoint if ctx._checkpoint else None  # type: ignore[method-assign, attr-defined]
+        ctx.update_checkpoint = lambda d: ctx._checkpoint.update(d)  # type: ignore[method-assign, attr-defined]
+        ctx.clear_checkpoint = lambda: ctx._checkpoint.clear()  # type: ignore[method-assign, attr-defined]
 
         mock_client = Mock()
         mock_batch = Mock()

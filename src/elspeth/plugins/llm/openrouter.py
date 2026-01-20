@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from threading import Lock
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from pydantic import Field
@@ -13,8 +14,13 @@ from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.clients.http import AuditedHTTPClient
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.llm.base import LLMConfig
+from elspeth.plugins.llm.capacity_errors import CapacityError, is_capacity_error
+from elspeth.plugins.llm.pooled_executor import PooledExecutor, RowContext
 from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
 from elspeth.plugins.schema_factory import create_schema_from_config
+
+if TYPE_CHECKING:
+    from elspeth.core.landscape.recorder import LandscapeRecorder
 
 
 class OpenRouterConfig(LLMConfig):
@@ -53,6 +59,7 @@ class OpenRouterLLMTransform(BaseTransform):
     """
 
     name = "openrouter_llm"
+    is_batch_aware = True  # Enable aggregation buffering
 
     # LLM transforms are non-deterministic by nature
     determinism: Determinism = Determinism.NON_DETERMINISTIC
@@ -94,14 +101,302 @@ class OpenRouterLLMTransform(BaseTransform):
         self.input_schema = schema
         self.output_schema = schema
 
-    def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
-        """Process row via OpenRouter API using audited HTTP client.
+        # Recorder reference for pooled execution (set in on_start)
+        self._recorder: LandscapeRecorder | None = None
+
+        # Create pooled executor if pool_size > 1
+        if cfg.pool_config is not None:
+            self._executor: PooledExecutor | None = PooledExecutor(cfg.pool_config)
+        else:
+            self._executor = None
+
+        # HTTP client cache for pooled execution - ensures call_index uniqueness across retries
+        # Each state_id gets its own client with monotonically increasing call indices
+        self._http_clients: dict[str, AuditedHTTPClient] = {}
+        self._http_clients_lock = Lock()
+
+    def on_start(self, ctx: PluginContext) -> None:
+        """Capture recorder reference for pooled execution."""
+        self._recorder = ctx.landscape
+
+    def _process_batch(
+        self,
+        rows: list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Process batch of rows with parallel execution via PooledExecutor.
+
+        Called when transform is used as aggregation node and trigger fires.
+        All rows share the same state_id; call_index provides audit uniqueness.
+
+        Args:
+            rows: List of row dicts from aggregation buffer
+            ctx: Plugin context with shared state_id for entire batch
+
+        Returns:
+            TransformResult.success_multi() with one output row per input
+        """
+        if not rows:
+            return TransformResult.success({"batch_empty": True, "row_count": 0})
+
+        if ctx.landscape is None or ctx.state_id is None:
+            raise RuntimeError(
+                "Batch processing requires landscape recorder and state_id. Ensure transform is executed through the engine."
+            )
+
+        # Ensure we have an executor for parallel processing
+        if self._executor is None:
+            # Fallback: process sequentially if no pool configured
+            return self._process_batch_sequential(rows, ctx)
+
+        # Create contexts - all rows share same state_id (call_index provides uniqueness)
+        contexts = [RowContext(row=row, state_id=ctx.state_id, row_index=i) for i, row in enumerate(rows)]
+
+        # Execute all rows in parallel
+        try:
+            results = self._executor.execute_batch(
+                contexts=contexts,
+                process_fn=self._process_single_with_state,
+            )
+        finally:
+            # Clean up cached clients
+            with self._http_clients_lock:
+                self._http_clients.pop(ctx.state_id, None)
+
+        # Assemble output with per-row error tracking
+        return self._assemble_batch_results(rows, results)
+
+    def _process_batch_sequential(
+        self,
+        rows: list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Fallback for batch processing without executor (pool_size=1).
+
+        Processes rows one at a time using existing sequential logic.
+        Uses cached HTTP client to preserve call_index across rows.
+        """
+        results: list[TransformResult] = []
+        try:
+            for row in rows:
+                # Use the single-row sequential path with cached client
+                result = self._process_sequential(row, ctx)
+                results.append(result)
+        finally:
+            # Clean up cached client after batch completes
+            assert ctx.state_id is not None
+            with self._http_clients_lock:
+                self._http_clients.pop(ctx.state_id, None)
+        return self._assemble_batch_results(rows, results)
+
+    def _process_sequential(
+        self,
+        row: dict[str, Any],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Process a single row sequentially (extracted from process()).
+
+        This is the existing sequential logic, extracted for reuse.
+        """
+        # 1. Render template (THEIR DATA - wrap)
+        try:
+            rendered = self._template.render_with_metadata(row)
+        except TemplateError as e:
+            return TransformResult.error(
+                {
+                    "reason": "template_rendering_failed",
+                    "error": str(e),
+                    "template_hash": self._template.template_hash,
+                    "template_source": self._template.template_source,
+                }
+            )
+
+        # 2. Build request
+        messages: list[dict[str, str]] = []
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": rendered.prompt})
+
+        request_body: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": self._temperature,
+        }
+        if self._max_tokens:
+            request_body["max_tokens"] = self._max_tokens
+
+        # 3. Call via cached HTTP client
+        # Uses _get_http_client to preserve call_index across rows in a batch.
+        # All rows in a batch share the same state_id, so the cached client
+        # ensures call_index increments (0, 1, 2, ...) rather than resetting.
+        assert ctx.state_id is not None
+        http_client = self._get_http_client(ctx.state_id)
+
+        try:
+            response = http_client.post(
+                "/chat/completions",
+                json=request_body,
+                headers={"Content-Type": "application/json"},
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            return TransformResult.error(
+                {"reason": "api_call_failed", "error": str(e)},
+                retryable=is_capacity_error(e.response.status_code),
+            )
+        except httpx.RequestError as e:
+            return TransformResult.error(
+                {"reason": "api_call_failed", "error": str(e)},
+                retryable=False,
+            )
+
+        # 4. Parse JSON response
+        try:
+            data = response.json()
+        except (ValueError, TypeError) as e:
+            return TransformResult.error(
+                {
+                    "reason": "invalid_json_response",
+                    "error": f"Response is not valid JSON: {e}",
+                    "content_type": response.headers.get("content-type", "unknown"),
+                    "body_preview": response.text[:500] if response.text else None,
+                },
+                retryable=False,
+            )
+
+        # 5. Extract content
+        try:
+            choices = data["choices"]
+            if not choices:
+                return TransformResult.error(
+                    {"reason": "empty_choices", "response": data},
+                    retryable=False,
+                )
+            content = choices[0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            return TransformResult.error(
+                {
+                    "reason": "malformed_response",
+                    "error": f"{type(e).__name__}: {e}",
+                    "response_keys": list(data.keys()) if isinstance(data, dict) else None,
+                },
+                retryable=False,
+            )
+
+        usage = data.get("usage", {})
+
+        output = dict(row)
+        output[self._response_field] = content
+        output[f"{self._response_field}_usage"] = usage
+        output[f"{self._response_field}_template_hash"] = rendered.template_hash
+        output[f"{self._response_field}_variables_hash"] = rendered.variables_hash
+        output[f"{self._response_field}_template_source"] = rendered.template_source
+        output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
+        output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
+        output[f"{self._response_field}_model"] = data.get("model", self._model)
+
+        return TransformResult.success(output)
+
+    def _assemble_batch_results(
+        self,
+        rows: list[dict[str, Any]],
+        results: list[TransformResult],
+    ) -> TransformResult:
+        """Assemble batch results with per-row error tracking.
+
+        Follows AzureBatchLLMTransform pattern: include all rows in output,
+        mark failures with {response_field}_error instead of failing entire batch.
+        """
+        output_rows: list[dict[str, Any]] = []
+        all_failed = True
+
+        for i, (row, result) in enumerate(zip(rows, results, strict=True)):
+            output_row = dict(row)
+
+            if result.status == "success" and result.row is not None:
+                all_failed = False
+                # Copy response fields from result - direct access because these are
+                # OUR data from _process_single_with_state/_process_sequential.
+                # Missing fields = bug in our code, not external data issue.
+                output_row[self._response_field] = result.row[self._response_field]
+                output_row[f"{self._response_field}_usage"] = result.row[f"{self._response_field}_usage"]
+                output_row[f"{self._response_field}_template_hash"] = result.row[f"{self._response_field}_template_hash"]
+                output_row[f"{self._response_field}_variables_hash"] = result.row[f"{self._response_field}_variables_hash"]
+                output_row[f"{self._response_field}_template_source"] = result.row[f"{self._response_field}_template_source"]
+                output_row[f"{self._response_field}_lookup_hash"] = result.row[f"{self._response_field}_lookup_hash"]
+                output_row[f"{self._response_field}_lookup_source"] = result.row[f"{self._response_field}_lookup_source"]
+                output_row[f"{self._response_field}_model"] = result.row[f"{self._response_field}_model"]
+            else:
+                # Per-row error tracking - don't fail entire batch
+                output_row[self._response_field] = None
+                output_row[f"{self._response_field}_error"] = result.reason or {
+                    "reason": "unknown_error",
+                    "row_index": i,
+                }
+
+            output_rows.append(output_row)
+
+        # Only return error if ALL rows failed
+        if all_failed and output_rows:
+            return TransformResult.error(
+                {
+                    "reason": "all_rows_failed",
+                    "row_count": len(rows),
+                }
+            )
+
+        return TransformResult.success_multi(output_rows)
+
+    def process(
+        self,
+        row: dict[str, Any] | list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Process row(s) via OpenRouter API using audited HTTP client.
+
+        When is_batch_aware=True and used in aggregation, receives list[dict].
+        Otherwise receives single dict.
+
+        Routes to pooled or sequential execution based on pool_size config.
 
         Error handling follows Three-Tier Trust Model:
         1. Template rendering (THEIR DATA) - wrap, return error
         2. HTTP API call (EXTERNAL) - wrap, return error
         3. Response parsing (OUR CODE) - let crash if malformed
+
+        Args:
+            row: Single row dict OR list of row dicts (batch aggregation)
+            ctx: Plugin context with landscape and state_id
+
+        Returns:
+            TransformResult with processed row(s) or error
         """
+        # Dispatch to batch processing if given a list
+        # NOTE: This isinstance check is legitimate polymorphic dispatch for
+        # batch-aware transforms, not defensive programming to hide bugs.
+        if isinstance(row, list):
+            return self._process_batch(row, ctx)
+
+        # Route to pooled execution if configured (single row)
+        if self._executor is not None:
+            if ctx.landscape is None or ctx.state_id is None:
+                raise RuntimeError(
+                    "Pooled execution requires landscape recorder and state_id. Ensure transform is executed through the engine."
+                )
+            row_ctx = RowContext(row=row, state_id=ctx.state_id, row_index=0)
+            try:
+                results = self._executor.execute_batch(
+                    contexts=[row_ctx],
+                    process_fn=self._process_single_with_state,
+                )
+                return results[0]
+            finally:
+                # Evict cached client after row completes to prevent unbounded memory growth
+                # The client is only needed during retry loops within execute_batch()
+                with self._http_clients_lock:
+                    self._http_clients.pop(ctx.state_id, None)
+
+        # Sequential execution path
         # 1. Render template (THEIR DATA - wrap)
         try:
             rendered = self._template.render_with_metadata(row)
@@ -141,7 +436,10 @@ class OpenRouterLLMTransform(BaseTransform):
             state_id=ctx.state_id,
             timeout=self._timeout,
             base_url=self._base_url,
-            headers={"Authorization": f"Bearer {self._api_key}"},
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "HTTP-Referer": "https://github.com/elspeth-rapid",  # Required by OpenRouter
+            },
         )
 
         try:
@@ -152,11 +450,11 @@ class OpenRouterLLMTransform(BaseTransform):
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            # HTTP error (4xx, 5xx) - check for rate limit
-            is_rate_limit = e.response.status_code == 429
+            # HTTP error (4xx, 5xx) - check for capacity errors (429/503/529)
+            # Use is_capacity_error() for consistency with pooled execution path
             return TransformResult.error(
                 {"reason": "api_call_failed", "error": str(e)},
-                retryable=is_rate_limit,
+                retryable=is_capacity_error(e.response.status_code),
             )
         except httpx.RequestError as e:
             # Network/connection errors - not retryable by default
@@ -216,6 +514,151 @@ class OpenRouterLLMTransform(BaseTransform):
 
         return TransformResult.success(output)
 
+    def _get_http_client(self, state_id: str) -> AuditedHTTPClient:
+        """Get or create HTTP client for a state_id.
+
+        Clients are cached to preserve call_index across retries.
+        This ensures uniqueness of (state_id, call_index) even when
+        the pooled executor retries after CapacityError.
+
+        Thread-safe: multiple workers can call this concurrently.
+        """
+        with self._http_clients_lock:
+            if state_id not in self._http_clients:
+                if self._recorder is None:
+                    raise RuntimeError("OpenRouter transform requires recorder. Ensure on_start was called.")
+                self._http_clients[state_id] = AuditedHTTPClient(
+                    recorder=self._recorder,
+                    state_id=state_id,
+                    timeout=self._timeout,
+                    base_url=self._base_url,
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "HTTP-Referer": "https://github.com/elspeth-rapid",  # Required by OpenRouter
+                    },
+                )
+            return self._http_clients[state_id]
+
+    def _process_single_with_state(self, row: dict[str, Any], state_id: str) -> TransformResult:
+        """Process a single row via OpenRouter API with explicit state_id.
+
+        This is used by the pooled executor where each row has its own state.
+        Uses cached HTTP clients to ensure call_index uniqueness across retries.
+
+        Args:
+            row: The row data to process
+            state_id: The state ID for audit trail recording
+
+        Returns:
+            TransformResult with processed row or error
+
+        Raises:
+            CapacityError: On 429/503/529 HTTP errors (for pooled retry)
+        """
+        # 1. Render template (THEIR DATA - wrap)
+        try:
+            rendered = self._template.render_with_metadata(row)
+        except TemplateError as e:
+            return TransformResult.error(
+                {
+                    "reason": "template_rendering_failed",
+                    "error": str(e),
+                    "template_hash": self._template.template_hash,
+                    "template_source": self._template.template_source,
+                }
+            )
+
+        # 2. Build request
+        messages: list[dict[str, str]] = []
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": rendered.prompt})
+
+        request_body: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": self._temperature,
+        }
+        if self._max_tokens:
+            request_body["max_tokens"] = self._max_tokens
+
+        # 3. Get cached HTTP client (preserves call_index across retries)
+        http_client = self._get_http_client(state_id)
+
+        try:
+            response = http_client.post(
+                "/chat/completions",
+                json=request_body,
+                headers={"Content-Type": "application/json"},
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            # Check for capacity error
+            if is_capacity_error(e.response.status_code):
+                raise CapacityError(e.response.status_code, str(e)) from e
+            # Non-capacity HTTP error
+            return TransformResult.error(
+                {"reason": "api_call_failed", "error": str(e)},
+                retryable=False,
+            )
+        except httpx.RequestError as e:
+            return TransformResult.error(
+                {"reason": "api_call_failed", "error": str(e)},
+                retryable=False,
+            )
+
+        # 4. Parse JSON response (EXTERNAL DATA - wrap)
+        try:
+            data = response.json()
+        except (ValueError, TypeError) as e:
+            return TransformResult.error(
+                {
+                    "reason": "invalid_json_response",
+                    "error": f"Response is not valid JSON: {e}",
+                    "content_type": response.headers.get("content-type", "unknown"),
+                    "body_preview": response.text[:500] if response.text else None,
+                },
+                retryable=False,
+            )
+
+        # 5. Extract content
+        try:
+            choices = data["choices"]
+            if not choices:
+                return TransformResult.error(
+                    {"reason": "empty_choices", "response": data},
+                    retryable=False,
+                )
+            content = choices[0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            return TransformResult.error(
+                {
+                    "reason": "malformed_response",
+                    "error": f"{type(e).__name__}: {e}",
+                    "response_keys": list(data.keys()) if isinstance(data, dict) else None,
+                },
+                retryable=False,
+            )
+
+        usage = data.get("usage", {})
+
+        output = dict(row)
+        output[self._response_field] = content
+        output[f"{self._response_field}_usage"] = usage
+        output[f"{self._response_field}_template_hash"] = rendered.template_hash
+        output[f"{self._response_field}_variables_hash"] = rendered.variables_hash
+        output[f"{self._response_field}_template_source"] = rendered.template_source
+        output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
+        output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
+        output[f"{self._response_field}_model"] = data.get("model", self._model)
+
+        return TransformResult.success(output)
+
     def close(self) -> None:
         """Release resources."""
-        pass
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+        self._recorder = None
+        # Clear cached HTTP clients
+        with self._http_clients_lock:
+            self._http_clients.clear()

@@ -27,14 +27,32 @@ The lookup table maps IDs to:
 ```
 template_lookups/
 ├── README.md
-├── settings.yaml           # Pipeline configuration
+├── settings.yaml           # Sequential pipeline configuration
+├── settings_batched.yaml   # Batch aggregation variant
 ├── input.csv               # Sample support tickets
 ├── prompts/
 │   ├── classify.j2         # External Jinja2 template
 │   └── categories.yaml     # Lookup data (categories, priorities)
-└── output/
-    └── results.csv         # Classification results
+├── output/
+│   ├── results.csv         # Sequential mode results
+│   └── results_batched.csv # Batch mode results
+└── runs/
+    ├── audit.db            # Sequential mode audit trail
+    └── audit_batched.db    # Batch mode audit trail
 ```
+
+## Configuration Variants
+
+| File | Processing Mode | Description |
+|------|-----------------|-------------|
+| `settings.yaml` | Sequential | One row at a time, simple but slow |
+| `settings_batched.yaml` | Batch parallel | Buffer N rows, process in parallel |
+
+The batched variant combines external template/lookup features with batch aggregation:
+- Rows are buffered until the trigger fires (default: 5 rows)
+- Batch is processed in parallel using a worker pool
+- Template and lookup files are still loaded once at config time
+- Each row gets its own prompt rendered with `{{ row.* }}` and `{{ lookup.* }}`
 
 ## How Two-Dimensional Lookups Work
 
@@ -70,12 +88,17 @@ This ensures every classification can be traced back to the exact template and l
 export OPENROUTER_API_KEY="your-key-here"
 export ELSPETH_ALLOW_RAW_SECRETS=true  # For development only
 
-# Run the pipeline
-python -m elspeth.cli run --settings examples/template_lookups/settings.yaml --execute --verbose
+# Run sequential mode
+uv run elspeth run -s examples/template_lookups/settings.yaml --execute --verbose
+
+# Run batched mode (parallel processing)
+uv run elspeth run -s examples/template_lookups/settings_batched.yaml --execute --verbose
 
 # Check results
 cat examples/template_lookups/output/results.csv
+cat examples/template_lookups/output/results_batched.csv
 
 # Check landscape database
 sqlite3 examples/template_lookups/runs/audit.db "SELECT run_id, status FROM runs;"
+sqlite3 examples/template_lookups/runs/audit_batched.db "SELECT run_id, status FROM runs;"
 ```

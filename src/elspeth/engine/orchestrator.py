@@ -787,7 +787,6 @@ class Orchestrator:
                 agg_succeeded, agg_failed = self._flush_remaining_aggregation_buffers(
                     config=config,
                     processor=processor,
-                    aggregation_id_map=aggregation_id_map,
                     ctx=ctx,
                     pending_tokens=pending_tokens,
                     output_sink_name=output_sink_name,
@@ -1132,7 +1131,6 @@ class Orchestrator:
         transform_id_map = graph.get_transform_id_map()
         config_gate_id_map = graph.get_config_gate_id_map()
         coalesce_id_map = graph.get_coalesce_id_map()
-        aggregation_id_map = graph.get_aggregation_id_map()
         output_sink_name = graph.get_output_sink()
 
         # Build edge_map from graph edges
@@ -1310,7 +1308,6 @@ class Orchestrator:
                 agg_succeeded, agg_failed = self._flush_remaining_aggregation_buffers(
                     config=config,
                     processor=processor,
-                    aggregation_id_map=aggregation_id_map,
                     ctx=ctx,
                     pending_tokens=pending_tokens,
                     output_sink_name=output_sink_name,
@@ -1422,7 +1419,6 @@ class Orchestrator:
         self,
         config: PipelineConfig,
         processor: RowProcessor,
-        aggregation_id_map: dict[str, str],
         ctx: PluginContext,
         pending_tokens: dict[str, list[TokenInfo]],
         output_sink_name: str,
@@ -1438,7 +1434,6 @@ class Orchestrator:
         Args:
             config: Pipeline configuration with aggregation_settings
             processor: RowProcessor with aggregation executor
-            aggregation_id_map: Maps aggregation name -> node_id
             ctx: Plugin context for transform execution
             pending_tokens: Dict of sink_name -> tokens to append results to
             output_sink_name: Default sink for aggregation output
@@ -1460,12 +1455,10 @@ class Orchestrator:
         rows_succeeded = 0
         rows_failed = 0
 
-        for agg_name, _agg_settings in config.aggregation_settings.items():
-            # Get the node_id for this aggregation
-            # Direct access: aggregation_id_map is built from the same graph that
-            # provides aggregation_settings, so all names must be present. KeyError
-            # here indicates a bug in graph construction.
-            agg_node_id = aggregation_id_map[agg_name]
+        for agg_node_id, agg_settings in config.aggregation_settings.items():
+            # aggregation_settings is keyed by node_id (set in cli.py)
+            # The aggregation name is available via agg_settings.name
+            agg_name = agg_settings.name
 
             # Check if there are buffered rows
             buffered_count = processor._aggregation_executor.get_buffer_count(agg_node_id)

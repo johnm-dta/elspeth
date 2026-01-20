@@ -939,6 +939,19 @@ def _expand_config_templates(
                 plugins.append(plugin_config)
         config["row_plugins"] = plugins
 
+    # === Aggregation options - expand template files ===
+    if "aggregations" in config and isinstance(config["aggregations"], list):
+        aggregations = []
+        for agg_config in config["aggregations"]:
+            if isinstance(agg_config, dict):
+                agg = dict(agg_config)
+                if "options" in agg and isinstance(agg["options"], dict):
+                    agg["options"] = _expand_template_files(agg["options"], settings_path)
+                aggregations.append(agg)
+            else:
+                aggregations.append(agg_config)
+        config["aggregations"] = aggregations
+
     return config
 
 

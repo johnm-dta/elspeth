@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from threading import Lock
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,6 +20,11 @@ class AuditedClientBase:
 
     Subclasses implement specific client protocols (LLM, HTTP, etc.)
     while inheriting automatic audit recording.
+
+    Thread Safety:
+        The _next_call_index method is thread-safe. Multiple threads can
+        safely call this method concurrently without risk of duplicate
+        call indices, which is essential for pooled execution scenarios.
     """
 
     def __init__(
@@ -35,15 +41,18 @@ class AuditedClientBase:
         self._recorder = recorder
         self._state_id = state_id
         self._call_index = 0
+        self._call_index_lock = Lock()
 
     def _next_call_index(self) -> int:
-        """Get and increment call index.
+        """Get next call index for this client (thread-safe).
 
         Each call within a node state gets a unique index for ordering.
+        This method is safe to call from multiple threads concurrently.
 
         Returns:
-            The next call index (0-based)
+            Sequential call index, unique within this client instance
         """
-        idx = self._call_index
-        self._call_index += 1
-        return idx
+        with self._call_index_lock:
+            idx = self._call_index
+            self._call_index += 1
+            return idx

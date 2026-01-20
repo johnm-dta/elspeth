@@ -1,0 +1,97 @@
+# Template Lookups Example - BATCH AGGREGATION
+#
+# This variant demonstrates batch aggregation combined with external template
+# files and two-dimensional lookups. It combines the template/lookup features
+# from settings.yaml with batch parallel processing.
+#
+# How batch aggregation works with template lookups:
+#   1. Rows are buffered by the engine until trigger fires (e.g., every 5 rows)
+#   2. When triggered, all buffered rows are sent to transform._process_batch()
+#   3. Each row's prompt is rendered using the external template + lookup data
+#   4. Parallel execution via PooledExecutor processes rows concurrently
+#   5. Results maintain input order despite parallel processing
+#
+# Template and lookup features:
+#   - template_file: Load Jinja2 templates from separate files for maintainability
+#   - lookup_file: Load YAML data for two-dimensional lookups (lookup.X[row.Y])
+#   - Audit metadata tracks template/lookup sources and content hashes
+#
+# When to use batched mode with templates:
+#   - Large prompt templates benefit from file-based management
+#   - Lookup tables change independently of pipeline config
+#   - Batch boundaries provide natural checkpointing for long runs
+#   - API rate limits are per-batch (not per-request)
+#
+# Prerequisites:
+#   export OPENROUTER_API_KEY="your-api-key-here"
+#
+# Run with:
+#   uv run elspeth run -s examples/template_lookups/settings_batched.yaml --execute
+
+landscape:
+  url: sqlite:///examples/template_lookups/runs/audit_batched.db
+
+datasource:
+  plugin: csv
+  options:
+    path: examples/template_lookups/input.csv
+    on_validation_failure: discard
+    schema:
+      fields: dynamic
+
+# Batch aggregation using OpenRouter LLM transform with external templates
+# The transform is batch-aware (is_batch_aware=True), so the engine:
+#   1. Buffers incoming rows until trigger condition is met
+#   2. Calls transform._process_batch(rows) with the full batch
+#   3. With output_mode: passthrough, each input row gets enriched output
+aggregations:
+  - name: classify_batch
+    plugin: openrouter_llm
+    trigger:
+      count: 5  # Buffer 5 rows, then process batch in parallel
+    output_mode: passthrough  # Each input row produces one output row (N->N)
+    options:
+      model: "anthropic/claude-3-haiku"
+      api_key: "${OPENROUTER_API_KEY}"
+
+      # === EXTERNAL TEMPLATE AND LOOKUP FILES ===
+      # These are loaded at config time and tracked in the audit trail
+
+      # External template file - loaded at config time
+      # The template uses {{ row.* }} for input data and {{ lookup.* }} for lookup data
+      template_file: prompts/classify.j2
+
+      # External lookup file - YAML parsed and available as lookup.* in template
+      # Enables two-dimensional lookups like: lookup.categories[row.category_id].name
+      lookup_file: prompts/categories.yaml
+
+      # System prompt for consistent behavior
+      system_prompt: |
+        You are a precise customer support ticket classifier.
+        Always respond with valid JSON matching the requested format.
+        Be concise but accurate in your analysis.
+
+      temperature: 0.1  # Low temperature for consistent classification
+      max_tokens: 500
+      response_field: classification
+
+      schema:
+        fields: dynamic
+
+      # === BATCH PARALLEL EXECUTION CONFIG ===
+      # Process buffered rows in parallel when batch is released
+      pool_size: 3  # Number of concurrent workers within the batch
+
+      # AIMD throttling options (optional - these are defaults)
+      # max_dispatch_delay_ms: 5000      # Maximum backoff delay (5 seconds)
+      # max_capacity_retry_seconds: 60   # Timeout for retrying rate-limited requests
+
+sinks:
+  output:
+    plugin: csv
+    options:
+      path: examples/template_lookups/output/results_batched.csv
+      schema:
+        fields: dynamic
+
+output_sink: output

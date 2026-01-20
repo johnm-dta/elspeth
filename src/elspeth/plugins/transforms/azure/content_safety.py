@@ -34,13 +34,9 @@ class ContentSafetyThresholds(BaseModel):
     """
 
     hate: int = Field(..., ge=0, le=6, description="Hate content threshold (0-6)")
-    violence: int = Field(
-        ..., ge=0, le=6, description="Violence content threshold (0-6)"
-    )
+    violence: int = Field(..., ge=0, le=6, description="Violence content threshold (0-6)")
     sexual: int = Field(..., ge=0, le=6, description="Sexual content threshold (0-6)")
-    self_harm: int = Field(
-        ..., ge=0, le=6, description="Self-harm content threshold (0-6)"
-    )
+    self_harm: int = Field(..., ge=0, le=6, description="Self-harm content threshold (0-6)")
 
 
 class AzureContentSafetyConfig(TransformDataConfig):
@@ -188,9 +184,7 @@ class AzureContentSafety(BaseTransform):
     ) -> dict[str, int]:
         """Call Azure Content Safety API."""
         if ctx.http_client is None:
-            raise RuntimeError(
-                "AzureContentSafety requires http_client in PluginContext"
-            )
+            raise RuntimeError("AzureContentSafety requires http_client in PluginContext")
 
         url = f"{self._endpoint}/contentsafety/text:analyze?api-version={self.API_VERSION}"
 
@@ -246,7 +240,7 @@ class AzureContentSafety(BaseTransform):
         }
 
         for info in categories.values():
-            info["exceeded"] = info["severity"] >= info["threshold"]
+            info["exceeded"] = info["severity"] > info["threshold"]
 
         if any(info["exceeded"] for info in categories.values()):
             return categories

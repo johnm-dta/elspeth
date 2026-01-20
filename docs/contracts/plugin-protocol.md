@@ -1,7 +1,7 @@
 # ELSPETH Plugin Protocol Contract
 
-> **Status:** FINAL (v1.5)
-> **Last Updated:** 2026-01-19
+> **Status:** FINAL (v1.6)
+> **Last Updated:** 2026-01-20
 > **Authority:** This document is the master reference for all plugin interactions.
 
 > ⚠️ **Implementation Status:** Features in v1.5 (multi-row output, `creates_tokens`, aggregation output modes) are **specified but not yet implemented**. See [`docs/plans/2026-01-19-multi-row-output.md`](../plans/2026-01-19-multi-row-output.md) for the implementation plan.
@@ -731,26 +731,24 @@ Idempotency key format: `{run_id}:{token_id}:{sink_name}`
 
 ## System Operations (Engine-Level)
 
-The following are **engine-level operations** with config-driven behavior. They are NOT user-written plugins. They operate on **wrapped data** (tokens, routing metadata) rather than row contents.
-
-**Why these are engine-level, not plugins:**
-- They don't touch row contents - they manipulate token flow
-- They require coordination across the DAG (fork/join semantics)
-- Their behavior is fully expressible via configuration
-- They are 100% ELSPETH code with no user extension points
+The following are **engine-level operations** that coordinate token flow through the DAG. They operate on **wrapped data** (tokens, routing metadata) rather than row contents directly.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                     DATA FLOW ARCHITECTURE                        │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                   │
-│  USER PLUGINS (touch row contents)                               │
-│  ─────────────────────────────────                               │
+│  PLUGINS (touch row contents)                                    │
+│  ────────────────────────────                                    │
 │  Source ──► [row data] ──► Transform ──► [row data] ──► Sink    │
+│                                    │                              │
+│                                    ▼                              │
+│  ROUTING DECISIONS                                                │
+│  ─────────────────                                               │
+│  Gate: "where does this token go?" (config OR plugin)            │
 │                                                                   │
-│  SYSTEM OPERATIONS (touch token wrapper)                         │
-│  ───────────────────────────────────────                         │
-│  Gate: "where does this token go?"                               │
+│  STRUCTURAL OPERATIONS (config-driven only)                      │
+│  ──────────────────────────────────────────                      │
 │  Fork: "copy token to parallel paths"                            │
 │  Coalesce: "merge tokens from paths"                             │
 │  Aggregation: "batch tokens until trigger"                       │
@@ -764,9 +762,26 @@ The following are **engine-level operations** with config-driven behavior. They 
 
 **Purpose:** Evaluate a condition on row data and decide where the token goes next.
 
-**Key property:** Gates don't modify row data - they only make routing decisions.
+**Key property:** Gates make routing decisions. They may optionally modify row data (e.g., adding routing metadata).
 
-#### Configuration
+**Two approaches are supported:**
+
+| Approach | Use When | Implementation |
+|----------|----------|----------------|
+| **Config Expression** | Simple field comparisons (`score > 0.8`) | YAML `condition` string |
+| **Plugin Gate** | Complex logic (ML models, multi-field analysis, external lookups) | `BaseGate` subclass |
+
+Choose config expressions for simple, readable routing. Choose plugin gates when you need:
+- Stateful evaluation (counters, caches)
+- External service calls
+- Complex business logic that doesn't fit in an expression
+- Reusable routing logic across pipelines
+
+#### Approach 1: Config Expression Gates
+
+Config expressions are ideal for simple, declarative routing.
+
+**Configuration:**
 
 ```yaml
 pipeline:
@@ -783,7 +798,7 @@ pipeline:
   - sink: output
 ```
 
-#### How It Works
+**How It Works:**
 
 1. Engine evaluates `condition` expression against row data
 2. Expression returns a route label (`high`, `low`, etc.)
@@ -827,11 +842,153 @@ Gate conditions are evaluated using a **restricted expression parser**, NOT Pyth
 
 This prevents code injection. An expression like `"__import__('os').system('rm -rf /')"` will be rejected at config validation time.
 
-#### Audit Trail
+#### Approach 2: Plugin Gates
 
-- Condition evaluated: expression + result
+Plugin gates are system code for complex routing logic that doesn't fit in config expressions.
+
+**Required Attributes:**
+
+```python
+name: str                          # Plugin identifier (e.g., "safety_check", "ml_router")
+input_schema: type[PluginSchema]   # Schema of incoming rows
+output_schema: type[PluginSchema]  # Schema of outgoing rows (usually same as input)
+node_id: str | None                # Set by orchestrator after registration
+determinism: Determinism           # DETERMINISTIC, NON_DETERMINISTIC, or EXTERNAL_CALL
+plugin_version: str                # Semantic version for reproducibility
+```
+
+**Required Methods:**
+
+```python
+def __init__(self, config: dict[str, Any]) -> None:
+    """Initialize with configuration.
+
+    Called once at pipeline construction.
+    Validate config here - fail fast if misconfigured.
+    """
+
+def evaluate(
+    self,
+    row: dict[str, Any],
+    ctx: PluginContext,
+) -> GateResult:
+    """Evaluate a row and decide routing.
+
+    Args:
+        row: Input row matching input_schema
+        ctx: Plugin context
+
+    Returns:
+        GateResult with routing decision
+    """
+
+def close(self) -> None:
+    """Release resources.
+
+    Called after on_complete() or on error.
+    """
+```
+
+**Required Lifecycle Hooks:**
+
+```python
+def on_start(self, ctx: PluginContext) -> None:
+    """Called before any rows are processed."""
+
+def on_complete(self, ctx: PluginContext) -> None:
+    """Called after all rows are processed."""
+```
+
+**GateResult Contract:**
+
+```python
+@dataclass
+class GateResult:
+    row: dict[str, Any]        # Row data (may be modified)
+    action: RoutingAction      # Where the token goes
+
+# RoutingAction options:
+RoutingAction.continue_()              # Continue to next node in pipeline
+RoutingAction.route("sink_name")       # Route to named sink
+RoutingAction.fork(["path1", "path2"]) # Fork to multiple parallel paths
+```
+
+**Example Plugin Gate:**
+
+```python
+class SafetyGate(BaseGate):
+    """Route suspicious content to review queue.
+
+    Uses ML model for complex content analysis that
+    can't be expressed as a simple field comparison.
+    """
+
+    name = "safety_check"
+    input_schema = ContentSchema
+    output_schema = ContentSchema
+    determinism = Determinism.EXTERNAL_CALL  # ML model is external
+    plugin_version = "1.2.0"
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self._threshold = config.get("threshold", 0.7)
+        self._model = None  # Lazy load
+
+    def on_start(self, ctx: PluginContext) -> None:
+        from mycompany.ml import SafetyClassifier
+        self._model = SafetyClassifier.load()
+
+    def evaluate(self, row: dict[str, Any], ctx: PluginContext) -> GateResult:
+        # Complex analysis that can't be a config expression
+        score = self._model.predict(row["content"])
+
+        if score > self._threshold:
+            # Add audit metadata before routing
+            row["safety_score"] = score
+            row["flagged_at"] = ctx.run_started_at.isoformat()
+            return GateResult(row=row, action=RoutingAction.route("review_queue"))
+
+        return GateResult(row=row, action=RoutingAction.continue_())
+
+    def close(self) -> None:
+        if self._model:
+            self._model.unload()
+```
+
+**Configuration (using plugin gate):**
+
+```yaml
+pipeline:
+  - source: content_feed
+
+  - gate: safety_check           # References plugin by name
+    threshold: 0.8               # Plugin-specific config
+    routes:                      # Route labels must match RoutingAction.route() calls
+      review_queue: review_sink
+
+  - transform: enrich
+
+  - sink: output
+```
+
+**When to Use Plugin Gates vs Config Expressions:**
+
+| Scenario | Use |
+|----------|-----|
+| `row['score'] > threshold` | Config expression |
+| Multi-field weighted scoring | Plugin gate |
+| External API call for validation | Plugin gate |
+| ML model inference | Plugin gate |
+| Stateful routing (rate limiting, quotas) | Plugin gate |
+| Simple field existence check | Config expression |
+| Complex business rules | Plugin gate |
+
+#### Gate Audit Trail
+
+Both approaches record:
+- Condition evaluated: expression text OR plugin name + version
 - Route chosen: label + destination
 - Timing: evaluation duration
+- For plugin gates: any row modifications
 
 ---
 
@@ -1230,6 +1387,7 @@ Plugins make calls; the engine throttles them.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.6 | 2026-01-20 | Gate documentation: clarified two approaches (config expressions AND plugin gates via `BaseGate`), added `GateResult` contract, plugin gate lifecycle, when-to-use guidance |
 | 1.5 | 2026-01-19 | Multi-row output: `creates_tokens` attribute, `TransformResult.success_multi()`, `rows` field, aggregation `output_mode` (single/passthrough/transform), `BUFFERED` and `EXPANDED` outcomes |
 | 1.4 | 2026-01-19 | Batch-aware transforms (`is_batch_aware`), structural aggregation (engine owns buffers), crash recovery for batches |
 | 1.3 | 2026-01-17 | Source `on_validation_failure` (required), Transform `on_error` (optional), QuarantineEvent, TransformErrorEvent |

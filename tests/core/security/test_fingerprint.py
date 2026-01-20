@@ -52,6 +52,7 @@ class TestSecretFingerprint:
     def test_fingerprint_without_key_raises_if_env_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Raises ValueError if no key provided and env var missing."""
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.delenv("ELSPETH_KEYVAULT_URL", raising=False)
 
         with pytest.raises(ValueError, match="ELSPETH_FINGERPRINT_KEY"):
             secret_fingerprint("my-secret")
@@ -158,5 +159,23 @@ class TestKeyVaultIntegration:
                 return_value=mock_client,
             ),
             pytest.raises(ValueError, match="Failed to retrieve fingerprint key from Key Vault"),
+        ):
+            get_fingerprint_key()
+
+    def test_keyvault_raises_when_secret_value_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Raises ValueError when Key Vault secret has no value."""
+        from unittest.mock import MagicMock, patch
+
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.setenv("ELSPETH_KEYVAULT_URL", "https://my-vault.vault.azure.net")
+
+        mock_secret = MagicMock()
+        mock_secret.value = None
+        mock_client = MagicMock()
+        mock_client.get_secret.return_value = mock_secret
+
+        with (
+            patch("elspeth.core.security.fingerprint._get_keyvault_client", return_value=mock_client),
+            pytest.raises(ValueError, match="has no value"),
         ):
             get_fingerprint_key()

@@ -392,10 +392,11 @@ class GateExecutor:
 
         if action.kind == RoutingKind.CONTINUE:
             # Record explicit continue routing for audit completeness (AUD-002)
+            # Preserve gate's reason and mode for full auditability
             self._record_routing(
                 state_id=state.state_id,
                 node_id=gate.node_id,
-                action=RoutingAction.route("continue", mode=RoutingMode.MOVE),
+                action=RoutingAction.route("continue", mode=action.mode, reason=dict(action.reason)),
             )
 
         elif action.kind == RoutingKind.ROUTE:
@@ -409,10 +410,11 @@ class GateExecutor:
 
             if destination == "continue":
                 # Route label resolves to "continue" - record routing event (AUD-002)
+                # Preserve gate's reason and mode for full auditability
                 self._record_routing(
                     state_id=state.state_id,
                     node_id=gate.node_id,
-                    action=RoutingAction.route("continue", mode=RoutingMode.MOVE),
+                    action=RoutingAction.route("continue", mode=action.mode, reason=dict(action.reason)),
                 )
             else:
                 # Route label resolves to a sink name
@@ -572,6 +574,7 @@ class GateExecutor:
 
         if destination == "continue":
             # Continue to next node - record routing event (AUD-002)
+            # Use CONTINUE kind for GateResult, ROUTE for recording (matches edge label)
             action = RoutingAction.continue_(reason=reason)
             self._record_routing(
                 state_id=state.state_id,

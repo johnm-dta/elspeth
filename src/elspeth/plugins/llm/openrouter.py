@@ -436,7 +436,10 @@ class OpenRouterLLMTransform(BaseTransform):
             state_id=ctx.state_id,
             timeout=self._timeout,
             base_url=self._base_url,
-            headers={"Authorization": f"Bearer {self._api_key}"},
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "HTTP-Referer": "https://github.com/elspeth-rapid",  # Required by OpenRouter
+            },
         )
 
         try:
@@ -529,7 +532,10 @@ class OpenRouterLLMTransform(BaseTransform):
                     state_id=state_id,
                     timeout=self._timeout,
                     base_url=self._base_url,
-                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "HTTP-Referer": "https://github.com/elspeth-rapid",  # Required by OpenRouter
+                    },
                 )
             return self._http_clients[state_id]
 

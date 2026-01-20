@@ -376,3 +376,72 @@ class TestPooledExecutorCapacityHandling:
         assert end_1_idx < end_0_idx, f"Row 1 should complete before Row 0's retry succeeds. Order: {execution_order}"
 
         executor.shutdown()
+
+    def test_no_deadlock_when_batch_exceeds_pool_with_capacity_errors(self) -> None:
+        """Regression test: batch > pool_size with early capacity errors must not deadlock.
+
+        The bug scenario:
+        1. pool_size=2, batch=6 rows
+        2. Main thread acquires semaphore for rows 0-2, submits, blocks on row 3
+        3. Workers 0-2 hit capacity errors, release semaphore, try to re-acquire
+        4. Main thread wakes up, acquires permits for rows 3-5, submits them
+        5. DEADLOCK: Workers 0-2 waiting for permits, but permits "held" by queued
+           tasks 3-5 that can't run (thread pool full of blocked workers)
+
+        Fix: Acquire semaphore INSIDE worker, not in main thread. This ensures
+        semaphore represents "actively working" not "queued for work".
+        """
+        config = PoolConfig(
+            pool_size=2,
+            recovery_step_ms=10,
+            max_dispatch_delay_ms=50,
+            max_capacity_retry_seconds=5,
+        )
+        executor = PooledExecutor(config)
+
+        # Track calls per row
+        call_counts: dict[int, int] = {}
+        lock = Lock()
+
+        def mock_process(row: dict[str, Any], state_id: str) -> TransformResult:
+            idx = row["idx"]
+            with lock:
+                call_counts[idx] = call_counts.get(idx, 0) + 1
+                current_count = call_counts[idx]
+
+            # ALL rows hit capacity error on first attempt, succeed on second
+            if current_count == 1:
+                raise CapacityError(429, f"Rate limited row {idx}")
+            return TransformResult.success({"idx": idx, "attempts": current_count})
+
+        # Batch of 6 rows with pool_size=2 - this would deadlock with old implementation
+        contexts = [RowContext(row={"idx": i}, state_id=f"state_{i}", row_index=i) for i in range(6)]
+
+        # This should complete without deadlock (timeout would indicate deadlock)
+        import signal
+
+        def timeout_handler(signum: int, frame: Any) -> None:
+            raise TimeoutError("Batch execution deadlocked - test failed")
+
+        # Set 10 second timeout
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(10)
+        try:
+            results = executor.execute_batch(contexts, mock_process)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+
+        # All rows should succeed
+        assert len(results) == 6
+        assert all(r.status == "success" for r in results)
+
+        # Each row should have been called twice (first fail, second succeed)
+        for i in range(6):
+            assert call_counts[i] == 2, f"Row {i} should have 2 calls, got {call_counts[i]}"
+
+        # Stats should show capacity retries
+        stats = executor.get_stats()
+        assert stats["pool_stats"]["capacity_retries"] == 6  # One retry per row
+
+        executor.shutdown()

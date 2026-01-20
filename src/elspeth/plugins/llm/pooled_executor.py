@@ -171,12 +171,12 @@ class PooledExecutor:
             # Reserve slot in reorder buffer
             buffer_idx = self._buffer.submit()
 
-            # Acquire semaphore (blocks if pool is full)
-            # NOTE: Throttle delay is applied INSIDE the worker, not here,
-            # to avoid serial delays blocking parallel submission
-            self._semaphore.acquire()
-
             # Submit to thread pool
+            # NOTE: Semaphore is acquired INSIDE the worker, not here.
+            # This prevents deadlock when capacity errors cause workers to
+            # release-then-reacquire: if we acquired here, the main thread
+            # could steal permits for queued tasks that can't run because
+            # worker threads are blocked waiting to reacquire.
             future = self._thread_pool.submit(
                 self._execute_single,
                 buffer_idx,
@@ -224,6 +224,11 @@ class PooledExecutor:
         max_capacity_retry_seconds is exceeded. Normal errors/results
         are returned as-is.
 
+        Semaphore is acquired at the start of this method (not in execute_batch)
+        to prevent deadlock: if acquire happened in execute_batch, the main thread
+        could acquire permits for queued tasks while workers are blocked trying
+        to re-acquire after capacity errors.
+
         Uses holding_semaphore flag for defensive tracking - ensures we
         only release what we hold, even in edge cases.
 
@@ -239,8 +244,9 @@ class PooledExecutor:
         start_time = time.monotonic()
         max_time = start_time + self._max_capacity_retry_seconds
 
-        # Track semaphore state for defensive tracking
-        # We enter holding the semaphore (acquired in execute_batch)
+        # Acquire semaphore at start of worker (not in execute_batch)
+        # This prevents deadlock when capacity errors cause release-then-reacquire
+        self._semaphore.acquire()
         holding_semaphore = True
 
         # Track if we just retried - skip pre-dispatch delay after capacity retry

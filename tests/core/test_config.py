@@ -2401,3 +2401,52 @@ run_mode: replay
             load_settings(config_file)
 
         assert "replay_source_run_id is required" in str(exc_info.value)
+
+
+class TestLoadSettingsTemplateFileExpansion:
+    """Tests for template file expansion during load_settings."""
+
+    def test_load_settings_expands_template_files(self, tmp_path: Path) -> None:
+        """load_settings expands template_file in row_plugins."""
+        from elspeth.core.config import load_settings
+
+        # Create directory structure
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+        (prompts_dir / "test.j2").write_text("Hello {{ row.name }}")
+        (prompts_dir / "lookups.yaml").write_text("greetings:\n  - Hello\n")
+
+        # Create settings file
+        settings_file = tmp_path / "settings.yaml"
+        settings_file.write_text("""
+datasource:
+  plugin: csv_local
+  options:
+    path: test.csv
+
+sinks:
+  output:
+    plugin: csv_local
+    options:
+      path: out.csv
+
+output_sink: output
+
+row_plugins:
+  - plugin: openrouter_llm
+    options:
+      model: test
+      template_file: prompts/test.j2
+      lookup_file: prompts/lookups.yaml
+      schema:
+        fields: dynamic
+""")
+
+        settings = load_settings(settings_file)
+
+        # Check that files were expanded
+        plugin_opts = settings.row_plugins[0].options
+        assert plugin_opts["template"] == "Hello {{ row.name }}"
+        assert plugin_opts["template_source"] == "prompts/test.j2"
+        assert plugin_opts["lookup"] == {"greetings": ["Hello"]}
+        assert plugin_opts["lookup_source"] == "prompts/lookups.yaml"

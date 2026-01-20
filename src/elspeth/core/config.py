@@ -979,25 +979,32 @@ def _sanitize_dsn(
     return str(sanitized), password_fingerprint, True
 
 
-def _fingerprint_config_options(raw_config: dict[str, Any]) -> dict[str, Any]:
+def _fingerprint_config_options(
+    raw_config: dict[str, Any],
+    settings_path: Path | None = None,
+) -> dict[str, Any]:
     """Walk config and fingerprint secrets in all plugin options.
+
+    Also expands template_file and lookup_file references if settings_path provided.
 
     Processes:
     - datasource.options
     - sinks.*.options
-    - row_plugins[*].options
+    - row_plugins[*].options (template file expansion + secrets)
     - aggregations[*].options
     - landscape.url (DSN password)
 
     Args:
         raw_config: Raw config dict from Dynaconf
+        settings_path: Path to settings file for resolving relative template paths
 
     Returns:
-        Config with secrets fingerprinted
+        Config with secrets fingerprinted and template files expanded
 
     Raises:
         SecretFingerprintError: If secrets found but no fingerprint key
                                 and ELSPETH_ALLOW_RAW_SECRETS is not set
+        TemplateFileError: If template/lookup files not found or invalid
     """
     import os
 
@@ -1055,6 +1062,12 @@ def _fingerprint_config_options(raw_config: dict[str, Any]) -> dict[str, Any]:
             if isinstance(plugin_config, dict):
                 plugin = dict(plugin_config)
                 if "options" in plugin and isinstance(plugin["options"], dict):
+                    # Expand template files first (if settings_path available)
+                    if settings_path is not None:
+                        plugin["options"] = _expand_template_files(
+                            plugin["options"], settings_path
+                        )
+                    # Then fingerprint secrets
                     plugin["options"] = _fingerprint_secrets(
                         plugin["options"], fail_if_no_key=fail_if_no_key
                     )
@@ -1123,9 +1136,7 @@ def _expand_template_files(
     # Handle lookup_file
     if "lookup_file" in result:
         if "lookup" in result:
-            raise TemplateFileError(
-                "Cannot specify both 'lookup' and 'lookup_file'"
-            )
+            raise TemplateFileError("Cannot specify both 'lookup' and 'lookup_file'")
         lookup_file = result.pop("lookup_file")
         lookup_path = Path(lookup_file)
         if not lookup_path.is_absolute():
@@ -1135,9 +1146,7 @@ def _expand_template_files(
             raise TemplateFileError(f"Lookup file not found: {lookup_path}")
 
         try:
-            result["lookup"] = yaml.safe_load(
-                lookup_path.read_text(encoding="utf-8")
-            )
+            result["lookup"] = yaml.safe_load(lookup_path.read_text(encoding="utf-8"))
         except yaml.YAMLError as e:
             raise TemplateFileError(f"Invalid YAML in lookup file: {e}") from e
 
@@ -1193,8 +1202,8 @@ def load_settings(config_path: Path) -> ElspethSettings:
     # Expand ${VAR} and ${VAR:-default} patterns in config values
     raw_config = _expand_env_vars(raw_config)
 
-    # Fingerprint secrets in plugin options before validation
-    raw_config = _fingerprint_config_options(raw_config)
+    # Expand template files and fingerprint secrets in plugin options before validation
+    raw_config = _fingerprint_config_options(raw_config, settings_path=config_path)
 
     return ElspethSettings(**raw_config)
 

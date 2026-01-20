@@ -1,8 +1,30 @@
 """Tests for AzureContentSafety transform."""
 
+from typing import TYPE_CHECKING, Any
+from unittest.mock import Mock
+
 import pytest
 
 from elspeth.plugins.config_base import PluginConfigError
+
+if TYPE_CHECKING:
+    pass
+
+
+def make_mock_context(http_response: dict[str, Any] | None = None) -> Mock:
+    """Create mock PluginContext with HTTP client."""
+    from elspeth.plugins.context import PluginContext
+
+    ctx = Mock(spec=PluginContext, run_id="test-run")
+
+    if http_response is not None:
+        response_mock = Mock()
+        response_mock.status_code = 200
+        response_mock.json.return_value = http_response
+        response_mock.raise_for_status = Mock()
+        ctx.http_client.post.return_value = response_mock
+
+    return ctx
 
 
 class TestAzureContentSafetyConfig:
@@ -261,3 +283,182 @@ class TestAzureContentSafetyConfig:
         )
 
         assert cfg.thresholds.hate == 6
+
+
+class TestAzureContentSafetyTransform:
+    """Tests for AzureContentSafety transform."""
+
+    def test_transform_has_required_attributes(self) -> None:
+        """Transform has all protocol-required attributes."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        assert transform.name == "azure_content_safety"
+        assert transform.determinism.value == "external_call"
+        assert transform.plugin_version == "1.0.0"
+        assert transform.is_batch_aware is False
+        assert transform.creates_tokens is False
+
+    def test_content_below_threshold_passes(self) -> None:
+        """Content with severity below thresholds passes through."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        ctx = make_mock_context(
+            {
+                "categoriesAnalysis": [
+                    {"category": "Hate", "severity": 0},
+                    {"category": "Violence", "severity": 0},
+                    {"category": "Sexual", "severity": 0},
+                    {"category": "SelfHarm", "severity": 0},
+                ]
+            }
+        )
+
+        row = {"content": "Hello world", "id": 1}
+        result = transform.process(row, ctx)
+
+        assert result.status == "success"
+        assert result.row == row
+
+    def test_content_exceeding_threshold_returns_error(self) -> None:
+        """Content exceeding any threshold returns error."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        ctx = make_mock_context(
+            {
+                "categoriesAnalysis": [
+                    {"category": "Hate", "severity": 4},  # Exceeds threshold of 2
+                    {"category": "Violence", "severity": 0},
+                    {"category": "Sexual", "severity": 0},
+                    {"category": "SelfHarm", "severity": 0},
+                ]
+            }
+        )
+
+        row = {"content": "Some hateful content", "id": 1}
+        result = transform.process(row, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "content_safety_violation"
+        assert result.reason["categories"]["hate"]["exceeded"] is True
+        assert result.reason["categories"]["hate"]["severity"] == 4
+
+    def test_api_error_returns_retryable_error(self) -> None:
+        """API rate limit errors return retryable error result."""
+        import httpx
+
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        ctx = make_mock_context()
+        ctx.http_client.post.side_effect = httpx.HTTPStatusError(
+            "Rate limited",
+            request=Mock(),
+            response=Mock(status_code=429),
+        )
+
+        row = {"content": "test", "id": 1}
+        result = transform.process(row, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "api_error"
+        assert result.retryable is True
+
+    def test_network_error_returns_retryable_error(self) -> None:
+        """Network errors return retryable error result."""
+        import httpx
+
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 0},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        ctx = make_mock_context()
+        ctx.http_client.post.side_effect = httpx.RequestError("Connection failed")
+
+        row = {"content": "test", "id": 1}
+        result = transform.process(row, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "api_error"
+        assert result.reason["error_type"] == "network_error"
+        assert result.retryable is True
+
+    def test_skips_missing_configured_field(self) -> None:
+        """Transform skips fields not present in the row."""
+        from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
+
+        transform = AzureContentSafety(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["content", "optional_field"],
+                "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        ctx = make_mock_context(
+            {
+                "categoriesAnalysis": [
+                    {"category": "Hate", "severity": 0},
+                    {"category": "Violence", "severity": 0},
+                    {"category": "Sexual", "severity": 0},
+                    {"category": "SelfHarm", "severity": 0},
+                ]
+            }
+        )
+
+        # Row is missing "optional_field"
+        row = {"content": "safe data", "id": 1}
+        result = transform.process(row, ctx)
+
+        assert result.status == "success"

@@ -241,7 +241,11 @@ class TransformContractPropertyTestBase(TransformContractTestBase):
         extra_field=st.text(min_size=1, max_size=20).filter(lambda s: s.isidentifier())
     )
     @settings(
-        max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture]
+        max_examples=50,
+        suppress_health_check=[
+            HealthCheck.function_scoped_fixture,
+            HealthCheck.differing_executors,
+        ],
     )
     def test_process_handles_extra_fields_gracefully(
         self,

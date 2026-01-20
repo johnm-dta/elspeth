@@ -58,6 +58,21 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _load_dotenv() -> bool:
+    """Load environment variables from .env file.
+
+    Searches for .env in current directory and parent directories.
+    Does not override existing environment variables.
+
+    Returns:
+        True if .env was found and loaded, False otherwise.
+    """
+    from dotenv import load_dotenv
+
+    # load_dotenv searches current dir and parents by default
+    return load_dotenv(override=False)  # Don't override existing env vars
+
+
 @app.callback()
 def main(
     version: bool | None = typer.Option(
@@ -68,9 +83,15 @@ def main(
         is_eager=True,
         help="Show version and exit.",
     ),
+    no_dotenv: bool = typer.Option(
+        False,
+        "--no-dotenv",
+        help="Skip loading .env file.",
+    ),
 ) -> None:
     """ELSPETH: Auditable Sense/Decide/Act pipelines."""
-    pass
+    if not no_dotenv:
+        _load_dotenv()
 
 
 # === Subcommand stubs (to be implemented in later tasks) ===

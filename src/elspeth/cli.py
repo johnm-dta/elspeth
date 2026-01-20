@@ -21,6 +21,28 @@ from elspeth.core.dag import ExecutionGraph, GraphValidationError
 if TYPE_CHECKING:
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import PipelineConfig
+    from elspeth.plugins.manager import PluginManager
+
+# Module-level singleton for plugin manager
+_plugin_manager_cache: PluginManager | None = None
+
+
+def _get_plugin_manager() -> PluginManager:
+    """Get initialized plugin manager (singleton).
+
+    Returns:
+        PluginManager with all built-in plugins registered
+    """
+    global _plugin_manager_cache
+
+    from elspeth.plugins.manager import PluginManager
+
+    if _plugin_manager_cache is None:
+        manager = PluginManager()
+        manager.register_builtin_plugins()
+        _plugin_manager_cache = manager
+    return _plugin_manager_cache
+
 
 app = typer.Typer(
     name="elspeth",
@@ -225,82 +247,48 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> Executi
     """
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import Orchestrator, PipelineConfig
-    from elspeth.plugins.base import BaseSink, BaseSource, BaseTransform
-    from elspeth.plugins.llm.azure import AzureLLMTransform
-    from elspeth.plugins.llm.azure_batch import AzureBatchLLMTransform
-    from elspeth.plugins.llm.openrouter import OpenRouterLLMTransform
-    from elspeth.plugins.sinks.csv_sink import CSVSink
-    from elspeth.plugins.sinks.database_sink import DatabaseSink
-    from elspeth.plugins.sinks.json_sink import JSONSink
-    from elspeth.plugins.sources.csv_source import CSVSource
-    from elspeth.plugins.sources.json_source import JSONSource
-    from elspeth.plugins.transforms import FieldMapper, PassThrough
-    from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
-    from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
-    from elspeth.plugins.transforms.batch_replicate import BatchReplicate
-    from elspeth.plugins.transforms.batch_stats import BatchStats
-    from elspeth.plugins.transforms.json_explode import JSONExplode
-    from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+    from elspeth.plugins.base import BaseSink, BaseTransform
 
-    # Plugin registries
-    TRANSFORM_PLUGINS: dict[str, type[BaseTransform]] = {
-        "passthrough": PassThrough,
-        "field_mapper": FieldMapper,
-        "batch_stats": BatchStats,
-        "json_explode": JSONExplode,
-        "keyword_filter": KeywordFilter,
-        "azure_content_safety": AzureContentSafety,
-        "azure_prompt_shield": AzurePromptShield,
-        "batch_replicate": BatchReplicate,
-        "openrouter_llm": OpenRouterLLMTransform,
-        "azure_llm": AzureLLMTransform,
-        "azure_batch_llm": AzureBatchLLMTransform,
-    }
+    # Get plugin manager for dynamic plugin lookup
+    manager = _get_plugin_manager()
 
-    # Instantiate source from new schema
+    # Instantiate source via PluginManager
     source_plugin = config.datasource.plugin
     source_options = dict(config.datasource.options)
 
-    source: BaseSource
-    if source_plugin == "csv":
-        source = CSVSource(source_options)
-    elif source_plugin == "json":
-        source = JSONSource(source_options)
-    else:
-        raise ValueError(f"Unknown source plugin: {source_plugin}")
+    source_cls = manager.get_source_by_name(source_plugin)
+    if source_cls is None:
+        available = [s.name for s in manager.get_sources()]
+        raise ValueError(f"Unknown source plugin: {source_plugin}. Available: {available}")
+    source = source_cls(source_options)
 
-    # Instantiate sinks directly - they implement batch write with ArtifactDescriptor
+    # Instantiate sinks via PluginManager
     sinks: dict[str, BaseSink] = {}
     for sink_name, sink_settings in config.sinks.items():
         sink_plugin = sink_settings.plugin
         sink_options = dict(sink_settings.options)
 
-        sink: BaseSink
-        if sink_plugin == "csv":
-            sink = CSVSink(sink_options)
-        elif sink_plugin == "json":
-            sink = JSONSink(sink_options)
-        elif sink_plugin == "database":
-            sink = DatabaseSink(sink_options)
-        else:
-            raise ValueError(f"Unknown sink plugin: {sink_plugin}")
-
-        sinks[sink_name] = sink
+        sink_cls = manager.get_sink_by_name(sink_plugin)
+        if sink_cls is None:
+            available = [s.name for s in manager.get_sinks()]
+            raise ValueError(f"Unknown sink plugin: {sink_plugin}. Available: {available}")
+        sinks[sink_name] = sink_cls(sink_options)  # type: ignore[assignment]
 
     # Get database URL from settings
     db_url = config.landscape.url
     db = LandscapeDB.from_url(db_url)
 
-    # Instantiate transforms from row_plugins
+    # Instantiate transforms from row_plugins via PluginManager
     transforms: list[BaseTransform] = []
     for plugin_config in config.row_plugins:
         plugin_name = plugin_config.plugin
         plugin_options = dict(plugin_config.options)
 
-        if plugin_name not in TRANSFORM_PLUGINS:
-            raise typer.BadParameter(f"Unknown transform plugin: {plugin_name}")
-        transform_class = TRANSFORM_PLUGINS[plugin_name]
-        transforms.append(transform_class(plugin_options))
+        transform_cls = manager.get_transform_by_name(plugin_name)
+        if transform_cls is None:
+            available = [t.name for t in manager.get_transforms()]
+            raise typer.BadParameter(f"Unknown transform plugin: {plugin_name}. Available: {available}")
+        transforms.append(transform_cls(plugin_options))  # type: ignore[arg-type]
 
     # Build execution graph from config (needed before PipelineConfig for aggregation node IDs)
     graph = ExecutionGraph.from_config(config)
@@ -315,21 +303,22 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> Executi
         node_id = agg_id_map[agg_config.name]
         aggregation_settings[node_id] = agg_config
 
-        # Instantiate the aggregation transform plugin
+        # Instantiate the aggregation transform plugin via PluginManager
         plugin_name = agg_config.plugin
-        if plugin_name not in TRANSFORM_PLUGINS:
-            raise typer.BadParameter(f"Unknown aggregation plugin: {plugin_name}")
-        transform_class = TRANSFORM_PLUGINS[plugin_name]
+        transform_cls = manager.get_transform_by_name(plugin_name)
+        if transform_cls is None:
+            available = [t.name for t in manager.get_transforms()]
+            raise typer.BadParameter(f"Unknown aggregation plugin: {plugin_name}. Available: {available}")
 
         # Merge aggregation options with schema from config
         agg_options = dict(agg_config.options)
-        transform = transform_class(agg_options)
+        transform = transform_cls(agg_options)
 
         # Set node_id so processor can identify this as an aggregation node
         transform.node_id = node_id
 
         # Add to transforms list (after row_plugins transforms)
-        transforms.append(transform)
+        transforms.append(transform)  # type: ignore[arg-type]
 
     # Build PipelineConfig with resolved configuration for audit
     # NOTE: Type ignores needed because:

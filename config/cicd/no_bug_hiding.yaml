@@ -780,25 +780,25 @@ allow_hits:
   # severity 0 (safe) to avoid false positives.
   # ============================================================
 
-  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=582"
+  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=586"
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories (hate)"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=586"
+  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=590"
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories (violence)"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=590"
+  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=594"
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories (sexual)"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"
     expires: null  # Permanent - intentional design
 
-  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=594"
+  - key: "plugins/transforms/azure/content_safety.py:R1:AzureContentSafety:_check_thresholds:line=598"
     owner: "architecture"
     reason: "Trust boundary: Azure API may not return all content categories (self_harm)"
     safety: "Graceful default to 0 (safe) - missing category is treated as 'not detected'"

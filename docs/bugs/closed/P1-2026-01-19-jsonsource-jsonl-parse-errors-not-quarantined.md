@@ -97,6 +97,28 @@
 - Suggested tests to run: `pytest tests/plugins/sources/test_json_source.py`
 - New tests required: yes
 
+## Resolution
+
+**Status:** FIXED (2026-01-21)
+**Fixed by:** Claude Opus 4.5
+
+**Changes made:**
+1. Modified `_load_jsonl()` in `src/elspeth/plugins/sources/json_source.py` to catch `json.JSONDecodeError`
+2. Parse errors now yield `SourceRow.quarantined()` with `{"__raw_line__": line, "__line_number__": line_num}` for audit traceability
+3. Uses `schema_mode="parse"` to distinguish from schema validation errors
+4. Respects `on_validation_failure="discard"` setting
+
+**Tests added:**
+- `test_jsonl_malformed_line_quarantined_not_crash` - Core fix verification
+- `test_jsonl_malformed_line_with_discard_mode` - Discard mode handling
+- `test_jsonl_quarantined_row_contains_raw_line_data` - Audit data verification
+
+**Verification:**
+- All 21 JSONSource tests pass
+- All 42 source plugin tests pass
+- mypy strict: no issues
+- ruff: all checks passed
+
 ## Notes / Links
 
 - Related design docs: `docs/design/requirements.md` (external data quarantine policy)

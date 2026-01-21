@@ -105,13 +105,43 @@ class JSONSource(BaseSource):
             yield from self._load_json_array(ctx)
 
     def _load_jsonl(self, ctx: PluginContext) -> Iterator[SourceRow]:
-        """Load from JSONL format (one JSON object per line)."""
+        """Load from JSONL format (one JSON object per line).
+
+        Per Three-Tier Trust Model (CLAUDE.md), external data (Tier 3) that
+        fails to parse is quarantined, not crash the pipeline. This allows
+        subsequent valid lines to still be processed.
+        """
         with open(self._path, encoding=self._encoding) as f:
-            for line in f:
+            for line_num, line in enumerate(f, start=1):
                 line = line.strip()
-                if line:  # Skip empty lines
+                if not line:  # Skip empty lines
+                    continue
+
+                # Catch JSON parse errors at the trust boundary
+                try:
                     row = json.loads(line)
-                    yield from self._validate_and_yield(row, ctx)
+                except json.JSONDecodeError as e:
+                    # External data parse failure - quarantine, don't crash
+                    # Store raw line + metadata for audit traceability
+                    raw_row = {"__raw_line__": line, "__line_number__": line_num}
+                    error_msg = f"JSON parse error at line {line_num}: {e}"
+
+                    ctx.record_validation_error(
+                        row=raw_row,
+                        error=error_msg,
+                        schema_mode="parse",  # Distinct from schema validation
+                        destination=self._on_validation_failure,
+                    )
+
+                    if self._on_validation_failure != "discard":
+                        yield SourceRow.quarantined(
+                            row=raw_row,
+                            error=error_msg,
+                            destination=self._on_validation_failure,
+                        )
+                    continue
+
+                yield from self._validate_and_yield(row, ctx)
 
     def _load_json_array(self, ctx: PluginContext) -> Iterator[SourceRow]:
         """Load from JSON array format."""

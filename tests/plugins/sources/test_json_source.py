@@ -383,3 +383,112 @@ class TestJSONSourceQuarantineYielding:
         assert isinstance(results[1], SourceRow)
         assert results[1].is_quarantined is True
         assert results[1].row["name"] == "bob"
+
+
+class TestJSONSourceParseErrors:
+    """Tests for JSON source handling of parse errors (JSONDecodeError).
+
+    Per CLAUDE.md Three-Tier Trust Model, external data (Tier 3) should be
+    quarantined on parse errors, not crash the pipeline.
+    """
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        """Create a minimal plugin context."""
+        return PluginContext(run_id="test-run", config={})
+
+    def test_jsonl_malformed_line_quarantined_not_crash(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Malformed JSONL line is quarantined, not crash the pipeline.
+
+        This is the core bug: json.JSONDecodeError should be caught and
+        the row quarantined, allowing subsequent valid lines to process.
+        """
+        from elspeth.contracts import SourceRow
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        # JSONL with malformed line (line 2 is invalid JSON)
+        jsonl_file = tmp_path / "data.jsonl"
+        jsonl_file.write_text(
+            '{"id": 1, "name": "alice"}\n'
+            "{bad json\n"  # Malformed - missing quotes, colon, closing brace
+            '{"id": 3, "name": "carol"}\n'
+        )
+
+        source = JSONSource(
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "on_validation_failure": "quarantine",
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        # Should NOT raise - malformed line should be quarantined
+        results = list(source.load(ctx))
+
+        # All 3 lines should be processed: 2 valid + 1 quarantined
+        assert len(results) == 3
+
+        # First and third are valid
+        assert results[0].is_quarantined is False
+        assert results[0].row == {"id": 1, "name": "alice"}
+        assert results[2].is_quarantined is False
+        assert results[2].row == {"id": 3, "name": "carol"}
+
+        # Second is quarantined with parse error info
+        quarantined = results[1]
+        assert isinstance(quarantined, SourceRow)
+        assert quarantined.is_quarantined is True
+        assert quarantined.quarantine_destination == "quarantine"
+        assert quarantined.quarantine_error is not None
+        assert "JSON" in quarantined.quarantine_error or "json" in quarantined.quarantine_error
+
+    def test_jsonl_malformed_line_with_discard_mode(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """With on_validation_failure='discard', malformed lines are dropped silently."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        jsonl_file = tmp_path / "data.jsonl"
+        jsonl_file.write_text('{"id": 1}\n{bad json\n{"id": 3}\n')
+
+        source = JSONSource(
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "on_validation_failure": "discard",
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        # Only 2 valid rows - malformed line discarded
+        assert len(results) == 2
+        assert all(not r.is_quarantined for r in results)
+        assert results[0].row == {"id": 1}
+        assert results[1].row == {"id": 3}
+
+    def test_jsonl_quarantined_row_contains_raw_line_data(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Quarantined parse error should contain the raw line for audit."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        jsonl_file = tmp_path / "data.jsonl"
+        malformed_line = "{totally broken: json here"
+        jsonl_file.write_text(f'{{"id": 1}}\n{malformed_line}\n')
+
+        source = JSONSource(
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "on_validation_failure": "quarantine",
+                "schema": {"fields": "dynamic"},
+            }
+        )
+
+        results = list(source.load(ctx))
+        quarantined = results[1]
+
+        # The quarantined row should contain the raw line for audit traceability
+        # (since we couldn't parse it into a dict)
+        assert quarantined.is_quarantined is True
+        # Row data should include the raw line content
+        assert "__raw_line__" in quarantined.row or malformed_line in str(quarantined.row)

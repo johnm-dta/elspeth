@@ -108,6 +108,27 @@ class TestRoutingAction:
         with pytest.raises(AttributeError):
             action.kind = "other"  # type: ignore[misc,assignment]  # Testing frozen
 
+    def test_fork_to_paths_rejects_empty_list(self) -> None:
+        """fork_to_paths must have at least one destination.
+
+        Per CLAUDE.md "no silent drops" invariant, empty forks would cause
+        tokens to disappear without audit trail. This MUST raise immediately.
+        """
+        from elspeth.contracts import RoutingAction
+
+        with pytest.raises(ValueError, match="at least one destination"):
+            RoutingAction.fork_to_paths([])
+
+    def test_fork_to_paths_rejects_duplicate_paths(self) -> None:
+        """fork_to_paths must have unique path names.
+
+        Duplicate paths would cause ambiguous routing and audit integrity issues.
+        """
+        from elspeth.contracts import RoutingAction
+
+        with pytest.raises(ValueError, match=r"unique path names.*duplicates"):
+            RoutingAction.fork_to_paths(["path_a", "path_a", "path_b"])
+
 
 class TestRoutingSpec:
     """Tests for RoutingSpec dataclass."""

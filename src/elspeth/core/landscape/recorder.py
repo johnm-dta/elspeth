@@ -785,12 +785,21 @@ class LandscapeRecorder:
         Args:
             parent_token_id: Token being forked
             row_id: Row ID (same for all children)
-            branches: List of branch names
+            branches: List of branch names (must have at least one)
             step_in_pipeline: Step in the DAG where the fork occurs
 
         Returns:
             List of child Token models
+
+        Raises:
+            ValueError: If branches is empty (defense-in-depth for audit integrity)
         """
+        # Defense-in-depth: validate even though RoutingAction.fork_to_paths()
+        # already validates. Per CLAUDE.md "no silent drops" - empty forks
+        # would cause tokens to disappear without audit trail.
+        if not branches:
+            raise ValueError("fork_token requires at least one branch")
+
         fork_group_id = _generate_id()
         children = []
 

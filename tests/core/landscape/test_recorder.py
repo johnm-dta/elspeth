@@ -535,6 +535,45 @@ class TestLandscapeRecorderTokens:
         assert retrieved is not None
         assert retrieved.step_in_pipeline == 2
 
+    def test_fork_token_rejects_empty_branches(self) -> None:
+        """fork_token must have at least one branch (defense-in-depth).
+
+        Per CLAUDE.md "no silent drops" invariant, empty forks would cause
+        tokens to disappear without audit trail. Even if RoutingAction validates
+        upstream, recorder MUST also validate as defense-in-depth.
+        """
+        import pytest
+
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={},
+        )
+        parent_token = recorder.create_token(row_id=row.row_id)
+
+        # Empty branches should be rejected
+        with pytest.raises(ValueError, match="at least one branch"):
+            recorder.fork_token(
+                parent_token_id=parent_token.token_id,
+                row_id=row.row_id,
+                branches=[],  # Empty!
+            )
+
     def test_coalesce_tokens_with_step_in_pipeline(self) -> None:
         """Coalesce stores step_in_pipeline in tokens table."""
         from elspeth.core.landscape.database import LandscapeDB

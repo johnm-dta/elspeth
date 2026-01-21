@@ -13,7 +13,7 @@
 ## Task 1: Add azure-keyvault-secrets Dependency
 
 **Files:**
-- Modify: `pyproject.toml:93-98`
+- Modify: `pyproject.toml:95-100`
 
 **Step 1: Add the dependency**
 
@@ -68,27 +68,25 @@ class TestKeyVaultIntegration:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """When ELSPETH_FINGERPRINT_KEY is missing but ELSPETH_KEYVAULT_URL is set, uses Key Vault."""
+        from unittest.mock import MagicMock, patch
+
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
         monkeypatch.setenv("ELSPETH_KEYVAULT_URL", "https://my-vault.vault.azure.net")
 
         # Mock the SecretClient to avoid real Azure calls
-        mock_secret = type("MockSecret", (), {"value": "keyvault-secret-value"})()
+        mock_secret = MagicMock()
+        mock_secret.value = "keyvault-secret-value"
+        mock_client = MagicMock()
+        mock_client.get_secret.return_value = mock_secret
 
-        with pytest.MonkeyPatch.context() as m:
-            # Import here to allow mocking
-            from unittest.mock import MagicMock, patch
+        with patch(
+            "elspeth.core.security.fingerprint._get_keyvault_client",
+            return_value=mock_client,
+        ):
+            key = get_fingerprint_key()
 
-            mock_client = MagicMock()
-            mock_client.get_secret.return_value = mock_secret
-
-            with patch(
-                "elspeth.core.security.fingerprint._get_keyvault_client",
-                return_value=mock_client,
-            ):
-                key = get_fingerprint_key()
-
-            assert key == b"keyvault-secret-value"
-            mock_client.get_secret.assert_called_once_with("elspeth-fingerprint-key")
+        assert key == b"keyvault-secret-value"
+        mock_client.get_secret.assert_called_once_with("elspeth-fingerprint-key")
 
     def test_keyvault_uses_custom_secret_name(
         self, monkeypatch: pytest.MonkeyPatch
@@ -413,9 +411,13 @@ EOF
 
 **Step 1: Update .env.example**
 
-Add Key Vault config options at the end of the file:
+Add fingerprint key and Key Vault config options at the end of the file:
 
 ```bash
+# HMAC Fingerprint Key (required for secret fingerprinting in production)
+# For local development, set this directly. For production, use Key Vault instead.
+# ELSPETH_FINGERPRINT_KEY=your-random-32-byte-key-here
+
 # Azure Key Vault (production alternative to ELSPETH_FINGERPRINT_KEY)
 # ELSPETH_KEYVAULT_URL=https://your-vault.vault.azure.net
 # ELSPETH_KEYVAULT_SECRET_NAME=elspeth-fingerprint-key

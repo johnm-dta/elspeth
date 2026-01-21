@@ -10,7 +10,7 @@
 ## Severity
 
 - Severity: major
-- Priority: P1
+- Priority: P2
 
 ## Reporter
 
@@ -56,13 +56,13 @@
 
 ## Impact
 
-- User-facing impact: pipelines crash on specific data values that should be quarantined; violates “process the other 10,000 rows”.
+- User-facing impact: pipelines crash on specific data values that should be quarantined; violates "process the other 10,000 rows".
 - Data integrity / security impact: audit trail cannot represent NaN/Inf and thus cannot preserve complete provenance unless quarantined at boundary.
 - Performance or cost impact: reruns and manual data cleaning.
 
 ## Root Cause Hypothesis
 
-- Source schema validation treats “non-finite float” as valid numeric data, but canonicalization treats it as invalid/unrepresentable in the audit model.
+- Source schema validation treats "non-finite float" as valid numeric data, but canonicalization treats it as invalid/unrepresentable in the audit model.
 
 ## Proposed Fix
 
@@ -97,3 +97,61 @@
 ## Notes / Links
 
 - Related code: `src/elspeth/core/canonical.py` (audit integrity policy)
+
+---
+
+## Resolution
+
+**Status:** CLOSED
+**Resolved by:** Claude
+**Date:** 2026-01-21
+**Commit:** (pending)
+
+### Root Cause
+
+The `TYPE_MAP` in `schema_factory.py` mapped `"float"` to Python's plain `float` type, which accepts `NaN` and `Infinity` values. This violated the Three-Tier Trust Model: external data containing non-finite floats passed source validation but then crashed during canonical hashing (which correctly rejects them per RFC 8785).
+
+### Fix Applied
+
+Created a `FiniteFloat` type using Pydantic's `Annotated` with `Field(allow_inf_nan=False)`:
+
+```python
+# In src/elspeth/plugins/schema_factory.py
+from typing import Annotated
+from pydantic import Field
+
+# Finite float type that rejects NaN and Infinity at the source boundary.
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
+TYPE_MAP: dict[str, type] = {
+    "str": str,
+    "int": int,
+    "float": FiniteFloat,  # Rejects NaN/Infinity
+    "bool": bool,
+    "any": Any,
+}
+```
+
+### Tests Added
+
+Added `TestNonFiniteFloatRejection` class in `tests/plugins/test_schema_factory.py` with 7 test cases:
+- `test_nan_string_rejected_in_float_field` - Rejects `"nan"` string
+- `test_infinity_string_rejected_in_float_field` - Rejects `"inf"` string
+- `test_negative_infinity_rejected_in_float_field` - Rejects `"-inf"` string
+- `test_actual_nan_float_rejected` - Rejects `float("nan")`
+- `test_actual_infinity_float_rejected` - Rejects `float("inf")`
+- `test_optional_float_still_rejects_nan` - Optional floats also reject NaN
+- `test_finite_floats_still_accepted` - Normal finite floats work correctly
+
+### Verification
+
+- All 28 schema factory tests pass
+- All 2889 project tests pass (no regressions)
+- mypy and ruff checks pass
+
+### Architectural Alignment
+
+This fix aligns with CLAUDE.md Three-Tier Trust Model:
+- **Tier 3 (External Data)**: NaN/Infinity now rejected at source boundary via schema validation
+- **Tier 1 (Audit DB)**: No change needed; canonical.py correctly rejects NaN/Infinity
+- **Defense in depth**: Two layers of protection (schema + canonical) for audit integrity

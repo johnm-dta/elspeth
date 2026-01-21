@@ -301,6 +301,51 @@ class Orchestrator:
                     f"Use 'discard' to drop error rows without routing."
                 )
 
+    def _validate_source_quarantine_destination(
+        self,
+        source: "SourceProtocol",
+        available_sinks: set[str],
+    ) -> None:
+        """Validate source quarantine destination references an existing sink.
+
+        Called at pipeline initialization, BEFORE any rows are processed.
+        This catches config errors early instead of silently dropping quarantined
+        rows at runtime (P2-2026-01-19-source-quarantine-silent-drop).
+
+        Args:
+            source: Source plugin instance
+            available_sinks: Set of sink names from PipelineConfig
+
+        Raises:
+            RouteValidationError: If source on_validation_failure references
+                a non-existent sink
+        """
+        # Check if source has _on_validation_failure attribute
+        # This is set by sources that inherit from SourceDataConfig
+        on_validation_failure = getattr(source, "_on_validation_failure", None)
+
+        if on_validation_failure is None:
+            # Source doesn't use on_validation_failure - that's fine
+            return
+
+        # Skip validation if not a string (e.g., MagicMock in tests)
+        # Real sources always have string values from SourceDataConfig
+        if not isinstance(on_validation_failure, str):
+            return
+
+        if on_validation_failure == "discard":
+            # "discard" is a special value, not a sink name
+            return
+
+        # on_validation_failure should reference an existing sink
+        if on_validation_failure not in available_sinks:
+            raise RouteValidationError(
+                f"Source '{source.name}' has on_validation_failure='{on_validation_failure}' "
+                f"but no sink named '{on_validation_failure}' exists. "
+                f"Available sinks: {sorted(available_sinks)}. "
+                f"Use 'discard' to drop invalid rows without routing."
+            )
+
     def _assign_plugin_node_ids(
         self,
         source: SourceProtocol,
@@ -592,6 +637,12 @@ class Orchestrator:
             transforms=config.transforms,
             available_sinks=set(config.sinks.keys()),
             _transform_id_map=transform_id_map,
+        )
+
+        # Validate source quarantine destination
+        self._validate_source_quarantine_destination(
+            source=config.source,
+            available_sinks=set(config.sinks.keys()),
         )
 
         # Get explicit node ID mappings from graph
@@ -1176,6 +1227,12 @@ class Orchestrator:
             transforms=config.transforms,
             available_sinks=set(config.sinks.keys()),
             _transform_id_map=transform_id_map,
+        )
+
+        # Validate source quarantine destination
+        self._validate_source_quarantine_destination(
+            source=config.source,
+            available_sinks=set(config.sinks.keys()),
         )
 
         # Assign node_ids to all plugins

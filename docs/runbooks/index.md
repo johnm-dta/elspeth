@@ -44,9 +44,11 @@ elspeth plugins list
 
 ## Emergency Contacts
 
+> **⚠️ Customize This Section:** Replace these generic contacts with your organization's actual contacts before deploying these runbooks.
+
 | Issue | Contact |
 |-------|---------|
-| Pipeline failures | On-call engineer |
+| Pipeline failures | On-call engineer (e.g., PagerDuty, Slack #oncall) |
 | Data integrity concerns | Data team lead |
 | Audit trail questions | Compliance team |
 

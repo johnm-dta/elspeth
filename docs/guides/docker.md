@@ -24,13 +24,13 @@ ELSPETH containers follow a **CLI-first design** - arguments are passed directly
 
 ```bash
 # Show help
-docker run ghcr.io/your-org/elspeth --help
+docker run ghcr.io/johnm-dta/elspeth --help
 
 # Check version
-docker run ghcr.io/your-org/elspeth --version
+docker run ghcr.io/johnm-dta/elspeth --version
 
 # List available plugins
-docker run ghcr.io/your-org/elspeth plugins list
+docker run ghcr.io/johnm-dta/elspeth plugins list
 ```
 
 ---
@@ -55,7 +55,7 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/your-org/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:v0.1.0 \
   run --settings /app/config/pipeline.yaml --execute
 ```
 
@@ -74,7 +74,7 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/your-org/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:v0.1.0 \
   run --settings /app/config/pipeline.yaml --execute
 ```
 
@@ -105,7 +105,7 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/your-org/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:v0.1.0 \
   run --settings /app/config/pipeline.yaml --execute
 ```
 
@@ -114,17 +114,33 @@ docker run --rm \
 ```bash
 docker run --rm \
   -v $(pwd)/config:/app/config:ro \
-  ghcr.io/your-org/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:v0.1.0 \
   validate --settings /app/config/pipeline.yaml
 ```
 
 ### Explain a Row
 
+For interactive exploration, mount the state and use the TUI (requires `-it`):
+
+```bash
+docker run -it --rm \
+  -v $(pwd)/state:/app/state:ro \
+  ghcr.io/johnm-dta/elspeth:v0.1.0 \
+  explain --run latest --row 42
+```
+
+For non-interactive environments (CI/CD), query the audit database directly:
+
 ```bash
 docker run --rm \
   -v $(pwd)/state:/app/state:ro \
-  ghcr.io/your-org/elspeth:v0.1.0 \
-  explain --run latest --row 42 --no-tui
+  --entrypoint sqlite3 \
+  ghcr.io/johnm-dta/elspeth:v0.1.0 \
+  /app/state/landscape.db \
+  "SELECT ns.node_id, ns.status FROM node_states ns
+   JOIN tokens t ON ns.token_id = t.token_id
+   JOIN rows r ON t.row_id = r.row_id
+   WHERE r.row_index = 42 ORDER BY ns.step_index;"
 ```
 
 ### Resume an Interrupted Run
@@ -135,7 +151,7 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/your-org/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:v0.1.0 \
   resume abc123
 ```
 
@@ -149,7 +165,7 @@ For easier management, use docker-compose:
 # docker-compose.yaml
 services:
   elspeth:
-    image: ghcr.io/your-org/elspeth:${IMAGE_TAG:-latest}
+    image: ghcr.io/johnm-dta/elspeth:${IMAGE_TAG:-latest}
     environment:
       - DATABASE_URL=${DATABASE_URL:-sqlite:////app/state/landscape.db}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -174,8 +190,8 @@ docker compose run --rm elspeth validate --settings /app/config/pipeline.yaml
 # Check health
 docker compose run --rm elspeth health --verbose
 
-# Explain a decision
-docker compose run --rm elspeth explain --run latest --row 42 --no-tui
+# Explain a decision (interactive TUI)
+docker compose run -it --rm elspeth explain --run latest --row 42
 ```
 
 ### Production docker-compose
@@ -184,7 +200,7 @@ docker compose run --rm elspeth explain --run latest --row 42 --no-tui
 # docker-compose.prod.yaml
 services:
   elspeth:
-    image: ghcr.io/your-org/elspeth:v0.1.0
+    image: ghcr.io/johnm-dta/elspeth:v0.1.0
     environment:
       - DATABASE_URL=postgresql://user:pass@db:5432/elspeth
       - OPENROUTER_API_KEY
@@ -220,13 +236,13 @@ The `health` command verifies system readiness:
 
 ```bash
 # Basic health check
-docker run --rm ghcr.io/your-org/elspeth health
+docker run --rm ghcr.io/johnm-dta/elspeth health
 
 # Verbose output
-docker run --rm ghcr.io/your-org/elspeth health --verbose
+docker run --rm ghcr.io/johnm-dta/elspeth health --verbose
 
 # JSON output (for automation)
-docker run --rm ghcr.io/your-org/elspeth health --json
+docker run --rm ghcr.io/johnm-dta/elspeth health --json
 ```
 
 ### Example JSON Output
@@ -273,7 +289,7 @@ livenessProbe:
 
 Images are published to:
 
-- **GitHub Container Registry**: `ghcr.io/your-org/elspeth`
+- **GitHub Container Registry**: `ghcr.io/johnm-dta/elspeth`
 - **Azure Container Registry**: `<your-acr>.azurecr.io/elspeth` (if configured)
 
 ### Pulling from Private Registry
@@ -281,7 +297,7 @@ Images are published to:
 ```bash
 # GitHub Container Registry
 echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
-docker pull ghcr.io/your-org/elspeth:v0.1.0
+docker pull ghcr.io/johnm-dta/elspeth:v0.1.0
 
 # Azure Container Registry
 az acr login --name your-acr

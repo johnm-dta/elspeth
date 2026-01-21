@@ -27,27 +27,25 @@ Explain why a specific row was routed to a particular destination.
 If you have the row content but not the row_id:
 
 ```bash
-# Search by field value in source payload
+# Search by row index
 sqlite3 runs/audit.db "
-  SELECT row_id, payload_hash
-  FROM row_events
+  SELECT row_id, source_data_hash
+  FROM rows
   WHERE run_id = '<RUN_ID>'
-    AND event_type = 'SOURCE_EMIT'
-    AND payload LIKE '%\"customer_id\": \"CUST123\"%'
-  LIMIT 5;
+  ORDER BY row_index
+  LIMIT 10;
 "
 ```
 
-If searching by a specific field value:
+To find a specific row, you'll need to check the source data. If you know the row index:
 
 ```bash
-# For JSON payloads, use json_extract if available
+# Find by row index
 sqlite3 runs/audit.db "
-  SELECT row_id
-  FROM row_events
+  SELECT row_id, row_index, source_data_hash
+  FROM rows
   WHERE run_id = '<RUN_ID>'
-    AND event_type = 'SOURCE_EMIT'
-    AND json_extract(payload, '$.customer_id') = 'CUST123';
+    AND row_index = 42;
 "
 ```
 
@@ -70,19 +68,21 @@ The TUI shows:
 If you need raw data instead of the TUI:
 
 ```bash
-# Get all events for a row
+# Get all processing states for a row
 sqlite3 runs/audit.db "
   SELECT
-    event_id,
-    event_type,
-    node_id,
-    edge_label,
-    payload_hash,
-    created_at
-  FROM row_events
-  WHERE run_id = '<RUN_ID>'
-    AND row_id = '<ROW_ID>'
-  ORDER BY created_at;
+    ns.state_id,
+    ns.node_id,
+    n.plugin_name,
+    ns.status,
+    ns.input_hash,
+    ns.output_hash,
+    ns.started_at
+  FROM node_states ns
+  JOIN tokens t ON ns.token_id = t.token_id
+  JOIN nodes n ON ns.node_id = n.node_id
+  WHERE t.row_id = '<ROW_ID>'
+  ORDER BY ns.step_index;
 "
 ```
 
@@ -93,17 +93,20 @@ Find the gate decision that caused the routing:
 ```bash
 sqlite3 runs/audit.db "
   SELECT
-    node_id,
-    edge_label,
-    payload
-  FROM row_events
-  WHERE run_id = '<RUN_ID>'
-    AND row_id = '<ROW_ID>'
-    AND event_type = 'GATE_EVAL';
+    ns.node_id,
+    n.plugin_name,
+    re.mode,
+    e.label as route_taken
+  FROM routing_events re
+  JOIN node_states ns ON re.state_id = ns.state_id
+  JOIN edges e ON re.edge_id = e.edge_id
+  JOIN nodes n ON ns.node_id = n.node_id
+  JOIN tokens t ON ns.token_id = t.token_id
+  WHERE t.row_id = '<ROW_ID>';
 "
 ```
 
-The `edge_label` shows which route was taken (`true`, `false`, or a custom label).
+The `label` shows which route was taken (`true`, `false`, or a named sink).
 
 ### Step 5: Verify the Condition
 
@@ -133,7 +136,7 @@ print(eval(condition))  # True
 ```bash
 docker run --rm \
   -v $(pwd)/state:/app/state:ro \
-  ghcr.io/your-org/elspeth:latest \
+  ghcr.io/johnm-dta/elspeth:latest \
   explain --run <RUN_ID> --row <ROW_ID>
 ```
 
@@ -151,13 +154,19 @@ docker run --rm \
 ### Row Was Quarantined
 
 ```bash
-# Find quarantine reason
+# Find validation errors (source quarantine)
 sqlite3 runs/audit.db "
-  SELECT payload
-  FROM row_events
-  WHERE run_id = '<RUN_ID>'
-    AND row_id = '<ROW_ID>'
-    AND event_type = 'QUARANTINE';
+  SELECT error, schema_mode, destination
+  FROM validation_errors
+  WHERE run_id = '<RUN_ID>';
+"
+
+# Find transform errors
+sqlite3 runs/audit.db "
+  SELECT te.transform_id, te.error_details_json, te.destination
+  FROM transform_errors te
+  JOIN tokens t ON te.token_id = t.token_id
+  WHERE t.row_id = '<ROW_ID>';
 "
 ```
 
@@ -172,15 +181,14 @@ Check if it was consumed by an aggregation:
 
 ```bash
 sqlite3 runs/audit.db "
-  SELECT event_type, node_id
-  FROM row_events
-  WHERE run_id = '<RUN_ID>'
-    AND row_id = '<ROW_ID>'
-  ORDER BY created_at;
+  SELECT to.outcome, to.sink_name, to.batch_id
+  FROM token_outcomes to
+  JOIN tokens t ON to.token_id = t.token_id
+  WHERE t.row_id = '<ROW_ID>';
 "
 ```
 
-Look for `CONSUMED_IN_BATCH` event type.
+Look for outcome `consumed_in_batch` - this means the row was aggregated into a batch.
 
 ---
 
@@ -189,13 +197,19 @@ Look for `CONSUMED_IN_BATCH` event type.
 For compliance reporting, export the complete lineage:
 
 ```bash
-# Export all events for a specific row
+# Export complete lineage for a specific row
 sqlite3 -header -csv runs/audit.db "
-  SELECT *
-  FROM row_events
-  WHERE run_id = '<RUN_ID>'
-    AND row_id = '<ROW_ID>'
-  ORDER BY created_at;
+  SELECT
+    r.row_id, r.row_index, r.source_data_hash,
+    t.token_id, t.branch_name,
+    ns.node_id, ns.step_index, ns.status, ns.input_hash, ns.output_hash,
+    to.outcome, to.sink_name
+  FROM rows r
+  JOIN tokens t ON r.row_id = t.row_id
+  LEFT JOIN node_states ns ON t.token_id = ns.token_id
+  LEFT JOIN token_outcomes to ON t.token_id = to.token_id
+  WHERE r.row_id = '<ROW_ID>'
+  ORDER BY ns.step_index;
 " > lineage_report.csv
 ```
 

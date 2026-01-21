@@ -38,8 +38,8 @@ Choose your environment:
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/elspeth-rapid.git
-cd elspeth-rapid
+git clone https://github.com/johnm-dta/elspeth.git
+cd elspeth
 
 # Create virtual environment and install
 uv venv
@@ -290,7 +290,7 @@ EOF
 docker run --rm \
   -v $(pwd)/config:/app/config:ro \
   -v $(pwd)/input:/app/input:ro \
-  ghcr.io/your-org/elspeth:latest \
+  ghcr.io/johnm-dta/elspeth:latest \
   validate --settings /app/config/pipeline.yaml
 ```
 
@@ -312,7 +312,7 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/your-org/elspeth:latest \
+  ghcr.io/johnm-dta/elspeth:latest \
   run --settings /app/config/pipeline.yaml --execute
 ```
 
@@ -337,14 +337,24 @@ cat output/high_values.csv
 
 ### Step 7: Explain a Decision
 
+For Docker environments where TUI isn't available, query the audit database directly:
+
 ```bash
+# Query routing decision for row 2
 docker run --rm \
   -v $(pwd)/state:/app/state:ro \
-  ghcr.io/your-org/elspeth:latest \
-  explain --run latest --row 2 --no-tui
+  --entrypoint sqlite3 \
+  ghcr.io/johnm-dta/elspeth:latest \
+  /app/state/audit.db \
+  "SELECT t.token_id, ns.node_id, ns.status, ns.input_hash
+   FROM tokens t
+   JOIN rows r ON t.row_id = r.row_id
+   JOIN node_states ns ON t.token_id = ns.token_id
+   WHERE r.row_index = 2
+   ORDER BY ns.step_index;"
 ```
 
-The `--no-tui` flag outputs text instead of launching the interactive terminal UI.
+> **Note:** Text output via `--no-tui` is planned for a future release. Currently, use the TUI for interactive lineage exploration or query the audit database directly for CI/CD environments.
 
 ---
 
@@ -356,7 +366,7 @@ For repeated runs, docker-compose is more convenient:
 # docker-compose.yaml
 services:
   elspeth:
-    image: ghcr.io/your-org/elspeth:latest
+    image: ghcr.io/johnm-dta/elspeth:latest
     volumes:
       - ./config:/app/config:ro
       - ./input:/app/input:ro
@@ -371,8 +381,8 @@ docker compose run --rm elspeth validate --settings /app/config/pipeline.yaml
 # Run
 docker compose run --rm elspeth run --settings /app/config/pipeline.yaml --execute
 
-# Explain
-docker compose run --rm elspeth explain --run latest --row 2 --no-tui
+# Explain (interactive TUI)
+docker compose run -it --rm elspeth explain --run latest --row 2
 ```
 
 ---
@@ -564,7 +574,7 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/your-org/elspeth:latest \
+  ghcr.io/johnm-dta/elspeth:latest \
   <command>
 ```
 
@@ -572,7 +582,7 @@ docker run --rm \
 |---------|-------------|
 | `validate --settings /app/config/pipeline.yaml` | Check configuration |
 | `run --settings /app/config/pipeline.yaml --execute` | Run pipeline |
-| `explain --run latest --row N --no-tui` | Explain decision |
+| `explain --run latest --row N` | Explain decision (TUI) |
 | `plugins list` | List available plugins |
 | `--help` | Show all commands |
 

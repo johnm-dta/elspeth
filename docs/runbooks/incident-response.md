@@ -103,11 +103,12 @@ Investigate and resolve production pipeline issues.
 1. **Identify affected rows:**
    ```bash
    sqlite3 runs/audit.db "
-     SELECT row_id, payload_hash
-     FROM row_events
-     WHERE run_id = '<RUN_ID>'
-       AND event_type = 'SINK_WRITE'
-       AND node_id = '<WRONG_SINK>'
+     SELECT r.row_id, r.row_index, to.sink_name
+     FROM token_outcomes to
+     JOIN tokens t ON to.token_id = t.token_id
+     JOIN rows r ON t.row_id = r.row_id
+     WHERE to.run_id = '<RUN_ID>'
+       AND to.sink_name = '<WRONG_SINK>'
      LIMIT 20;
    "
    ```
@@ -161,9 +162,8 @@ Investigate and resolve production pipeline issues.
      SELECT
        strftime('%H:%M', created_at) as minute,
        COUNT(*) as rows_per_minute
-     FROM row_events
+     FROM rows
      WHERE run_id = '<RUN_ID>'
-       AND event_type = 'SOURCE_EMIT'
      GROUP BY minute
      ORDER BY minute DESC
      LIMIT 30;
@@ -176,7 +176,7 @@ Investigate and resolve production pipeline issues.
    grep "API_CALL" pipeline.log | tail -100
 
    # Database query times
-   sqlite3 runs/audit.db "EXPLAIN QUERY PLAN SELECT * FROM row_events WHERE run_id = 'xxx';"
+   sqlite3 runs/audit.db "EXPLAIN QUERY PLAN SELECT * FROM node_states ns JOIN tokens t ON ns.token_id = t.token_id WHERE t.row_id = 'xxx';"
    ```
 
 3. **Check rate limiting:**
@@ -230,7 +230,7 @@ Investigate and resolve production pipeline issues.
 
 **Cosmetic TUI issues:**
 - Check terminal compatibility
-- Try `--no-tui` flag
+- Use direct database queries for non-interactive environments
 
 ---
 

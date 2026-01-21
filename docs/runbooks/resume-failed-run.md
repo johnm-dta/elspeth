@@ -30,7 +30,7 @@ Find the run ID of the failed run:
 # List recent runs and their status
 sqlite3 runs/audit.db "
   SELECT run_id, status, started_at, completed_at,
-         (SELECT COUNT(*) FROM row_events WHERE row_events.run_id = runs.run_id) as rows_processed
+         (SELECT COUNT(*) FROM rows WHERE rows.run_id = runs.run_id) as rows_processed
   FROM runs
   ORDER BY started_at DESC
   LIMIT 10;
@@ -78,8 +78,8 @@ sqlite3 runs/audit.db "SELECT status, completed_at FROM runs WHERE run_id = '<RU
 # Verify row counts
 sqlite3 runs/audit.db "
   SELECT
-    (SELECT COUNT(*) FROM row_events WHERE run_id = '<RUN_ID>' AND event_type = 'SOURCE_EMIT') as source_rows,
-    (SELECT COUNT(*) FROM row_events WHERE run_id = '<RUN_ID>' AND event_type IN ('SINK_WRITE', 'QUARANTINE')) as terminal_rows;
+    (SELECT COUNT(*) FROM rows WHERE run_id = '<RUN_ID>') as source_rows,
+    (SELECT COUNT(*) FROM token_outcomes WHERE run_id = '<RUN_ID>' AND is_terminal = 1) as terminal_tokens;
 "
 ```
 
@@ -97,7 +97,7 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/your-org/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:v0.1.0 \
   resume <RUN_ID>
 ```
 

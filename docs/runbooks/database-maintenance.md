@@ -35,7 +35,11 @@ ls -lh runs/audit.db
 sqlite3 runs/audit.db "
   SELECT 'runs' as table_name, COUNT(*) as row_count FROM runs
   UNION ALL
-  SELECT 'row_events', COUNT(*) FROM row_events
+  SELECT 'rows', COUNT(*) FROM rows
+  UNION ALL
+  SELECT 'tokens', COUNT(*) FROM tokens
+  UNION ALL
+  SELECT 'node_states', COUNT(*) FROM node_states
   UNION ALL
   SELECT 'checkpoints', COUNT(*) FROM checkpoints
   UNION ALL
@@ -73,7 +77,7 @@ Find runs older than retention period (e.g., 90 days):
 ```bash
 sqlite3 runs/audit.db "
   SELECT run_id, started_at, status,
-         (SELECT COUNT(*) FROM row_events WHERE row_events.run_id = runs.run_id) as event_count
+         (SELECT COUNT(*) FROM rows WHERE rows.run_id = runs.run_id) as row_count
   FROM runs
   WHERE started_at < datetime('now', '-90 days')
   ORDER BY started_at;
@@ -98,40 +102,42 @@ sqlite3 runs/audit.db "
   WHERE run_id = '<RUN_ID>';
 " > run_archive.json
 
-# Export all row events for a run
+# Export all processing states for a run
 sqlite3 -header -csv runs/audit.db "
-  SELECT * FROM row_events WHERE run_id = '<RUN_ID>';
-" > row_events_archive.csv
+  SELECT ns.*, t.row_id, t.branch_name
+  FROM node_states ns
+  JOIN tokens t ON ns.token_id = t.token_id
+  JOIN rows r ON t.row_id = r.row_id
+  WHERE r.run_id = '<RUN_ID>';
+" > node_states_archive.csv
 ```
 
 ### Step 4: Delete Old Data
 
-**CAUTION:** Always backup before deletion.
+**⚠️ CAUTION: DESTRUCTIVE OPERATION**
+
+This procedure permanently deletes audit data. Before proceeding:
+- [ ] Verify you have a recent backup
+- [ ] Confirm retention period meets compliance requirements
+- [ ] Test the deletion query with `SELECT COUNT(*)` first
+- [ ] Ensure no pipelines are currently running
 
 ```bash
 # Backup first
 cp runs/audit.db runs/audit.db.backup.$(date +%Y%m%d)
 
 # Delete runs older than 90 days (cascades to related tables)
-sqlite3 runs/audit.db "
-  -- Delete checkpoints
-  DELETE FROM checkpoints WHERE run_id IN (
-    SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days')
-  );
-
-  -- Delete row events
-  DELETE FROM row_events WHERE run_id IN (
-    SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days')
-  );
-
-  -- Delete artifacts
-  DELETE FROM artifacts WHERE run_id IN (
-    SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days')
-  );
-
-  -- Delete runs
-  DELETE FROM runs WHERE started_at < datetime('now', '-90 days');
-"
+# Execute statements one at a time due to foreign key constraints
+sqlite3 runs/audit.db "DELETE FROM checkpoints WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'));"
+sqlite3 runs/audit.db "DELETE FROM routing_events WHERE state_id IN (SELECT state_id FROM node_states WHERE token_id IN (SELECT token_id FROM tokens WHERE row_id IN (SELECT row_id FROM rows WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days')))));"
+sqlite3 runs/audit.db "DELETE FROM token_outcomes WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'));"
+sqlite3 runs/audit.db "DELETE FROM node_states WHERE token_id IN (SELECT token_id FROM tokens WHERE row_id IN (SELECT row_id FROM rows WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'))));"
+sqlite3 runs/audit.db "DELETE FROM tokens WHERE row_id IN (SELECT row_id FROM rows WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days')));"
+sqlite3 runs/audit.db "DELETE FROM artifacts WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'));"
+sqlite3 runs/audit.db "DELETE FROM rows WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'));"
+sqlite3 runs/audit.db "DELETE FROM nodes WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'));"
+sqlite3 runs/audit.db "DELETE FROM edges WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'));"
+sqlite3 runs/audit.db "DELETE FROM runs WHERE started_at < datetime('now', '-90 days');"
 ```
 
 ### Step 5: Vacuum the Database
@@ -180,11 +186,11 @@ find .elspeth/payloads -type f -mtime +90 -delete
 ### Add Indexes (if missing)
 
 ```sql
--- Index for querying by run
-CREATE INDEX IF NOT EXISTS idx_row_events_run_id ON row_events(run_id);
+-- Index for querying rows by run
+CREATE INDEX IF NOT EXISTS idx_rows_run_id ON rows(run_id);
 
--- Index for querying by row within run
-CREATE INDEX IF NOT EXISTS idx_row_events_run_row ON row_events(run_id, row_id);
+-- Index for querying node states by token
+CREATE INDEX IF NOT EXISTS idx_node_states_token ON node_states(token_id);
 
 -- Index for date-based queries
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);

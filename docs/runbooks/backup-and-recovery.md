@@ -254,7 +254,8 @@ fi
 
 # Check table counts
 echo "Runs: $(sqlite3 "$BACKUP" "SELECT COUNT(*) FROM runs;")"
-echo "Events: $(sqlite3 "$BACKUP" "SELECT COUNT(*) FROM row_events;")"
+echo "Tokens: $(sqlite3 "$BACKUP" "SELECT COUNT(*) FROM tokens;")"
+echo "States: $(sqlite3 "$BACKUP" "SELECT COUNT(*) FROM node_states;")"
 
 echo "OK: Backup verification passed"
 ```

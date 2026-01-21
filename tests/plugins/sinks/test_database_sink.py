@@ -284,3 +284,150 @@ class TestDatabaseSink:
 
         column_names = [c.name for c in table.columns]
         assert sorted(column_names) == ["a", "b"]
+
+
+class TestDatabaseSinkIfExistsReplace:
+    """Regression tests for if_exists='replace' behavior.
+
+    Bug: P2-2026-01-19-databasesink-if-exists-replace-ignored
+    The if_exists config option was stored but never used. Replace mode
+    should drop the existing table on first write, following pandas
+    to_sql semantics.
+    """
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        """Create a minimal plugin context."""
+        return PluginContext(run_id="test-run", config={})
+
+    @pytest.fixture
+    def db_url(self, tmp_path: Path) -> str:
+        """Create a SQLite database URL."""
+        return f"sqlite:///{tmp_path / 'test.db'}"
+
+    def _get_row_count(self, db_url: str, table_name: str) -> int:
+        """Helper to count rows in a table."""
+        engine = create_engine(db_url)
+        metadata = MetaData()
+        table = Table(table_name, metadata, autoload_with=engine)
+        with engine.connect() as conn:
+            rows = list(conn.execute(select(table)))
+        engine.dispose()
+        return len(rows)
+
+    def test_if_exists_replace_drops_existing_table(self, db_url: str, ctx: PluginContext) -> None:
+        """if_exists='replace' drops existing table on first write.
+
+        When a new sink instance with if_exists='replace' writes to an
+        existing table, the old data should be dropped first.
+        """
+        from elspeth.plugins.sinks.database_sink import DatabaseSink
+
+        # First sink with append (default) - creates table with initial data
+        sink1 = DatabaseSink(
+            {
+                "url": db_url,
+                "table": "output",
+                "schema": DYNAMIC_SCHEMA,
+                "if_exists": "append",
+            }
+        )
+        sink1.write([{"id": 1}, {"id": 2}], ctx)
+        sink1.close()
+
+        assert self._get_row_count(db_url, "output") == 2
+
+        # Second sink with replace - should drop table and start fresh
+        sink2 = DatabaseSink(
+            {
+                "url": db_url,
+                "table": "output",
+                "schema": DYNAMIC_SCHEMA,
+                "if_exists": "replace",
+            }
+        )
+        sink2.write([{"id": 3}], ctx)
+        sink2.close()
+
+        # Only the new row should exist (old rows dropped)
+        assert self._get_row_count(db_url, "output") == 1
+
+    def test_if_exists_replace_subsequent_writes_append(self, db_url: str, ctx: PluginContext) -> None:
+        """After initial drop, subsequent writes within same instance append.
+
+        The replace behavior (drop table) only happens on first write
+        of the sink instance. Additional writes to the same instance
+        should append.
+        """
+        from elspeth.plugins.sinks.database_sink import DatabaseSink
+
+        sink = DatabaseSink(
+            {
+                "url": db_url,
+                "table": "output",
+                "schema": DYNAMIC_SCHEMA,
+                "if_exists": "replace",
+            }
+        )
+
+        # First write - would drop if table existed
+        sink.write([{"id": 1}], ctx)
+        # Second write - should append, not drop again
+        sink.write([{"id": 2}], ctx)
+        sink.close()
+
+        # Both rows should exist (second write appended)
+        assert self._get_row_count(db_url, "output") == 2
+
+    def test_if_exists_append_accumulates(self, db_url: str, ctx: PluginContext) -> None:
+        """if_exists='append' (default) accumulates data across sink instances."""
+        from elspeth.plugins.sinks.database_sink import DatabaseSink
+
+        # First sink writes initial data
+        sink1 = DatabaseSink(
+            {
+                "url": db_url,
+                "table": "output",
+                "schema": DYNAMIC_SCHEMA,
+                "if_exists": "append",  # Explicit, but also the default
+            }
+        )
+        sink1.write([{"id": 1}], ctx)
+        sink1.close()
+
+        # Second sink appends more data
+        sink2 = DatabaseSink(
+            {
+                "url": db_url,
+                "table": "output",
+                "schema": DYNAMIC_SCHEMA,
+                "if_exists": "append",
+            }
+        )
+        sink2.write([{"id": 2}], ctx)
+        sink2.close()
+
+        # Both rows should exist
+        assert self._get_row_count(db_url, "output") == 2
+
+    def test_if_exists_replace_works_when_table_does_not_exist(self, db_url: str, ctx: PluginContext) -> None:
+        """if_exists='replace' works correctly when table doesn't exist yet.
+
+        The first write should succeed even though there's nothing to drop.
+        """
+        from elspeth.plugins.sinks.database_sink import DatabaseSink
+
+        sink = DatabaseSink(
+            {
+                "url": db_url,
+                "table": "new_table",
+                "schema": DYNAMIC_SCHEMA,
+                "if_exists": "replace",
+            }
+        )
+
+        # Should not raise - creates table since it doesn't exist
+        sink.write([{"id": 1}], ctx)
+        sink.close()
+
+        assert self._get_row_count(db_url, "new_table") == 1

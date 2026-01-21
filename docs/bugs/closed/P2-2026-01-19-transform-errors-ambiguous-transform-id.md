@@ -95,3 +95,52 @@
 ## Notes / Links
 
 - Related docs: `docs/contracts/plugin-protocol.md` (node identity expectations)
+
+## Resolution
+
+**Status:** CLOSED (2026-01-21)
+**Resolved by:** Claude Opus 4.5
+
+### Changes Made
+
+**Code fix (`src/elspeth/engine/executors.py`):**
+
+Changed line 263 from using `transform.name` to `transform.node_id`:
+
+```python
+# Before (Bug):
+ctx.record_transform_error(
+    token_id=token.token_id,
+    transform_id=transform.name,  # Plugin type - ambiguous!
+    ...
+)
+
+# After (Fix):
+ctx.record_transform_error(
+    token_id=token.token_id,
+    transform_id=transform.node_id,  # Unique DAG node ID
+    ...
+)
+```
+
+Added comment explaining the fix:
+```python
+# Record error event (always, even for discard - audit completeness)
+# Use node_id (unique DAG identifier), not name (plugin type)
+# Bug fix: P2-2026-01-19-transform-errors-ambiguous-transform-id
+```
+
+**Tests added (`tests/engine/test_executors.py`):**
+- `TestTransformErrorIdRegression` class with 1 regression test:
+  - `test_transform_error_uses_node_id_not_name` - Creates two transforms with same `name` but different `node_id`, triggers error, verifies the recorded `transform_id` matches the unique `node_id` and not the ambiguous plugin name
+
+### Verification
+
+```bash
+.venv/bin/python -m pytest tests/engine/test_executors.py -v
+# 49 passed (48 existing + 1 new)
+```
+
+### Notes
+
+This fix ensures audit traceability per CLAUDE.md: "Every decision must be traceable to source data, configuration, and code version." When a pipeline uses the same plugin multiple times (e.g., two `field_mapper` nodes for email and phone validation), errors are now attributed to the specific DAG node (`node_id`) rather than the generic plugin type (`name`). This enables precise error attribution without inference.

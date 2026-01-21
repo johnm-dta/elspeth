@@ -301,7 +301,7 @@ class Checkpoint:
     token_id: str
     node_id: str
     sequence_number: int
-    created_at: datetime | None
+    created_at: datetime  # Required - schema enforces NOT NULL (Tier 1 audit data)
     aggregation_state_json: str | None = None
 
 

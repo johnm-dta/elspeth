@@ -553,6 +553,109 @@ class TestTransformExecutor:
         assert call_kwargs.get("attempt") == 2
 
 
+class TestTransformErrorIdRegression:
+    """Regression tests for P2-2026-01-19-transform-errors-ambiguous-transform-id.
+
+    Transform errors must be recorded with node_id (unique DAG identifier),
+    not name (plugin type which can be reused multiple times).
+    """
+
+    def test_transform_error_uses_node_id_not_name(self) -> None:
+        """Transform errors are attributed to node_id, not ambiguous plugin name.
+
+        Bug: When a pipeline has two instances of the same plugin (e.g., two
+        field_mappers), errors were recorded with transform.name which is the
+        plugin type - making it impossible to determine which node failed.
+
+        Fix: Use transform.node_id which is unique per DAG node.
+        """
+        from elspeth.contracts import TokenInfo
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.executors import TransformExecutor
+        from elspeth.engine.spans import SpanFactory
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Register TWO nodes with SAME plugin name but DIFFERENT node_ids
+        # This simulates a pipeline with two instances of the same transform plugin
+        node1 = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="field_mapper",  # Same name as node2!
+            node_type="transform",
+            plugin_version="1.0",
+            config={"field": "email"},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        node2 = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="field_mapper",  # Same name as node1!
+            node_type="transform",
+            plugin_version="1.0",
+            config={"field": "phone"},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        # Verify precondition: both have same name but different node_ids
+        assert node1.node_id != node2.node_id
+        shared_plugin_name = "field_mapper"
+
+        # Create a transform that fails - using node2's identity
+        class FailingFieldMapper:
+            name = shared_plugin_name  # This is the plugin name (not unique)
+            node_id = node2.node_id  # This is the unique DAG node ID
+            _on_error = "error_sink"
+
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+                return TransformResult.error({"reason": "invalid phone format"})
+
+        transform = FailingFieldMapper()
+        ctx = PluginContext(run_id=run.run_id, config={}, landscape=recorder)
+        executor = TransformExecutor(recorder, SpanFactory())
+
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="token-1",
+            row_data={"phone": "invalid"},
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node1.node_id,
+            row_index=0,
+            data=token.row_data,
+            row_id=token.row_id,
+        )
+        recorder.create_token(row_id=row.row_id, token_id=token.token_id)
+
+        # Execute the transform - this should record an error
+        result, _, error_sink = executor.execute_transform(
+            transform=as_transform(transform),
+            token=token,
+            ctx=ctx,
+            step_in_pipeline=1,
+        )
+
+        assert result.status == "error"
+        assert error_sink == "error_sink"
+
+        # REGRESSION CHECK: Verify the recorded error uses node_id, not name
+        errors = recorder.get_transform_errors_for_token(token.token_id)
+        assert len(errors) == 1
+
+        recorded_error = errors[0]
+        # The transform_id should be the unique node_id, NOT the plugin name
+        assert recorded_error.transform_id == node2.node_id, (
+            f"Transform error should use node_id ({node2.node_id}) not name ({shared_plugin_name}). Got: {recorded_error.transform_id}"
+        )
+        # Explicitly verify it's NOT the ambiguous name
+        assert recorded_error.transform_id != shared_plugin_name, (
+            "Transform error should NOT use plugin name (ambiguous when same plugin used multiple times)"
+        )
+
+
 class TestGateExecutor:
     """Gate execution with audit and routing."""
 

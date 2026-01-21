@@ -95,3 +95,42 @@
 ## Notes / Links
 
 - Related issues/PRs: N/A
+
+## Resolution
+
+**Status:** CLOSED (2026-01-21)
+**Resolved by:** Claude Opus 4.5
+
+### Changes Made
+
+**Code fix (`src/elspeth/core/landscape/recorder.py`):**
+
+1. **Added `completed_at` validation for COMPLETED state** (line 144-145):
+   ```python
+   if row.completed_at is None:
+       raise ValueError(f"COMPLETED state {row.state_id} has NULL completed_at - audit integrity violation")
+   ```
+
+2. **Added `completed_at` validation for FAILED state** (line 166-167):
+   ```python
+   if row.completed_at is None:
+       raise ValueError(f"FAILED state {row.state_id} has NULL completed_at - audit integrity violation")
+   ```
+
+3. **Updated docstring for FAILED state** (line 162): Added `completed_at` to required fields list
+
+**Tests added (`tests/core/landscape/test_recorder.py`):**
+- `TestNodeStateIntegrityValidation` class with 2 regression tests:
+  - `test_completed_state_with_null_completed_at_raises` - corrupts DB, verifies crash on read
+  - `test_failed_state_with_null_completed_at_raises` - corrupts DB, verifies crash on read
+
+### Verification
+
+```bash
+.venv/bin/python -m pytest tests/core/landscape/test_recorder.py -v
+# 99 passed (97 existing + 2 new)
+```
+
+### Notes
+
+This fix aligns with the Data Manifesto Tier 1 rule: "Bad data in audit trail = crash immediately." Terminal node states represent completed processing; `completed_at` is essential timing information for audit investigations. Silently accepting NULL values would undermine the audit trail's integrity.

@@ -112,3 +112,68 @@
 
 - Related issues/PRs: N/A
 - Related design docs: `docs/design/architecture.md` (payload retention)
+
+---
+
+## Resolution
+
+**Status:** CLOSED
+**Resolved by:** Claude
+**Date:** 2026-01-21
+**Commit:** (pending)
+
+### Root Cause
+
+The original `find_expired_row_payloads()` method only queried `rows_table.source_data_ref`, ignoring other payload reference columns:
+- `calls_table.request_ref` and `calls_table.response_ref` (external call payloads)
+- `routing_events_table.reason_ref` (routing reason payloads)
+
+This meant only source row payloads were subject to retention; call and routing payloads grew without bound.
+
+### Fix Applied
+
+Added new `find_expired_payload_refs()` method that uses SQLAlchemy `union()` to query all payload references:
+
+```python
+def find_expired_payload_refs(
+    self,
+    retention_days: int,
+    as_of: datetime | None = None,
+) -> list[str]:
+    """Find all payload refs eligible for deletion based on retention policy.
+
+    This includes payloads from:
+    - rows.source_data_ref (source row payloads)
+    - calls.request_ref and calls.response_ref (external call payloads)
+    - routing_events.reason_ref (routing reason payloads)
+    """
+    # ... queries for each table joined to runs via appropriate path
+    # Call/routing payloads join: table → node_states → nodes → runs
+    combined_query = union(row_query, call_request_query, call_response_query, routing_query)
+```
+
+### Tests Added
+
+Added three new test classes in `tests/core/retention/test_purge.py`:
+
+- `TestFindExpiredCallPayloads`:
+  - `test_find_expired_includes_call_request_refs` - Verifies call request payloads are found
+  - `test_find_expired_includes_call_response_refs` - Verifies call response payloads are found
+
+- `TestFindExpiredRoutingPayloads`:
+  - `test_find_expired_includes_routing_reason_refs` - Verifies routing reason payloads are found
+
+- `TestFindExpiredAllPayloadRefs`:
+  - `test_find_expired_payload_refs_returns_deduplicated_union` - Verifies all 4 payload types returned
+  - `test_find_expired_payload_refs_respects_retention` - Verifies recent payloads not included
+
+### Verification
+
+- All 2895 project tests pass (no regressions)
+- mypy and ruff checks pass
+
+### Architectural Alignment
+
+The fix aligns with the documented retention strategy in `docs/design/architecture.md:569-580` which explicitly states both row payloads and call payloads should be subject to retention.
+
+The original `find_expired_row_payloads()` method is preserved for backwards compatibility; new code should use `find_expired_payload_refs()` for complete coverage.

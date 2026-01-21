@@ -122,3 +122,43 @@
 
 - Related issues/PRs: N/A
 - Related design docs: `docs/design/architecture.md` (audit trail integrity + export tracking)
+
+## Resolution
+
+**Status:** CLOSED (2026-01-21)
+**Resolved by:** Claude Opus 4.5
+
+### Changes Made
+
+**Code fix (`src/elspeth/core/landscape/recorder.py`):**
+
+1. **Added `ExportStatus` import** (line 31)
+
+2. **Fixed `get_run()` coercion** (line 334):
+   ```python
+   # Before: export_status=row.export_status
+   # After:
+   export_status=ExportStatus(row.export_status) if row.export_status else None
+   ```
+
+3. **Fixed `list_runs()` coercion** (line 374): Same pattern
+
+4. **Fixed `set_export_status()` method** (lines 383-430):
+   - Changed signature: `status: str` → `status: ExportStatus | str`
+   - Added validation via `_coerce_enum(status, ExportStatus)`
+   - Clear `export_error` when transitioning to `COMPLETED` or `PENDING`
+   - Uses `status_enum.value` for DB storage
+
+**Tests added (`tests/core/landscape/test_recorder.py`):**
+- `TestExportStatusEnumCoercion` class with 6 regression tests
+
+### Verification
+
+```bash
+.venv/bin/python -m pytest tests/core/landscape/test_recorder.py -v
+# 97 passed (91 existing + 6 new)
+```
+
+### Notes
+
+This fix enforces the Data Manifesto "Tier 1: Full Trust" principle - audit database fields must be properly typed enums, not raw strings. Invalid values will now crash at read time (desired behavior).

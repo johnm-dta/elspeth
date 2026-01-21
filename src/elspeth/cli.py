@@ -129,7 +129,7 @@ def run(
     Requires --execute flag to actually run (safety feature).
     Use --dry-run to validate configuration without executing.
     """
-    settings_path = Path(settings)
+    settings_path = Path(settings).expanduser()
 
     # Load and validate config via Pydantic
     try:
@@ -309,74 +309,77 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> Executi
     db_url = config.landscape.url
     db = LandscapeDB.from_url(db_url)
 
-    # Instantiate transforms from row_plugins via PluginManager
-    transforms: list[BaseTransform] = []
-    for plugin_config in config.row_plugins:
-        plugin_name = plugin_config.plugin
-        plugin_options = dict(plugin_config.options)
+    try:
+        # Instantiate transforms from row_plugins via PluginManager
+        transforms: list[BaseTransform] = []
+        for plugin_config in config.row_plugins:
+            plugin_name = plugin_config.plugin
+            plugin_options = dict(plugin_config.options)
 
-        transform_cls = manager.get_transform_by_name(plugin_name)
-        if transform_cls is None:
-            available = [t.name for t in manager.get_transforms()]
-            raise typer.BadParameter(f"Unknown transform plugin: {plugin_name}. Available: {available}")
-        transforms.append(transform_cls(plugin_options))  # type: ignore[arg-type]
+            transform_cls = manager.get_transform_by_name(plugin_name)
+            if transform_cls is None:
+                available = [t.name for t in manager.get_transforms()]
+                raise typer.BadParameter(f"Unknown transform plugin: {plugin_name}. Available: {available}")
+            transforms.append(transform_cls(plugin_options))  # type: ignore[arg-type]
 
-    # Build execution graph from config (needed before PipelineConfig for aggregation node IDs)
-    graph = ExecutionGraph.from_config(config)
+        # Build execution graph from config (needed before PipelineConfig for aggregation node IDs)
+        graph = ExecutionGraph.from_config(config)
 
-    # Build aggregation_settings dict (node_id -> AggregationSettings)
-    # Also instantiate aggregation transforms and add to transforms list
-    from elspeth.core.config import AggregationSettings
+        # Build aggregation_settings dict (node_id -> AggregationSettings)
+        # Also instantiate aggregation transforms and add to transforms list
+        from elspeth.core.config import AggregationSettings
 
-    aggregation_settings: dict[str, AggregationSettings] = {}
-    agg_id_map = graph.get_aggregation_id_map()
-    for agg_config in config.aggregations:
-        node_id = agg_id_map[agg_config.name]
-        aggregation_settings[node_id] = agg_config
+        aggregation_settings: dict[str, AggregationSettings] = {}
+        agg_id_map = graph.get_aggregation_id_map()
+        for agg_config in config.aggregations:
+            node_id = agg_id_map[agg_config.name]
+            aggregation_settings[node_id] = agg_config
 
-        # Instantiate the aggregation transform plugin via PluginManager
-        plugin_name = agg_config.plugin
-        transform_cls = manager.get_transform_by_name(plugin_name)
-        if transform_cls is None:
-            available = [t.name for t in manager.get_transforms()]
-            raise typer.BadParameter(f"Unknown aggregation plugin: {plugin_name}. Available: {available}")
+            # Instantiate the aggregation transform plugin via PluginManager
+            plugin_name = agg_config.plugin
+            transform_cls = manager.get_transform_by_name(plugin_name)
+            if transform_cls is None:
+                available = [t.name for t in manager.get_transforms()]
+                raise typer.BadParameter(f"Unknown aggregation plugin: {plugin_name}. Available: {available}")
 
-        # Merge aggregation options with schema from config
-        agg_options = dict(agg_config.options)
-        transform = transform_cls(agg_options)
+            # Merge aggregation options with schema from config
+            agg_options = dict(agg_config.options)
+            transform = transform_cls(agg_options)
 
-        # Set node_id so processor can identify this as an aggregation node
-        transform.node_id = node_id
+            # Set node_id so processor can identify this as an aggregation node
+            transform.node_id = node_id
 
-        # Add to transforms list (after row_plugins transforms)
-        transforms.append(transform)  # type: ignore[arg-type]
+            # Add to transforms list (after row_plugins transforms)
+            transforms.append(transform)  # type: ignore[arg-type]
 
-    # Build PipelineConfig with resolved configuration for audit
-    # NOTE: Type ignores needed because:
-    # - Source plugins implement SourceProtocol structurally but mypy doesn't recognize it
-    # - list is invariant so list[BaseTransform] != list[TransformLike]
-    # - Sinks implement SinkProtocol structurally but mypy doesn't recognize it
-    pipeline_config = PipelineConfig(
-        source=source,  # type: ignore[arg-type]
-        transforms=transforms,  # type: ignore[arg-type]
-        sinks=sinks,  # type: ignore[arg-type]
-        config=resolve_config(config),
-        gates=list(config.gates),  # Config-driven gates
-        aggregation_settings=aggregation_settings,  # Aggregation configurations
-    )
+        # Build PipelineConfig with resolved configuration for audit
+        # NOTE: Type ignores needed because:
+        # - Source plugins implement SourceProtocol structurally but mypy doesn't recognize it
+        # - list is invariant so list[BaseTransform] != list[TransformLike]
+        # - Sinks implement SinkProtocol structurally but mypy doesn't recognize it
+        pipeline_config = PipelineConfig(
+            source=source,  # type: ignore[arg-type]
+            transforms=transforms,  # type: ignore[arg-type]
+            sinks=sinks,  # type: ignore[arg-type]
+            config=resolve_config(config),
+            gates=list(config.gates),  # Config-driven gates
+            aggregation_settings=aggregation_settings,  # Aggregation configurations
+        )
 
-    if verbose:
-        typer.echo("Starting pipeline execution...")
+        if verbose:
+            typer.echo("Starting pipeline execution...")
 
-    # Execute via Orchestrator (creates full audit trail)
-    orchestrator = Orchestrator(db)
-    result = orchestrator.run(pipeline_config, graph=graph, settings=config)
+        # Execute via Orchestrator (creates full audit trail)
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(pipeline_config, graph=graph, settings=config)
 
-    return {
-        "run_id": result.run_id,
-        "status": result.status.value,  # Convert enum to string for TypedDict
-        "rows_processed": result.rows_processed,
-    }
+        return {
+            "run_id": result.run_id,
+            "status": result.status.value,  # Convert enum to string for TypedDict
+            "rows_processed": result.rows_processed,
+        }
+    finally:
+        db.close()
 
 
 @app.command()
@@ -389,7 +392,7 @@ def validate(
     ),
 ) -> None:
     """Validate pipeline configuration without running."""
-    settings_path = Path(settings)
+    settings_path = Path(settings).expanduser()
 
     # Load and validate config via Pydantic
     try:
@@ -564,7 +567,7 @@ def purge(
             typer.echo(f"Warning: Could not load settings.yaml: {e}", err=True)
 
     if database:
-        db_path = Path(database)
+        db_path = Path(database).expanduser()
         db_url = f"sqlite:///{db_path.resolve()}"
     elif config:
         db_url = config.landscape.url
@@ -615,8 +618,8 @@ def purge(
         payload_store = FilesystemPayloadStore(payload_path)
         purge_manager = PurgeManager(db, payload_store)
 
-        # Find expired payloads
-        expired_refs = purge_manager.find_expired_row_payloads(effective_retention_days)
+        # Find all expired payload refs (rows, calls, routing reasons)
+        expired_refs = purge_manager.find_expired_payload_refs(effective_retention_days)
 
         if not expired_refs:
             typer.echo(f"No payloads older than {effective_retention_days} days found.")
@@ -819,7 +822,7 @@ def resume(
 
     # Try to load settings - needed for execute mode and optional for dry-run
     settings_config: ElspethSettings | None = None
-    settings_path = Path(settings_file) if settings_file else Path("settings.yaml")
+    settings_path = Path(settings_file).expanduser() if settings_file else Path("settings.yaml")
     if settings_path.exists():
         try:
             settings_config = load_settings(settings_path)
@@ -837,7 +840,7 @@ def resume(
     db_url: str | None = None
 
     if database:
-        db_path = Path(database)
+        db_path = Path(database).expanduser()
         db_url = f"sqlite:///{db_path.resolve()}"
     elif settings_config is not None:
         db_url = settings_config.landscape.url

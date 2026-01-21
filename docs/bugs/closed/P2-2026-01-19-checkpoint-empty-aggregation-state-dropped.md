@@ -90,3 +90,34 @@
 ## Notes / Links
 
 - Related issues/PRs: N/A
+
+## Resolution
+
+**Status:** CLOSED (2026-01-21)
+**Resolved by:** Claude Opus 4.5
+
+### Timeline
+
+1. **Bug discovered:** 2026-01-19 via static analysis at commit `8cfebea`
+2. **Code fixed:** Prior to bug report filing (commit `07084c3` - "chore: delint and reformat codebase with line-length 140")
+3. **Tests added:** 2026-01-21 - regression tests added to `tests/core/checkpoint/test_manager.py`
+
+### Changes Made
+
+**Code (already fixed before report):**
+- `src/elspeth/core/checkpoint/manager.py:57`: Changed from `if aggregation_state else None` to `if aggregation_state is not None else None`
+
+**Tests added:**
+- `test_checkpoint_with_empty_aggregation_state_preserved()`: Verifies `{}` serializes to `"{}"`
+- `test_checkpoint_with_none_aggregation_state_is_null()`: Verifies `None` stays as `None`
+
+### Verification
+
+```bash
+.venv/bin/python -m pytest tests/core/checkpoint/test_manager.py -v
+# 9 tests passed including both new regression tests
+```
+
+### Notes
+
+The fix was applied in the delint commit before the bug report was filed, but no regression tests existed. The resolution adds proper test coverage to prevent future regressions of this common Python truthiness bug.

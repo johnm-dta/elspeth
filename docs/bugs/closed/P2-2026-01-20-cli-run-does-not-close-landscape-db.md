@@ -99,3 +99,36 @@
 ## Notes / Links
 
 - Related issues/PRs: N/A
+
+## Resolution
+
+**Status:** CLOSED (2026-01-21)
+**Resolved by:** Claude Opus 4.5
+
+### Root Cause Confirmed
+
+The `_execute_pipeline()` function at `src/elspeth/cli.py:310` created a `LandscapeDB` instance but never called `db.close()`, unlike the `purge` and `resume` commands which properly use `try/finally` blocks.
+
+### Changes Made
+
+**Code fix (`src/elspeth/cli.py`):**
+- Wrapped all DB usage in `_execute_pipeline()` with `try/finally: db.close()` (lines 312-382)
+- Now consistent with `purge` and `resume` command patterns
+
+**Tests added (`tests/cli/test_run_command.py`):**
+- `test_run_closes_database_after_success()`: Verifies `LandscapeDB.close()` is called after successful pipeline execution
+- `test_run_closes_database_after_failure()`: Verifies `LandscapeDB.close()` is called even when pipeline fails (via finally block)
+
+### Verification
+
+```bash
+.venv/bin/python -m pytest tests/cli/test_run_command.py -v
+# 13 tests passed including both new regression tests
+```
+
+### Notes
+
+The `try/finally` pattern is critical for resource cleanup because:
+1. SQLite file handles remain open without explicit close → "database is locked" errors
+2. Connection pool exhaustion in long-running processes
+3. Temp files can't be deleted on Windows when handles are open

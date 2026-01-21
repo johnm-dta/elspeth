@@ -98,3 +98,55 @@
 ## Notes / Links
 
 - Related issues/PRs: N/A
+
+## Resolution
+
+**Status:** CLOSED (2026-01-21)
+**Resolved by:** Claude Opus 4.5
+
+### Changes Made
+
+**Code fix (`src/elspeth/core/landscape/recorder.py`):**
+
+Changed `get_node_states_for_token()` to order by both `step_index` and `attempt`:
+
+```python
+# Before (Bug):
+query = select(node_states_table).where(node_states_table.c.token_id == token_id).order_by(node_states_table.c.step_index)
+
+# After (Fix):
+query = (
+    select(node_states_table)
+    .where(node_states_table.c.token_id == token_id)
+    .order_by(node_states_table.c.step_index, node_states_table.c.attempt)
+)
+```
+
+Added comment explaining the fix:
+```python
+# Order by (step_index, attempt) for deterministic ordering across retries
+# Bug fix: P2-2026-01-19-node-state-ordering-missing-attempt
+```
+
+Updated docstring to reflect the ordering:
+```python
+Returns:
+    List of NodeState models (discriminated union), ordered by (step_index, attempt)
+```
+
+**Tests added (`tests/core/landscape/test_recorder.py`):**
+- `TestNodeStateOrderingWithRetries` class with 1 regression test:
+  - `test_get_node_states_orders_by_step_index_and_attempt` - Creates node states with multiple attempts inserted out of order, verifies they're returned in (step_index, attempt) order
+
+### Verification
+
+```bash
+.venv/bin/python -m pytest tests/core/landscape/test_recorder.py -v
+# 100 passed (99 existing + 1 new)
+```
+
+### Notes
+
+Without explicit attempt ordering, results were non-deterministic across database backends because SQLite/Postgres may return rows in different orders when only partial ordering is specified. This could cause:
+1. Confusing `explain()` output (attempt 1 appearing before attempt 0)
+2. Non-deterministic signed exports (record order affects signature chain)

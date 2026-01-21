@@ -105,3 +105,37 @@ Similar repros:
 ## Notes / Links
 
 - Related issues/PRs: N/A
+
+## Resolution
+
+**Status:** CLOSED (2026-01-21)
+**Resolved by:** Claude Opus 4.5
+
+### Changes Made
+
+**Code fix (`src/elspeth/cli.py`):**
+Added `.expanduser()` to all user-provided path options:
+
+| Line | Command | Option | Change |
+|------|---------|--------|--------|
+| 132 | `run` | `--settings` | `Path(settings)` → `Path(settings).expanduser()` |
+| 395 | `validate` | `--settings` | `Path(settings)` → `Path(settings).expanduser()` |
+| 570 | `purge` | `--database` | `Path(database)` → `Path(database).expanduser()` |
+| 825 | `resume` | `--settings` | `Path(settings_file)` → `Path(settings_file).expanduser()` |
+| 843 | `resume` | `--database` | `Path(database)` → `Path(database).expanduser()` |
+
+Note: `--payload-dir` already had `.expanduser()` at line 582.
+
+**Tests added (`tests/cli/test_cli.py`):**
+- `TestTildeExpansion` class with 2 regression tests verifying `~` expansion works for `run` and `validate` commands
+
+### Verification
+
+```bash
+.venv/bin/python -m pytest tests/cli/test_cli.py::TestTildeExpansion -v
+# 2 passed
+```
+
+### Notes
+
+The `~` character is expanded by shells, not by the filesystem. When paths come from CLI arguments, Python sees the literal `~`. `Path.expanduser()` converts `~` to the actual home directory path.

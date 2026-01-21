@@ -11,9 +11,16 @@ from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import TYPE_CHECKING, Protocol
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, union
 
-from elspeth.core.landscape.schema import rows_table, runs_table
+from elspeth.core.landscape.schema import (
+    calls_table,
+    node_states_table,
+    nodes_table,
+    routing_events_table,
+    rows_table,
+    runs_table,
+)
 
 if TYPE_CHECKING:
     from elspeth.core.landscape.database import LandscapeDB
@@ -107,6 +114,88 @@ class PurgeManager:
 
         with self._db.connection() as conn:
             result = conn.execute(query)
+            refs = [row[0] for row in result]
+
+        return refs
+
+    def find_expired_payload_refs(
+        self,
+        retention_days: int,
+        as_of: datetime | None = None,
+    ) -> list[str]:
+        """Find all payload refs eligible for deletion based on retention policy.
+
+        This includes payloads from:
+        - rows.source_data_ref (source row payloads)
+        - calls.request_ref and calls.response_ref (external call payloads)
+        - routing_events.reason_ref (routing reason payloads)
+
+        Args:
+            retention_days: Number of days to retain payloads after run completion
+            as_of: Reference datetime for cutoff calculation (defaults to now)
+
+        Returns:
+            Deduplicated list of payload refs for expired payloads
+        """
+        if as_of is None:
+            as_of = datetime.now(UTC)
+
+        cutoff = as_of - timedelta(days=retention_days)
+
+        # Common conditions for completed runs older than cutoff
+        run_expired_condition = and_(
+            runs_table.c.status == "completed",
+            runs_table.c.completed_at.isnot(None),
+            runs_table.c.completed_at < cutoff,
+        )
+
+        # 1. Row payloads: rows → runs
+        row_query = (
+            select(rows_table.c.source_data_ref)
+            .select_from(rows_table.join(runs_table, rows_table.c.run_id == runs_table.c.run_id))
+            .where(and_(run_expired_condition, rows_table.c.source_data_ref.isnot(None)))
+        )
+
+        # 2. Call payloads: calls → node_states → nodes → runs
+        # Join path to get run_id for calls
+        call_join = (
+            calls_table.join(node_states_table, calls_table.c.state_id == node_states_table.c.state_id)
+            .join(nodes_table, node_states_table.c.node_id == nodes_table.c.node_id)
+            .join(runs_table, nodes_table.c.run_id == runs_table.c.run_id)
+        )
+
+        # Request refs
+        call_request_query = (
+            select(calls_table.c.request_ref)
+            .select_from(call_join)
+            .where(and_(run_expired_condition, calls_table.c.request_ref.isnot(None)))
+        )
+
+        # Response refs
+        call_response_query = (
+            select(calls_table.c.response_ref)
+            .select_from(call_join)
+            .where(and_(run_expired_condition, calls_table.c.response_ref.isnot(None)))
+        )
+
+        # 3. Routing payloads: routing_events → node_states → nodes → runs
+        routing_join = (
+            routing_events_table.join(node_states_table, routing_events_table.c.state_id == node_states_table.c.state_id)
+            .join(nodes_table, node_states_table.c.node_id == nodes_table.c.node_id)
+            .join(runs_table, nodes_table.c.run_id == runs_table.c.run_id)
+        )
+
+        routing_query = (
+            select(routing_events_table.c.reason_ref)
+            .select_from(routing_join)
+            .where(and_(run_expired_condition, routing_events_table.c.reason_ref.isnot(None)))
+        )
+
+        # Combine all queries with UNION (automatically deduplicates)
+        combined_query = union(row_query, call_request_query, call_response_query, routing_query)
+
+        with self._db.connection() as conn:
+            result = conn.execute(combined_query)
             refs = [row[0] for row in result]
 
         return refs

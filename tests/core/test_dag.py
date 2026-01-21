@@ -577,6 +577,48 @@ class TestExecutionGraphRouteMapping:
         route_label = graph.get_route_label(gate_node_id, "results")
         assert route_label == "continue"
 
+    def test_hyphenated_sink_names_work_in_dag(self) -> None:
+        """Gate routing to hyphenated sink names works correctly.
+
+        Regression test for gate-route-destination-name-validation-mismatch bug.
+        Sink names don't need to match identifier pattern - they're just dict keys.
+        """
+        from elspeth.core.config import (
+            DatasourceSettings,
+            ElspethSettings,
+            GateSettings,
+            SinkSettings,
+        )
+        from elspeth.core.dag import ExecutionGraph
+
+        config = ElspethSettings(
+            datasource=DatasourceSettings(plugin="csv"),
+            sinks={
+                "output-sink": SinkSettings(plugin="csv"),
+                "quarantine-bucket": SinkSettings(plugin="csv"),
+            },
+            gates=[
+                GateSettings(
+                    name="quality_check",
+                    condition="row['score'] >= 0.5",
+                    routes={"true": "output-sink", "false": "quarantine-bucket"},
+                ),
+            ],
+            output_sink="output-sink",
+        )
+
+        # DAG compilation should succeed with hyphenated sink names
+        graph = ExecutionGraph.from_config(config)
+
+        # Verify both hyphenated sinks exist
+        sink_ids = graph.get_sink_id_map()
+        assert "output-sink" in sink_ids
+        assert "quarantine-bucket" in sink_ids
+
+        # Verify gate routes to the hyphenated sinks
+        gate_node_id = graph.get_config_gate_id_map()["quality_check"]
+        assert graph.get_route_label(gate_node_id, "quarantine-bucket") == "false"
+
 
 class TestMultiEdgeSupport:
     """Tests for MultiDiGraph multi-edge support."""

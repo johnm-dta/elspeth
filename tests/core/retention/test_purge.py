@@ -908,3 +908,225 @@ class TestFindExpiredAllPayloadRefs:
         expired = manager.find_expired_payload_refs(retention_days=30)
 
         assert "recent_call_ref" not in expired
+
+
+class TestContentAddressableSharedRefs:
+    """Tests for content-addressable storage shared refs across runs.
+
+    Regression tests for P2-payload-refs-shared-across-runs bug:
+    Because payloads are content-addressable, the same hash can appear in
+    multiple runs. Purge must exclude refs still used by non-expired runs.
+    """
+
+    def test_shared_row_ref_excluded_when_used_by_recent_run(self) -> None:
+        """Shared row payload ref should NOT be purged if a recent run uses it.
+
+        Scenario:
+        - Run A (60 days old, expired) has row with source_data_ref=H
+        - Run B (10 days old, not expired) has row with same source_data_ref=H
+        - Purge with 30-day retention should NOT return H (Run B needs it)
+        """
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        # The shared ref (content-addressable: same content = same hash)
+        shared_ref = "shared_row_payload_hash"
+
+        # Run A: 60 days old (expired with 30-day retention)
+        run_a_id = str(uuid4())
+        node_a_id = str(uuid4())
+        old_completed = datetime.now(UTC) - timedelta(days=60)
+
+        # Run B: 10 days old (NOT expired with 30-day retention)
+        run_b_id = str(uuid4())
+        node_b_id = str(uuid4())
+        recent_completed = datetime.now(UTC) - timedelta(days=10)
+
+        with db.connection() as conn:
+            # Create Run A (expired) with shared ref
+            _create_run(conn, runs_table, run_a_id, completed_at=old_completed, status="completed")
+            _create_node(conn, nodes_table, node_a_id, run_a_id)
+            _create_row(
+                conn,
+                rows_table,
+                str(uuid4()),
+                run_a_id,
+                node_a_id,
+                row_index=0,
+                source_data_ref=shared_ref,
+                source_data_hash="hash_a",
+            )
+
+            # Create Run B (NOT expired) with SAME shared ref
+            _create_run(conn, runs_table, run_b_id, completed_at=recent_completed, status="completed")
+            _create_node(conn, nodes_table, node_b_id, run_b_id)
+            _create_row(
+                conn,
+                rows_table,
+                str(uuid4()),
+                run_b_id,
+                node_b_id,
+                row_index=0,
+                source_data_ref=shared_ref,
+                source_data_hash="hash_b",
+            )
+
+        # Find expired refs - shared ref should be EXCLUDED
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        assert shared_ref not in expired, (
+            f"Shared ref {shared_ref} should NOT be returned for deletion because Run B (10 days old) still needs it"
+        )
+
+    def test_shared_call_ref_excluded_when_used_by_recent_run(self) -> None:
+        """Shared call payload ref should NOT be purged if a recent run uses it."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import (
+            calls_table,
+            node_states_table,
+            nodes_table,
+            rows_table,
+            runs_table,
+            tokens_table,
+        )
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        # Shared call response ref (e.g., identical LLM response)
+        shared_ref = "shared_call_response_hash"
+
+        # Run A: 60 days old (expired)
+        run_a_id = str(uuid4())
+        old_completed = datetime.now(UTC) - timedelta(days=60)
+
+        # Run B: 10 days old (NOT expired)
+        run_b_id = str(uuid4())
+        recent_completed = datetime.now(UTC) - timedelta(days=10)
+
+        with db.connection() as conn:
+            # Run A with call using shared ref
+            node_a_id = str(uuid4())
+            row_a_id = str(uuid4())
+            token_a_id = str(uuid4())
+            state_a_id = str(uuid4())
+            _create_run(conn, runs_table, run_a_id, completed_at=old_completed, status="completed")
+            _create_node(conn, nodes_table, node_a_id, run_a_id)
+            _create_row(conn, rows_table, row_a_id, run_a_id, node_a_id, row_index=0)
+            _create_token(conn, tokens_table, token_a_id, row_a_id)
+            _create_state(conn, node_states_table, state_a_id, token_a_id, node_a_id)
+            _create_call(conn, calls_table, str(uuid4()), state_a_id, response_ref=shared_ref)
+
+            # Run B with call using SAME shared ref
+            node_b_id = str(uuid4())
+            row_b_id = str(uuid4())
+            token_b_id = str(uuid4())
+            state_b_id = str(uuid4())
+            _create_run(conn, runs_table, run_b_id, completed_at=recent_completed, status="completed")
+            _create_node(conn, nodes_table, node_b_id, run_b_id)
+            _create_row(conn, rows_table, row_b_id, run_b_id, node_b_id, row_index=0)
+            _create_token(conn, tokens_table, token_b_id, row_b_id)
+            _create_state(conn, node_states_table, state_b_id, token_b_id, node_b_id)
+            _create_call(conn, calls_table, str(uuid4()), state_b_id, response_ref=shared_ref)
+
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        assert shared_ref not in expired, (
+            f"Shared call ref {shared_ref} should NOT be returned for deletion because Run B (10 days old) still needs it"
+        )
+
+    def test_exclusive_expired_ref_is_returned(self) -> None:
+        """Ref used ONLY by expired runs should be returned for deletion."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        # Ref used only by expired run
+        exclusive_ref = "exclusive_to_expired_run"
+
+        # Run A: 60 days old (expired)
+        run_a_id = str(uuid4())
+        node_a_id = str(uuid4())
+        old_completed = datetime.now(UTC) - timedelta(days=60)
+
+        with db.connection() as conn:
+            _create_run(conn, runs_table, run_a_id, completed_at=old_completed, status="completed")
+            _create_node(conn, nodes_table, node_a_id, run_a_id)
+            _create_row(
+                conn,
+                rows_table,
+                str(uuid4()),
+                run_a_id,
+                node_a_id,
+                row_index=0,
+                source_data_ref=exclusive_ref,
+                source_data_hash="hash_excl",
+            )
+
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        assert exclusive_ref in expired, f"Exclusive ref {exclusive_ref} SHOULD be returned for deletion because no active run needs it"
+
+    def test_shared_ref_excluded_when_used_by_running_run(self) -> None:
+        """Shared ref should NOT be purged if an incomplete (running) run uses it."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        shared_ref = "shared_with_running_run"
+
+        # Run A: 60 days old (expired)
+        run_a_id = str(uuid4())
+        node_a_id = str(uuid4())
+        old_completed = datetime.now(UTC) - timedelta(days=60)
+
+        # Run B: still running (no completed_at)
+        run_b_id = str(uuid4())
+        node_b_id = str(uuid4())
+
+        with db.connection() as conn:
+            _create_run(conn, runs_table, run_a_id, completed_at=old_completed, status="completed")
+            _create_node(conn, nodes_table, node_a_id, run_a_id)
+            _create_row(
+                conn,
+                rows_table,
+                str(uuid4()),
+                run_a_id,
+                node_a_id,
+                row_index=0,
+                source_data_ref=shared_ref,
+            )
+
+            # Running run (completed_at=None, status=running)
+            _create_run(conn, runs_table, run_b_id, completed_at=None, status="running")
+            _create_node(conn, nodes_table, node_b_id, run_b_id)
+            _create_row(
+                conn,
+                rows_table,
+                str(uuid4()),
+                run_b_id,
+                node_b_id,
+                row_index=0,
+                source_data_ref=shared_ref,
+            )
+
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        assert shared_ref not in expired, (
+            f"Shared ref {shared_ref} should NOT be returned for deletion because a running run still needs it"
+        )

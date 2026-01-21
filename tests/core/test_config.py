@@ -968,29 +968,37 @@ class TestGateSettings:
             )
         assert "at least one entry" in str(exc_info.value)
 
-    def test_gate_settings_invalid_route_destination(self) -> None:
-        """Route destination must be 'continue', 'fork', or valid identifier."""
+    def test_gate_settings_hyphenated_sink_destination_accepted(self) -> None:
+        """Route destination can be any sink name, including hyphenated.
+
+        Regression test for gate-route-destination-name-validation-mismatch bug.
+        Sink names don't need to match identifier pattern - they're just dict keys.
+        The DAG builder validates that destinations are actual sink keys.
+        """
         from elspeth.core.config import GateSettings
 
-        with pytest.raises(ValidationError) as exc_info:
-            GateSettings(
-                name="bad_gate",
-                condition="row['x'] > 0",
-                routes={"yes": "123invalid"},  # Starts with number
-            )
-        assert "valid identifier" in str(exc_info.value)
+        # Hyphenated sink names should be accepted at GateSettings level
+        gate = GateSettings(
+            name="hyphen_gate",
+            condition="row['x'] > 0",
+            routes={"true": "output-sink", "false": "continue"},
+        )
+        assert gate.routes["true"] == "output-sink"
 
-    def test_gate_settings_route_destination_special_chars(self) -> None:
-        """Route destination cannot have special characters."""
+    def test_gate_settings_numeric_prefix_sink_destination_accepted(self) -> None:
+        """Route destination can start with numbers (not identifier-constrained).
+
+        Sink names are dict keys, not Python identifiers. Names like "123_sink"
+        are valid sink names and should be accepted in gate routes.
+        """
         from elspeth.core.config import GateSettings
 
-        with pytest.raises(ValidationError) as exc_info:
-            GateSettings(
-                name="bad_gate",
-                condition="row['x'] > 0",
-                routes={"yes": "sink-name"},  # Has hyphen
-            )
-        assert "valid identifier" in str(exc_info.value)
+        gate = GateSettings(
+            name="numeric_gate",
+            condition="row['x'] > 0",
+            routes={"true": "123_sink", "false": "continue"},
+        )
+        assert gate.routes["true"] == "123_sink"
 
     def test_gate_settings_fork_requires_fork_to(self) -> None:
         """fork_to is required when routes use 'fork' destination."""

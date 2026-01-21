@@ -102,3 +102,27 @@ One of:
 ## Notes / Links
 
 - Related issues/PRs: N/A
+
+## Resolution
+
+**Status:** FIXED (2026-01-21)
+
+**Solution Applied:** Option B - removed `_IDENTIFIER_PATTERN` enforcement from `GateSettings.validate_routes()`.
+
+**Changes Made:**
+1. `src/elspeth/core/config.py`: Removed the identifier pattern check from `validate_routes()` and deleted the now-unused `_IDENTIFIER_PATTERN` constant (per CLAUDE.md "No Legacy Code Policy"). The DAG builder (`ExecutionGraph.from_config` at `dag.py:388-392`) already validates that route destinations exist as actual sink keys, providing better error messages that reference available sinks.
+
+2. `tests/core/test_config.py`: Updated tests:
+   - Replaced `test_gate_settings_invalid_route_destination` with `test_gate_settings_hyphenated_sink_destination_accepted`
+   - Replaced `test_gate_settings_route_destination_special_chars` with `test_gate_settings_numeric_prefix_sink_destination_accepted`
+
+3. `tests/core/test_dag.py`: Added integration test `test_hyphenated_sink_names_work_in_dag` to verify end-to-end flow with hyphenated sink names.
+
+**Rationale:**
+- Sink names are dict keys, not Python identifiers - no reason to restrict them
+- The DAG builder already validates sink existence with helpful error messages
+- Option A would have been breaking for existing configs with non-identifier sink names
+
+**Verification:**
+- All 200 tests in `test_config.py` and `test_dag.py` pass
+- Manual verification confirms hyphenated sink names now work with gates

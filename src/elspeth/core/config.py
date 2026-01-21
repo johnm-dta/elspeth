@@ -15,9 +15,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from elspeth.contracts.enums import RunMode
 
-# Compiled regex for validating route destination identifiers
-_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
-
 # Reserved edge labels that cannot be used as route labels or fork branch names.
 # "continue" is used by the DAG builder for edges between sequential nodes.
 # Using these as user-defined labels would cause edge_map collisions in the orchestrator,
@@ -215,6 +212,12 @@ class GateSettings(BaseModel):
 
         Also validates that route labels don't use reserved edge labels,
         which would cause edge_map collisions in the orchestrator.
+
+        Note: Sink destinations are NOT restricted to identifier-like names.
+        Sink names can be any valid dict key (including hyphenated names like "my-sink").
+        The DAG builder validates that destinations are actual sink keys at graph
+        compilation time (ExecutionGraph.from_config), which provides better error
+        messages referencing available sinks.
         """
         if not v:
             raise ValueError("routes must have at least one entry")
@@ -224,10 +227,12 @@ class GateSettings(BaseModel):
             if label in _RESERVED_EDGE_LABELS:
                 raise ValueError(f"Route label '{label}' is reserved and cannot be used. Reserved labels: {sorted(_RESERVED_EDGE_LABELS)}")
 
+            # Destinations must be "continue", "fork", or a sink name.
+            # Sink name validation is deferred to DAG compilation where we have
+            # access to the actual sink definitions.
             if destination in ("continue", "fork"):
                 continue
-            if not _IDENTIFIER_PATTERN.match(destination):
-                raise ValueError(f"Route destination '{destination}' for label '{label}' must be 'continue', 'fork', or a valid identifier")
+            # Any other string is assumed to be a sink name - validated later
         return v
 
     @field_validator("fork_to")

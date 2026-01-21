@@ -60,23 +60,25 @@ class TestAzureMultiQueryLLMContract(TransformContractPropertyTestBase):
     """
 
     @pytest.fixture
-    def transform(self) -> "TransformProtocol":
+    def transform(self) -> TransformProtocol:
         """Return a configured transform instance."""
-        t = AzureMultiQueryLLMTransform({
-            "deployment_name": "gpt-4o",
-            "endpoint": "https://test.openai.azure.com",
-            "api_key": "test-key",
-            "template": "{{ input_1 }} {{ criterion.name }}",
-            "case_studies": [
-                {"name": "cs1", "input_fields": ["cs1_a", "cs1_b"]},
-            ],
-            "criteria": [
-                {"name": "test_criterion", "code": "TEST"},
-            ],
-            "response_format": "json",
-            "output_mapping": {"score": "score", "rationale": "rationale"},
-            "schema": {"fields": "dynamic"},
-        })
+        t = AzureMultiQueryLLMTransform(
+            {
+                "deployment_name": "gpt-4o",
+                "endpoint": "https://test.openai.azure.com",
+                "api_key": "test-key",
+                "template": "{{ input_1 }} {{ criterion.name }}",
+                "case_studies": [
+                    {"name": "cs1", "input_fields": ["cs1_a", "cs1_b"]},
+                ],
+                "criteria": [
+                    {"name": "test_criterion", "code": "TEST"},
+                ],
+                "response_format": "json",
+                "output_mapping": {"score": "score", "rationale": "rationale"},
+                "schema": {"fields": "dynamic"},
+            }
+        )
         # Pre-initialize with context for lifecycle tests
         mock_ctx = _make_mock_context()
         t.on_start(mock_ctx)
@@ -97,64 +99,74 @@ class TestAzureMultiQueryLLMSpecific:
     """Multi-query-specific contract tests."""
 
     def test_query_expansion_matches_cross_product(self) -> None:
-        """Query specs match case_studies × criteria cross-product."""
-        transform = AzureMultiQueryLLMTransform({
-            "deployment_name": "gpt-4o",
-            "endpoint": "https://test.openai.azure.com",
-            "api_key": "test-key",
-            "template": "{{ input_1 }}",
-            "case_studies": [
-                {"name": "cs1", "input_fields": ["a"]},
-                {"name": "cs2", "input_fields": ["b"]},
-            ],
-            "criteria": [
-                {"name": "crit1"},
-                {"name": "crit2"},
-                {"name": "crit3"},
-            ],
-            "response_format": "json",
-            "output_mapping": {"score": "score"},
-            "schema": {"fields": "dynamic"},
-        })
+        """Query specs match case_studies x criteria cross-product."""
+        transform = AzureMultiQueryLLMTransform(
+            {
+                "deployment_name": "gpt-4o",
+                "endpoint": "https://test.openai.azure.com",
+                "api_key": "test-key",
+                "template": "{{ input_1 }}",
+                "case_studies": [
+                    {"name": "cs1", "input_fields": ["a"]},
+                    {"name": "cs2", "input_fields": ["b"]},
+                ],
+                "criteria": [
+                    {"name": "crit1"},
+                    {"name": "crit2"},
+                    {"name": "crit3"},
+                ],
+                "response_format": "json",
+                "output_mapping": {"score": "score"},
+                "schema": {"fields": "dynamic"},
+            }
+        )
 
-        # 2 case studies × 3 criteria = 6 queries
+        # 2 case studies x 3 criteria = 6 queries
         assert len(transform._query_specs) == 6
 
         # Verify all combinations present
         prefixes = {s.output_prefix for s in transform._query_specs}
         assert prefixes == {
-            "cs1_crit1", "cs1_crit2", "cs1_crit3",
-            "cs2_crit1", "cs2_crit2", "cs2_crit3",
+            "cs1_crit1",
+            "cs1_crit2",
+            "cs1_crit3",
+            "cs2_crit1",
+            "cs2_crit2",
+            "cs2_crit3",
         }
 
     def test_is_batch_aware_true(self) -> None:
         """Transform declares batch awareness for aggregation support."""
-        transform = AzureMultiQueryLLMTransform({
-            "deployment_name": "gpt-4o",
-            "endpoint": "https://test.openai.azure.com",
-            "api_key": "test-key",
-            "template": "{{ input_1 }}",
-            "case_studies": [{"name": "cs1", "input_fields": ["a"]}],
-            "criteria": [{"name": "crit1"}],
-            "response_format": "json",
-            "output_mapping": {"score": "score"},
-            "schema": {"fields": "dynamic"},
-        })
+        transform = AzureMultiQueryLLMTransform(
+            {
+                "deployment_name": "gpt-4o",
+                "endpoint": "https://test.openai.azure.com",
+                "api_key": "test-key",
+                "template": "{{ input_1 }}",
+                "case_studies": [{"name": "cs1", "input_fields": ["a"]}],
+                "criteria": [{"name": "crit1"}],
+                "response_format": "json",
+                "output_mapping": {"score": "score"},
+                "schema": {"fields": "dynamic"},
+            }
+        )
 
         assert transform.is_batch_aware is True
 
     def test_creates_tokens_false(self) -> None:
         """Transform does not create new tokens (1-to-1 row mapping)."""
-        transform = AzureMultiQueryLLMTransform({
-            "deployment_name": "gpt-4o",
-            "endpoint": "https://test.openai.azure.com",
-            "api_key": "test-key",
-            "template": "{{ input_1 }}",
-            "case_studies": [{"name": "cs1", "input_fields": ["a"]}],
-            "criteria": [{"name": "crit1"}],
-            "response_format": "json",
-            "output_mapping": {"score": "score"},
-            "schema": {"fields": "dynamic"},
-        })
+        transform = AzureMultiQueryLLMTransform(
+            {
+                "deployment_name": "gpt-4o",
+                "endpoint": "https://test.openai.azure.com",
+                "api_key": "test-key",
+                "template": "{{ input_1 }}",
+                "case_studies": [{"name": "cs1", "input_fields": ["a"]}],
+                "criteria": [{"name": "crit1"}],
+                "response_format": "json",
+                "output_mapping": {"score": "score"},
+                "schema": {"fields": "dynamic"},
+            }
+        )
 
         assert transform.creates_tokens is False

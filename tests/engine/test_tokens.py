@@ -166,6 +166,100 @@ class TestTokenManagerCoalesce:
         assert merged.row_data == {"value": 42, "mean": 10.5, "label": "A"}
 
 
+class TestTokenManagerForkIsolation:
+    """Test that forked tokens have isolated row_data (no shared mutable objects)."""
+
+    def test_fork_nested_data_isolation(self) -> None:
+        """Forked children must not share nested mutable objects.
+
+        Bug: P2-2026-01-20-forked-token-row-data-shallow-copy-leaks-nested-mutations
+        When row_data contains nested dicts/lists, shallow copy causes siblings
+        to share nested objects. Mutating one affects all.
+        """
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        manager = TokenManager(recorder)
+
+        # Create token with NESTED data (common from JSON sources)
+        initial = manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            row_data={"payload": {"x": 1, "y": 2}, "items": [1, 2, 3]},
+        )
+
+        # Fork to two branches
+        children = manager.fork_token(
+            parent_token=initial,
+            branches=["branch_a", "branch_b"],
+            step_in_pipeline=1,
+        )
+
+        child_a = children[0]
+        child_b = children[1]
+
+        # Mutate nested data in child_a
+        child_a.row_data["payload"]["x"] = 999
+        child_a.row_data["items"].append(4)
+
+        # Bug: child_b should NOT be affected, but shallow copy means it is
+        assert child_b.row_data["payload"]["x"] == 1, "Nested dict mutation leaked to sibling!"
+        assert child_b.row_data["items"] == [1, 2, 3], "Nested list mutation leaked to sibling!"
+
+    def test_fork_with_custom_nested_data_isolation(self) -> None:
+        """Custom row_data in fork should also be deep copied."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.tokens import TokenManager
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        manager = TokenManager(recorder)
+        initial = manager.create_initial_token(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            row_data={"value": 1},
+        )
+
+        # Fork with custom nested row_data
+        custom_data = {"nested": {"key": "original"}}
+        children = manager.fork_token(
+            parent_token=initial,
+            branches=["a", "b"],
+            step_in_pipeline=1,
+            row_data=custom_data,
+        )
+
+        # Mutate one child's nested data
+        children[0].row_data["nested"]["key"] = "modified"
+
+        # Siblings should be isolated
+        assert children[1].row_data["nested"]["key"] == "original"
+
+
 class TestTokenManagerEdgeCases:
     """Test edge cases and error handling."""
 

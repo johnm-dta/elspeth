@@ -251,3 +251,42 @@ class TestFieldMapper:
         # Any data passes with dynamic schema
         result = transform.process({"anything": "goes", "count": "string"}, ctx)
         assert result.status == "success"
+
+
+class TestFieldMapperOutputSchema:
+    """Tests for output schema behavior of shape-changing transforms.
+
+    Per P1-2026-01-19-shape-changing-transforms-output-schema-mismatch:
+    Shape-changing transforms must use dynamic output_schema because their
+    output shape depends on config (mapping, select_only), not input schema.
+    """
+
+    def test_select_only_uses_dynamic_output_schema(self) -> None:
+        """FieldMapper with select_only=True uses dynamic output_schema.
+
+        When select_only=True, the output only includes mapped fields,
+        which depends on config, not the input schema. Therefore output_schema
+        must be dynamic (accepts any fields) to avoid false schema validation.
+        """
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        # Explicit schema: expects a, b, c
+        transform = FieldMapper(
+            {
+                "schema": {"mode": "strict", "fields": ["a: str", "b: int", "c: float"]},
+                "mapping": {"a": "a"},  # Only select field 'a'
+                "select_only": True,
+            }
+        )
+
+        # Output schema should be dynamic (accepts any fields)
+        # because output shape depends on mapping config, not input schema
+        output_fields = transform.output_schema.model_fields
+
+        # The fix: output_schema should be dynamic (empty required fields, extra="allow")
+        # Currently fails because output_schema = input_schema, which has a, b, c
+        assert len(output_fields) == 0, f"Expected dynamic schema with no required fields, got: {list(output_fields.keys())}"
+
+        # Additionally verify extra fields are allowed (dynamic schema behavior)
+        config = transform.output_schema.model_config
+        assert config.get("extra") == "allow", "Output schema should allow extra fields (dynamic)"

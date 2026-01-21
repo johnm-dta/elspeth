@@ -2,7 +2,7 @@
 
 ## Summary
 
-- `DatabaseSink` creates its table schema by inferring columns from the first row’s keys.
+- `DatabaseSink` creates its table schema by inferring columns from the first row's keys.
 - If later rows include additional keys (which can be valid under a free/dynamic schema, or from optional fields), inserts can fail because the table lacks those columns.
 - The sink already validates and stores a `schema_config`, but it is not used to define the table schema.
 
@@ -46,7 +46,7 @@
 
 ## Actual Behavior
 
-- Table columns are derived only from the first row’s keys; later valid keys can cause failures.
+- Table columns are derived only from the first row's keys; later valid keys can cause failures.
 
 ## Evidence
 
@@ -57,12 +57,12 @@
 ## Impact
 
 - User-facing impact: nondeterministic failures depending on row ordering; difficult to operate pipelines reliably.
-- Data integrity / security impact: schema configuration is not honored by the sink’s side effects; audit trail may not reflect actual DB schema.
+- Data integrity / security impact: schema configuration is not honored by the sink's side effects; audit trail may not reflect actual DB schema.
 - Performance or cost impact: reruns, partial writes, and manual table repair.
 
 ## Root Cause Hypothesis
 
-- Implementation uses a “quickstart” inference approach rather than schema-driven schema definition.
+- Implementation uses a "quickstart" inference approach rather than schema-driven schema definition.
 
 ## Proposed Fix
 
@@ -81,7 +81,7 @@
 ## Architectural Deviations
 
 - Spec or doc reference: `CLAUDE.md` (auditability and reproducibility)
-- Observed divergence: declared schema is not used to shape the sink’s output schema (table definition).
+- Observed divergence: declared schema is not used to shape the sink's output schema (table definition).
 - Reason (if known): minimal inference implementation.
 - Alignment plan or decision needed: define whether sinks are schema-driven or data-driven, and how that affects audit expectations.
 
@@ -97,3 +97,42 @@
 ## Notes / Links
 
 - Related ticket: `docs/bugs/open/2026-01-19-databasesink-if-exists-replace-ignored.md`
+
+---
+
+## Resolution
+
+**Status:** CLOSED
+**Date:** 2026-01-21
+**Resolved by:** Claude Opus 4.5
+
+### Root Cause Confirmed
+
+The `_ensure_table` method created table columns from `row.keys()` instead of using the stored `_schema_config.fields` when an explicit schema was configured.
+
+### Fix Applied
+
+Modified `src/elspeth/plugins/sinks/database_sink.py`:
+
+1. Added `SCHEMA_TYPE_TO_SQLALCHEMY` mapping to convert schema field types (str, int, float, bool, any) to SQLAlchemy column types (String, Integer, Float, Boolean).
+
+2. Split `_ensure_table` logic into a new `_create_columns_from_schema_or_row` method:
+   - When schema is explicit (not dynamic) and has fields, creates columns from `schema_config.fields` with proper type mapping
+   - When schema is dynamic, falls back to inferring from first row keys (original behavior preserved)
+
+3. Updated class docstring to reflect the new behavior.
+
+### Tests Added
+
+Three new tests in `tests/plugins/sinks/test_database_sink.py`:
+
+1. `test_explicit_schema_creates_all_columns_including_optional` - Verifies optional fields present in table even when first row doesn't include them
+2. `test_explicit_schema_maps_types_correctly` - Verifies schema types (int, str, float, bool) map to correct SQLAlchemy types
+3. `test_dynamic_schema_still_infers_from_row` - Verifies backward compatibility for dynamic schemas
+
+### Verification
+
+- All 15 database sink tests pass
+- All 939 plugin tests pass
+- Type checking (mypy) passes
+- Linting (ruff) passes

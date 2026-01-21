@@ -3,7 +3,7 @@
 ## Summary
 
 - `CSVSink` lazily initializes its `csv.DictWriter` with `fieldnames=list(rows[0].keys())`.
-- `csv.DictWriter` defaults `extrasaction="raise"`, so if a later row includes a key not present in the first row’s keys, `writer.writerow(row)` raises `ValueError`.
+- `csv.DictWriter` defaults `extrasaction="raise"`, so if a later row includes a key not present in the first row's keys, `writer.writerow(row)` raises `ValueError`.
 - This is especially problematic for explicit schemas with optional fields: the first row may omit an optional field, but later rows can legally include it.
 
 ## Severity
@@ -72,15 +72,15 @@
     - support evolving columns (requires rewriting header / buffering), or
     - ignore extras (`extrasaction="ignore"`) and record a warning/audit event.
 - Config or schema changes:
-  - Potentially document/require “stable field set” for CSV sinks.
+  - Potentially document/require "stable field set" for CSV sinks.
 - Tests to add/update:
-  - Add a test with explicit schema + optional field that appears only in later rows and assert sink does not crash (or fails fast with a clear, deterministic error if that’s the chosen policy).
+  - Add a test with explicit schema + optional field that appears only in later rows and assert sink does not crash (or fails fast with a clear, deterministic error if that's the chosen policy).
 - Risks or migration steps:
   - Changing header generation affects output CSV column order; document this for consumers.
 
 ## Architectural Deviations
 
-- Spec or doc reference: `CLAUDE.md` (deterministic, auditable behavior; “no silent wrong results”)
+- Spec or doc reference: `CLAUDE.md` (deterministic, auditable behavior; "no silent wrong results")
 - Observed divergence: sink behavior depends on incidental first-row shape rather than declared schema.
 - Reason (if known): convenience lazy initialization without schema integration.
 - Alignment plan or decision needed: define canonical CSV column ordering strategy (schema-driven preferred).
@@ -97,3 +97,45 @@
 ## Notes / Links
 
 - Related file: `src/elspeth/contracts/schema.py` (optional field support via `?`)
+
+---
+
+## Resolution
+
+**Status:** CLOSED
+**Date:** 2026-01-21
+**Resolved by:** Claude Opus 4.5
+
+### Root Cause Confirmed
+
+The `_open_file` method set `self._fieldnames = list(rows[0].keys())` instead of using the stored `_schema_config.fields` when an explicit schema was configured.
+
+### Fix Applied
+
+Modified `src/elspeth/plugins/sinks/csv_sink.py`:
+
+1. Added new method `_get_fieldnames_from_schema_or_row()`:
+   - When schema is explicit (not dynamic) and has fields, returns field names from `schema_config.fields`
+   - When schema is dynamic, falls back to inferring from first row keys (original behavior preserved)
+
+2. Updated `_open_file` to use this new method instead of directly accessing `rows[0].keys()`
+
+3. Updated class docstring to reflect the new behavior.
+
+### Tests Added
+
+Two new tests in `tests/plugins/sinks/test_csv_sink.py`:
+
+1. `test_explicit_schema_creates_all_headers_including_optional` - Verifies optional fields present in headers even when first row doesn't include them
+2. `test_dynamic_schema_still_infers_from_row` - Verifies backward compatibility for dynamic schemas
+
+### Verification
+
+- All 16 CSV sink tests pass
+- All 6 append mode tests pass
+- Type checking (mypy) passes
+- Linting (ruff) passes
+
+### Related Fix
+
+This bug was a sibling of P1-2026-01-19-databasesink-schema-inferred-from-first-row, which had the same root cause pattern. Both were fixed in the same session using the same approach.

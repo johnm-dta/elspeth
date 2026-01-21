@@ -17,7 +17,7 @@ def make_full_config() -> dict[str, Any]:
         "deployment_name": "gpt-4o",
         "endpoint": "https://test.openai.azure.com",
         "api_key": "test-key",
-        "system_prompt": "You are an assessment AI. Respond in JSON: {\"score\": <0-100>, \"rationale\": \"<text>\"}",
+        "system_prompt": 'You are an assessment AI. Respond in JSON: {"score": <0-100>, "rationale": "<text>"}',
         "template": """
 Case Study:
 Background: {{ row.input_1 }}
@@ -71,10 +71,12 @@ class TestMultiQueryIntegration:
         responses: list[dict[str, Any]] = []
         for cs in ["cs1", "cs2"]:
             for crit in ["diagnosis", "treatment", "prognosis", "risk", "followup"]:
-                responses.append({
-                    "score": len(responses) * 10,
-                    "rationale": f"Assessment for {cs}_{crit}",
-                })
+                responses.append(
+                    {
+                        "score": len(responses) * 10,
+                        "rationale": f"Assessment for {cs}_{crit}",
+                    }
+                )
 
         call_idx = [0]
 

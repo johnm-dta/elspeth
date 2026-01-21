@@ -11,14 +11,24 @@ import hashlib
 import json
 from typing import Any, Literal
 
-from sqlalchemy import Column, MetaData, String, Table, create_engine, insert
+from sqlalchemy import Boolean, Column, Float, Integer, MetaData, String, Table, create_engine, insert
 from sqlalchemy.engine import Engine
+from sqlalchemy.types import TypeEngine
 
 from elspeth.contracts import ArtifactDescriptor, PluginSchema
 from elspeth.plugins.base import BaseSink
 from elspeth.plugins.config_base import DataPluginConfig
 from elspeth.plugins.context import PluginContext
 from elspeth.plugins.schema_factory import create_schema_from_config
+
+# Map schema field types to SQLAlchemy column types
+SCHEMA_TYPE_TO_SQLALCHEMY: dict[str, type[TypeEngine[Any]]] = {
+    "str": String,
+    "int": Integer,
+    "float": Float,
+    "bool": Boolean,
+    "any": String,  # Fallback to String for 'any' type
+}
 
 
 class DatabaseSinkConfig(DataPluginConfig):
@@ -36,7 +46,10 @@ class DatabaseSinkConfig(DataPluginConfig):
 class DatabaseSink(BaseSink):
     """Write rows to a database table.
 
-    Creates the table on first write, inferring columns from row keys.
+    Creates the table on first write. When schema is explicit, columns are
+    derived from schema field definitions with proper type mapping. When schema
+    is dynamic, columns are inferred from the first row's keys.
+
     Uses SQLAlchemy Core for direct SQL control.
 
     Returns ArtifactDescriptor with SHA-256 hash of canonical JSON payload
@@ -50,9 +63,9 @@ class DatabaseSink(BaseSink):
         validate_input: Validate incoming rows against schema (default: False)
 
     The schema can be:
-        - Dynamic: {"fields": "dynamic"} - accept any fields
-        - Strict: {"mode": "strict", "fields": ["id: int", "name: str"]}
-        - Free: {"mode": "free", "fields": ["id: int"]} - at least these fields
+        - Dynamic: {"fields": "dynamic"} - accept any fields (columns inferred from first row)
+        - Strict: {"mode": "strict", "fields": ["id: int", "name: str"]} - columns from schema
+        - Free: {"mode": "free", "fields": ["id: int"]} - columns from schema, extras allowed
     """
 
     name = "database"
@@ -89,14 +102,20 @@ class DatabaseSink(BaseSink):
         self._metadata: MetaData | None = None
 
     def _ensure_table(self, row: dict[str, Any]) -> None:
-        """Create table if it doesn't exist, inferring schema from row."""
+        """Create table if it doesn't exist.
+
+        When schema is explicit (not dynamic), columns are derived from schema
+        fields with proper type mapping. This ensures all defined fields
+        (including optional ones) are present in the table.
+
+        When schema is dynamic, columns are inferred from the first row's keys.
+        """
         if self._engine is None:
             self._engine = create_engine(self._url)
             self._metadata = MetaData()
 
         if self._table is None:
-            # Infer columns from first row (all as String for simplicity)
-            columns = [Column(key, String) for key in row]
+            columns = self._create_columns_from_schema_or_row(row)
             # Metadata is always set when engine is created
             assert self._metadata is not None
             self._table = Table(
@@ -105,6 +124,27 @@ class DatabaseSink(BaseSink):
                 *columns,
             )
             self._metadata.create_all(self._engine, checkfirst=True)
+
+    def _create_columns_from_schema_or_row(self, row: dict[str, Any]) -> list[Column[Any]]:
+        """Create SQLAlchemy columns from schema or row keys.
+
+        When schema is explicit, creates columns for ALL defined fields with
+        proper type mapping. This ensures optional fields are present.
+
+        When schema is dynamic, falls back to inferring from row keys.
+        """
+        if not self._schema_config.is_dynamic and self._schema_config.fields:
+            # Explicit schema: use field definitions with proper types
+            columns: list[Column[Any]] = []
+            for field_def in self._schema_config.fields:
+                sql_type = SCHEMA_TYPE_TO_SQLALCHEMY[field_def.field_type]
+                # Note: nullable=True for optional fields, but SQLAlchemy Column
+                # defaults to nullable=True anyway, so we don't need to set it
+                columns.append(Column(field_def.name, sql_type))
+            return columns
+        else:
+            # Dynamic schema: infer from row keys (all as String)
+            return [Column(key, String) for key in row]
 
     def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
         """Write a batch of rows to the database.

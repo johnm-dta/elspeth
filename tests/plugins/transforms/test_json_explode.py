@@ -323,3 +323,40 @@ class TestJSONExplodeConfiguration:
         from elspeth.plugins.transforms.json_explode import JSONExplode
 
         assert JSONExplode.name == "json_explode"
+
+
+class TestJSONExplodeOutputSchema:
+    """Tests for output schema behavior of shape-changing transforms.
+
+    Per P1-2026-01-19-shape-changing-transforms-output-schema-mismatch:
+    JSONExplode changes row shape (removes array_field, adds output_field + item_index),
+    so output_schema must be dynamic.
+    """
+
+    def test_output_schema_is_dynamic(self) -> None:
+        """JSONExplode uses dynamic output_schema.
+
+        JSONExplode removes array_field and adds output_field/item_index.
+        The output shape depends on config, not input schema.
+        Therefore output_schema must be dynamic.
+        """
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        # Explicit schema with array field
+        transform = JSONExplode(
+            {
+                "schema": {"mode": "strict", "fields": ["id: int", "items: any"]},
+                "array_field": "items",
+                "output_field": "item",
+            }
+        )
+
+        # Output schema should be dynamic (no required fields, extra="allow")
+        # Output has: id, item, item_index (NOT items)
+        # Currently fails because output_schema = input_schema (has id, items)
+        output_fields = transform.output_schema.model_fields
+
+        assert len(output_fields) == 0, f"Expected dynamic schema with no required fields, got: {list(output_fields.keys())}"
+
+        config = transform.output_schema.model_config
+        assert config.get("extra") == "allow", "Output schema should allow extra fields (dynamic)"

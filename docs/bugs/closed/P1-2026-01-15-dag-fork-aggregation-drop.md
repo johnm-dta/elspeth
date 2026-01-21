@@ -55,7 +55,7 @@
   - Fork: `src/elspeth/engine/processor.py:328-349`
   - Aggregation consume: `src/elspeth/engine/processor.py:350-379`
 - Orchestrator now handles fork outcomes and routes fork children to branch-named sinks: `src/elspeth/engine/orchestrator.py:581-637`
-- Aggregation flush currently does not enqueue downstream work (flush has no return path into `Orchestrator`’s sink buffer): `src/elspeth/engine/processor.py:365-370`
+- Aggregation flush currently does not enqueue downstream work (flush has no return path into `Orchestrator`'s sink buffer): `src/elspeth/engine/processor.py:365-370`
 - Invariant: no silent drops: `src/elspeth/plugins/results.py:19-32`
 
 ## Impact
@@ -118,3 +118,47 @@
 3. Integration tests cover multi-branch fork scenarios
 
 **Next steps:** Write integration test that verifies fork child tokens appear in sink outputs.
+
+---
+
+## Resolution
+
+**Status:** CLOSED (VERIFIED FIXED)
+**Date:** 2026-01-21
+**Verified by:** Claude Opus 4.5
+
+### Verification Summary
+
+The bug was fully fixed by commits made after the original report:
+
+**Key commits:**
+- `8d1c54a fix(engine): flush aggregation buffers at end-of-source to prevent data loss`
+- `1c8300a refactor(engine): extract aggregation flush to helper and fix silent data loss bug`
+
+### Evidence of Fix
+
+**1. Fork handling verified:**
+- Test `test_full_pipeline_with_fork_writes_all_children_to_sink` passes ✓
+- Orchestrator handles `RowOutcome.FORKED` and routes children to branch-named sinks
+- Lines 780-781, 1315-1316 handle FORKED outcomes
+
+**2. Aggregation flush to sink verified:**
+- Method `_flush_remaining_aggregation_buffers()` (lines 1443-1565) properly routes flush outputs
+- Line 1533: `pending_tokens[output_sink_name].append(output_token)` - single row output
+- Lines 1550-1551: Multi-row outputs via `expand_token` added to `pending_tokens`
+- `pending_tokens` are written to sinks in lines 850-851, 1357-1358
+
+**3. All integration tests pass:**
+- 25/25 integration tests pass including:
+  - `test_full_pipeline_with_fork_writes_all_children_to_sink`
+  - `test_fork_coalesce_writes_merged_to_sink`
+  - `test_diamond_dag_fork_transform_coalesce`
+  - `test_explain_for_aggregated_row`
+- 42/42 aggregation tests pass
+- 467/467 engine tests pass
+
+### Acceptance Criteria Met
+
+✅ Forked tokens are processed through downstream transforms and reach the intended sinks
+✅ Aggregation outputs are emitted and processed downstream with complete audit trail
+✅ Integration tests cover fork and aggregation scenarios

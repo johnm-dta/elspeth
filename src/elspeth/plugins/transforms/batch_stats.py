@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import Field
 
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.config_base import TransformDataConfig
 from elspeth.plugins.context import PluginContext
@@ -79,14 +80,22 @@ class BatchStats(BaseTransform):
         assert cfg.schema_config is not None
         self._schema_config = cfg.schema_config
 
-        # Create schema from config
-        schema = create_schema_from_config(
+        # Create input schema from config
+        self.input_schema = create_schema_from_config(
             self._schema_config,
-            "BatchStatsSchema",
+            "BatchStatsInputSchema",
             allow_coercion=False,
         )
-        self.input_schema = schema
-        self.output_schema = schema
+
+        # Output schema MUST be dynamic because BatchStats outputs a completely
+        # different shape: {count, sum, mean, batch_size, group_by?}
+        # The output shape has no relation to the input schema.
+        # Per P1-2026-01-19-shape-changing-transforms-output-schema-mismatch
+        self.output_schema = create_schema_from_config(
+            SchemaConfig.from_dict({"fields": "dynamic"}),
+            "BatchStatsOutputSchema",
+            allow_coercion=False,
+        )
 
     @staticmethod
     def _try_convert_to_float(value: Any) -> float | None:

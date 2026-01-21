@@ -23,6 +23,7 @@ from typing import Any
 
 from pydantic import Field
 
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.config_base import DataPluginConfig
 from elspeth.plugins.context import PluginContext
@@ -97,9 +98,21 @@ class JSONExplode(BaseTransform):
 
         # Schema setup - DataPluginConfig validates schema_config is not None
         assert cfg.schema_config is not None
-        schema = create_schema_from_config(cfg.schema_config, "JSONExplodeSchema", allow_coercion=False)
-        self.input_schema = schema
-        self.output_schema = schema
+
+        # Input schema from config for validation
+        self.input_schema = create_schema_from_config(cfg.schema_config, "JSONExplodeInputSchema", allow_coercion=False)
+
+        # Output schema MUST be dynamic because JSONExplode changes row shape:
+        # - Removes array_field
+        # - Adds output_field (e.g., "item")
+        # - Adds item_index (if include_index=True)
+        # The output shape depends on config, not input schema.
+        # Per P1-2026-01-19-shape-changing-transforms-output-schema-mismatch
+        self.output_schema = create_schema_from_config(
+            SchemaConfig.from_dict({"fields": "dynamic"}),
+            "JSONExplodeOutputSchema",
+            allow_coercion=False,
+        )
 
     def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
         """Explode array field into multiple rows.

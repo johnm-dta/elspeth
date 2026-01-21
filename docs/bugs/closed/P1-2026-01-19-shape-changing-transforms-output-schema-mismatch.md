@@ -107,3 +107,53 @@ Example for `JSONExplode` (similar applies to others):
 ## Notes / Links
 
 - Related issue: `docs/bugs/open/2026-01-19-json-explode-iterable-nonstrict-types.md` (JSONExplode type enforcement)
+
+---
+
+## Resolution
+
+**Status:** CLOSED
+**Date:** 2026-01-21
+**Resolved by:** Claude Opus 4.5
+
+### Root Cause Confirmed
+
+Shape-changing transforms (FieldMapper, JSONExplode, BatchStats) set `output_schema = input_schema` (the same schema object), even though these transforms produce outputs with different field shapes than their inputs.
+
+### Fix Applied
+
+Modified all three transforms to use dynamic output schemas:
+
+**1. FieldMapper** (`src/elspeth/plugins/transforms/field_mapper.py`):
+- `input_schema` remains from config (for optional input validation)
+- `output_schema` is now dynamic (accepts any fields)
+- Reason: Output depends on `mapping` and `select_only` config, not input schema
+
+**2. JSONExplode** (`src/elspeth/plugins/transforms/json_explode.py`):
+- `input_schema` remains from config
+- `output_schema` is now dynamic
+- Reason: Output removes `array_field`, adds `output_field` and `item_index`
+
+**3. BatchStats** (`src/elspeth/plugins/transforms/batch_stats.py`):
+- `input_schema` remains from config
+- `output_schema` is now dynamic
+- Reason: Output is `{count, sum, mean, batch_size, group_by?}` regardless of input
+
+### Tests Added
+
+Three new test classes:
+- `TestFieldMapperOutputSchema` in `tests/plugins/transforms/test_field_mapper.py`
+- `TestJSONExplodeOutputSchema` in `tests/plugins/transforms/test_json_explode.py`
+- `TestBatchStatsOutputSchema` in `tests/plugins/transforms/test_batch_stats.py`
+
+### Verification
+
+- All 138 transform tests pass
+- All 56 orchestrator and schema validator tests pass
+- Type checking (mypy) passes
+- Linting (ruff) passes
+
+### Acceptance Criteria Met
+
+✅ For each built-in transform, `output_schema` is now dynamic (matches any emitted row shape)
+✅ Orchestrator schema validation produces consistent results with runtime behavior

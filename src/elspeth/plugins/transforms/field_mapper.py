@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import Field
 
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.config_base import TransformDataConfig
 from elspeth.plugins.context import PluginContext
@@ -61,15 +62,24 @@ class FieldMapper(BaseTransform):
         assert cfg.schema_config is not None
         self._schema_config = cfg.schema_config
 
-        # Create schema from config
+        # Create input schema from config
         # CRITICAL: allow_coercion=False - wrong types are source bugs
-        schema = create_schema_from_config(
+        self.input_schema = create_schema_from_config(
             self._schema_config,
-            "FieldMapperSchema",
+            "FieldMapperInputSchema",
             allow_coercion=False,
         )
-        self.input_schema = schema
-        self.output_schema = schema
+
+        # Output schema MUST be dynamic because FieldMapper changes row shape:
+        # - With mapping, fields can be renamed
+        # - With select_only=True, only mapped fields appear in output
+        # The output shape depends on config, not input schema.
+        # Per P1-2026-01-19-shape-changing-transforms-output-schema-mismatch
+        self.output_schema = create_schema_from_config(
+            SchemaConfig.from_dict({"fields": "dynamic"}),
+            "FieldMapperOutputSchema",
+            allow_coercion=False,
+        )
 
     def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
         """Apply field mapping to row.

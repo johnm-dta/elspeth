@@ -36,6 +36,10 @@ class CSVSink(BaseSink):
 
     Returns ArtifactDescriptor with SHA-256 content hash for audit integrity.
 
+    Creates the CSV file on first write. When schema is explicit, headers are
+    derived from schema field definitions. When schema is dynamic, headers are
+    inferred from the first row's keys.
+
     Config options:
         path: Path to output CSV file (required)
         schema: Schema configuration (required, via PathConfig)
@@ -45,9 +49,9 @@ class CSVSink(BaseSink):
         mode: "write" (truncate, default) or "append" (add to existing file)
 
     The schema can be:
-        - Dynamic: {"fields": "dynamic"} - accept any fields
-        - Strict: {"mode": "strict", "fields": ["id: int", "name: str"]}
-        - Free: {"mode": "free", "fields": ["id: int"]} - at least these fields
+        - Dynamic: {"fields": "dynamic"} - accept any fields (headers inferred from first row)
+        - Strict: {"mode": "strict", "fields": ["id: int", "name: str"]} - headers from schema
+        - Free: {"mode": "free", "fields": ["id: int"]} - headers from schema, extras allowed
 
     Append mode behavior:
         - If file exists: reads headers from it and appends rows without header
@@ -152,8 +156,14 @@ class CSVSink(BaseSink):
         In write mode:
         - Always truncate and write headers
 
+        When schema is explicit (not dynamic), fieldnames are derived from schema
+        field definitions. This ensures all defined fields (including optional ones)
+        are present in the CSV header.
+
+        When schema is dynamic, fieldnames are inferred from the first row's keys.
+
         Args:
-            rows: First batch of rows (used to determine fieldnames if needed)
+            rows: First batch of rows (used to determine fieldnames if dynamic schema)
         """
         if self._mode == "append" and self._path.exists():
             # Try to read existing headers from file
@@ -176,8 +186,8 @@ class CSVSink(BaseSink):
                 return
 
         # Write mode OR append to non-existent/empty file
-        # In both cases: determine fieldnames from first row, write header
-        self._fieldnames = list(rows[0].keys())
+        # Determine fieldnames from schema (if explicit) or first row (if dynamic)
+        self._fieldnames = self._get_fieldnames_from_schema_or_row(rows[0])
         self._file = open(  # noqa: SIM115 - handle kept open for streaming writes, closed in close()
             self._path, "w", encoding=self._encoding, newline=""
         )
@@ -187,6 +197,21 @@ class CSVSink(BaseSink):
             delimiter=self._delimiter,
         )
         self._writer.writeheader()
+
+    def _get_fieldnames_from_schema_or_row(self, row: dict[str, Any]) -> list[str]:
+        """Get fieldnames from schema or row keys.
+
+        When schema is explicit, returns field names from schema definition.
+        This ensures optional fields are present in the header.
+
+        When schema is dynamic, falls back to inferring from row keys.
+        """
+        if not self._schema_config.is_dynamic and self._schema_config.fields:
+            # Explicit schema: use field names from schema definition
+            return [field_def.name for field_def in self._schema_config.fields]
+        else:
+            # Dynamic schema: infer from row keys
+            return list(row.keys())
 
     def _compute_file_hash(self) -> str:
         """Compute SHA-256 hash of the file contents."""

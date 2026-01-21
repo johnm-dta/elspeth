@@ -5,6 +5,7 @@ Provides a simplified interface over LandscapeRecorder for managing
 tokens (row instances flowing through the DAG).
 """
 
+import copy
 from typing import Any
 
 from elspeth.contracts import TokenInfo
@@ -141,11 +142,14 @@ class TokenManager:
             step_in_pipeline=step_in_pipeline,
         )
 
+        # CRITICAL: Use deepcopy to prevent nested mutable objects from being
+        # shared across forked children. Shallow copy would cause mutations in
+        # one branch to leak to siblings, breaking audit trail integrity.
         return [
             TokenInfo(
                 row_id=parent_token.row_id,
                 token_id=child.token_id,
-                row_data=data.copy(),
+                row_data=copy.deepcopy(data),
                 branch_name=child.branch_name,
             )
             for child in children

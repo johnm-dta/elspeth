@@ -3,7 +3,7 @@
 ## Summary
 
 - `TokenInfo.row_data` is a mutable dict by contract, and forked tokens are created with `data.copy()` (a shallow copy).
-- If a row contains nested dict/list values (common for JSON sources), siblings created by fork share nested objects. A branch-local in-place mutation can affect other branches’ token data, causing cross-branch contamination and audit confusion.
+- If a row contains nested dict/list values (common for JSON sources), siblings created by fork share nested objects. A branch-local in-place mutation can affect other branches' token data, causing cross-branch contamination and audit confusion.
 
 ## Severity
 
@@ -36,7 +36,7 @@ assert child_b["payload"]["x"] == 999  # shared nested dict
 ```
 
 2. In ELSPETH runtime, fork a token whose `row_data` contains nested objects (e.g., from a JSON source).
-3. If any transform/gate mutates nested structures in-place on one branch, observe sibling branches’ `row_data` also changing.
+3. If any transform/gate mutates nested structures in-place on one branch, observe sibling branches' `row_data` also changing.
 
 ## Expected Behavior
 
@@ -74,7 +74,7 @@ assert child_b["payload"]["x"] == 999  # shared nested dict
 
 ## Architectural Deviations
 
-- Spec or doc reference: CLAUDE.md invariants around auditability and “no inference”
+- Spec or doc reference: CLAUDE.md invariants around auditability and "no inference"
 - Observed divergence: shared mutable nested state across branches can make the audit record misleading
 - Alignment plan or decision needed: decide between deep-copying vs enforcing immutable/flat row structures
 
@@ -87,3 +87,43 @@ assert child_b["payload"]["x"] == 999  # shared nested dict
 
 - Suggested tests to run: `.venv/bin/python -m pytest tests/engine -k fork`
 - New tests required: yes
+
+---
+
+## Resolution
+
+**Status:** CLOSED
+**Date:** 2026-01-21
+**Resolved by:** Claude Opus 4.5
+
+### Root Cause Confirmed
+
+The `fork_token` method in `TokenManager` used `data.copy()` (shallow copy) at line 148. When row_data contains nested dicts or lists, all forked children share those nested objects, causing cross-branch mutation leakage.
+
+### Fix Applied
+
+Modified `src/elspeth/engine/tokens.py`:
+
+1. Added `import copy` at module level
+2. Changed `row_data=data.copy()` to `row_data=copy.deepcopy(data)` in the fork_token method
+3. Added critical comment explaining why deepcopy is required for audit trail integrity
+
+### Tests Added
+
+Two new tests in `tests/engine/test_tokens.py` under `TestTokenManagerForkIsolation`:
+
+1. `test_fork_nested_data_isolation` - Forks a token with nested dict and list, mutates one child's nested data, verifies siblings are unaffected
+2. `test_fork_with_custom_nested_data_isolation` - Same test but with custom row_data provided to fork
+
+### Verification
+
+- All 14 token tests pass
+- All 467 engine tests pass
+- Type checking (mypy) passes
+- Linting (ruff) passes
+
+### Performance Note
+
+`copy.deepcopy()` is slower than `dict.copy()` but is necessary for correctness. For ELSPETH's use case (audit trail integrity), correctness must take priority over performance. If performance becomes an issue with deeply nested structures, consider:
+- Enforcing flat row structures at the source level
+- Using structural sharing (e.g., immutable data structures)

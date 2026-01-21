@@ -180,3 +180,107 @@ class TestDatabaseSink:
 
         sink = DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": DYNAMIC_SCHEMA})
         assert sink.determinism == Determinism.IO_WRITE
+
+    def test_explicit_schema_creates_all_columns_including_optional(self, db_url: str, ctx: PluginContext) -> None:
+        """Table should include all schema fields, not just first row keys.
+
+        Bug: P1-2026-01-19-databasesink-schema-inferred-from-first-row
+        When schema is explicit, table columns should come from schema config,
+        not from first row keys. This ensures optional fields are present.
+        """
+        from elspeth.plugins.sinks.database_sink import DatabaseSink
+
+        # Explicit schema with optional field 'score'
+        explicit_schema = {
+            "mode": "free",
+            "fields": ["id: int", "score: float?"],
+        }
+
+        sink = DatabaseSink(
+            {
+                "url": db_url,
+                "table": "output",
+                "schema": explicit_schema,
+            }
+        )
+
+        # First batch WITHOUT optional field
+        sink.write([{"id": 1}], ctx)
+
+        # Second batch WITH optional field - should NOT fail
+        # Bug: This fails because table was created without 'score' column
+        sink.write([{"id": 2, "score": 1.5}], ctx)
+
+        sink.close()
+
+        # Verify both rows written correctly
+        engine = create_engine(db_url)
+        metadata = MetaData()
+        table = Table("output", metadata, autoload_with=engine)
+
+        # Table should have 'score' column even though first row didn't have it
+        assert "score" in [c.name for c in table.columns]
+
+        with engine.connect() as conn:
+            rows = list(conn.execute(select(table)))
+
+        assert len(rows) == 2
+
+    def test_explicit_schema_maps_types_correctly(self, db_url: str, ctx: PluginContext) -> None:
+        """Schema field types should map to appropriate SQLAlchemy types."""
+        from sqlalchemy import Boolean, Float, Integer, String
+
+        from elspeth.plugins.sinks.database_sink import DatabaseSink
+
+        # Explicit schema with all supported types
+        explicit_schema = {
+            "mode": "strict",
+            "fields": ["id: int", "name: str", "score: float", "active: bool"],
+        }
+
+        sink = DatabaseSink(
+            {
+                "url": db_url,
+                "table": "typed_output",
+                "schema": explicit_schema,
+            }
+        )
+
+        sink.write([{"id": 1, "name": "test", "score": 1.5, "active": True}], ctx)
+        sink.close()
+
+        # Verify column types
+        engine = create_engine(db_url)
+        metadata = MetaData()
+        table = Table("typed_output", metadata, autoload_with=engine)
+
+        columns_by_name = {c.name: c for c in table.columns}
+        assert isinstance(columns_by_name["id"].type, Integer)
+        assert isinstance(columns_by_name["name"].type, (String, type(String())))
+        assert isinstance(columns_by_name["score"].type, (Float, type(Float())))
+        # SQLite stores booleans as integers, so check for either
+        assert isinstance(columns_by_name["active"].type, (Boolean, Integer))
+
+    def test_dynamic_schema_still_infers_from_row(self, db_url: str, ctx: PluginContext) -> None:
+        """Dynamic schema should continue to infer columns from first row."""
+        from elspeth.plugins.sinks.database_sink import DatabaseSink
+
+        sink = DatabaseSink(
+            {
+                "url": db_url,
+                "table": "dynamic_output",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        # First row defines columns
+        sink.write([{"a": 1, "b": 2}], ctx)
+        sink.close()
+
+        # Verify columns match first row (not schema)
+        engine = create_engine(db_url)
+        metadata = MetaData()
+        table = Table("dynamic_output", metadata, autoload_with=engine)
+
+        column_names = [c.name for c in table.columns]
+        assert sorted(column_names) == ["a", "b"]

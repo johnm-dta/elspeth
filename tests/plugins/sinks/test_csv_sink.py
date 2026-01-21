@@ -250,3 +250,71 @@ class TestCSVSink:
         # Sanity check: each hash should be different (file grew each time)
         assert hash_after_first != hash_after_second
         assert hash_after_second != hash_after_third
+
+    def test_explicit_schema_creates_all_headers_including_optional(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Headers should include all schema fields, not just first row keys.
+
+        Bug: P2-2026-01-19-csvsink-fieldnames-inferred-from-first-row
+        When schema is explicit, headers should come from schema config,
+        not from first row keys. This ensures optional fields are present.
+        """
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        # Explicit schema with optional field 'score'
+        explicit_schema = {
+            "mode": "free",
+            "fields": ["id: int", "score: float?"],
+        }
+
+        output_file = tmp_path / "output.csv"
+        sink = CSVSink(
+            {
+                "path": str(output_file),
+                "schema": explicit_schema,
+            }
+        )
+
+        # First batch WITHOUT optional field
+        sink.write([{"id": 1}], ctx)
+
+        # Second batch WITH optional field - should NOT fail
+        # Bug: This fails with ValueError because 'score' is not in fieldnames
+        sink.write([{"id": 2, "score": 1.5}], ctx)
+
+        sink.close()
+
+        # Verify CSV has correct headers (including optional field)
+        with open(output_file) as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames
+            rows = list(reader)
+
+        # Headers should include 'score' even though first row didn't have it
+        assert fieldnames is not None
+        assert "score" in fieldnames
+
+        assert len(rows) == 2
+
+    def test_dynamic_schema_still_infers_from_row(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Dynamic schema should continue to infer headers from first row."""
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "dynamic_output.csv"
+        sink = CSVSink(
+            {
+                "path": str(output_file),
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        # First row defines headers
+        sink.write([{"a": 1, "b": 2}], ctx)
+        sink.close()
+
+        # Verify headers match first row
+        with open(output_file) as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames
+
+        assert fieldnames is not None
+        assert sorted(fieldnames) == ["a", "b"]

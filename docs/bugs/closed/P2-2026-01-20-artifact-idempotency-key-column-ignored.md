@@ -87,3 +87,23 @@ N/A (feature is structurally unreachable today because it is not plumbed).
 
 - Suggested tests to run: `.venv/bin/python -m pytest tests/core/landscape -k artifact`
 - New tests required: yes
+
+## Resolution
+
+**Status:** FIXED
+
+**Date:** 2026-01-21
+
+**Changes made:**
+
+1. `src/elspeth/contracts/audit.py`: Added `idempotency_key: str | None = None` field to `Artifact` dataclass
+2. `src/elspeth/core/landscape/recorder.py`:
+   - `register_artifact()`: Added `idempotency_key` parameter and writes to DB
+   - `get_artifacts()`: Now reads and returns `idempotency_key` from DB
+
+**Tests added:**
+
+- `test_register_artifact_with_idempotency_key`: Verifies key is persisted and returned
+- `test_register_artifact_without_idempotency_key_returns_none`: Verifies optional field behavior
+
+**Note:** Acceptance criteria #3 (sink execution path producing idempotency_key) is deferred - sinks can now record idempotency keys via the plumbed API, but automatic key generation is a follow-on enhancement.

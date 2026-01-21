@@ -1361,6 +1361,119 @@ class TestLandscapeRecorderArtifacts:
         artifacts = recorder.get_artifacts(run.run_id)
         assert len(artifacts) == 2
 
+    def test_register_artifact_with_idempotency_key(self) -> None:
+        """register_artifact should accept and persist idempotency_key.
+
+        Regression test for:
+        docs/bugs/open/P2-2026-01-20-artifact-idempotency-key-column-ignored.md
+
+        The idempotency_key allows retry deduplication - sinks can use a stable
+        key (e.g., run_id:row_id:sink_name) to detect if an artifact was already
+        written, enabling safe retries without duplicate outputs.
+        """
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        sink = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=sink.node_id,
+            row_index=0,
+            data={},
+        )
+        token = recorder.create_token(row_id=row.row_id)
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=sink.node_id,
+            step_index=0,
+            input_data={},
+        )
+
+        # Register artifact with idempotency key
+        idem_key = f"{run.run_id}:{row.row_id}:csv_sink"
+        artifact = recorder.register_artifact(
+            run_id=run.run_id,
+            state_id=state.state_id,
+            sink_node_id=sink.node_id,
+            artifact_type="csv",
+            path="/output/result.csv",
+            content_hash="abc123",
+            size_bytes=1024,
+            idempotency_key=idem_key,
+        )
+
+        assert artifact.idempotency_key == idem_key, (
+            "register_artifact should return Artifact with idempotency_key set. "
+            "See P2-2026-01-20-artifact-idempotency-key-column-ignored.md"
+        )
+
+        # Verify it's persisted and returned by get_artifacts
+        artifacts = recorder.get_artifacts(run.run_id)
+        assert len(artifacts) == 1
+        assert artifacts[0].idempotency_key == idem_key, (
+            "get_artifacts should return Artifact with idempotency_key populated. "
+            "See P2-2026-01-20-artifact-idempotency-key-column-ignored.md"
+        )
+
+    def test_register_artifact_without_idempotency_key_returns_none(self) -> None:
+        """register_artifact without idempotency_key should return None for that field.
+
+        The idempotency_key is optional - not all sinks need deduplication support.
+        When not provided, the field should be None (not missing or error).
+        """
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        sink = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=sink.node_id,
+            row_index=0,
+            data={},
+        )
+        token = recorder.create_token(row_id=row.row_id)
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=sink.node_id,
+            step_index=0,
+            input_data={},
+        )
+
+        # Register artifact WITHOUT idempotency key
+        artifact = recorder.register_artifact(
+            run_id=run.run_id,
+            state_id=state.state_id,
+            sink_node_id=sink.node_id,
+            artifact_type="csv",
+            path="/output/result.csv",
+            content_hash="abc123",
+            size_bytes=1024,
+        )
+
+        assert artifact.idempotency_key is None, "register_artifact without idempotency_key should return None for that field"
+
     def test_get_rows_for_run(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder

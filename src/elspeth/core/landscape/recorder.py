@@ -1603,6 +1603,7 @@ class LandscapeRecorder:
         size_bytes: int,
         *,
         artifact_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Artifact:
         """Register an artifact produced by a sink.
 
@@ -1615,6 +1616,7 @@ class LandscapeRecorder:
             content_hash: Hash of artifact content
             size_bytes: Size of artifact in bytes
             artifact_id: Optional artifact ID
+            idempotency_key: Optional key for retry deduplication
 
         Returns:
             Artifact model
@@ -1632,6 +1634,7 @@ class LandscapeRecorder:
             content_hash=content_hash,
             size_bytes=size_bytes,
             created_at=now,
+            idempotency_key=idempotency_key,
         )
 
         with self._db.connection() as conn:
@@ -1645,6 +1648,7 @@ class LandscapeRecorder:
                     path_or_uri=artifact.path_or_uri,
                     content_hash=artifact.content_hash,
                     size_bytes=artifact.size_bytes,
+                    idempotency_key=artifact.idempotency_key,
                     created_at=artifact.created_at,
                 )
             )
@@ -1686,6 +1690,7 @@ class LandscapeRecorder:
                 content_hash=row.content_hash,
                 size_bytes=row.size_bytes,
                 created_at=row.created_at,
+                idempotency_key=row.idempotency_key,
             )
             for row in rows
         ]

@@ -232,6 +232,7 @@ class Artifact:
     content_hash: str
     size_bytes: int
     created_at: datetime
+    idempotency_key: str | None = None  # For retry deduplication
 
 
 @dataclass

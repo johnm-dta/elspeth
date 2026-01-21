@@ -1,5 +1,7 @@
 # ELSPETH
 
+**E**xtensible **L**ayered **S**ecure **P**ipeline **E**ngine for **T**ransformation and **H**andling
+
 **Auditable Sense/Decide/Act pipelines for high-reliability systems**
 
 ELSPETH is a domain-agnostic framework for building data processing workflows where **every decision must be traceable**. Whether you're evaluating tenders with LLMs, monitoring weather sensors, or processing satellite telemetry, ELSPETH provides the scaffolding for reliable, auditable pipelines.
@@ -363,11 +365,13 @@ uv run elspeth run -s settings.yaml --execute
 ```
 
 Each record receives an HMAC-SHA256 signature. A manifest record at the end contains:
+
 - Total record count
 - Running hash of all signatures
 - Export timestamp
 
 This allows auditors to:
+
 1. Verify no records were added, removed, or modified
 2. Trace any row through every processing step
 3. Prove chain-of-custody for legal proceedings
@@ -492,6 +496,7 @@ This will redact secrets (replacing them with `[REDACTED]`) instead of fingerpri
 #### Behavior Change Notice
 
 Prior versions silently preserved raw secrets when `ELSPETH_FINGERPRINT_KEY` was unset. Current versions fail-closed by default - you must either:
+
 1. Set `ELSPETH_FINGERPRINT_KEY` (recommended), or
 2. Explicitly opt-in to dev mode with `ELSPETH_ALLOW_RAW_SECRETS=true`
 

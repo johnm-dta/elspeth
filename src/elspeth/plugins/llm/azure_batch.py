@@ -73,6 +73,7 @@ class AzureBatchConfig(TransformDataConfig):
     lookup: dict[str, Any] | None = Field(None, description="Lookup data loaded from YAML file")
     template_source: str | None = Field(None, description="Template file path for audit (None if inline)")
     lookup_source: str | None = Field(None, description="Lookup file path for audit (None if no lookup)")
+    system_prompt_source: str | None = Field(None, description="System prompt file path for audit (None if inline)")
 
 
 class AzureBatchLLMTransform(BaseTransform):
@@ -140,6 +141,7 @@ class AzureBatchLLMTransform(BaseTransform):
             lookup_source=cfg.lookup_source,
         )
         self._system_prompt = cfg.system_prompt
+        self._system_prompt_source = cfg.system_prompt_source
         self._temperature = cfg.temperature
         self._max_tokens = cfg.max_tokens
         self._response_field = cfg.response_field

@@ -59,10 +59,11 @@ class LLMConfig(TransformDataConfig):
     max_tokens: int | None = Field(None, gt=0, description="Maximum tokens in response")
     response_field: str = Field("llm_response", description="Field name for LLM response in output")
 
-    # New fields for file-based templates
+    # File-based content with source paths for audit trail
     lookup: dict[str, Any] | None = Field(None, description="Lookup data loaded from YAML file")
     template_source: str | None = Field(None, description="Template file path for audit (None if inline)")
     lookup_source: str | None = Field(None, description="Lookup file path for audit (None if no lookup)")
+    system_prompt_source: str | None = Field(None, description="System prompt file path for audit (None if inline)")
 
     # Pool configuration fields (flat - assembled into PoolConfig by pool_config property)
     pool_size: int = Field(1, ge=1, description="Number of concurrent requests (1 = sequential)")
@@ -157,6 +158,7 @@ class BaseLLMTransform(BaseTransform):
             lookup_source=cfg.lookup_source,
         )
         self._system_prompt = cfg.system_prompt
+        self._system_prompt_source = cfg.system_prompt_source
         self._temperature = cfg.temperature
         self._max_tokens = cfg.max_tokens
         self._response_field = cfg.response_field
@@ -265,6 +267,7 @@ class BaseLLMTransform(BaseTransform):
         output[f"{self._response_field}_template_source"] = rendered.template_source
         output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
         output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
+        output[f"{self._response_field}_system_prompt_source"] = self._system_prompt_source
 
         return TransformResult.success(output)
 

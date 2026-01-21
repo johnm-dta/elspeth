@@ -1026,6 +1026,7 @@ class TestOpenRouterBatchProcessing:
                 output["llm_response_template_source"] = None
                 output["llm_response_lookup_hash"] = None
                 output["llm_response_lookup_source"] = None
+                output["llm_response_system_prompt_source"] = None
                 output["llm_response_model"] = "anthropic/claude-3-haiku"
                 return TransformResult.success(output)
 

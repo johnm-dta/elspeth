@@ -2432,6 +2432,92 @@ class TestExpandTemplateFiles:
         assert expanded["lookup"] == {"cats": {0: "A", 1: "B"}}
         assert expanded["lookup_source"] == "prompts/lookups.yaml"
 
+    def test_expand_system_prompt_file_not_found(self, tmp_path: Path) -> None:
+        """Missing system_prompt file raises TemplateFileError."""
+        from elspeth.core.config import TemplateFileError, _expand_template_files
+
+        settings_path = tmp_path / "settings.yaml"
+        config = {
+            "template": "test",
+            "system_prompt_file": "prompts/missing.txt",
+        }
+
+        with pytest.raises(TemplateFileError, match="not found"):
+            _expand_template_files(config, settings_path)
+
+    def test_expand_system_prompt_file_with_inline_raises(self, tmp_path: Path) -> None:
+        """Cannot specify both system_prompt and system_prompt_file."""
+        from elspeth.core.config import TemplateFileError, _expand_template_files
+
+        settings_path = tmp_path / "settings.yaml"
+        config = {
+            "template": "test",
+            "system_prompt": "You are a helpful assistant.",
+            "system_prompt_file": "prompts/system.txt",
+        }
+
+        with pytest.raises(TemplateFileError, match="Cannot specify both"):
+            _expand_template_files(config, settings_path)
+
+    def test_expand_system_prompt_file(self, tmp_path: Path) -> None:
+        """system_prompt_file is expanded to system_prompt content at config time."""
+        from elspeth.core.config import _expand_template_files
+
+        # Create system prompt file
+        system_file = tmp_path / "prompts" / "system.txt"
+        system_file.parent.mkdir(parents=True, exist_ok=True)
+        system_file.write_text("You are an expert classifier. Be precise and consistent.")
+
+        settings_path = tmp_path / "settings.yaml"
+
+        config = {
+            "template": "Classify: {{ row.text }}",
+            "system_prompt_file": "prompts/system.txt",
+        }
+
+        expanded = _expand_template_files(config, settings_path)
+
+        assert "system_prompt" in expanded
+        assert expanded["system_prompt"] == "You are an expert classifier. Be precise and consistent."
+        assert expanded["system_prompt_source"] == "prompts/system.txt"
+        assert "system_prompt_file" not in expanded  # Original key removed
+
+    def test_expand_all_file_types(self, tmp_path: Path) -> None:
+        """All file types (template, lookup, system_prompt) expand together."""
+        from elspeth.core.config import _expand_template_files
+
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+
+        (prompts_dir / "classify.j2").write_text("Classify: {{ row.text }}")
+        (prompts_dir / "lookups.yaml").write_text("categories:\n  - A\n  - B\n")
+        (prompts_dir / "system.txt").write_text("You are an expert.")
+
+        settings_path = tmp_path / "settings.yaml"
+
+        config = {
+            "template_file": "prompts/classify.j2",
+            "lookup_file": "prompts/lookups.yaml",
+            "system_prompt_file": "prompts/system.txt",
+        }
+
+        expanded = _expand_template_files(config, settings_path)
+
+        # Template expanded
+        assert expanded["template"] == "Classify: {{ row.text }}"
+        assert expanded["template_source"] == "prompts/classify.j2"
+        assert "template_file" not in expanded
+
+        # Lookup expanded
+        assert expanded["lookup"] == {"categories": ["A", "B"]}
+        assert expanded["lookup_source"] == "prompts/lookups.yaml"
+        assert "lookup_file" not in expanded
+
+        # System prompt expanded
+        assert expanded["system_prompt"] == "You are an expert."
+        assert expanded["system_prompt_source"] == "prompts/system.txt"
+        assert "system_prompt_file" not in expanded
+
 
 class TestLoadSettingsWithRunMode:
     """Tests for loading YAML with run_mode configuration."""

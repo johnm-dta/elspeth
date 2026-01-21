@@ -1041,14 +1041,17 @@ def _expand_template_files(
     options: dict[str, Any],
     settings_path: Path,
 ) -> dict[str, Any]:
-    """Expand template_file and lookup_file to loaded content.
+    """Expand template_file, lookup_file, and system_prompt_file to loaded content.
 
     Args:
         options: Plugin options dict
         settings_path: Path to settings file for resolving relative paths
 
     Returns:
-        New dict with files loaded and paths recorded
+        New dict with files loaded and paths recorded:
+        - template_file → template (content) + template_source (path)
+        - lookup_file → lookup (content) + lookup_source (path)
+        - system_prompt_file → system_prompt (content) + system_prompt_source (path)
 
     Raises:
         TemplateFileError: If files not found or invalid
@@ -1091,6 +1094,21 @@ def _expand_template_files(
             raise TemplateFileError(f"Invalid YAML in lookup file: {e}") from e
 
         result["lookup_source"] = lookup_file
+
+    # Handle system_prompt_file
+    if "system_prompt_file" in result:
+        if "system_prompt" in result:
+            raise TemplateFileError("Cannot specify both 'system_prompt' and 'system_prompt_file'")
+        system_prompt_file = result.pop("system_prompt_file")
+        system_prompt_path = Path(system_prompt_file)
+        if not system_prompt_path.is_absolute():
+            system_prompt_path = (settings_path.parent / system_prompt_path).resolve()
+
+        if not system_prompt_path.exists():
+            raise TemplateFileError(f"System prompt file not found: {system_prompt_path}")
+
+        result["system_prompt"] = system_prompt_path.read_text(encoding="utf-8")
+        result["system_prompt_source"] = system_prompt_file
 
     return result
 

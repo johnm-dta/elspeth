@@ -93,6 +93,7 @@ class AzureMultiQueryLLMTransform(BaseTransform):
             lookup_source=cfg.lookup_source,
         )
         self._system_prompt = cfg.system_prompt
+        self._system_prompt_source = cfg.system_prompt_source
         self._temperature = cfg.temperature
         self._max_tokens = cfg.max_tokens
         self._on_error = cfg.on_error
@@ -270,6 +271,7 @@ class AzureMultiQueryLLMTransform(BaseTransform):
         output[f"{spec.output_prefix}_template_source"] = rendered.template_source
         output[f"{spec.output_prefix}_lookup_hash"] = rendered.lookup_hash
         output[f"{spec.output_prefix}_lookup_source"] = rendered.lookup_source
+        output[f"{spec.output_prefix}_system_prompt_source"] = self._system_prompt_source
 
         return TransformResult.success(output)
 

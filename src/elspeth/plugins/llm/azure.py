@@ -115,6 +115,7 @@ class AzureLLMTransform(BaseTransform):
             lookup_source=cfg.lookup_source,
         )
         self._system_prompt = cfg.system_prompt
+        self._system_prompt_source = cfg.system_prompt_source
         self._temperature = cfg.temperature
         self._max_tokens = cfg.max_tokens
         self._response_field = cfg.response_field
@@ -273,6 +274,7 @@ class AzureLLMTransform(BaseTransform):
         output[f"{self._response_field}_template_source"] = rendered.template_source
         output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
         output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
+        output[f"{self._response_field}_system_prompt_source"] = self._system_prompt_source
         output[f"{self._response_field}_model"] = response.model
 
         return TransformResult.success(output)
@@ -371,6 +373,7 @@ class AzureLLMTransform(BaseTransform):
         output[f"{self._response_field}_template_source"] = rendered.template_source
         output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
         output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
+        output[f"{self._response_field}_system_prompt_source"] = self._system_prompt_source
         output[f"{self._response_field}_model"] = response.model
 
         return TransformResult.success(output)
@@ -508,6 +511,7 @@ class AzureLLMTransform(BaseTransform):
         output[f"{self._response_field}_template_source"] = rendered.template_source
         output[f"{self._response_field}_lookup_hash"] = rendered.lookup_hash
         output[f"{self._response_field}_lookup_source"] = rendered.lookup_source
+        output[f"{self._response_field}_system_prompt_source"] = self._system_prompt_source
         output[f"{self._response_field}_model"] = response.model
 
         return TransformResult.success(output)
@@ -540,6 +544,7 @@ class AzureLLMTransform(BaseTransform):
                 output_row[f"{self._response_field}_template_source"] = result.row[f"{self._response_field}_template_source"]
                 output_row[f"{self._response_field}_lookup_hash"] = result.row[f"{self._response_field}_lookup_hash"]
                 output_row[f"{self._response_field}_lookup_source"] = result.row[f"{self._response_field}_lookup_source"]
+                output_row[f"{self._response_field}_system_prompt_source"] = result.row[f"{self._response_field}_system_prompt_source"]
                 output_row[f"{self._response_field}_model"] = result.row[f"{self._response_field}_model"]
             else:
                 # Per-row error tracking - don't fail entire batch

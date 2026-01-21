@@ -20,10 +20,10 @@ class TestExplainCommand:
         """explain --no-tui outputs text instead of TUI."""
         from elspeth.cli import app
 
-        # Note: This will fail gracefully since no runs exist
+        # Note: --no-tui mode is not yet implemented, should show informative message
         result = runner.invoke(app, ["explain", "--run", "test-run", "--no-tui"])
-        # Should not crash, may report "run not found"
-        assert "error" in result.output.lower() or "not found" in result.output.lower()
+        # Should not crash, currently shows "not yet implemented" message
+        assert "not yet implemented" in result.output.lower() or "not found" in result.output.lower()
 
     def test_explain_json_output(self) -> None:
         """explain --json outputs JSON format."""

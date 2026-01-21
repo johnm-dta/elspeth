@@ -741,6 +741,136 @@ class TestLandscapeRecorderNodeStates:
         assert completed.error_json is not None
         assert "Validation failed" in completed.error_json
 
+    def test_complete_node_state_with_empty_output(self) -> None:
+        """Empty dict output is valid and must produce non-NULL output_hash.
+
+        Bug: P1-2026-01-19-complete-node-state-empty-output-hash
+        """
+        from elspeth.contracts import NodeStateStatus
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="transform",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={},
+        )
+        token = recorder.create_token(row_id=row.row_id)
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=node.node_id,
+            step_index=0,
+            input_data={},
+        )
+
+        # Empty output_data={} should succeed, not crash
+        completed = recorder.complete_node_state(
+            state_id=state.state_id,
+            status="completed",
+            output_data={},  # Empty dict is valid output
+            duration_ms=1.0,
+        )
+
+        assert completed.status == NodeStateStatus.COMPLETED
+        assert completed.output_hash is not None  # Must have non-NULL hash
+
+    def test_complete_node_state_with_empty_error(self) -> None:
+        """Empty dict error payload is recorded, not dropped.
+
+        Bug: P1-2026-01-19-complete-node-state-empty-output-hash
+        """
+        from elspeth.contracts import NodeStateStatus
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="transform",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={},
+        )
+        token = recorder.create_token(row_id=row.row_id)
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=node.node_id,
+            step_index=0,
+            input_data={},
+        )
+
+        # Empty error={} should be serialized, not dropped
+        completed = recorder.complete_node_state(
+            state_id=state.state_id,
+            status="failed",
+            error={},  # Empty dict error
+            duration_ms=1.0,
+        )
+
+        assert completed.status == NodeStateStatus.FAILED
+        assert completed.error_json == "{}"  # Empty dict serializes to "{}"
+
+    def test_begin_node_state_with_empty_context(self) -> None:
+        """Empty dict context_before is recorded, not dropped.
+
+        Bug: P1-2026-01-19-complete-node-state-empty-output-hash
+        """
+        from elspeth.contracts import NodeStateStatus
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="transform",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={},
+        )
+        token = recorder.create_token(row_id=row.row_id)
+
+        # Empty context_before={} should be serialized, not dropped
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=node.node_id,
+            step_index=0,
+            input_data={},
+            context_before={},  # Empty dict context
+        )
+
+        assert state.status == NodeStateStatus.OPEN
+        assert state.context_before_json == "{}"  # Empty dict serializes to "{}"
+
     def test_retry_increments_attempt(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder

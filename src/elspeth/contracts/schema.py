@@ -14,9 +14,13 @@ Example YAML:
         schema:
           mode: strict
           fields:
-            - id: int
-            - name: str
-            - score: float?  # Optional field
+            - "id: int"
+            - "name: str"
+            - "score: float?"  # Optional field
+
+Note: Field specs must be quoted strings in YAML. Unquoted `- id: int` is parsed
+as a dict `{id: int}` by YAML loaders, not as the string `"id: int"`. Both formats
+are accepted, but quoted strings are recommended for clarity.
 """
 
 from __future__ import annotations
@@ -117,6 +121,47 @@ class FieldDefinition:
         }
 
 
+def _normalize_field_spec(spec: Any, *, index: int) -> str:
+    """Normalize a field spec to string form.
+
+    Accepts:
+    - String: "field_name: type" or "field_name: type?"
+    - Dict (from YAML): {"field_name": "type"} or {"field_name": "type?"}
+
+    Args:
+        spec: Field specification (string or single-key dict)
+        index: Index in fields list (for error messages)
+
+    Returns:
+        Normalized string spec like "field_name: type"
+
+    Raises:
+        ValueError: If spec format is invalid
+    """
+    if isinstance(spec, str):
+        return spec
+
+    if isinstance(spec, dict):
+        # YAML `- id: int` parses as {"id": "int"}
+        if len(spec) != 1:
+            raise ValueError(
+                f"Field spec at index {index} is a dict with {len(spec)} keys. "
+                f"Expected single-key dict like {{'field_name': 'type'}} or a string like 'field_name: type'."
+            )
+        name, type_spec = next(iter(spec.items()))
+        if not isinstance(name, str) or not isinstance(type_spec, str):
+            raise ValueError(
+                f"Field spec at index {index}: dict keys and values must be strings, "
+                f"got {{{type(name).__name__}: {type(type_spec).__name__}}}."
+            )
+        return f"{name}: {type_spec}"
+
+    raise ValueError(
+        f"Field spec at index {index} must be a string like 'field_name: type' "
+        f"or a dict like {{'field_name': 'type'}}, got {type(spec).__name__}."
+    )
+
+
 @dataclass(frozen=True)
 class SchemaConfig:
     """Configuration for a plugin's data schema.
@@ -183,7 +228,13 @@ class SchemaConfig:
         if len(fields_value) == 0:
             raise ValueError("Schema must define at least one field. Use 'fields: dynamic' to accept any fields.")
 
-        parsed_fields = tuple(FieldDefinition.parse(f) for f in fields_value)
+        # Normalize field specs: accept both string and dict forms
+        normalized_specs = []
+        for i, f in enumerate(fields_value):
+            spec = _normalize_field_spec(f, index=i)
+            normalized_specs.append(spec)
+
+        parsed_fields = tuple(FieldDefinition.parse(spec) for spec in normalized_specs)
 
         # Check for duplicate field names
         names = [f.name for f in parsed_fields]

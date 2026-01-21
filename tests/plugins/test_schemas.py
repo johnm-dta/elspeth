@@ -160,3 +160,80 @@ class TestSchemaCompatibility:
 
         result = check_compatibility(ProducerOutput, ConsumerInput)
         assert result.compatible is True
+
+    def test_int_to_optional_float_coercion(self) -> None:
+        """int is compatible with Optional[float] via numeric coercion.
+
+        Bug: P1-2026-01-20-schema-compatibility-check-fails-on-optional-and-any
+        """
+
+        from elspeth.contracts import PluginSchema, check_compatibility
+
+        class Producer(PluginSchema):
+            x: int
+
+        class Consumer(PluginSchema):
+            x: float | None
+
+        result = check_compatibility(Producer, Consumer)
+        assert result.compatible is True
+        assert result.type_mismatches == []
+
+    def test_union_to_optional_float_coercion(self) -> None:
+        """int | None is compatible with Optional[float] via coercion.
+
+        All members of producer union must be compatible with at least one
+        member of consumer union (with coercion applied).
+
+        Bug: P1-2026-01-20-schema-compatibility-check-fails-on-optional-and-any
+        """
+
+        from elspeth.contracts import PluginSchema, check_compatibility
+
+        class Producer(PluginSchema):
+            x: int | None
+
+        class Consumer(PluginSchema):
+            x: float | None
+
+        result = check_compatibility(Producer, Consumer)
+        assert result.compatible is True
+        assert result.type_mismatches == []
+
+    def test_any_accepts_all_types(self) -> None:
+        """Any type in consumer accepts any producer type.
+
+        Bug: P1-2026-01-20-schema-compatibility-check-fails-on-optional-and-any
+        """
+        from typing import Any
+
+        from elspeth.contracts import PluginSchema, check_compatibility
+
+        class Producer(PluginSchema):
+            x: int
+
+        class Consumer(PluginSchema):
+            x: Any
+
+        result = check_compatibility(Producer, Consumer)
+        assert result.compatible is True
+        assert result.type_mismatches == []
+
+    def test_error_message_includes_full_type_names(self) -> None:
+        """Error messages should show full type names like 'int | None' not 'Union'.
+
+        Bug: P1-2026-01-20-schema-compatibility-check-fails-on-optional-and-any
+        """
+        from elspeth.contracts import PluginSchema, check_compatibility
+
+        class Producer(PluginSchema):
+            x: str
+
+        class Consumer(PluginSchema):
+            x: int | None
+
+        result = check_compatibility(Producer, Consumer)
+        assert result.compatible is False
+        assert result.error_message is not None
+        # Error should contain "int | None", not just "Union" or "Optional"
+        assert "int | None" in result.error_message or "Optional" not in result.error_message

@@ -469,7 +469,7 @@ allow_hits:
     safety: "Graceful handling - validation error message still produced"
     expires: null  # Permanent - intentional design
 
-  - key: "contracts/schema.py:R1:SchemaConfig:from_dict:line=154"
+  - key: "contracts/schema.py:R1:SchemaConfig:from_dict:line=199"
     owner: "architecture"
     reason: "Round-trip serialization: to_dict() outputs mode='dynamic', from_dict() must accept it"
     safety: "Explicit check for serialized form before standard parsing - enables audit trail storage"
@@ -843,31 +843,31 @@ allow_hits:
   # to report system state rather than crash.
   # ============================================================
 
-  - key: "cli.py:R1:health:line=952"
+  - key: "cli.py:R1:health:line=990"
     owner: "architecture"
     reason: "Trust boundary: environment variable GIT_COMMIT_SHA is optional external input"
     safety: "Empty string default is safe - commit SHA is informational only"
     expires: null  # Permanent - intentional design
 
-  - key: "cli.py:R4:health:line=964"
+  - key: "cli.py:R4:health:line=1002"
     owner: "architecture"
     reason: "Trust boundary: git subprocess may fail for many reasons (not installed, not a repo, etc.)"
     safety: "Graceful fallback to 'unknown' - health check reports git as unavailable"
     expires: null  # Permanent - intentional design
 
-  - key: "cli.py:R1:health:line=980"
+  - key: "cli.py:R1:health:line=1018"
     owner: "architecture"
     reason: "Trust boundary: environment variable DATABASE_URL is optional external input"
     safety: "Empty string default triggers skip logic - database check only runs if configured"
     expires: null  # Permanent - intentional design
 
-  - key: "cli.py:R4:health:line=992"
+  - key: "cli.py:R4:health:line=1030"
     owner: "architecture"
     reason: "Trust boundary: database connection may fail for many reasons (network, auth, etc.)"
     safety: "Error recorded in checks dict with status='error' - health check reports DB as unhealthy"
     expires: null  # Permanent - intentional design
 
-  - key: "cli.py:R4:health:line=1056"
+  - key: "cli.py:R4:health:line=1094"
     owner: "architecture"
     reason: "Trust boundary: plugin manager initialization may fail due to misconfiguration"
     safety: "Error recorded in checks dict with status='error' - health check reports plugins as unhealthy"

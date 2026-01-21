@@ -223,31 +223,41 @@ def explain(
 
     Use --no-tui for text output or --json for JSON output.
     Without these flags, launches an interactive TUI.
+
+    NOTE: This command is not yet implemented. JSON and text output modes
+    will return proper lineage data in a future release.
     """
     import json as json_module
 
     from elspeth.tui.explain_app import ExplainApp
 
-    # For now, we need a database connection to query
-    # This will be integrated with actual runs once Phase 3 is complete
+    # Explain command is not yet fully implemented (Phase 4+ work)
+    # See: docs/bugs/open/P1-2026-01-20-cli-explain-is-placeholder.md
 
     if json_output:
-        # JSON output mode
+        # JSON output mode - not implemented yet
         result = {
             "run_id": run_id,
-            "status": "error",
-            "message": "No runs found. Execute 'elspeth run --execute' first.",
+            "row": row,
+            "token": token,
+            "status": "not_implemented",
+            "message": "The explain --json command is not yet implemented. "
+            "Lineage query support is planned for Phase 4. "
+            "Use the TUI mode (without --json or --no-tui) for a preview.",
         }
         typer.echo(json_module.dumps(result, indent=2))
-        raise typer.Exit(1)
+        raise typer.Exit(2)  # Exit code 2 = not implemented (distinct from error)
 
     if no_tui:
-        # Text output mode
-        typer.echo(f"Error: Run '{run_id}' not found.")
-        typer.echo("Execute 'elspeth run --execute' to create a run first.")
-        raise typer.Exit(1)
+        # Text output mode - not implemented yet
+        typer.echo("Note: The explain --no-tui command is not yet implemented.", err=True)
+        typer.echo("", err=True)
+        typer.echo("Lineage query support is planned for Phase 4.", err=True)
+        typer.echo("Use the TUI mode (without --no-tui) for a preview.", err=True)
+        raise typer.Exit(2)  # Exit code 2 = not implemented
 
-    # TUI mode
+    # TUI mode - launches placeholder app
+    typer.echo("Note: TUI explain is a preview. Full lineage queries are planned for Phase 4.")
     tui_app = ExplainApp(
         run_id=run_id if run_id != "latest" else None,
         token_id=token,
@@ -498,11 +508,11 @@ def purge(
         "-p",
         help="Path to payload storage directory.",
     ),
-    retention_days: int = typer.Option(
-        90,
+    retention_days: int | None = typer.Option(
+        None,
         "--retention-days",
         "-r",
-        help="Delete payloads older than this many days.",
+        help="Delete payloads older than this many days (default: from config or 90).",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -536,35 +546,63 @@ def purge(
     # Try to load settings from settings.yaml if database not provided
     db_url: str | None = None
     payload_path: Path | None = None
+    effective_retention_days: int = 90  # Fallback default
+    config: ElspethSettings | None = None
+
+    # Try loading settings.yaml first (for payload_store config)
+    settings_path = Path("settings.yaml")
+    if settings_path.exists():
+        try:
+            config = load_settings(settings_path)
+        except Exception as e:
+            if not database:
+                # Only fail if we needed settings for database URL
+                typer.echo(f"Error loading settings.yaml: {e}", err=True)
+                typer.echo("Specify --database to provide path directly.", err=True)
+                raise typer.Exit(1) from None
+            # Otherwise warn but continue with CLI-provided database
+            typer.echo(f"Warning: Could not load settings.yaml: {e}", err=True)
 
     if database:
         db_path = Path(database)
         db_url = f"sqlite:///{db_path.resolve()}"
+    elif config:
+        db_url = config.landscape.url
+        typer.echo(f"Using database from settings.yaml: {db_url}")
     else:
-        # Try loading from settings.yaml
-        settings_path = Path("settings.yaml")
-        if settings_path.exists():
-            try:
-                config = load_settings(settings_path)
-                db_url = config.landscape.url
-                typer.echo(f"Using database from settings.yaml: {db_url}")
-            except Exception as e:
-                typer.echo(f"Error loading settings.yaml: {e}", err=True)
-                typer.echo("Specify --database to provide path directly.", err=True)
-                raise typer.Exit(1) from None
-        else:
-            typer.echo("Error: No settings.yaml found and --database not provided.", err=True)
-            typer.echo("Specify --database to provide path to Landscape database.", err=True)
-            raise typer.Exit(1) from None
+        typer.echo("Error: No settings.yaml found and --database not provided.", err=True)
+        typer.echo("Specify --database to provide path to Landscape database.", err=True)
+        raise typer.Exit(1) from None
 
+    # Determine payload path: CLI override > config > default
     if payload_dir:
-        payload_path = Path(payload_dir)
+        payload_path = Path(payload_dir).expanduser()
+    elif config:
+        # Use config's payload_store.base_path
+        payload_path = config.payload_store.base_path.expanduser()
+        # Verify backend is supported
+        if config.payload_store.backend != "filesystem":
+            typer.echo(
+                f"Error: Payload store backend '{config.payload_store.backend}' is not supported for purge. "
+                f"Only 'filesystem' backend is currently implemented.",
+                err=True,
+            )
+            raise typer.Exit(1) from None
+        typer.echo(f"Using payload directory from config: {payload_path}")
     else:
         # Default to ./payloads relative to database location
         if database:
             payload_path = Path(database).parent / "payloads"
         else:
             payload_path = Path("payloads")
+
+    # Determine retention days: CLI override > config > default (90)
+    if retention_days is not None:
+        effective_retention_days = retention_days
+    elif config:
+        effective_retention_days = config.payload_store.retention_days
+        typer.echo(f"Using retention_days from config: {effective_retention_days}")
+    # else: use the fallback default of 90
 
     # Initialize database and payload store
     try:
@@ -578,14 +616,14 @@ def purge(
         purge_manager = PurgeManager(db, payload_store)
 
         # Find expired payloads
-        expired_refs = purge_manager.find_expired_row_payloads(retention_days)
+        expired_refs = purge_manager.find_expired_row_payloads(effective_retention_days)
 
         if not expired_refs:
-            typer.echo(f"No payloads older than {retention_days} days found.")
+            typer.echo(f"No payloads older than {effective_retention_days} days found.")
             return
 
         if dry_run:
-            typer.echo(f"Would delete {len(expired_refs)} payload(s) older than {retention_days} days:")
+            typer.echo(f"Would delete {len(expired_refs)} payload(s) older than {effective_retention_days} days:")
             for ref in expired_refs[:10]:  # Show first 10
                 exists = payload_store.exists(ref)
                 status = "exists" if exists else "already deleted"
@@ -596,7 +634,7 @@ def purge(
 
         # Confirm unless --yes
         if not yes:
-            confirm = typer.confirm(f"Delete {len(expired_refs)} payload(s) older than {retention_days} days?")
+            confirm = typer.confirm(f"Delete {len(expired_refs)} payload(s) older than {effective_retention_days} days?")
             if not confirm:
                 typer.echo("Aborted.")
                 raise typer.Exit(1)

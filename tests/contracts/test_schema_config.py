@@ -165,3 +165,91 @@ class TestSchemaConfig:
                     "fields": ["id: int", "id: str"],
                 }
             )
+
+    def test_dict_form_field_specs(self) -> None:
+        """Dict-form field specs (YAML: - id: int) parse correctly.
+
+        Bug: P1-2026-01-20-schema-config-yaml-example-crashes-parsing
+        """
+        from elspeth.contracts.schema import SchemaConfig
+
+        # YAML `- id: int` parses as [{"id": "int"}]
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "strict",
+                "fields": [{"id": "int"}, {"name": "str"}],
+            }
+        )
+        assert config.is_dynamic is False
+        assert config.mode == "strict"
+        assert len(config.fields) == 2
+        assert config.fields[0].name == "id"
+        assert config.fields[0].field_type == "int"
+        assert config.fields[1].name == "name"
+        assert config.fields[1].field_type == "str"
+
+    def test_dict_form_optional_field(self) -> None:
+        """Dict-form optional field specs parse correctly.
+
+        Bug: P1-2026-01-20-schema-config-yaml-example-crashes-parsing
+        """
+        from elspeth.contracts.schema import SchemaConfig
+
+        # YAML `- score: float?` parses as [{"score": "float?"}]
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "strict",
+                "fields": [{"score": "float?"}],
+            }
+        )
+        assert config.fields[0].name == "score"
+        assert config.fields[0].field_type == "float"
+        assert config.fields[0].required is False
+
+    def test_mixed_string_and_dict_form(self) -> None:
+        """Mixed string and dict field specs work together.
+
+        Bug: P1-2026-01-20-schema-config-yaml-example-crashes-parsing
+        """
+        from elspeth.contracts.schema import SchemaConfig
+
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "strict",
+                "fields": ["id: int", {"name": "str"}, "score: float?"],
+            }
+        )
+        assert len(config.fields) == 3
+        assert config.fields[0].name == "id"
+        assert config.fields[1].name == "name"
+        assert config.fields[2].name == "score"
+
+    def test_multi_key_dict_raises_valueerror(self) -> None:
+        """Multi-key dict in fields raises ValueError, not AttributeError.
+
+        Bug: P1-2026-01-20-schema-config-yaml-example-crashes-parsing
+        """
+        from elspeth.contracts.schema import SchemaConfig
+
+        with pytest.raises(ValueError, match=r"dict with 2 keys"):
+            SchemaConfig.from_dict(
+                {
+                    "mode": "strict",
+                    "fields": [{"id": "int", "name": "str"}],
+                }
+            )
+
+    def test_invalid_field_type_raises_valueerror(self) -> None:
+        """Invalid field type (not str/dict) raises ValueError, not AttributeError.
+
+        Bug: P1-2026-01-20-schema-config-yaml-example-crashes-parsing
+        """
+        from elspeth.contracts.schema import SchemaConfig
+
+        with pytest.raises(ValueError, match=r"must be a string.*or a dict"):
+            SchemaConfig.from_dict(
+                {
+                    "mode": "strict",
+                    "fields": [[1, 2, 3]],
+                }
+            )

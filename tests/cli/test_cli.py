@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 # Note: In Click 8.0+, mix_stderr is no longer a CliRunner parameter.
@@ -378,6 +379,85 @@ class TestPurgeCommand:
             assert not store.exists(content_hash)
         finally:
             db.close()
+
+    def test_purge_uses_config_payload_store_settings(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """purge uses payload_store settings from config when settings.yaml exists.
+
+        Bug: P1-2026-01-20-cli-purge-ignores-payload-store-settings
+        """
+        import yaml
+
+        from elspeth.cli import app
+
+        # Change to temp directory so settings.yaml is found
+        monkeypatch.chdir(tmp_path)
+
+        # Create minimal settings.yaml with custom payload_store config
+        custom_payload_path = tmp_path / "custom_payloads"
+        custom_payload_path.mkdir()
+        settings = {
+            "datasource": {"plugin": "csv", "path": "test.csv"},
+            "sinks": {"output": {"plugin": "csv", "path": "output.csv"}},
+            "output_sink": "output",
+            "landscape": {"url": f"sqlite:///{tmp_path / 'landscape.db'}"},
+            "payload_store": {
+                "backend": "filesystem",
+                "base_path": str(custom_payload_path),
+                "retention_days": 45,  # Custom retention
+            },
+        }
+        with open("settings.yaml", "w") as f:
+            yaml.dump(settings, f)
+
+        # Run purge --dry-run (no --payload-dir, no --retention-days)
+        result = runner.invoke(
+            app,
+            ["purge", "--dry-run"],
+        )
+
+        assert result.exit_code == 0
+        # Should show it's using the configured payload directory
+        assert "custom_payloads" in result.stdout or str(custom_payload_path) in result.stdout
+        # Should show it's using the configured retention_days
+        assert "45" in result.stdout or "retention" in result.stdout.lower()
+
+    def test_purge_rejects_unsupported_backend(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """purge fails fast when payload_store.backend is not 'filesystem'.
+
+        Bug: P1-2026-01-20-cli-purge-ignores-payload-store-settings
+        """
+        import yaml
+
+        from elspeth.cli import app
+
+        # Change to temp directory so settings.yaml is found
+        monkeypatch.chdir(tmp_path)
+
+        # Create settings.yaml with unsupported backend
+        settings = {
+            "datasource": {"plugin": "csv", "path": "test.csv"},
+            "sinks": {"output": {"plugin": "csv", "path": "output.csv"}},
+            "output_sink": "output",
+            "landscape": {"url": f"sqlite:///{tmp_path / 'landscape.db'}"},
+            "payload_store": {
+                "backend": "azure_blob",  # Unsupported backend
+                "base_path": str(tmp_path / "payloads"),
+            },
+        }
+        with open("settings.yaml", "w") as f:
+            yaml.dump(settings, f)
+
+        # Run purge --dry-run
+        result = runner.invoke(
+            app,
+            ["purge", "--dry-run"],
+        )
+
+        # Should fail with clear error message
+        assert result.exit_code == 1
+        # Error is written to stderr (result.output includes both stdout and stderr)
+        output = result.output.lower() if result.output else ""
+        assert "azure_blob" in output or "not supported" in output
 
 
 class TestResumeCommand:

@@ -998,7 +998,7 @@ class LandscapeRecorder:
         input_hash = stable_hash(input_data)
         now = _now()
 
-        context_json = canonical_json(context_before) if context_before else None
+        context_json = canonical_json(context_before) if context_before is not None else None
 
         state = NodeStateOpen(
             state_id=state_id,
@@ -2151,7 +2151,7 @@ class LandscapeRecorder:
         """
         outcome_id = f"out_{_generate_id()[:12]}"
         is_terminal = outcome.is_terminal
-        context_json = json.dumps(context) if context else None
+        context_json = json.dumps(context) if context is not None else None
 
         with self._db.connection() as conn:
             conn.execute(

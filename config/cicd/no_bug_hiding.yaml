@@ -199,7 +199,7 @@ allow_hits:
   # whole cleanup process.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=192"
+  - key: "engine/orchestrator.py:R4:Orchestrator:_cleanup_transforms:line=194"
     owner: "architecture"
     reason: "Best-effort cleanup: one plugin failure shouldn't prevent others from cleanup"
     safety: "Logged with warning, other plugins still get close() called"
@@ -212,19 +212,19 @@ allow_hits:
   # messages. These lookups are for UI/diagnostic purposes only.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=229"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=231"
     owner: "architecture"
     reason: "Building lookup for gate names - only gates (not transforms) are in map"
     safety: "None means 'not a gate at this sequence' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=236"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=238"
     owner: "architecture"
     reason: "Building lookup for config gate names"
     safety: "None means 'not a config gate at this name' - correctly skipped"
     expires: null  # Permanent - intentional design
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=252"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_validate_route_destinations:line=254"
     owner: "architecture"
     reason: "Fallback for error message - use node_id if gate name not found"
     safety: "Error message still produced with node_id as fallback"
@@ -238,7 +238,7 @@ allow_hits:
   # that inherit from SourceDataConfig (CSV, JSON, etc.).
   # ============================================================
 
-  - key: "engine/orchestrator.py:R2:Orchestrator:_validate_source_quarantine_destination:line=325"
+  - key: "engine/orchestrator.py:R2:Orchestrator:_validate_source_quarantine_destination:line=327"
     owner: "architecture"
     reason: "Optional protocol extension - _on_validation_failure only on sources with SourceDataConfig"
     safety: "None default means source doesn't support quarantine routing - validation skipped"
@@ -251,7 +251,7 @@ allow_hits:
   # others use dynamic. The default value is well-defined.
   # ============================================================
 
-  - key: "engine/orchestrator.py:R1:Orchestrator:_execute_run:line=591"
+  - key: "engine/orchestrator.py:R1:Orchestrator:_execute_run:line=598"
     owner: "architecture"
     reason: "Optional schema config with explicit default - not all nodes define schemas"
     safety: "Default value is well-defined: dynamic fields"
@@ -857,31 +857,31 @@ allow_hits:
   # to report system state rather than crash.
   # ============================================================
 
-  - key: "cli.py:R1:health:line=993"
+  - key: "cli.py:R1:health:line=1007"
     owner: "architecture"
     reason: "Trust boundary: environment variable GIT_COMMIT_SHA is optional external input"
     safety: "Empty string default is safe - commit SHA is informational only"
     expires: null  # Permanent - intentional design
 
-  - key: "cli.py:R4:health:line=1005"
+  - key: "cli.py:R4:health:line=1019"
     owner: "architecture"
     reason: "Trust boundary: git subprocess may fail for many reasons (not installed, not a repo, etc.)"
     safety: "Graceful fallback to 'unknown' - health check reports git as unavailable"
     expires: null  # Permanent - intentional design
 
-  - key: "cli.py:R1:health:line=1021"
+  - key: "cli.py:R1:health:line=1035"
     owner: "architecture"
     reason: "Trust boundary: environment variable DATABASE_URL is optional external input"
     safety: "Empty string default triggers skip logic - database check only runs if configured"
     expires: null  # Permanent - intentional design
 
-  - key: "cli.py:R4:health:line=1033"
+  - key: "cli.py:R4:health:line=1047"
     owner: "architecture"
     reason: "Trust boundary: database connection may fail for many reasons (network, auth, etc.)"
     safety: "Error recorded in checks dict with status='error' - health check reports DB as unhealthy"
     expires: null  # Permanent - intentional design
 
-  - key: "cli.py:R4:health:line=1097"
+  - key: "cli.py:R4:health:line=1111"
     owner: "architecture"
     reason: "Trust boundary: plugin manager initialization may fail due to misconfiguration"
     safety: "Error recorded in checks dict with status='error' - health check reports plugins as unhealthy"

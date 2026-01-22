@@ -14,7 +14,7 @@ import typer
 from pydantic import ValidationError
 
 from elspeth import __version__
-from elspeth.contracts import ExecutionResult
+from elspeth.contracts import ExecutionResult, ProgressEvent
 from elspeth.core.config import ElspethSettings, load_settings, resolve_config
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
@@ -369,9 +369,23 @@ def _execute_pipeline(config: ElspethSettings, verbose: bool = False) -> Executi
         if verbose:
             typer.echo("Starting pipeline execution...")
 
+        # Progress callback for live updates
+        def _print_progress(event: ProgressEvent) -> None:
+            rate = event.rows_processed / event.elapsed_seconds if event.elapsed_seconds > 0 else 0
+            typer.echo(
+                f"Processing: {event.rows_processed:,} rows | "
+                f"{rate:.0f} rows/sec | "
+                f"✓{event.rows_succeeded:,} ✗{event.rows_failed} ⚠{event.rows_quarantined}"
+            )
+
         # Execute via Orchestrator (creates full audit trail)
         orchestrator = Orchestrator(db)
-        result = orchestrator.run(pipeline_config, graph=graph, settings=config)
+        result = orchestrator.run(
+            pipeline_config,
+            graph=graph,
+            settings=config,
+            on_progress=_print_progress,
+        )
 
         return {
             "run_id": result.run_id,

@@ -368,3 +368,68 @@ class TestRunCommandResourceCleanup:
         assert len(close_called) >= 1, (
             "LandscapeDB.close() was not called after pipeline failure. The try/finally block should ensure cleanup on all code paths."
         )
+
+
+class TestRunCommandProgress:
+    """Tests for progress output during pipeline execution."""
+
+    @pytest.fixture
+    def multi_row_data(self, tmp_path: Path) -> Path:
+        """Create sample input data with 150 rows for progress testing."""
+        csv_file = tmp_path / "multi_row_input.csv"
+        lines = ["id,name,value"]
+        for i in range(150):
+            lines.append(f"{i},item_{i},{i * 10}")
+        csv_file.write_text("\n".join(lines))
+        return csv_file
+
+    @pytest.fixture
+    def progress_settings(self, tmp_path: Path, multi_row_data: Path) -> Path:
+        """Create pipeline configuration for progress testing."""
+        output_file = tmp_path / "progress_output.json"
+        landscape_db = tmp_path / "landscape.db"
+        settings = {
+            "datasource": {
+                "plugin": "csv",
+                "options": {
+                    "path": str(multi_row_data),
+                    "on_validation_failure": "discard",
+                    "schema": {"fields": "dynamic"},
+                },
+            },
+            "sinks": {
+                "default": {
+                    "plugin": "json",
+                    "options": {
+                        "path": str(output_file),
+                        "schema": {"fields": "dynamic"},
+                    },
+                },
+            },
+            "output_sink": "default",
+            "landscape": {"url": f"sqlite:///{landscape_db}"},
+        }
+        settings_file = tmp_path / "settings.yaml"
+        settings_file.write_text(yaml.dump(settings))
+        return settings_file
+
+    def test_run_shows_progress_output(self, progress_settings: Path) -> None:
+        """run --execute shows progress lines during execution."""
+        result = runner.invoke(app, ["run", "--settings", str(progress_settings), "--execute"])
+        assert result.exit_code == 0
+
+        # Check for progress output format: "Processing: X rows | ..."
+        assert "Processing:" in result.output
+        assert "rows" in result.output
+        assert "rows/sec" in result.output
+
+    def test_run_progress_shows_counters(self, progress_settings: Path) -> None:
+        """run --execute progress shows success/fail/quarantine counters."""
+        result = runner.invoke(app, ["run", "--settings", str(progress_settings), "--execute"])
+        assert result.exit_code == 0
+
+        # Check for counter symbols in output
+        # Format: ✓N ✗N ⚠N
+        assert "✓" in result.output  # success
+        assert "✗" in result.output  # failed
+        assert "⚠" in result.output  # quarantined

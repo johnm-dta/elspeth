@@ -11,12 +11,14 @@ Coordinates:
 """
 
 import os
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts import NodeType, RowOutcome, RunStatus, TokenInfo
+from elspeth.contracts.cli import ProgressEvent
 from elspeth.core.config import AggregationSettings, CoalesceSettings, GateSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
@@ -399,6 +401,7 @@ class Orchestrator:
         graph: ExecutionGraph | None = None,
         settings: "ElspethSettings | None" = None,
         batch_checkpoints: dict[str, dict[str, Any]] | None = None,
+        on_progress: Callable[[ProgressEvent], None] | None = None,
     ) -> RunResult:
         """Execute a pipeline run.
 
@@ -410,6 +413,8 @@ class Orchestrator:
                 previous BatchPendingError). Maps node_id -> checkpoint_data.
                 Used when retrying a run after a batch transform raised
                 BatchPendingError.
+            on_progress: Optional callback for progress updates. Called every
+                100 rows with current progress metrics.
 
         Raises:
             ValueError: If graph is not provided
@@ -444,7 +449,7 @@ class Orchestrator:
         run_completed = False
         try:
             with self._span_factory.run_span(run.run_id):
-                result = self._execute_run(recorder, run.run_id, config, graph, settings, batch_checkpoints)
+                result = self._execute_run(recorder, run.run_id, config, graph, settings, batch_checkpoints, on_progress)
 
             # Complete run
             recorder.complete_run(run.run_id, status="completed")
@@ -510,6 +515,7 @@ class Orchestrator:
         graph: ExecutionGraph,
         settings: "ElspethSettings | None" = None,
         batch_checkpoints: dict[str, dict[str, Any]] | None = None,
+        on_progress: Callable[[ProgressEvent], None] | None = None,
     ) -> RunResult:
         """Execute the run using the execution graph.
 
@@ -525,6 +531,7 @@ class Orchestrator:
             graph: Execution graph
             settings: Full settings (optional)
             batch_checkpoints: Restored batch checkpoints (maps node_id -> checkpoint_data)
+            on_progress: Optional callback for progress updates
         """
         # Get execution order from graph
         execution_order = graph.topological_order()
@@ -758,6 +765,10 @@ class Orchestrator:
         rows_buffered = 0
         pending_tokens: dict[str, list[TokenInfo]] = {name: [] for name in config.sinks}
 
+        # Progress tracking
+        progress_interval = 100
+        start_time = time.perf_counter()
+
         # Compute default last_node_id for end-of-source checkpointing
         # (e.g., flush_pending when no rows were processed in the main loop)
         # This mirrors the in-loop logic for consistency
@@ -791,6 +802,18 @@ class Orchestrator:
                                 row_data=source_item.row,
                             )
                             pending_tokens[quarantine_sink].append(quarantine_token)
+                        # Emit progress before continue (ensures quarantined rows trigger updates)
+                        if on_progress and rows_processed % progress_interval == 0:
+                            elapsed = time.perf_counter() - start_time
+                            on_progress(
+                                ProgressEvent(
+                                    rows_processed=rows_processed,
+                                    rows_succeeded=rows_succeeded,
+                                    rows_failed=rows_failed,
+                                    rows_quarantined=rows_quarantined,
+                                    elapsed_seconds=elapsed,
+                                )
+                            )
                         # Skip normal processing - row is already handled
                         continue
 
@@ -845,6 +868,19 @@ class Orchestrator:
                         elif result.outcome == RowOutcome.BUFFERED:
                             # Passthrough mode buffered token
                             rows_buffered += 1
+
+                    # Emit progress every N rows (after outcome counters are updated)
+                    if on_progress and rows_processed % progress_interval == 0:
+                        elapsed = time.perf_counter() - start_time
+                        on_progress(
+                            ProgressEvent(
+                                rows_processed=rows_processed,
+                                rows_succeeded=rows_succeeded,
+                                rows_failed=rows_failed,
+                                rows_quarantined=rows_quarantined,
+                                elapsed_seconds=elapsed,
+                            )
+                        )
 
             # ─────────────────────────────────────────────────────────────────
             # CRITICAL: Flush remaining aggregation buffers at end-of-source
@@ -910,6 +946,19 @@ class Orchestrator:
                         step_in_pipeline=step,
                         on_token_written=checkpoint_after_sink(sink_node_id),
                     )
+
+            # Emit final progress for runs not divisible by progress_interval
+            if on_progress and rows_processed % progress_interval != 0:
+                elapsed = time.perf_counter() - start_time
+                on_progress(
+                    ProgressEvent(
+                        rows_processed=rows_processed,
+                        rows_succeeded=rows_succeeded,
+                        rows_failed=rows_failed,
+                        rows_quarantined=rows_quarantined,
+                        elapsed_seconds=elapsed,
+                    )
+                )
 
         finally:
             # Call on_complete for all plugins (even on error)

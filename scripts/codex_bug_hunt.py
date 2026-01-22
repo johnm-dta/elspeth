@@ -18,6 +18,40 @@ def _resolve_path(repo_root: Path, value: str) -> Path:
     return (repo_root / path).resolve()
 
 
+# Directories and file patterns to exclude from scanning
+_EXCLUDE_DIRS = {
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".git",
+    ".tox",
+    ".nox",
+    ".hypothesis",
+    "node_modules",
+    ".venv",
+    "venv",
+    ".eggs",
+    "htmlcov",
+    ".coverage",
+}
+
+_EXCLUDE_SUFFIXES = {".pyc", ".pyo"}
+
+
+def _is_cache_path(path: Path) -> bool:
+    """Check if path is a cache file or inside a cache directory."""
+    # Check if any parent directory is an excluded directory
+    for part in path.parts:
+        if part in _EXCLUDE_DIRS:
+            return True
+        # Handle *.egg-info directories
+        if part.endswith(".egg-info"):
+            return True
+    # Check file suffix
+    return path.suffix in _EXCLUDE_SUFFIXES
+
+
 def _build_prompt(file_path: Path, template: str, context: str) -> str:
     return (
         "You are a static analysis agent doing a deep bug audit.\n"
@@ -65,21 +99,17 @@ async def _run_codex(
     gated_count = 0
     cmd = [
         "codex",
+        "exec",
         "--sandbox",
         "read-only",
-        "--ask-for-approval",
-        "never",
+        "-c",
+        'approval_policy="never"',
+        "--output-last-message",
+        str(output_path),
     ]
     if model is not None:
         cmd.extend(["--model", model])
-    cmd.extend(
-        [
-            "exec",
-            prompt,
-            "--output-last-message",
-            str(output_path),
-        ]
-    )
+    cmd.append(prompt)
 
     try:
         process = await asyncio.create_subprocess_exec(*cmd, cwd=repo_root)
@@ -294,9 +324,10 @@ def _paths_from_file(path_file: Path, repo_root: Path, root_dir: Path) -> list[P
         if not path.exists():
             raise RuntimeError(f"paths-from entry does not exist: {raw_path}")
         if path.is_dir():
-            selected.extend([p for p in path.rglob("*") if p.is_file()])
+            selected.extend([p for p in path.rglob("*") if p.is_file() and not _is_cache_path(p)])
         else:
-            selected.append(path)
+            if not _is_cache_path(path):
+                selected.append(path)
     return [path for path in selected if _is_under_root(path, root_dir)]
 
 
@@ -323,7 +354,7 @@ def _changed_files_since(repo_root: Path, root_dir: Path, git_ref: str) -> list[
         if not rel:
             continue
         path = (repo_root / rel).resolve()
-        if path.is_file() and _is_under_root(path, root_dir):
+        if path.is_file() and _is_under_root(path, root_dir) and not _is_cache_path(path):
             selected.append(path)
     return selected
 
@@ -346,7 +377,7 @@ def _list_files(
         selected = listed if selected is None else selected & listed
 
     if selected is None:
-        selected = {path for path in root_dir.rglob("*") if path.is_file()}
+        selected = {path for path in root_dir.rglob("*") if path.is_file() and not _is_cache_path(path)}
 
     return sorted(selected)
 

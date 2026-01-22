@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ELSPETH is a **domain-agnostic framework for auditable Sense/Decide/Act (SDA) pipelines**. It provides scaffolding for data processing workflows where every decision must be traceable to its source, regardless of whether the "decide" step is an LLM, ML model, rules engine, or threshold check.
 
-**Current Status:** Approaching RC-1. Core architecture and audit trail are complete. LLM integration is in Phase 6 of 7.
+**Current Status:** RC-1. Core architecture and audit trail are complete. External integrations (LLMs, databases, Azure) are complete.
 
 ## Auditability Standard
 

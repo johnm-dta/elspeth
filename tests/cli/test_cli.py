@@ -735,3 +735,83 @@ class TestResumeCommand:
         # Should show checkpoint info
         assert "token" in result.stdout.lower() or "node" in result.stdout.lower()
         assert "42" in result.stdout or "sequence" in result.stdout.lower()
+
+
+class TestTildeExpansion:
+    """Tests that CLI path options expand ~ to home directory.
+
+    Regression tests for:
+    - docs/bugs/closed/P2-2026-01-20-cli-paths-no-tilde-expansion.md
+    """
+
+    def test_run_expands_tilde_in_settings_path(self, tmp_path: Path) -> None:
+        """run command expands ~ in --settings path.
+
+        Creates a file in a temp dir, then constructs a path using ~ that
+        resolves to the same location, verifying expansion works.
+        """
+        from unittest.mock import patch
+
+        from elspeth.cli import app
+
+        # Create a settings file
+        settings_content = """
+datasource:
+  plugin: csv
+  options:
+    path: input.csv
+sinks:
+  default:
+    plugin: json
+    options:
+      path: output.json
+output_sink: default
+"""
+        settings_file = tmp_path / "settings.yaml"
+        settings_file.write_text(settings_content)
+
+        # Mock expanduser to return our temp path
+        # This simulates ~ expanding to our test directory
+        def mock_expanduser(self: Path) -> Path:
+            if str(self).startswith("~"):
+                return tmp_path / str(self)[2:]  # Replace ~/x with tmp_path/x
+            return self
+
+        with patch.object(Path, "expanduser", mock_expanduser):
+            result = runner.invoke(app, ["run", "-s", "~/settings.yaml"])
+
+        # Should find the file (even if validation fails for other reasons)
+        # The key is that it doesn't say "file not found" for the tilde path
+        assert "Settings file not found: ~/settings.yaml" not in result.output
+
+    def test_validate_expands_tilde_in_settings_path(self, tmp_path: Path) -> None:
+        """validate command expands ~ in --settings path."""
+        from unittest.mock import patch
+
+        from elspeth.cli import app
+
+        settings_content = """
+datasource:
+  plugin: csv
+  options:
+    path: input.csv
+sinks:
+  default:
+    plugin: json
+    options:
+      path: output.json
+output_sink: default
+"""
+        settings_file = tmp_path / "settings.yaml"
+        settings_file.write_text(settings_content)
+
+        def mock_expanduser(self: Path) -> Path:
+            if str(self).startswith("~"):
+                return tmp_path / str(self)[2:]
+            return self
+
+        with patch.object(Path, "expanduser", mock_expanduser):
+            result = runner.invoke(app, ["validate", "-s", "~/settings.yaml"])
+
+        # Should find the file
+        assert "Settings file not found: ~/settings.yaml" not in result.output

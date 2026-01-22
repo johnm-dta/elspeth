@@ -1361,6 +1361,119 @@ class TestLandscapeRecorderArtifacts:
         artifacts = recorder.get_artifacts(run.run_id)
         assert len(artifacts) == 2
 
+    def test_register_artifact_with_idempotency_key(self) -> None:
+        """register_artifact should accept and persist idempotency_key.
+
+        Regression test for:
+        docs/bugs/open/P2-2026-01-20-artifact-idempotency-key-column-ignored.md
+
+        The idempotency_key allows retry deduplication - sinks can use a stable
+        key (e.g., run_id:row_id:sink_name) to detect if an artifact was already
+        written, enabling safe retries without duplicate outputs.
+        """
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        sink = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=sink.node_id,
+            row_index=0,
+            data={},
+        )
+        token = recorder.create_token(row_id=row.row_id)
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=sink.node_id,
+            step_index=0,
+            input_data={},
+        )
+
+        # Register artifact with idempotency key
+        idem_key = f"{run.run_id}:{row.row_id}:csv_sink"
+        artifact = recorder.register_artifact(
+            run_id=run.run_id,
+            state_id=state.state_id,
+            sink_node_id=sink.node_id,
+            artifact_type="csv",
+            path="/output/result.csv",
+            content_hash="abc123",
+            size_bytes=1024,
+            idempotency_key=idem_key,
+        )
+
+        assert artifact.idempotency_key == idem_key, (
+            "register_artifact should return Artifact with idempotency_key set. "
+            "See P2-2026-01-20-artifact-idempotency-key-column-ignored.md"
+        )
+
+        # Verify it's persisted and returned by get_artifacts
+        artifacts = recorder.get_artifacts(run.run_id)
+        assert len(artifacts) == 1
+        assert artifacts[0].idempotency_key == idem_key, (
+            "get_artifacts should return Artifact with idempotency_key populated. "
+            "See P2-2026-01-20-artifact-idempotency-key-column-ignored.md"
+        )
+
+    def test_register_artifact_without_idempotency_key_returns_none(self) -> None:
+        """register_artifact without idempotency_key should return None for that field.
+
+        The idempotency_key is optional - not all sinks need deduplication support.
+        When not provided, the field should be None (not missing or error).
+        """
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        sink = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_sink",
+            node_type="sink",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=sink.node_id,
+            row_index=0,
+            data={},
+        )
+        token = recorder.create_token(row_id=row.row_id)
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=sink.node_id,
+            step_index=0,
+            input_data={},
+        )
+
+        # Register artifact WITHOUT idempotency key
+        artifact = recorder.register_artifact(
+            run_id=run.run_id,
+            state_id=state.state_id,
+            sink_node_id=sink.node_id,
+            artifact_type="csv",
+            path="/output/result.csv",
+            content_hash="abc123",
+            size_bytes=1024,
+        )
+
+        assert artifact.idempotency_key is None, "register_artifact without idempotency_key should return None for that field"
+
     def test_get_rows_for_run(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.recorder import LandscapeRecorder
@@ -3213,3 +3326,368 @@ class TestBatchRetry:
 
         with pytest.raises(ValueError, match="Batch not found"):
             recorder.retry_batch("nonexistent-batch-id")
+
+
+class TestExportStatusEnumCoercion:
+    """Tests that export status is properly coerced to ExportStatus enum.
+
+    Regression tests for:
+    - docs/bugs/closed/P2-2026-01-19-recorder-export-status-enum-mismatch.md
+    """
+
+    def test_get_run_returns_export_status_enum(self) -> None:
+        """get_run() returns ExportStatus enum, not raw string."""
+        from elspeth.contracts import ExportStatus
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        recorder.set_export_status(run.run_id, "completed")
+
+        loaded = recorder.get_run(run.run_id)
+
+        assert loaded is not None
+        assert loaded.export_status is not None
+        assert isinstance(loaded.export_status, ExportStatus), (
+            f"export_status should be ExportStatus enum, got {type(loaded.export_status).__name__}"
+        )
+        assert loaded.export_status == ExportStatus.COMPLETED
+
+    def test_list_runs_returns_export_status_enum(self) -> None:
+        """list_runs() returns ExportStatus enum, not raw string."""
+        from elspeth.contracts import ExportStatus
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        recorder.set_export_status(run.run_id, ExportStatus.PENDING)
+
+        runs = recorder.list_runs()
+
+        assert len(runs) == 1
+        assert isinstance(runs[0].export_status, ExportStatus), (
+            f"export_status should be ExportStatus enum, got {type(runs[0].export_status).__name__}"
+        )
+
+    def test_set_export_status_validates_status_string(self) -> None:
+        """set_export_status() rejects invalid status strings."""
+        import pytest
+
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        with pytest.raises(ValueError, match="invalid_status"):
+            recorder.set_export_status(run.run_id, "invalid_status")
+
+    def test_set_export_status_clears_stale_error_on_completed(self) -> None:
+        """Transitioning from failed to completed clears export_error."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # First fail with an error
+        recorder.set_export_status(run.run_id, "failed", error="export failed")
+        r1 = recorder.get_run(run.run_id)
+        assert r1 is not None
+        assert r1.export_error == "export failed"
+
+        # Now complete - error should be cleared
+        recorder.set_export_status(run.run_id, "completed")
+        r2 = recorder.get_run(run.run_id)
+        assert r2 is not None
+        assert r2.export_error is None, f"export_error should be cleared on completed, got {r2.export_error!r}"
+
+    def test_set_export_status_clears_stale_error_on_pending(self) -> None:
+        """Transitioning from failed to pending clears export_error."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # First fail with an error
+        recorder.set_export_status(run.run_id, "failed", error="export failed")
+
+        # Now set to pending - error should be cleared
+        recorder.set_export_status(run.run_id, "pending")
+        r = recorder.get_run(run.run_id)
+        assert r is not None
+        assert r.export_error is None
+
+    def test_set_export_status_accepts_enum_directly(self) -> None:
+        """set_export_status() accepts ExportStatus enum as well as string."""
+        from elspeth.contracts import ExportStatus
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+
+        # Pass enum directly
+        recorder.set_export_status(run.run_id, ExportStatus.COMPLETED)
+
+        r = recorder.get_run(run.run_id)
+        assert r is not None
+        assert r.export_status == ExportStatus.COMPLETED
+
+
+class TestNodeStateIntegrityValidation:
+    """Regression tests for Tier 1 audit integrity validation.
+
+    Bug: P2-2026-01-19-node-state-terminal-completed-at-not-validated
+    Terminal node states (COMPLETED, FAILED) must have non-NULL completed_at.
+    Reading corrupted audit data should crash per Data Manifesto Tier 1 rules.
+    """
+
+    def test_completed_state_with_null_completed_at_raises(self) -> None:
+        """COMPLETED state with NULL completed_at raises integrity violation.
+
+        Per Data Manifesto: "Bad data in audit trail = crash immediately"
+        """
+        import pytest
+        from sqlalchemy import text
+
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Create valid infrastructure
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="test_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row_record = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={"test": "value"},
+        )
+        token = recorder.create_token(row_id=row_record.row_id)
+
+        # Create a completed state normally
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=node.node_id,
+            step_index=0,
+            input_data={"test": "data"},
+        )
+        recorder.complete_node_state(
+            state_id=state.state_id,
+            status="completed",
+            output_data={"result": "ok"},
+            duration_ms=10.0,
+        )
+
+        # Verify it works normally
+        retrieved = recorder.get_node_states_for_token(token.token_id)
+        assert len(retrieved) == 1
+
+        # Now corrupt the database - set completed_at to NULL
+        with db.connection() as conn:
+            conn.execute(
+                text("UPDATE node_states SET completed_at = NULL WHERE state_id = :sid"),
+                {"sid": state.state_id},
+            )
+            conn.commit()
+
+        # Reading corrupted data should crash (Tier 1 rule)
+        with pytest.raises(ValueError, match=r"NULL completed_at.*audit integrity violation"):
+            recorder.get_node_states_for_token(token.token_id)
+
+    def test_failed_state_with_null_completed_at_raises(self) -> None:
+        """FAILED state with NULL completed_at raises integrity violation.
+
+        Per Data Manifesto: "Bad data in audit trail = crash immediately"
+        """
+        import pytest
+        from sqlalchemy import text
+
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        # Create valid infrastructure
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        node = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="test_source",
+            node_type="source",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row_record = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={"test": "value"},
+        )
+        token = recorder.create_token(row_id=row_record.row_id)
+
+        # Create a failed state normally
+        state = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=node.node_id,
+            step_index=0,
+            input_data={"test": "data"},
+        )
+        recorder.complete_node_state(
+            state_id=state.state_id,
+            status="failed",
+            error={"message": "Something went wrong"},
+            duration_ms=5.0,
+        )
+
+        # Verify it works normally
+        retrieved = recorder.get_node_states_for_token(token.token_id)
+        assert len(retrieved) == 1
+
+        # Now corrupt the database - set completed_at to NULL
+        with db.connection() as conn:
+            conn.execute(
+                text("UPDATE node_states SET completed_at = NULL WHERE state_id = :sid"),
+                {"sid": state.state_id},
+            )
+            conn.commit()
+
+        # Reading corrupted data should crash (Tier 1 rule)
+        with pytest.raises(ValueError, match=r"NULL completed_at.*audit integrity violation"):
+            recorder.get_node_states_for_token(token.token_id)
+
+
+class TestNodeStateOrderingWithRetries:
+    """Regression tests for P2-2026-01-19-node-state-ordering-missing-attempt.
+
+    Node states must be ordered by (step_index, attempt) for deterministic
+    output, especially when retries exist.
+    """
+
+    def test_get_node_states_orders_by_step_index_and_attempt(self) -> None:
+        """Node states are returned ordered by (step_index, attempt).
+
+        Bug: Query only ordered by step_index, leaving attempt ordering
+        undefined across database backends. This caused non-deterministic
+        output for retries and could break signed exports.
+
+        Fix: ORDER BY (step_index, attempt) for deterministic ordering.
+        """
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+
+        db = LandscapeDB.in_memory()
+        recorder = LandscapeRecorder(db)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        node1 = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="test_transform_1",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        node2 = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="test_transform_2",
+            node_type="transform",
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+        row_record = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=node1.node_id,
+            row_index=0,
+            data={"test": "value"},
+        )
+        token = recorder.create_token(row_id=row_record.row_id)
+
+        # Create states at step 0 with multiple attempts (simulating retries)
+        # Insert OUT OF ORDER to test that ordering is enforced by the query
+        state_0_attempt_1 = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=node1.node_id,
+            step_index=0,
+            attempt=1,  # Second attempt first!
+            input_data={"test": "data"},
+        )
+        recorder.complete_node_state(
+            state_id=state_0_attempt_1.state_id,
+            status="failed",
+            error={"message": "First failure"},
+            duration_ms=10.0,
+        )
+
+        state_0_attempt_0 = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=node1.node_id,
+            step_index=0,
+            attempt=0,  # First attempt second!
+            input_data={"test": "data"},
+        )
+        recorder.complete_node_state(
+            state_id=state_0_attempt_0.state_id,
+            status="completed",
+            output_data={"result": "ok"},
+            duration_ms=5.0,
+        )
+
+        # Create a state at step 1 using a different node (different step in pipeline)
+        state_1_attempt_0 = recorder.begin_node_state(
+            token_id=token.token_id,
+            node_id=node2.node_id,  # Different node for step 1
+            step_index=1,
+            attempt=0,
+            input_data={"test": "data2"},
+        )
+        recorder.complete_node_state(
+            state_id=state_1_attempt_0.state_id,
+            status="completed",
+            output_data={"result": "ok2"},
+            duration_ms=3.0,
+        )
+
+        # REGRESSION CHECK: Verify ordering is (step_index, attempt)
+        states = recorder.get_node_states_for_token(token.token_id)
+        assert len(states) == 3
+
+        # Verify order: step 0 attempt 0, step 0 attempt 1, step 1 attempt 0
+        assert states[0].step_index == 0
+        assert states[0].attempt == 0
+        assert states[1].step_index == 0
+        assert states[1].attempt == 1
+        assert states[2].step_index == 1
+        assert states[2].attempt == 0
+
+        # Verify the state IDs match expected order
+        assert states[0].state_id == state_0_attempt_0.state_id
+        assert states[1].state_id == state_0_attempt_1.state_id
+        assert states[2].state_id == state_1_attempt_0.state_id

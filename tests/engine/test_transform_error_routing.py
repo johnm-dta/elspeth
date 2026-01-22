@@ -357,7 +357,9 @@ class TestTransformErrorRouting:
 
         assert len(recorded) == 1
         assert recorded[0]["destination"] == "error_sink"
-        assert recorded[0]["transform_id"] == "mock_transform"
+        # transform_id is the node_id (unique DAG identifier), not plugin name
+        # See: P2-2026-01-19-transform-errors-ambiguous-transform-id
+        assert recorded[0]["transform_id"] == node.node_id
         assert recorded[0]["token_id"] == "tok_123"
         assert recorded[0]["error_details"] == {"reason": "Test error"}
 

@@ -11,9 +11,16 @@ from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import TYPE_CHECKING, Protocol
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select, union
 
-from elspeth.core.landscape.schema import rows_table, runs_table
+from elspeth.core.landscape.schema import (
+    calls_table,
+    node_states_table,
+    nodes_table,
+    routing_events_table,
+    rows_table,
+    runs_table,
+)
 
 if TYPE_CHECKING:
     from elspeth.core.landscape.database import LandscapeDB
@@ -110,6 +117,158 @@ class PurgeManager:
             refs = [row[0] for row in result]
 
         return refs
+
+    def find_expired_payload_refs(
+        self,
+        retention_days: int,
+        as_of: datetime | None = None,
+    ) -> list[str]:
+        """Find all payload refs eligible for deletion based on retention policy.
+
+        This includes payloads from:
+        - rows.source_data_ref (source row payloads)
+        - calls.request_ref and calls.response_ref (external call payloads)
+        - routing_events.reason_ref (routing reason payloads)
+
+        IMPORTANT: Because payloads are content-addressable, the same hash can
+        appear in multiple runs. We must exclude refs that are still used by
+        non-expired runs to avoid breaking replay/explain for active runs.
+
+        Args:
+            retention_days: Number of days to retain payloads after run completion
+            as_of: Reference datetime for cutoff calculation (defaults to now)
+
+        Returns:
+            Deduplicated list of payload refs for expired payloads that are NOT
+            used by any non-expired or incomplete runs
+        """
+        if as_of is None:
+            as_of = datetime.now(UTC)
+
+        cutoff = as_of - timedelta(days=retention_days)
+
+        # Condition for expired runs: completed AND older than cutoff
+        run_expired_condition = and_(
+            runs_table.c.status == "completed",
+            runs_table.c.completed_at.isnot(None),
+            runs_table.c.completed_at < cutoff,
+        )
+
+        # Condition for active runs: NOT expired (recent, incomplete, or failed)
+        # A run is "active" if any of:
+        # - completed_at >= cutoff (recent)
+        # - completed_at IS NULL (still running)
+        # - status != "completed" (failed, paused, etc.)
+        run_active_condition = or_(
+            runs_table.c.completed_at >= cutoff,
+            runs_table.c.completed_at.is_(None),
+            runs_table.c.status != "completed",
+        )
+
+        # === Build queries for refs from EXPIRED runs ===
+
+        # 1. Row payloads from expired runs
+        row_expired_query = (
+            select(rows_table.c.source_data_ref)
+            .select_from(rows_table.join(runs_table, rows_table.c.run_id == runs_table.c.run_id))
+            .where(and_(run_expired_condition, rows_table.c.source_data_ref.isnot(None)))
+        )
+
+        # 2. Call payloads from expired runs
+        call_join = (
+            calls_table.join(node_states_table, calls_table.c.state_id == node_states_table.c.state_id)
+            .join(nodes_table, node_states_table.c.node_id == nodes_table.c.node_id)
+            .join(runs_table, nodes_table.c.run_id == runs_table.c.run_id)
+        )
+
+        call_request_expired_query = (
+            select(calls_table.c.request_ref)
+            .select_from(call_join)
+            .where(and_(run_expired_condition, calls_table.c.request_ref.isnot(None)))
+        )
+
+        call_response_expired_query = (
+            select(calls_table.c.response_ref)
+            .select_from(call_join)
+            .where(and_(run_expired_condition, calls_table.c.response_ref.isnot(None)))
+        )
+
+        # 3. Routing payloads from expired runs
+        routing_join = (
+            routing_events_table.join(node_states_table, routing_events_table.c.state_id == node_states_table.c.state_id)
+            .join(nodes_table, node_states_table.c.node_id == nodes_table.c.node_id)
+            .join(runs_table, nodes_table.c.run_id == runs_table.c.run_id)
+        )
+
+        routing_expired_query = (
+            select(routing_events_table.c.reason_ref)
+            .select_from(routing_join)
+            .where(and_(run_expired_condition, routing_events_table.c.reason_ref.isnot(None)))
+        )
+
+        # Combine all expired refs
+        expired_refs_query = union(
+            row_expired_query,
+            call_request_expired_query,
+            call_response_expired_query,
+            routing_expired_query,
+        )
+
+        # === Build queries for refs from ACTIVE runs (to exclude) ===
+
+        # 1. Row payloads from active runs
+        row_active_query = (
+            select(rows_table.c.source_data_ref)
+            .select_from(rows_table.join(runs_table, rows_table.c.run_id == runs_table.c.run_id))
+            .where(and_(run_active_condition, rows_table.c.source_data_ref.isnot(None)))
+        )
+
+        # 2. Call payloads from active runs
+        call_request_active_query = (
+            select(calls_table.c.request_ref)
+            .select_from(call_join)
+            .where(and_(run_active_condition, calls_table.c.request_ref.isnot(None)))
+        )
+
+        call_response_active_query = (
+            select(calls_table.c.response_ref)
+            .select_from(call_join)
+            .where(and_(run_active_condition, calls_table.c.response_ref.isnot(None)))
+        )
+
+        # 3. Routing payloads from active runs
+        routing_active_query = (
+            select(routing_events_table.c.reason_ref)
+            .select_from(routing_join)
+            .where(and_(run_active_condition, routing_events_table.c.reason_ref.isnot(None)))
+        )
+
+        # Combine all active refs
+        active_refs_query = union(
+            row_active_query,
+            call_request_active_query,
+            call_response_active_query,
+            routing_active_query,
+        )
+
+        # === Execute both queries and compute set difference ===
+        # We use Python set difference rather than SQL EXCEPT because:
+        # 1. SQLite's EXCEPT can have performance issues with complex UNIONs
+        # 2. The result sets are typically small enough for in-memory operation
+        # 3. Python set operations are clearer for this anti-join pattern
+
+        with self._db.connection() as conn:
+            # Get all refs from expired runs
+            expired_result = conn.execute(expired_refs_query)
+            expired_refs = {row[0] for row in expired_result}
+
+            # Get all refs from active runs
+            active_result = conn.execute(active_refs_query)
+            active_refs = {row[0] for row in active_result}
+
+        # Return refs that are ONLY in expired runs (not in any active run)
+        safe_to_delete = expired_refs - active_refs
+        return list(safe_to_delete)
 
     def purge_payloads(self, refs: list[str]) -> PurgeResult:
         """Purge payloads from the PayloadStore.

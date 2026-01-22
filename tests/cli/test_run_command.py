@@ -237,3 +237,199 @@ output_sink: results
         assert result.exit_code == 0
         # Verbose should show graph info
         assert "node" in result.stdout.lower() or "edge" in result.stdout.lower()
+
+
+class TestRunCommandResourceCleanup:
+    """Tests that run command properly cleans up resources.
+
+    Regression tests for:
+    - docs/bugs/closed/P2-2026-01-20-cli-run-does-not-close-landscape-db.md
+    """
+
+    def test_run_closes_database_after_success(self, tmp_path: Path) -> None:
+        """Database connection is closed after successful pipeline execution.
+
+        Verifies that LandscapeDB.close() is called even on success, preventing
+        resource leaks in embedded/test contexts where process doesn't exit.
+        """
+        from unittest.mock import patch
+
+        # Create minimal valid settings
+        csv_file = tmp_path / "input.csv"
+        csv_file.write_text("id,name\n1,alice\n")
+        output_file = tmp_path / "output.json"
+        landscape_db = tmp_path / "landscape.db"
+
+        settings = {
+            "datasource": {
+                "plugin": "csv",
+                "options": {
+                    "path": str(csv_file),
+                    "on_validation_failure": "discard",
+                    "schema": {"fields": "dynamic"},
+                },
+            },
+            "sinks": {
+                "default": {
+                    "plugin": "json",
+                    "options": {
+                        "path": str(output_file),
+                        "schema": {"fields": "dynamic"},
+                    },
+                },
+            },
+            "output_sink": "default",
+            "landscape": {"url": f"sqlite:///{landscape_db}"},
+        }
+        settings_file = tmp_path / "settings.yaml"
+        import yaml
+
+        settings_file.write_text(yaml.dump(settings))
+
+        # Track if close was called
+        close_called = []
+        original_close = None
+
+        def track_close(self: object) -> None:
+            close_called.append(True)
+            if original_close:
+                original_close(self)
+
+        from elspeth.core.landscape import LandscapeDB
+
+        original_close = LandscapeDB.close
+
+        with patch.object(LandscapeDB, "close", track_close):
+            result = runner.invoke(app, ["run", "--settings", str(settings_file), "--execute"])
+
+        assert result.exit_code == 0, f"Run failed: {result.output}"
+        assert len(close_called) >= 1, (
+            "LandscapeDB.close() was not called after successful pipeline execution. "
+            "This is a resource leak - see P2-2026-01-20-cli-run-does-not-close-landscape-db.md"
+        )
+
+    def test_run_closes_database_after_failure(self, tmp_path: Path) -> None:
+        """Database connection is closed even when pipeline fails.
+
+        Verifies that LandscapeDB.close() is called in finally block, ensuring
+        cleanup happens regardless of success or failure.
+        """
+        from unittest.mock import patch
+
+        # Create settings that will fail during execution (non-existent file)
+        landscape_db = tmp_path / "landscape.db"
+
+        settings = {
+            "datasource": {
+                "plugin": "csv",
+                "options": {
+                    "path": str(tmp_path / "nonexistent.csv"),  # Will fail
+                    "on_validation_failure": "discard",
+                    "schema": {"fields": "dynamic"},
+                },
+            },
+            "sinks": {
+                "default": {
+                    "plugin": "json",
+                    "options": {
+                        "path": str(tmp_path / "output.json"),
+                        "schema": {"fields": "dynamic"},
+                    },
+                },
+            },
+            "output_sink": "default",
+            "landscape": {"url": f"sqlite:///{landscape_db}"},
+        }
+        settings_file = tmp_path / "settings.yaml"
+        import yaml
+
+        settings_file.write_text(yaml.dump(settings))
+
+        # Track if close was called
+        close_called = []
+        original_close = None
+
+        def track_close(self: object) -> None:
+            close_called.append(True)
+            if original_close:
+                original_close(self)
+
+        from elspeth.core.landscape import LandscapeDB
+
+        original_close = LandscapeDB.close
+
+        with patch.object(LandscapeDB, "close", track_close):
+            result = runner.invoke(app, ["run", "--settings", str(settings_file), "--execute"])
+
+        # Expect failure (file doesn't exist)
+        assert result.exit_code != 0
+
+        # But close should still be called (finally block)
+        assert len(close_called) >= 1, (
+            "LandscapeDB.close() was not called after pipeline failure. The try/finally block should ensure cleanup on all code paths."
+        )
+
+
+class TestRunCommandProgress:
+    """Tests for progress output during pipeline execution."""
+
+    @pytest.fixture
+    def multi_row_data(self, tmp_path: Path) -> Path:
+        """Create sample input data with 150 rows for progress testing."""
+        csv_file = tmp_path / "multi_row_input.csv"
+        lines = ["id,name,value"]
+        for i in range(150):
+            lines.append(f"{i},item_{i},{i * 10}")
+        csv_file.write_text("\n".join(lines))
+        return csv_file
+
+    @pytest.fixture
+    def progress_settings(self, tmp_path: Path, multi_row_data: Path) -> Path:
+        """Create pipeline configuration for progress testing."""
+        output_file = tmp_path / "progress_output.json"
+        landscape_db = tmp_path / "landscape.db"
+        settings = {
+            "datasource": {
+                "plugin": "csv",
+                "options": {
+                    "path": str(multi_row_data),
+                    "on_validation_failure": "discard",
+                    "schema": {"fields": "dynamic"},
+                },
+            },
+            "sinks": {
+                "default": {
+                    "plugin": "json",
+                    "options": {
+                        "path": str(output_file),
+                        "schema": {"fields": "dynamic"},
+                    },
+                },
+            },
+            "output_sink": "default",
+            "landscape": {"url": f"sqlite:///{landscape_db}"},
+        }
+        settings_file = tmp_path / "settings.yaml"
+        settings_file.write_text(yaml.dump(settings))
+        return settings_file
+
+    def test_run_shows_progress_output(self, progress_settings: Path) -> None:
+        """run --execute shows progress lines during execution."""
+        result = runner.invoke(app, ["run", "--settings", str(progress_settings), "--execute"])
+        assert result.exit_code == 0
+
+        # Check for progress output format: "Processing: X rows | ..."
+        assert "Processing:" in result.output
+        assert "rows" in result.output
+        assert "rows/sec" in result.output
+
+    def test_run_progress_shows_counters(self, progress_settings: Path) -> None:
+        """run --execute progress shows success/fail/quarantine counters."""
+        result = runner.invoke(app, ["run", "--settings", str(progress_settings), "--execute"])
+        assert result.exit_code == 0
+
+        # Check for counter symbols in output
+        # Format: ✓N ✗N ⚠N
+        assert "✓" in result.output  # success
+        assert "✗" in result.output  # failed
+        assert "⚠" in result.output  # quarantined

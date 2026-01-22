@@ -3493,6 +3493,108 @@ class TestOrchestratorForkExecution:
         assert len(sink.results) == 3
 
 
+class TestOrchestratorSourceQuarantineValidation:
+    """Test that invalid source quarantine destinations fail at startup.
+
+    Per P2-2026-01-19-source-quarantine-silent-drop:
+    Source on_validation_failure destinations should be validated at startup,
+    just like gate routes and transform error sinks.
+    """
+
+    def test_invalid_source_quarantine_destination_fails_at_init(self) -> None:
+        """Source quarantine to non-existent sink should fail before processing rows.
+
+        When a source has on_validation_failure set to a sink that doesn't exist,
+        the orchestrator should fail at initialization with a clear error message,
+        NOT silently drop quarantined rows at runtime.
+        """
+        from elspeth.contracts import PluginSchema, SourceRow
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import (
+            Orchestrator,
+            PipelineConfig,
+            RouteValidationError,
+        )
+
+        db = LandscapeDB.in_memory()
+
+        class RowSchema(PluginSchema):
+            id: int
+            name: str
+
+        class QuarantiningSource(_TestSourceBase):
+            """Source that yields one valid row and one quarantined row."""
+
+            name = "quarantining_source"
+            output_schema = RowSchema
+
+            def __init__(self) -> None:
+                self.load_called = False
+                # Track the quarantine destination for validation
+                self._on_validation_failure = "nonexistent_quarantine_sink"
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def load(self, ctx: Any) -> Any:
+                self.load_called = True
+                # Valid row
+                yield SourceRow.valid({"id": 1, "name": "alice"})
+                # Quarantined row - destination doesn't exist!
+                yield SourceRow.quarantined(
+                    row={"id": 2, "name": "bob", "bad_field": "invalid"},
+                    error="Validation failed",
+                    destination="nonexistent_quarantine_sink",
+                )
+
+            def close(self) -> None:
+                pass
+
+        class CollectSink(_TestSinkBase):
+            name = "collect"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def on_start(self, ctx: Any) -> None:
+                pass
+
+            def on_complete(self, ctx: Any) -> None:
+                pass
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+
+            def close(self) -> None:
+                pass
+
+        source = QuarantiningSource()
+        default_sink = CollectSink()
+        # Note: NO 'nonexistent_quarantine_sink' provided!
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[],
+            sinks={"default": as_sink(default_sink)},  # Only default, no quarantine sink
+        )
+
+        orchestrator = Orchestrator(db)
+
+        # Should fail at initialization with clear error message
+        with pytest.raises(RouteValidationError) as exc_info:
+            orchestrator.run(config, graph=_build_test_graph(config))
+
+        # Verify error message contains helpful information
+        error_msg = str(exc_info.value)
+        assert "nonexistent_quarantine_sink" in error_msg  # Invalid destination
+        assert "default" in error_msg  # Available sinks
+
+        # Verify no rows were processed (failed at validation, not runtime)
+        assert not source.load_called, "Source.load() should not be called - validation failed first"
+
+
 class TestOrchestratorQuarantineMetrics:
     """Test that QUARANTINED rows are counted separately from FAILED."""
 
@@ -4360,3 +4462,275 @@ class TestCoalesceWiring:
             assert "coalesce_step_map" in call_kwargs
             # 2 transforms + 1 gate = step 3 for coalesce
             assert call_kwargs["coalesce_step_map"]["merge_results"] == 3
+
+
+class TestOrchestratorProgress:
+    """Tests for progress callback functionality."""
+
+    def test_progress_callback_called_every_100_rows(self) -> None:
+        """Verify progress callback is called at 100, 200, and 250 row marks."""
+        from elspeth.contracts import PluginSchema, ProgressEvent, SourceRow
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class MultiRowSource(_TestSourceBase):
+            """Source that yields N rows for progress testing."""
+
+            name = "multi_row_source"
+            output_schema = ValueSchema
+
+            def __init__(self, count: int) -> None:
+                self._count = count
+
+            def load(self, ctx: Any) -> Iterator[SourceRow]:
+                for i in range(self._count):
+                    yield SourceRow.valid({"value": i})
+
+        class CollectSink(_TestSinkBase):
+            name = "collect_sink"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+
+        # Create 250-row source
+        source = MultiRowSource(count=250)
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[],
+            sinks={"default": as_sink(sink)},
+        )
+
+        # Track progress events
+        progress_events: list[ProgressEvent] = []
+
+        def track_progress(event: ProgressEvent) -> None:
+            progress_events.append(event)
+
+        orchestrator = Orchestrator(db)
+        orchestrator.run(
+            config,
+            graph=_build_test_graph(config),
+            on_progress=track_progress,
+        )
+
+        # Should be called at 100, 200, and 250 (final)
+        assert len(progress_events) == 3
+
+        # Verify row counts at each emission
+        assert progress_events[0].rows_processed == 100
+        assert progress_events[1].rows_processed == 200
+        assert progress_events[2].rows_processed == 250  # Final emission
+
+        # Verify timing is recorded
+        assert all(e.elapsed_seconds > 0 for e in progress_events)
+        # Elapsed should be monotonically increasing
+        assert progress_events[0].elapsed_seconds <= progress_events[1].elapsed_seconds
+        assert progress_events[1].elapsed_seconds <= progress_events[2].elapsed_seconds
+
+    def test_progress_callback_not_called_when_none(self) -> None:
+        """Verify no crash when on_progress is None."""
+        from elspeth.contracts import PluginSchema, SourceRow
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class SmallSource(_TestSourceBase):
+            name = "small_source"
+            output_schema = ValueSchema
+
+            def load(self, ctx: Any) -> Iterator[SourceRow]:
+                for i in range(50):
+                    yield SourceRow.valid({"value": i})
+
+        class CollectSink(_TestSinkBase):
+            name = "collect_sink"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+
+        source = SmallSource()
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[],
+            sinks={"default": as_sink(sink)},
+        )
+
+        orchestrator = Orchestrator(db)
+        # Run without progress callback - should not crash
+        run_result = orchestrator.run(config, graph=_build_test_graph(config))
+
+        assert run_result.rows_processed == 50
+
+    def test_progress_callback_fires_for_quarantined_rows(self) -> None:
+        """Verify progress callback fires even when rows are quarantined.
+
+        Regression test: progress emission was placed after the quarantine
+        continue, so quarantined rows at 100-row boundaries never triggered
+        progress updates.
+        """
+        from elspeth.contracts import PluginSchema, ProgressEvent, SourceRow
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        class ValueSchema(PluginSchema):
+            value: int
+
+        class QuarantineAtBoundarySource(_TestSourceBase):
+            """Source that quarantines specifically at 100-row boundary."""
+
+            name = "quarantine_boundary_source"
+            output_schema = ValueSchema
+
+            def load(self, ctx: Any) -> Iterator[SourceRow]:
+                for i in range(150):
+                    if i == 99:  # Row 100 (0-indexed 99) is quarantined
+                        yield SourceRow.quarantined(
+                            row={"value": i},
+                            error="test_quarantine_at_boundary",
+                            destination="quarantine",
+                        )
+                    else:
+                        yield SourceRow.valid({"value": i})
+
+        class CollectSink(_TestSinkBase):
+            name = "collect_sink"
+
+            def __init__(self) -> None:
+                self.results: list[dict[str, Any]] = []
+
+            def write(self, rows: Any, ctx: Any) -> ArtifactDescriptor:
+                self.results.extend(rows)
+                return ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="")
+
+        source = QuarantineAtBoundarySource()
+        default_sink = CollectSink()
+        quarantine_sink = CollectSink()
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[],
+            sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
+        )
+
+        progress_events: list[ProgressEvent] = []
+
+        def track_progress(event: ProgressEvent) -> None:
+            progress_events.append(event)
+
+        orchestrator = Orchestrator(db)
+        orchestrator.run(
+            config,
+            graph=_build_test_graph(config),
+            on_progress=track_progress,
+        )
+
+        # Progress should fire at row 100 even though it was quarantined
+        assert len(progress_events) == 2  # At 100 and final 150
+
+        # First progress at row 100 - quarantined count should be 1
+        assert progress_events[0].rows_processed == 100
+        assert progress_events[0].rows_quarantined == 1
+
+        # Final progress at row 150
+        assert progress_events[1].rows_processed == 150
+
+    def test_progress_callback_includes_routed_rows_in_success(self) -> None:
+        """Verify routed rows are counted as successes in progress events.
+
+        Regression test: progress was showing ✓0 for pipelines with gates
+        because routed rows weren't included in rows_succeeded.
+        """
+        from unittest.mock import MagicMock
+
+        from elspeth.contracts import ProgressEvent, SourceRow
+        from elspeth.core.config import GateSettings
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        # Mock source that yields 150 rows
+        mock_source = MagicMock()
+        mock_source.name = "test_source"
+        mock_source.determinism = Determinism.IO_READ
+        mock_source.plugin_version = "1.0.0"
+        mock_source.load.return_value = iter([SourceRow.valid({"value": i}) for i in range(150)])
+
+        # Config-driven gate: always routes to "routed_sink"
+        routing_gate = GateSettings(
+            name="routing_gate",
+            condition="True",  # Always routes
+            routes={"true": "routed_sink", "false": "continue"},
+        )
+
+        # Mock sinks
+        mock_default = MagicMock()
+        mock_default.name = "default_sink"
+        mock_default.determinism = Determinism.IO_WRITE
+        mock_default.plugin_version = "1.0.0"
+        mock_default.write.return_value = ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
+
+        mock_routed = MagicMock()
+        mock_routed.name = "routed_sink"
+        mock_routed.determinism = Determinism.IO_WRITE
+        mock_routed.plugin_version = "1.0.0"
+        mock_routed.write.return_value = ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="def456")
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[],
+            sinks={"default": mock_default, "routed_sink": mock_routed},
+            gates=[routing_gate],
+        )
+
+        # Track progress events
+        progress_events: list[ProgressEvent] = []
+
+        def track_progress(event: ProgressEvent) -> None:
+            progress_events.append(event)
+
+        orchestrator = Orchestrator(db)
+        orchestrator.run(
+            config,
+            graph=_build_test_graph(config),
+            on_progress=track_progress,
+        )
+
+        # Should have progress at 100 and final 150
+        assert len(progress_events) == 2
+
+        # All rows were routed - they should count as succeeded, not zero
+        # Bug: without fix, this shows rows_succeeded=0 because routed rows weren't counted
+        assert progress_events[0].rows_succeeded == 100
+        assert progress_events[1].rows_succeeded == 150
+
+        # Verify routed sink received rows, default did not
+        assert mock_routed.write.called
+        assert not mock_default.write.called

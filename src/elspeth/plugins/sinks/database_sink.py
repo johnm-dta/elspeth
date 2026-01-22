@@ -100,9 +100,14 @@ class DatabaseSink(BaseSink):
         self._engine: Engine | None = None
         self._table: Table | None = None
         self._metadata: MetaData | None = None
+        self._table_replaced: bool = False  # Track if we've done the replace for this instance
 
     def _ensure_table(self, row: dict[str, Any]) -> None:
-        """Create table if it doesn't exist.
+        """Create table, handling if_exists behavior.
+
+        if_exists behavior (follows pandas to_sql semantics):
+        - "append": Create table if not exists, insert rows (default)
+        - "replace": Drop table on first write, recreate with fresh schema
 
         When schema is explicit (not dynamic), columns are derived from schema
         fields with proper type mapping. This ensures all defined fields
@@ -115,6 +120,11 @@ class DatabaseSink(BaseSink):
             self._metadata = MetaData()
 
         if self._table is None:
+            # Handle if_exists="replace": drop table on first write
+            if self._if_exists == "replace" and not self._table_replaced:
+                self._drop_table_if_exists()
+                self._table_replaced = True
+
             columns = self._create_columns_from_schema_or_row(row)
             # Metadata is always set when engine is created
             assert self._metadata is not None
@@ -124,6 +134,26 @@ class DatabaseSink(BaseSink):
                 *columns,
             )
             self._metadata.create_all(self._engine, checkfirst=True)
+
+    def _drop_table_if_exists(self) -> None:
+        """Drop the table if it exists (for replace mode).
+
+        Uses SQLAlchemy's Table.drop() for portable, dialect-safe drops.
+        This handles identifier quoting correctly across all databases
+        (SQLite, PostgreSQL, MySQL, etc.).
+        """
+        if self._engine is None:
+            return
+
+        from sqlalchemy import MetaData, Table, inspect
+
+        inspector = inspect(self._engine)
+        if inspector.has_table(self._table_name):
+            # Use SQLAlchemy's Table.drop() for dialect-safe drop
+            # This generates correct identifier quoting for any database
+            temp_metadata = MetaData()
+            table = Table(self._table_name, temp_metadata)
+            table.drop(self._engine)
 
     def _create_columns_from_schema_or_row(self, row: dict[str, Any]) -> list[Column[Any]]:
         """Create SQLAlchemy columns from schema or row keys.

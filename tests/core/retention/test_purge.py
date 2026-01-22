@@ -7,6 +7,122 @@ from uuid import uuid4
 from sqlalchemy import Connection, Table
 
 
+def _create_state(
+    conn: Connection,
+    states_table: Table,
+    state_id: str,
+    token_id: str,
+    node_id: str,
+) -> None:
+    """Helper to create a node_state record."""
+    conn.execute(
+        states_table.insert().values(
+            state_id=state_id,
+            token_id=token_id,
+            node_id=node_id,
+            step_index=0,
+            attempt=0,
+            status="completed",
+            input_hash="input123",
+            output_hash="output123",
+            started_at=datetime.now(UTC),
+        )
+    )
+
+
+def _create_token(
+    conn: Connection,
+    tokens_table: Table,
+    token_id: str,
+    row_id: str,
+) -> None:
+    """Helper to create a token record.
+
+    Note: tokens_table does NOT have run_id - tokens link to runs through rows.
+    """
+    conn.execute(
+        tokens_table.insert().values(
+            token_id=token_id,
+            row_id=row_id,
+            branch_name=None,
+            created_at=datetime.now(UTC),
+        )
+    )
+
+
+def _create_call(
+    conn: Connection,
+    calls_table: Table,
+    call_id: str,
+    state_id: str,
+    *,
+    request_ref: str | None = None,
+    response_ref: str | None = None,
+) -> None:
+    """Helper to create an external call record."""
+    conn.execute(
+        calls_table.insert().values(
+            call_id=call_id,
+            state_id=state_id,
+            call_index=0,
+            call_type="llm",
+            status="completed",
+            request_hash="req_hash",
+            request_ref=request_ref,
+            response_hash="resp_hash",
+            response_ref=response_ref,
+            created_at=datetime.now(UTC),
+        )
+    )
+
+
+def _create_edge(
+    conn: Connection,
+    edges_table: Table,
+    edge_id: str,
+    run_id: str,
+    from_node_id: str,
+    to_node_id: str,
+) -> None:
+    """Helper to create an edge record."""
+    conn.execute(
+        edges_table.insert().values(
+            edge_id=edge_id,
+            run_id=run_id,
+            from_node_id=from_node_id,
+            to_node_id=to_node_id,
+            label="continue",
+            default_mode="move",
+            created_at=datetime.now(UTC),
+        )
+    )
+
+
+def _create_routing_event(
+    conn: Connection,
+    routing_events_table: Table,
+    event_id: str,
+    state_id: str,
+    edge_id: str,
+    *,
+    reason_ref: str | None = None,
+) -> None:
+    """Helper to create a routing event record."""
+    conn.execute(
+        routing_events_table.insert().values(
+            event_id=event_id,
+            state_id=state_id,
+            edge_id=edge_id,
+            routing_group_id=str(uuid4()),
+            ordinal=0,
+            mode="move",
+            reason_hash="reason_hash",
+            reason_ref=reason_ref,
+            created_at=datetime.now(UTC),
+        )
+    )
+
+
 def _create_run(
     conn: Connection,
     runs_table: Table,
@@ -507,3 +623,510 @@ class TestPurgePayloads:
         assert result.bytes_freed == 0
         assert result.skipped_count == 0
         assert result.failed_refs == []
+
+
+class TestFindExpiredCallPayloads:
+    """Tests for finding expired call payloads (request/response refs).
+
+    Per P2-2026-01-19-retention-purge-ignores-call-and-reason-payload-refs:
+    Call payloads (request_ref, response_ref) should be subject to the same
+    retention policy as row payloads.
+    """
+
+    def test_find_expired_includes_call_request_refs(self) -> None:
+        """Expired call request payloads should be found for purge."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import (
+            calls_table,
+            node_states_table,
+            nodes_table,
+            rows_table,
+            runs_table,
+            tokens_table,
+        )
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        # Create a run completed 60 days ago
+        run_id = str(uuid4())
+        node_id = str(uuid4())
+        row_id = str(uuid4())
+        token_id = str(uuid4())
+        state_id = str(uuid4())
+        call_id = str(uuid4())
+        old_completed_at = datetime.now(UTC) - timedelta(days=60)
+
+        with db.connection() as conn:
+            _create_run(conn, runs_table, run_id, completed_at=old_completed_at, status="completed")
+            _create_node(conn, nodes_table, node_id, run_id)
+            _create_row(conn, rows_table, row_id, run_id, node_id, row_index=0)
+            _create_token(conn, tokens_table, token_id, row_id)
+            _create_state(conn, node_states_table, state_id, token_id, node_id)
+            _create_call(
+                conn,
+                calls_table,
+                call_id,
+                state_id,
+                request_ref="call_request_payload_ref",
+                response_ref="call_response_payload_ref",
+            )
+
+        # Find payloads older than 30 days - should include call payloads
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        assert "call_request_payload_ref" in expired, "Call request_ref should be found"
+        assert "call_response_payload_ref" in expired, "Call response_ref should be found"
+
+    def test_find_expired_includes_call_response_refs(self) -> None:
+        """Expired call response payloads should be found for purge."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import (
+            calls_table,
+            node_states_table,
+            nodes_table,
+            rows_table,
+            runs_table,
+            tokens_table,
+        )
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        # Create a run completed 60 days ago with only response_ref
+        run_id = str(uuid4())
+        node_id = str(uuid4())
+        row_id = str(uuid4())
+        token_id = str(uuid4())
+        state_id = str(uuid4())
+        call_id = str(uuid4())
+        old_completed_at = datetime.now(UTC) - timedelta(days=60)
+
+        with db.connection() as conn:
+            _create_run(conn, runs_table, run_id, completed_at=old_completed_at, status="completed")
+            _create_node(conn, nodes_table, node_id, run_id)
+            _create_row(conn, rows_table, row_id, run_id, node_id, row_index=0)
+            _create_token(conn, tokens_table, token_id, row_id)
+            _create_state(conn, node_states_table, state_id, token_id, node_id)
+            _create_call(
+                conn,
+                calls_table,
+                call_id,
+                state_id,
+                request_ref=None,  # No request ref
+                response_ref="only_response_ref",
+            )
+
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        assert "only_response_ref" in expired
+
+
+class TestFindExpiredRoutingPayloads:
+    """Tests for finding expired routing event payloads (reason_ref).
+
+    Per P2-2026-01-19-retention-purge-ignores-call-and-reason-payload-refs:
+    Routing reason payloads should be subject to the same retention policy.
+    """
+
+    def test_find_expired_includes_routing_reason_refs(self) -> None:
+        """Expired routing reason payloads should be found for purge."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import (
+            edges_table,
+            node_states_table,
+            nodes_table,
+            routing_events_table,
+            rows_table,
+            runs_table,
+            tokens_table,
+        )
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        # Create a run completed 60 days ago
+        run_id = str(uuid4())
+        source_node_id = str(uuid4())
+        sink_node_id = str(uuid4())
+        row_id = str(uuid4())
+        token_id = str(uuid4())
+        state_id = str(uuid4())
+        edge_id = str(uuid4())
+        event_id = str(uuid4())
+        old_completed_at = datetime.now(UTC) - timedelta(days=60)
+
+        with db.connection() as conn:
+            _create_run(conn, runs_table, run_id, completed_at=old_completed_at, status="completed")
+            _create_node(conn, nodes_table, source_node_id, run_id)
+            _create_node(conn, nodes_table, sink_node_id, run_id)
+            _create_row(conn, rows_table, row_id, run_id, source_node_id, row_index=0)
+            _create_token(conn, tokens_table, token_id, row_id)
+            _create_state(conn, node_states_table, state_id, token_id, source_node_id)
+            _create_edge(conn, edges_table, edge_id, run_id, source_node_id, sink_node_id)
+            _create_routing_event(
+                conn,
+                routing_events_table,
+                event_id,
+                state_id,
+                edge_id,
+                reason_ref="routing_reason_payload_ref",
+            )
+
+        # Find payloads older than 30 days - should include routing reason
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        assert "routing_reason_payload_ref" in expired, "Routing reason_ref should be found"
+
+
+class TestFindExpiredAllPayloadRefs:
+    """Tests for the unified find_expired_payload_refs method."""
+
+    def test_find_expired_payload_refs_returns_deduplicated_union(self) -> None:
+        """All payload types should be returned, deduplicated."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import (
+            calls_table,
+            edges_table,
+            node_states_table,
+            nodes_table,
+            routing_events_table,
+            rows_table,
+            runs_table,
+            tokens_table,
+        )
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        # Create a run completed 60 days ago with all payload types
+        run_id = str(uuid4())
+        source_node_id = str(uuid4())
+        sink_node_id = str(uuid4())
+        row_id = str(uuid4())
+        token_id = str(uuid4())
+        state_id = str(uuid4())
+        call_id = str(uuid4())
+        edge_id = str(uuid4())
+        event_id = str(uuid4())
+        old_completed_at = datetime.now(UTC) - timedelta(days=60)
+
+        with db.connection() as conn:
+            _create_run(conn, runs_table, run_id, completed_at=old_completed_at, status="completed")
+            _create_node(conn, nodes_table, source_node_id, run_id)
+            _create_node(conn, nodes_table, sink_node_id, run_id)
+            _create_row(
+                conn,
+                rows_table,
+                row_id,
+                run_id,
+                source_node_id,
+                row_index=0,
+                source_data_ref="row_payload_ref",
+            )
+            _create_token(conn, tokens_table, token_id, row_id)
+            _create_state(conn, node_states_table, state_id, token_id, source_node_id)
+            _create_call(
+                conn,
+                calls_table,
+                call_id,
+                state_id,
+                request_ref="call_request_ref",
+                response_ref="call_response_ref",
+            )
+            _create_edge(conn, edges_table, edge_id, run_id, source_node_id, sink_node_id)
+            _create_routing_event(
+                conn,
+                routing_events_table,
+                event_id,
+                state_id,
+                edge_id,
+                reason_ref="routing_reason_ref",
+            )
+
+        # Find all expired payload refs
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        # Should include all 4 payload refs
+        assert "row_payload_ref" in expired
+        assert "call_request_ref" in expired
+        assert "call_response_ref" in expired
+        assert "routing_reason_ref" in expired
+
+        # Should be exactly 4 (no duplicates)
+        assert len(expired) == 4
+
+    def test_find_expired_payload_refs_respects_retention(self) -> None:
+        """Recent call/routing payloads should not be found."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import (
+            calls_table,
+            node_states_table,
+            nodes_table,
+            rows_table,
+            runs_table,
+            tokens_table,
+        )
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        # Create a run completed 10 days ago (within retention)
+        run_id = str(uuid4())
+        node_id = str(uuid4())
+        row_id = str(uuid4())
+        token_id = str(uuid4())
+        state_id = str(uuid4())
+        call_id = str(uuid4())
+        recent_completed_at = datetime.now(UTC) - timedelta(days=10)
+
+        with db.connection() as conn:
+            _create_run(conn, runs_table, run_id, completed_at=recent_completed_at, status="completed")
+            _create_node(conn, nodes_table, node_id, run_id)
+            _create_row(conn, rows_table, row_id, run_id, node_id, row_index=0)
+            _create_token(conn, tokens_table, token_id, row_id)
+            _create_state(conn, node_states_table, state_id, token_id, node_id)
+            _create_call(
+                conn,
+                calls_table,
+                call_id,
+                state_id,
+                request_ref="recent_call_ref",
+            )
+
+        # Find payloads older than 30 days - should NOT include recent
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        assert "recent_call_ref" not in expired
+
+
+class TestContentAddressableSharedRefs:
+    """Tests for content-addressable storage shared refs across runs.
+
+    Regression tests for P2-payload-refs-shared-across-runs bug:
+    Because payloads are content-addressable, the same hash can appear in
+    multiple runs. Purge must exclude refs still used by non-expired runs.
+    """
+
+    def test_shared_row_ref_excluded_when_used_by_recent_run(self) -> None:
+        """Shared row payload ref should NOT be purged if a recent run uses it.
+
+        Scenario:
+        - Run A (60 days old, expired) has row with source_data_ref=H
+        - Run B (10 days old, not expired) has row with same source_data_ref=H
+        - Purge with 30-day retention should NOT return H (Run B needs it)
+        """
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        # The shared ref (content-addressable: same content = same hash)
+        shared_ref = "shared_row_payload_hash"
+
+        # Run A: 60 days old (expired with 30-day retention)
+        run_a_id = str(uuid4())
+        node_a_id = str(uuid4())
+        old_completed = datetime.now(UTC) - timedelta(days=60)
+
+        # Run B: 10 days old (NOT expired with 30-day retention)
+        run_b_id = str(uuid4())
+        node_b_id = str(uuid4())
+        recent_completed = datetime.now(UTC) - timedelta(days=10)
+
+        with db.connection() as conn:
+            # Create Run A (expired) with shared ref
+            _create_run(conn, runs_table, run_a_id, completed_at=old_completed, status="completed")
+            _create_node(conn, nodes_table, node_a_id, run_a_id)
+            _create_row(
+                conn,
+                rows_table,
+                str(uuid4()),
+                run_a_id,
+                node_a_id,
+                row_index=0,
+                source_data_ref=shared_ref,
+                source_data_hash="hash_a",
+            )
+
+            # Create Run B (NOT expired) with SAME shared ref
+            _create_run(conn, runs_table, run_b_id, completed_at=recent_completed, status="completed")
+            _create_node(conn, nodes_table, node_b_id, run_b_id)
+            _create_row(
+                conn,
+                rows_table,
+                str(uuid4()),
+                run_b_id,
+                node_b_id,
+                row_index=0,
+                source_data_ref=shared_ref,
+                source_data_hash="hash_b",
+            )
+
+        # Find expired refs - shared ref should be EXCLUDED
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        assert shared_ref not in expired, (
+            f"Shared ref {shared_ref} should NOT be returned for deletion because Run B (10 days old) still needs it"
+        )
+
+    def test_shared_call_ref_excluded_when_used_by_recent_run(self) -> None:
+        """Shared call payload ref should NOT be purged if a recent run uses it."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import (
+            calls_table,
+            node_states_table,
+            nodes_table,
+            rows_table,
+            runs_table,
+            tokens_table,
+        )
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        # Shared call response ref (e.g., identical LLM response)
+        shared_ref = "shared_call_response_hash"
+
+        # Run A: 60 days old (expired)
+        run_a_id = str(uuid4())
+        old_completed = datetime.now(UTC) - timedelta(days=60)
+
+        # Run B: 10 days old (NOT expired)
+        run_b_id = str(uuid4())
+        recent_completed = datetime.now(UTC) - timedelta(days=10)
+
+        with db.connection() as conn:
+            # Run A with call using shared ref
+            node_a_id = str(uuid4())
+            row_a_id = str(uuid4())
+            token_a_id = str(uuid4())
+            state_a_id = str(uuid4())
+            _create_run(conn, runs_table, run_a_id, completed_at=old_completed, status="completed")
+            _create_node(conn, nodes_table, node_a_id, run_a_id)
+            _create_row(conn, rows_table, row_a_id, run_a_id, node_a_id, row_index=0)
+            _create_token(conn, tokens_table, token_a_id, row_a_id)
+            _create_state(conn, node_states_table, state_a_id, token_a_id, node_a_id)
+            _create_call(conn, calls_table, str(uuid4()), state_a_id, response_ref=shared_ref)
+
+            # Run B with call using SAME shared ref
+            node_b_id = str(uuid4())
+            row_b_id = str(uuid4())
+            token_b_id = str(uuid4())
+            state_b_id = str(uuid4())
+            _create_run(conn, runs_table, run_b_id, completed_at=recent_completed, status="completed")
+            _create_node(conn, nodes_table, node_b_id, run_b_id)
+            _create_row(conn, rows_table, row_b_id, run_b_id, node_b_id, row_index=0)
+            _create_token(conn, tokens_table, token_b_id, row_b_id)
+            _create_state(conn, node_states_table, state_b_id, token_b_id, node_b_id)
+            _create_call(conn, calls_table, str(uuid4()), state_b_id, response_ref=shared_ref)
+
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        assert shared_ref not in expired, (
+            f"Shared call ref {shared_ref} should NOT be returned for deletion because Run B (10 days old) still needs it"
+        )
+
+    def test_exclusive_expired_ref_is_returned(self) -> None:
+        """Ref used ONLY by expired runs should be returned for deletion."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        # Ref used only by expired run
+        exclusive_ref = "exclusive_to_expired_run"
+
+        # Run A: 60 days old (expired)
+        run_a_id = str(uuid4())
+        node_a_id = str(uuid4())
+        old_completed = datetime.now(UTC) - timedelta(days=60)
+
+        with db.connection() as conn:
+            _create_run(conn, runs_table, run_a_id, completed_at=old_completed, status="completed")
+            _create_node(conn, nodes_table, node_a_id, run_a_id)
+            _create_row(
+                conn,
+                rows_table,
+                str(uuid4()),
+                run_a_id,
+                node_a_id,
+                row_index=0,
+                source_data_ref=exclusive_ref,
+                source_data_hash="hash_excl",
+            )
+
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        assert exclusive_ref in expired, f"Exclusive ref {exclusive_ref} SHOULD be returned for deletion because no active run needs it"
+
+    def test_shared_ref_excluded_when_used_by_running_run(self) -> None:
+        """Shared ref should NOT be purged if an incomplete (running) run uses it."""
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
+        from elspeth.core.retention.purge import PurgeManager
+
+        db = LandscapeDB.in_memory()
+        store = MockPayloadStore()
+        manager = PurgeManager(db, store)
+
+        shared_ref = "shared_with_running_run"
+
+        # Run A: 60 days old (expired)
+        run_a_id = str(uuid4())
+        node_a_id = str(uuid4())
+        old_completed = datetime.now(UTC) - timedelta(days=60)
+
+        # Run B: still running (no completed_at)
+        run_b_id = str(uuid4())
+        node_b_id = str(uuid4())
+
+        with db.connection() as conn:
+            _create_run(conn, runs_table, run_a_id, completed_at=old_completed, status="completed")
+            _create_node(conn, nodes_table, node_a_id, run_a_id)
+            _create_row(
+                conn,
+                rows_table,
+                str(uuid4()),
+                run_a_id,
+                node_a_id,
+                row_index=0,
+                source_data_ref=shared_ref,
+            )
+
+            # Running run (completed_at=None, status=running)
+            _create_run(conn, runs_table, run_b_id, completed_at=None, status="running")
+            _create_node(conn, nodes_table, node_b_id, run_b_id)
+            _create_row(
+                conn,
+                rows_table,
+                str(uuid4()),
+                run_b_id,
+                node_b_id,
+                row_index=0,
+                source_data_ref=shared_ref,
+            )
+
+        expired = manager.find_expired_payload_refs(retention_days=30)
+
+        assert shared_ref not in expired, (
+            f"Shared ref {shared_ref} should NOT be returned for deletion because a running run still needs it"
+        )

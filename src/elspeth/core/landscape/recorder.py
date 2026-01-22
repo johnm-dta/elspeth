@@ -28,6 +28,7 @@ from elspeth.contracts import (
     Determinism,
     Edge,
     ExecutionError,
+    ExportStatus,
     Node,
     NodeState,
     NodeStateCompleted,
@@ -140,6 +141,8 @@ def _row_to_node_state(row: Any) -> NodeState:
             raise ValueError(f"COMPLETED state {row.state_id} has NULL output_hash - audit integrity violation")
         if row.duration_ms is None:
             raise ValueError(f"COMPLETED state {row.state_id} has NULL duration_ms - audit integrity violation")
+        if row.completed_at is None:
+            raise ValueError(f"COMPLETED state {row.state_id} has NULL completed_at - audit integrity violation")
         return NodeStateCompleted(
             state_id=row.state_id,
             token_id=row.token_id,
@@ -156,10 +159,12 @@ def _row_to_node_state(row: Any) -> NodeState:
             context_after_json=row.context_after_json,
         )
     else:  # FAILED
-        # Failed states must have duration_ms (error_json and output_hash are optional)
+        # Failed states must have completed_at, duration_ms (error_json and output_hash are optional)
         # Validate required fields - None indicates audit integrity violation
         if row.duration_ms is None:
             raise ValueError(f"FAILED state {row.state_id} has NULL duration_ms - audit integrity violation")
+        if row.completed_at is None:
+            raise ValueError(f"FAILED state {row.state_id} has NULL completed_at - audit integrity violation")
         return NodeStateFailed(
             state_id=row.state_id,
             token_id=row.token_id,
@@ -330,7 +335,8 @@ class LandscapeRecorder:
             canonical_version=row.canonical_version,
             status=RunStatus(row.status),  # Coerce DB string to enum
             reproducibility_grade=row.reproducibility_grade,
-            export_status=row.export_status,
+            # Use explicit is not None check - empty string should raise, not become None (Tier 1)
+            export_status=ExportStatus(row.export_status) if row.export_status is not None else None,
             export_error=row.export_error,
             exported_at=row.exported_at,
             export_format=row.export_format,
@@ -370,7 +376,8 @@ class LandscapeRecorder:
                 canonical_version=row.canonical_version,
                 status=RunStatus(row.status),  # Coerce DB string to enum
                 reproducibility_grade=row.reproducibility_grade,
-                export_status=row.export_status,
+                # Use explicit is not None check - empty string should raise, not become None (Tier 1)
+                export_status=ExportStatus(row.export_status) if row.export_status is not None else None,
                 export_error=row.export_error,
                 exported_at=row.exported_at,
                 export_format=row.export_format,
@@ -382,7 +389,7 @@ class LandscapeRecorder:
     def set_export_status(
         self,
         run_id: str,
-        status: str,
+        status: ExportStatus | str,
         *,
         error: str | None = None,
         export_format: str | None = None,
@@ -395,17 +402,31 @@ class LandscapeRecorder:
 
         Args:
             run_id: Run to update
-            status: Export status (pending, completed, failed)
+            status: Export status (ExportStatus enum or string: pending, completed, failed)
             error: Error message if status is 'failed'
             export_format: Format used (csv, json)
             export_sink: Sink name used for export
-        """
-        updates: dict[str, Any] = {"export_status": status}
 
-        if status == "completed":
+        Raises:
+            ValueError: If status is not a valid ExportStatus value
+        """
+        # Validate and coerce status - crash on invalid values per Data Manifesto
+        status_enum = _coerce_enum(status, ExportStatus)
+
+        updates: dict[str, Any] = {"export_status": status_enum.value}
+
+        if status_enum == ExportStatus.COMPLETED:
             updates["exported_at"] = _now()
+            # Clear stale error when transitioning to completed
+            updates["export_error"] = None
+        elif status_enum == ExportStatus.PENDING:
+            # Clear stale error when transitioning to pending
+            updates["export_error"] = None
+
+        # Only set error if explicitly provided (for FAILED status)
         if error is not None:
             updates["export_error"] = error
+
         if export_format is not None:
             updates["export_format"] = export_format
         if export_sink is not None:
@@ -1582,6 +1603,7 @@ class LandscapeRecorder:
         size_bytes: int,
         *,
         artifact_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Artifact:
         """Register an artifact produced by a sink.
 
@@ -1594,6 +1616,7 @@ class LandscapeRecorder:
             content_hash: Hash of artifact content
             size_bytes: Size of artifact in bytes
             artifact_id: Optional artifact ID
+            idempotency_key: Optional key for retry deduplication
 
         Returns:
             Artifact model
@@ -1611,6 +1634,7 @@ class LandscapeRecorder:
             content_hash=content_hash,
             size_bytes=size_bytes,
             created_at=now,
+            idempotency_key=idempotency_key,
         )
 
         with self._db.connection() as conn:
@@ -1624,6 +1648,7 @@ class LandscapeRecorder:
                     path_or_uri=artifact.path_or_uri,
                     content_hash=artifact.content_hash,
                     size_bytes=artifact.size_bytes,
+                    idempotency_key=artifact.idempotency_key,
                     created_at=artifact.created_at,
                 )
             )
@@ -1665,6 +1690,7 @@ class LandscapeRecorder:
                 content_hash=row.content_hash,
                 size_bytes=row.size_bytes,
                 created_at=row.created_at,
+                idempotency_key=row.idempotency_key,
             )
             for row in rows
         ]
@@ -1736,9 +1762,15 @@ class LandscapeRecorder:
             token_id: Token ID
 
         Returns:
-            List of NodeState models (discriminated union), ordered by step_index
+            List of NodeState models (discriminated union), ordered by (step_index, attempt)
         """
-        query = select(node_states_table).where(node_states_table.c.token_id == token_id).order_by(node_states_table.c.step_index)
+        # Order by (step_index, attempt) for deterministic ordering across retries
+        # Bug fix: P2-2026-01-19-node-state-ordering-missing-attempt
+        query = (
+            select(node_states_table)
+            .where(node_states_table.c.token_id == token_id)
+            .order_by(node_states_table.c.step_index, node_states_table.c.attempt)
+        )
 
         with self._db.connection() as conn:
             result = conn.execute(query)

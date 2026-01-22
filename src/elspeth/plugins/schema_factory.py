@@ -10,9 +10,9 @@ CRITICAL: The `allow_coercion` parameter enforces the three-tier trust model:
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import ConfigDict, create_model
+from pydantic import ConfigDict, Field, create_model
 
 from elspeth.contracts import PluginSchema
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
@@ -20,11 +20,19 @@ from elspeth.contracts.schema import FieldDefinition, SchemaConfig
 # Type alias for extra field handling modes
 ExtraMode = Literal["allow", "forbid"]
 
+# Finite float type that rejects NaN and Infinity at the source boundary.
+# Per CLAUDE.md Three-Tier Trust Model and canonical.py policy:
+# - NaN/Infinity cannot be represented in RFC 8785 canonical JSON
+# - They must be rejected at the source boundary (Tier 3), not crash downstream
+# - Use None for intentional missing values, not NaN
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+
 # Python type mapping for schema field types
+# NOTE: float uses FiniteFloat to reject NaN/Infinity at source boundary
 TYPE_MAP: dict[str, type] = {
     "str": str,
     "int": int,
-    "float": float,
+    "float": FiniteFloat,  # type: ignore[dict-item]
     "bool": bool,
     "any": Any,
 }

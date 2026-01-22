@@ -89,7 +89,7 @@ from elspeth.contracts.config import (
     SinkSettings,
 )
 from elspeth.contracts.engine import RetryPolicy
-from elspeth.contracts.cli import ExecutionResult
+from elspeth.contracts.cli import ExecutionResult, ProgressEvent
 
 __all__ = [  # Grouped by category for readability
     # audit
@@ -170,4 +170,5 @@ __all__ = [  # Grouped by category for readability
     "RetryPolicy",
     # cli
     "ExecutionResult",
+    "ProgressEvent",
 ]

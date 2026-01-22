@@ -123,6 +123,53 @@ class TestCheckpointManager:
         assert loaded.aggregation_state_json is not None
         assert json.loads(loaded.aggregation_state_json) == agg_state
 
+    def test_checkpoint_with_empty_aggregation_state_preserved(self, manager: CheckpointManager, setup_run: str) -> None:
+        """Empty aggregation state {} is distinct from None (no state).
+
+        Regression test for truthiness bug: empty dict {} should serialize to "{}"
+        not None. This ensures resume can distinguish "state is empty" from
+        "no aggregation state was provided".
+
+        See: docs/bugs/closed/P2-2026-01-19-checkpoint-empty-aggregation-state-dropped.md
+        """
+        # Create checkpoint with empty dict (NOT None)
+        manager.create_checkpoint(
+            run_id="run-001",
+            token_id="tok-001",
+            node_id="node-001",
+            sequence_number=1,
+            aggregation_state={},  # Empty dict, not None
+        )
+
+        loaded = manager.get_latest_checkpoint("run-001")
+        assert loaded is not None
+        # Critical: empty dict should serialize to "{}", NOT None
+        assert loaded.aggregation_state_json == "{}", (
+            f"Empty aggregation state should serialize to '{{}}', got {loaded.aggregation_state_json!r}. "
+            "This is likely a truthiness bug where `if aggregation_state:` was used "
+            "instead of `if aggregation_state is not None:`"
+        )
+
+    def test_checkpoint_with_none_aggregation_state_is_null(self, manager: CheckpointManager, setup_run: str) -> None:
+        """None aggregation state stays as NULL/None in the database.
+
+        Complements test_checkpoint_with_empty_aggregation_state_preserved to
+        verify the full contract: {} → "{}" and None → NULL.
+        """
+        # Create checkpoint with explicit None
+        manager.create_checkpoint(
+            run_id="run-001",
+            token_id="tok-001",
+            node_id="node-001",
+            sequence_number=1,
+            aggregation_state=None,
+        )
+
+        loaded = manager.get_latest_checkpoint("run-001")
+        assert loaded is not None
+        # None should stay as None (NULL in DB)
+        assert loaded.aggregation_state_json is None, f"None aggregation state should stay as None, got {loaded.aggregation_state_json!r}"
+
     def test_get_checkpoints_ordered(self, manager: CheckpointManager, setup_run: str) -> None:
         """Get all checkpoints ordered by sequence number."""
         manager.create_checkpoint("run-001", "tok-001", "node-001", 3)

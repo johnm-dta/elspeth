@@ -347,6 +347,141 @@ class TestCoercionControl:
         assert instance.model_dump() == {"foo": "bar", "count": "42", "value": "3.14"}
 
 
+class TestNonFiniteFloatRejection:
+    """Tests for NaN/Infinity rejection at source boundary.
+
+    Per P2-2026-01-19-non-finite-floats-pass-source-validation:
+    Non-finite floats (NaN, Infinity) must be rejected at the source boundary
+    because they cannot be represented in canonical JSON (RFC 8785) and would
+    crash later during hashing. This is a Tier 3 -> Tier 1 boundary enforcement.
+    """
+
+    def test_nan_string_rejected_in_float_field(self) -> None:
+        """Source schema rejects 'nan' string for float fields.
+
+        NaN cannot be represented in canonical JSON and would crash during
+        hashing. Must be caught at source validation, not downstream.
+        """
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.schema_factory import create_schema_from_config
+
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "strict",
+                "fields": ["value: float"],
+            }
+        )
+        # Source uses allow_coercion=True (default)
+        Schema = create_schema_from_config(config, "SourceSchema")
+
+        with pytest.raises(ValidationError):
+            Schema(value="nan")
+
+    def test_infinity_string_rejected_in_float_field(self) -> None:
+        """Source schema rejects 'inf' string for float fields."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.schema_factory import create_schema_from_config
+
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "strict",
+                "fields": ["value: float"],
+            }
+        )
+        Schema = create_schema_from_config(config, "SourceSchema")
+
+        with pytest.raises(ValidationError):
+            Schema(value="inf")
+
+    def test_negative_infinity_rejected_in_float_field(self) -> None:
+        """Source schema rejects '-inf' string for float fields."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.schema_factory import create_schema_from_config
+
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "strict",
+                "fields": ["value: float"],
+            }
+        )
+        Schema = create_schema_from_config(config, "SourceSchema")
+
+        with pytest.raises(ValidationError):
+            Schema(value="-inf")
+
+    def test_actual_nan_float_rejected(self) -> None:
+        """Source schema rejects actual float('nan') value."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.schema_factory import create_schema_from_config
+
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "strict",
+                "fields": ["value: float"],
+            }
+        )
+        Schema = create_schema_from_config(config, "SourceSchema")
+
+        with pytest.raises(ValidationError):
+            Schema(value=float("nan"))
+
+    def test_actual_infinity_float_rejected(self) -> None:
+        """Source schema rejects actual float('inf') value."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.schema_factory import create_schema_from_config
+
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "strict",
+                "fields": ["value: float"],
+            }
+        )
+        Schema = create_schema_from_config(config, "SourceSchema")
+
+        with pytest.raises(ValidationError):
+            Schema(value=float("inf"))
+
+    def test_optional_float_still_rejects_nan(self) -> None:
+        """Optional float fields also reject NaN."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.schema_factory import create_schema_from_config
+
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "strict",
+                "fields": ["value: float?"],
+            }
+        )
+        Schema = create_schema_from_config(config, "SourceSchema")
+
+        # None is fine
+        instance = Schema(value=None)
+        assert instance.value is None
+
+        # NaN is not
+        with pytest.raises(ValidationError):
+            Schema(value="nan")
+
+    def test_finite_floats_still_accepted(self) -> None:
+        """Normal finite floats are still accepted."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.schema_factory import create_schema_from_config
+
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "strict",
+                "fields": ["value: float"],
+            }
+        )
+        Schema = create_schema_from_config(config, "SourceSchema")
+
+        # Finite values work
+        assert Schema(value=3.14).value == 3.14
+        assert Schema(value=-273.15).value == -273.15
+        assert Schema(value=0.0).value == 0.0
+        assert Schema(value="3.14").value == 3.14  # Coercion still works
+
+
 class TestSchemaPluginSchemaCompliance:
     """Tests for PluginSchema compliance and conversion methods."""
 

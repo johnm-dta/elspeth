@@ -1,7 +1,30 @@
 # src/elspeth/contracts/cli.py
 """CLI-related type contracts."""
 
+from dataclasses import dataclass
 from typing import NotRequired, TypedDict
+
+
+@dataclass(frozen=True)
+class ProgressEvent:
+    """Progress event emitted during pipeline execution.
+
+    Emitted every N rows (default 100) to provide visibility into long-running
+    pipelines. The CLI subscribes to these events and renders progress output.
+
+    Attributes:
+        rows_processed: Total rows processed so far.
+        rows_succeeded: Rows that completed successfully.
+        rows_failed: Rows that failed processing.
+        rows_quarantined: Rows that were quarantined for investigation.
+        elapsed_seconds: Time elapsed since run started.
+    """
+
+    rows_processed: int
+    rows_succeeded: int
+    rows_failed: int
+    rows_quarantined: int
+    elapsed_seconds: float
 
 
 class ExecutionResult(TypedDict):

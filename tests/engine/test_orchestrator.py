@@ -4659,3 +4659,78 @@ class TestOrchestratorProgress:
 
         # Final progress at row 150
         assert progress_events[1].rows_processed == 150
+
+    def test_progress_callback_includes_routed_rows_in_success(self) -> None:
+        """Verify routed rows are counted as successes in progress events.
+
+        Regression test: progress was showing ✓0 for pipelines with gates
+        because routed rows weren't included in rows_succeeded.
+        """
+        from unittest.mock import MagicMock
+
+        from elspeth.contracts import ProgressEvent, SourceRow
+        from elspeth.core.config import GateSettings
+        from elspeth.core.landscape import LandscapeDB
+        from elspeth.engine.artifacts import ArtifactDescriptor
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        db = LandscapeDB.in_memory()
+
+        # Mock source that yields 150 rows
+        mock_source = MagicMock()
+        mock_source.name = "test_source"
+        mock_source.determinism = Determinism.IO_READ
+        mock_source.plugin_version = "1.0.0"
+        mock_source.load.return_value = iter([SourceRow.valid({"value": i}) for i in range(150)])
+
+        # Config-driven gate: always routes to "routed_sink"
+        routing_gate = GateSettings(
+            name="routing_gate",
+            condition="True",  # Always routes
+            routes={"true": "routed_sink", "false": "continue"},
+        )
+
+        # Mock sinks
+        mock_default = MagicMock()
+        mock_default.name = "default_sink"
+        mock_default.determinism = Determinism.IO_WRITE
+        mock_default.plugin_version = "1.0.0"
+        mock_default.write.return_value = ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="abc123")
+
+        mock_routed = MagicMock()
+        mock_routed.name = "routed_sink"
+        mock_routed.determinism = Determinism.IO_WRITE
+        mock_routed.plugin_version = "1.0.0"
+        mock_routed.write.return_value = ArtifactDescriptor.for_file(path="memory", size_bytes=0, content_hash="def456")
+
+        config = PipelineConfig(
+            source=mock_source,
+            transforms=[],
+            sinks={"default": mock_default, "routed_sink": mock_routed},
+            gates=[routing_gate],
+        )
+
+        # Track progress events
+        progress_events: list[ProgressEvent] = []
+
+        def track_progress(event: ProgressEvent) -> None:
+            progress_events.append(event)
+
+        orchestrator = Orchestrator(db)
+        orchestrator.run(
+            config,
+            graph=_build_test_graph(config),
+            on_progress=track_progress,
+        )
+
+        # Should have progress at 100 and final 150
+        assert len(progress_events) == 2
+
+        # All rows were routed - they should count as succeeded, not zero
+        # Bug: without fix, this shows rows_succeeded=0 because routed rows weren't counted
+        assert progress_events[0].rows_succeeded == 100
+        assert progress_events[1].rows_succeeded == 150
+
+        # Verify routed sink received rows, default did not
+        assert mock_routed.write.called
+        assert not mock_default.write.called

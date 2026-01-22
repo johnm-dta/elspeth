@@ -808,7 +808,8 @@ class Orchestrator:
                             on_progress(
                                 ProgressEvent(
                                     rows_processed=rows_processed,
-                                    rows_succeeded=rows_succeeded,
+                                    # Include routed rows in success count - they reached their destination
+                                    rows_succeeded=rows_succeeded + rows_routed,
                                     rows_failed=rows_failed,
                                     rows_quarantined=rows_quarantined,
                                     elapsed_seconds=elapsed,
@@ -875,7 +876,8 @@ class Orchestrator:
                         on_progress(
                             ProgressEvent(
                                 rows_processed=rows_processed,
-                                rows_succeeded=rows_succeeded,
+                                # Include routed rows in success count - they reached their destination
+                                rows_succeeded=rows_succeeded + rows_routed,
                                 rows_failed=rows_failed,
                                 rows_quarantined=rows_quarantined,
                                 elapsed_seconds=elapsed,
@@ -953,7 +955,8 @@ class Orchestrator:
                 on_progress(
                     ProgressEvent(
                         rows_processed=rows_processed,
-                        rows_succeeded=rows_succeeded,
+                        # Include routed rows in success count - they reached their destination
+                        rows_succeeded=rows_succeeded + rows_routed,
                         rows_failed=rows_failed,
                         rows_quarantined=rows_quarantined,
                         elapsed_seconds=elapsed,

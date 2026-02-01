@@ -1,0 +1,429 @@
+# src/elspeth/plugins/base.py
+"""Base classes for plugin implementations.
+
+These provide common functionality and ensure proper interface compliance.
+Plugins MUST subclass these base classes (BaseSource, BaseTransform, BaseSink).
+
+Why base class inheritance is required:
+- Plugin discovery uses issubclass() checks against base classes
+- Python's Protocol with non-method members (name, determinism, etc.) cannot
+  support issubclass() - only isinstance() on already-instantiated objects
+- Base classes enforce self-consistency via __init_subclass__ hooks
+- Per CLAUDE.md "Plugin Ownership", all plugins are system code, not user extensions
+
+The protocol definitions (SourceProtocol, TransformProtocol, SinkProtocol) exist
+for type-checking purposes only - they define the interface contract but cannot
+be used for runtime discovery.
+
+Phase 3 Integration:
+- Lifecycle hooks (on_start, on_complete) are called by engine
+- PluginContext is provided by engine with landscape/tracer/payload_store
+"""
+
+from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any
+
+from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema, SourceRow
+
+if TYPE_CHECKING:
+    from elspeth.contracts.sink import OutputValidationResult
+from elspeth.plugins.context import PluginContext
+from elspeth.plugins.results import (
+    GateResult,
+    TransformResult,
+)
+
+
+class BaseTransform(ABC):
+    """Base class for stateless row transforms.
+
+    Subclass and implement process() to create a transform.
+
+    For batch-aware transforms (used in aggregation nodes):
+    - Set is_batch_aware = True
+    - process() will receive list[dict] when used in aggregation
+
+    Example:
+        class MyTransform(BaseTransform):
+            name = "my_transform"
+            input_schema = InputSchema
+            output_schema = OutputSchema
+
+            def process(self, row: dict, ctx: PluginContext) -> TransformResult:
+                return TransformResult.success(
+                    {**row, "new_field": "value"},
+                    success_reason={"action": "processed"},
+                )
+    """
+
+    name: str
+    input_schema: type[PluginSchema]
+    output_schema: type[PluginSchema]
+    node_id: str | None = None  # Set by orchestrator after registration
+
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism = Determinism.DETERMINISTIC
+    plugin_version: str = "0.0.0"
+
+    # Batch support - override to True for batch-aware transforms
+    # When True, engine may pass list[dict] instead of single dict to process()
+    is_batch_aware: bool = False
+
+    # Token creation flag for deaggregation transforms
+    # When True AND process() returns success_multi(), the processor creates
+    # new token_ids for each output row with parent linkage to input token.
+    # When False AND success_multi() is returned, the processor expects
+    # passthrough mode (same number of outputs as inputs, preserve token_ids).
+    # Default: False (most transforms don't create new tokens)
+    creates_tokens: bool = False
+
+    # Error routing configuration (WP-11.99b)
+    # Transforms extending TransformDataConfig override this from config.
+    # None means: transform doesn't return errors, OR errors are bugs.
+    _on_error: str | None = None
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        """Initialize with configuration.
+
+        Args:
+            config: Plugin configuration
+        """
+        self.config = config
+
+    @abstractmethod
+    def process(
+        self,
+        row: dict[str, Any],
+        ctx: PluginContext,
+    ) -> TransformResult:
+        """Process a single row.
+
+        Args:
+            row: Input row matching input_schema
+            ctx: Plugin context
+
+        Returns:
+            TransformResult with processed row or error
+        """
+        ...
+
+    def close(self) -> None:  # noqa: B027 - optional override, not abstract
+        """Clean up resources after pipeline completion.
+
+        Called once after all rows have been processed. Override for closing
+        connections, flushing buffers, or releasing external resources.
+        """
+        pass
+
+    # === Lifecycle Hooks (Phase 3) ===
+    # These are intentionally empty - optional hooks for subclasses to override
+
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
+        """Called at the start of each run.
+
+        Override for per-run initialization.
+        """
+        pass
+
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
+        """Called at the end of each run.
+
+        Override for cleanup.
+        """
+        pass
+
+
+class BaseGate(ABC):
+    """Base class for gate transforms (routing decisions).
+
+    Subclass and implement evaluate() to create a gate.
+
+    Example:
+        class SafetyGate(BaseGate):
+            name = "safety"
+            input_schema = RowSchema
+            output_schema = RowSchema
+
+            def evaluate(self, row: dict, ctx: PluginContext) -> GateResult:
+                if self._is_suspicious(row):
+                    return GateResult(
+                        row=row,
+                        action=RoutingAction.route("suspicious"),  # Resolved via routes config
+                    )
+                return GateResult(row=row, action=RoutingAction.route("normal"))
+    """
+
+    name: str
+    input_schema: type[PluginSchema]
+    output_schema: type[PluginSchema]
+    routes: dict[str, str]
+    fork_to: list[str] | None
+    node_id: str | None = None  # Set by orchestrator after registration
+
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism = Determinism.DETERMINISTIC
+    plugin_version: str = "0.0.0"
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        """Initialize with configuration.
+
+        Args:
+            config: Plugin configuration (validated by GateSettings schema)
+        """
+        self.config = config
+        # GateSettings schema validates routes (required) and fork_to (optional)
+        # Trust the schema - no defensive checks needed here
+        self.routes = config["routes"]
+        self.fork_to = config.get("fork_to")
+
+    @abstractmethod
+    def evaluate(
+        self,
+        row: dict[str, Any],
+        ctx: PluginContext,
+    ) -> GateResult:
+        """Evaluate a row and decide routing.
+
+        Args:
+            row: Input row
+            ctx: Plugin context
+
+        Returns:
+            GateResult with routing decision
+        """
+        ...
+
+    def close(self) -> None:  # noqa: B027 - optional override, not abstract
+        """Clean up resources after pipeline completion.
+
+        Called once after all rows have been processed. Override for closing
+        connections, flushing buffers, or releasing external resources.
+        """
+        pass
+
+    # === Lifecycle Hooks (Phase 3) ===
+
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
+        """Called at start of run."""
+        pass
+
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
+        """Called at end of run."""
+        pass
+
+
+# NOTE: BaseAggregation was DELETED in aggregation structural cleanup.
+# Aggregation is now fully structural:
+# - Engine buffers rows internally
+# - Engine evaluates triggers (WP-06)
+# - Engine calls batch-aware Transform.process(rows: list[dict])
+# Use is_batch_aware=True on BaseTransform for batch processing.
+
+
+class BaseSink(ABC):
+    """Base class for sink plugins.
+
+    Subclass and implement write(), flush(), close().
+
+    Example:
+        class CSVSink(BaseSink):
+            name = "csv"
+            input_schema = RowSchema
+            idempotent = False
+
+            def write(self, rows: list[dict], ctx: PluginContext) -> ArtifactDescriptor:
+                for row in rows:
+                    self._writer.writerow(row)
+                return ArtifactDescriptor.for_file(
+                    path=self._path,
+                    content_hash=self._compute_hash(),
+                    size_bytes=self._file.tell(),
+                )
+
+            def flush(self) -> None:
+                self._file.flush()
+
+            def close(self) -> None:
+                self._file.close()
+    """
+
+    name: str
+    input_schema: type[PluginSchema]
+    idempotent: bool = False
+    node_id: str | None = None  # Set by orchestrator after registration
+
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism = Determinism.IO_WRITE
+    plugin_version: str = "0.0.0"
+
+    # Resume capability (Phase 5 - Checkpoint/Resume)
+    # Default: sinks don't support resume. Override in subclasses that can append.
+    supports_resume: bool = False
+
+    def configure_for_resume(self) -> None:
+        """Configure sink for resume mode (append instead of truncate).
+
+        Called by engine when resuming a run. Override in sinks that support
+        resume to switch from truncate mode to append mode.
+
+        Default implementation raises NotImplementedError. Subclasses that
+        set supports_resume=True MUST override this method.
+
+        Raises:
+            NotImplementedError: If sink cannot be resumed.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support resume. "
+            f"To make this sink resumable, set supports_resume=True and "
+            f"implement configure_for_resume()."
+        )
+
+    def validate_output_target(self) -> "OutputValidationResult":
+        """Validate existing output target matches configured schema.
+
+        Called by engine/CLI before write operations in append/resume mode.
+        Default returns valid=True (dynamic schema or no existing target).
+
+        Sinks that set supports_resume=True SHOULD override this to validate
+        that the existing output target (file/table) matches the schema.
+
+        Returns:
+            OutputValidationResult indicating compatibility.
+        """
+        from elspeth.contracts.sink import OutputValidationResult
+
+        return OutputValidationResult.success()
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        """Initialize with configuration.
+
+        Args:
+            config: Plugin configuration
+        """
+        self.config = config
+
+    @abstractmethod
+    def write(
+        self,
+        rows: list[dict[str, Any]],
+        ctx: PluginContext,
+    ) -> ArtifactDescriptor:
+        """Write a batch of rows to the sink.
+
+        Args:
+            rows: List of row dicts to write
+            ctx: Plugin context
+
+        Returns:
+            ArtifactDescriptor with content_hash and size_bytes
+        """
+        ...
+
+    @abstractmethod
+    def flush(self) -> None:
+        """Flush buffered data."""
+        ...
+
+    @abstractmethod
+    def close(self) -> None:
+        """Close and release resources."""
+        ...
+
+    # === Lifecycle Hooks (Phase 3) ===
+
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
+        """Called at start of run."""
+        pass
+
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
+        """Called at end of run (before close)."""
+        pass
+
+
+class BaseSource(ABC):
+    """Base class for source plugins.
+
+    Subclass and implement load() and close().
+
+    Example:
+        class CSVSource(BaseSource):
+            name = "csv"
+            output_schema = RowSchema
+
+            def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
+                with open(self.config["path"]) as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        yield SourceRow.valid(row)
+
+            def close(self) -> None:
+                pass  # File already closed by context manager
+    """
+
+    name: str
+    output_schema: type[PluginSchema]
+    node_id: str | None = None  # Set by orchestrator after registration
+
+    # Metadata for Phase 3 audit/reproducibility
+    determinism: Determinism = Determinism.IO_READ
+    plugin_version: str = "0.0.0"
+
+    # Sink name for quarantined rows, or "discard" to drop invalid rows
+    # All sources must set this - config-based sources get it from SourceDataConfig
+    _on_validation_failure: str
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        """Initialize with configuration.
+
+        Args:
+            config: Plugin configuration
+        """
+        self.config = config
+
+    @abstractmethod
+    def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
+        """Load and yield rows from the source.
+
+        Args:
+            ctx: Plugin context
+
+        Yields:
+            SourceRow for each row - either SourceRow.valid() for rows that
+            passed validation, or SourceRow.quarantined() for invalid rows.
+        """
+        ...
+
+    @abstractmethod
+    def close(self) -> None:
+        """Clean up resources."""
+        ...
+
+    # === Lifecycle Hooks (Phase 3) ===
+
+    def on_start(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
+        """Called before load()."""
+        pass
+
+    def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
+        """Called after load() completes (before close)."""
+        pass
+
+    # === Audit Trail Metadata ===
+
+    def get_field_resolution(self) -> tuple[dict[str, str], str | None] | None:
+        """Return field resolution mapping computed during load().
+
+        Sources that perform field normalization (e.g., CSVSource with normalize_fields)
+        should override this to return the mapping from original header names to final
+        field names. This enables audit trail to recover original headers.
+
+        Must be called AFTER load() has been invoked (resolution is computed lazily
+        when file headers are read).
+
+        Returns:
+            Tuple of (resolution_mapping, normalization_version) if field resolution
+            was performed, or None if no normalization occurred. The resolution_mapping
+            is a dict mapping original header name → final field name.
+        """
+        return None  # Default: no field resolution metadata

@@ -1,0 +1,7 @@
+# Group 1: Core Engine (HIGHEST RISK)
+# These are the heart of the system - bugs here break everything
+src/elspeth/engine/processor.py
+src/elspeth/engine/orchestrator.py
+src/elspeth/engine/coalesce_executor.py
+src/elspeth/engine/executors.py
+src/elspeth/core/dag.py

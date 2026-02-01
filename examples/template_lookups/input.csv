@@ -1,0 +1,6 @@
+ticket_id,category_id,priority_id,subject,body
+TKT-001,billing,high,Charged twice for subscription,I was charged $49.99 twice this month for my Pro subscription. Please refund the duplicate charge. Order ID: ORD-78234
+TKT-002,technical,medium,App crashes on login,The mobile app crashes every time I try to log in. I've tried reinstalling but the issue persists. iPhone 14 Pro iOS 17.2
+TKT-003,general,low,Feature request - dark mode,Would love to see a dark mode option in the desktop app. My eyes get tired during late night sessions.
+TKT-004,billing,medium,Cancel subscription,I need to cancel my subscription before the next billing cycle. Please confirm cancellation and any remaining balance.
+TKT-005,technical,high,Data not syncing,My data hasn't synced across devices for 3 days. I have critical work documents that need to be accessible. This is urgent!

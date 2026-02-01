@@ -1,0 +1,5 @@
+{"content": "{\"classification\": \"positive\", \"confidence\": 0.93, \"summary\": \"Solid performance overall.\"}"}
+{"content": "{\"classification\": \"neutral\", \"confidence\": 0.71, \"summary\": \"Mixed signals, no strong trend.\"}"}
+{"content": "{\"classification\": \"negative\", \"confidence\": 0.88, \"summary\": \"Decline driven by churn and margin compression.\"}"}
+{"content": "Short natural-language response for non-JSON tests."}
+{"content": "{\"entities\": [\"ACME\", \"Globex\"], \"sentiment\": \"positive\"}"}

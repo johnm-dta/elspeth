@@ -1,0 +1,64 @@
+# ELSPETH Container Smoke Test Pipeline
+#
+# This example is specifically designed to run inside a Docker container
+# with the example directory mounted at /app/pipeline. It's used by CI/CD
+# to verify the container image works correctly after build.
+#
+# Run with:
+#   docker run -v ./examples/threshold_gate_container:/app/pipeline:rw elspeth \
+#     run --settings /app/pipeline/settings.yaml --execute
+#
+# Expected behavior:
+#   - Reads 8 rows from input.csv
+#   - Routes rows with amount > 1000 to high_values.csv (4 rows)
+#   - Routes rows with amount <= 1000 to normal.csv (4 rows)
+#   - Creates audit.db in runs/
+
+source:
+  plugin: csv
+  options:
+    path: /app/pipeline/input.csv
+    schema:
+      mode: strict
+      fields:
+        - "id: int"
+        - "name: str"
+        - "amount: int"
+        - "category: str"
+    on_validation_failure: discard
+
+gates:
+  - name: amount_threshold
+    condition: "row['amount'] > 1000"
+    routes:
+      "true": high_values
+      "false": continue
+
+sinks:
+  output:
+    plugin: csv
+    options:
+      path: /app/pipeline/output/normal.csv
+      schema:
+        mode: strict
+        fields:
+          - "id: int"
+          - "name: str"
+          - "amount: int"
+          - "category: str"
+  high_values:
+    plugin: csv
+    options:
+      path: /app/pipeline/output/high_values.csv
+      schema:
+        mode: strict
+        fields:
+          - "id: int"
+          - "name: str"
+          - "amount: int"
+          - "category: str"
+
+default_sink: output
+
+landscape:
+  url: sqlite:////app/pipeline/runs/audit.db

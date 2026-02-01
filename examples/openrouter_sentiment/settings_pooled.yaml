@@ -1,0 +1,68 @@
+# ELSPETH OpenRouter Sentiment Analysis Example - POOLED EXECUTION
+#
+# This is a multi-threaded variant of the sentiment analysis pipeline.
+# It processes multiple rows concurrently using pooled execution with
+# AIMD (Additive Increase, Multiplicative Decrease) throttling.
+#
+# Prerequisites:
+#   export OPENROUTER_API_KEY="your-api-key-here"
+#
+# Run with:
+#   uv run elspeth run -s examples/openrouter_sentiment/settings_pooled.yaml --execute
+#
+# Key differences from settings.yaml:
+#   - pool_size: 3 (processes 3 rows concurrently)
+#   - AIMD throttling automatically backs off on rate limits
+#   - Results maintain submission order despite concurrent processing
+
+source:
+  plugin: csv
+  options:
+    path: examples/openrouter_sentiment/input.csv
+    schema:
+      mode: strict
+      fields:
+        - "id: int"
+        - "text: str"
+    on_validation_failure: discard
+
+transforms:
+  - plugin: openrouter_llm
+    options:
+      api_key: "${OPENROUTER_API_KEY}"
+      model: "openai/gpt-4o-mini"  # Fast and cheap for demos
+      template: |
+        Analyze the sentiment of the following text and respond with ONLY a JSON object.
+
+        Text: {{ row.text }}
+
+        Respond with exactly this format (no other text):
+        {"sentiment": "positive" or "negative" or "neutral", "confidence": 0.0-1.0, "summary": "brief explanation"}
+      temperature: 0.0  # Deterministic for consistent results
+      response_field: sentiment_analysis
+      required_input_fields: [text]  # Template uses row.text
+      schema:
+        fields: dynamic
+
+      # === POOLED EXECUTION CONFIG ===
+      # Process multiple rows concurrently with automatic rate limiting
+      pool_size: 3  # Number of concurrent workers (1 = sequential, >1 = pooled)
+
+      # AIMD throttling options (optional - these are defaults)
+      # max_dispatch_delay_ms: 5000      # Maximum backoff delay (5 seconds)
+      # max_capacity_retry_seconds: 60   # Timeout for retrying rate-limited requests
+
+sinks:
+  output:
+    plugin: json
+    options:
+      path: examples/openrouter_sentiment/output/results_pooled.json
+      schema:
+        fields: dynamic
+      format: jsonl
+
+default_sink: output
+
+# Audit trail stored in runs/
+landscape:
+  url: sqlite:///examples/openrouter_sentiment/runs/audit_pooled.db

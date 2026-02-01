@@ -1,0 +1,6 @@
+# Group 5: Config Contracts (MEDIUM RISK)
+# Settings->Runtime mapping bugs (like P2-2026-01-21)
+src/elspeth/contracts/config/runtime.py
+src/elspeth/contracts/config/alignment.py
+src/elspeth/contracts/config/protocols.py
+src/elspeth/core/config.py

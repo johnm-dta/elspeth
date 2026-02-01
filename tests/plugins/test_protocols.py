@@ -1,0 +1,638 @@
+# tests/plugins/test_protocols.py
+"""Tests for plugin protocols."""
+
+from collections.abc import Iterator
+from typing import Any, ClassVar
+
+from elspeth.contracts import SourceRow
+
+
+class TestSourceProtocol:
+    """Source plugin protocol."""
+
+    def test_source_protocol_definition(self) -> None:
+        from elspeth.plugins.protocols import SourceProtocol
+
+        # Should be a Protocol (runtime_checkable protocols have this attribute)
+        assert hasattr(SourceProtocol, "__protocol_attrs__")
+
+    def test_source_implementation(self) -> None:
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import SourceProtocol
+
+        class OutputSchema(PluginSchema):
+            value: int
+
+        class MySource:
+            """Example source implementation."""
+
+            name = "my_source"
+            output_schema = OutputSchema
+            node_id: str | None = None  # Set by orchestrator
+            determinism = Determinism.IO_READ
+            plugin_version = "1.0.0"
+            _on_validation_failure = "discard"
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+
+            def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
+                for i in range(3):
+                    yield SourceRow.valid({"value": i})
+
+            def close(self) -> None:
+                pass
+
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
+            def get_field_resolution(self) -> tuple[dict[str, str], str | None] | None:
+                return None  # No field normalization
+
+        source = MySource({"path": "test.csv"})
+
+        # IMPORTANT: Verify protocol conformance at runtime
+        # This is why we use @runtime_checkable
+        assert isinstance(
+            source,  # type: ignore[unreachable]
+            SourceProtocol,
+        ), "Source must conform to SourceProtocol"
+
+        ctx = PluginContext(run_id="test", config={})  # type: ignore[unreachable]
+
+        source_rows = list(source.load(ctx))
+        assert len(source_rows) == 3
+        assert source_rows[0].row == {"value": 0}
+
+    def test_source_has_lifecycle_hooks(self) -> None:
+        from elspeth.plugins.protocols import SourceProtocol
+
+        # Check protocol has expected methods
+        assert hasattr(SourceProtocol, "load")
+        assert hasattr(SourceProtocol, "close")
+
+    def test_source_has_determinism_attribute(self) -> None:
+        from elspeth.plugins.protocols import SourceProtocol
+
+        assert "determinism" in SourceProtocol.__protocol_attrs__  # type: ignore[attr-defined]
+
+    def test_source_has_version_attribute(self) -> None:
+        from elspeth.plugins.protocols import SourceProtocol
+
+        assert "plugin_version" in SourceProtocol.__protocol_attrs__  # type: ignore[attr-defined]
+
+    def test_source_implementation_with_metadata(self) -> None:
+        from collections.abc import Iterator
+        from typing import Any
+
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import SourceProtocol
+
+        class OutputSchema(PluginSchema):
+            value: int
+
+        class MetadataSource:
+            name = "metadata_source"
+            output_schema = OutputSchema
+            node_id: str | None = None
+            determinism = Determinism.IO_READ
+            plugin_version = "1.0.0"
+            _on_validation_failure = "discard"
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+
+            def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
+                yield SourceRow.valid({"value": 1})
+
+            def close(self) -> None:
+                pass
+
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
+            def get_field_resolution(self) -> tuple[dict[str, str], str | None] | None:
+                return None  # No field normalization
+
+        source = MetadataSource({})
+        assert isinstance(source, SourceProtocol)  # type: ignore[unreachable]
+        assert source.determinism == Determinism.IO_READ  # type: ignore[unreachable]
+        assert source.plugin_version == "1.0.0"
+
+
+class TestTransformProtocol:
+    """Transform plugin protocol (stateless row processing)."""
+
+    def test_transform_implementation(self) -> None:
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import TransformProtocol
+        from elspeth.plugins.results import TransformResult
+
+        class InputSchema(PluginSchema):
+            value: int
+
+        class OutputSchema(PluginSchema):
+            value: int
+            doubled: int
+
+        class DoubleTransform:
+            name = "double"
+            input_schema = InputSchema
+            output_schema = OutputSchema
+            routes: ClassVar[dict[str, str]] = {}
+            fork_to: list[str] | None = None
+            node_id: str | None = None  # Set by orchestrator
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+            is_batch_aware = False  # Batch support (structural aggregation)
+            creates_tokens = False  # Deaggregation (multi-row output)
+            _on_error: str | None = None  # Error routing (WP-11.99b)
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.config = config
+
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+                return TransformResult.success(
+                    {
+                        "value": row["value"],
+                        "doubled": row["value"] * 2,
+                    },
+                    success_reason={"action": "test"},
+                )
+
+            def close(self) -> None:
+                pass
+
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
+        transform = DoubleTransform({})
+
+        # IMPORTANT: Verify protocol conformance at runtime
+        assert isinstance(
+            transform,  # type: ignore[unreachable]
+            TransformProtocol,
+        ), "Must conform to TransformProtocol"
+
+        ctx = PluginContext(run_id="test", config={})  # type: ignore[unreachable]
+
+        result = transform.process({"value": 21}, ctx)
+        assert result.status == "success"
+        assert result.row == {"value": 21, "doubled": 42}
+
+
+class TestTransformBatchSupport:
+    """Tests for batch-aware transform protocol."""
+
+    def test_transform_process_single_row(self) -> None:
+        """Transform.process() accepts single row dict."""
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class AnySchema(PluginSchema):
+            value: int
+
+        class SingleTransform(BaseTransform):
+            name = "single"
+            input_schema = AnySchema
+            output_schema = AnySchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+                return TransformResult.success({"processed": row["value"]}, success_reason={"action": "test"})
+
+        transform = SingleTransform({})
+        ctx = PluginContext(run_id="test", config={})
+        result = transform.process({"value": 1}, ctx)
+        assert result.row == {"processed": 1}
+
+    def test_transform_process_batch_rows(self) -> None:
+        """Transform.process() accepts list of row dicts when is_batch_aware=True."""
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class AnySchema(PluginSchema):
+            pass
+
+        class BatchTransform(BaseTransform):
+            name = "batch"
+            input_schema = AnySchema
+            output_schema = AnySchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+            is_batch_aware = True  # Declares batch support
+
+            def process(self, row: dict[str, Any] | list[dict[str, Any]], ctx: PluginContext) -> TransformResult:
+                # When given a list, process as batch
+                if isinstance(row, list):
+                    total = sum(r["value"] for r in row)
+                    return TransformResult.success({"total": total, "count": len(row)}, success_reason={"action": "test"})
+                # Single row
+                return TransformResult.success({"value": row["value"]}, success_reason={"action": "test"})
+
+        transform = BatchTransform({})
+        ctx = PluginContext(run_id="test", config={})
+
+        # Batch mode
+        result = transform.process([{"value": 1}, {"value": 2}, {"value": 3}], ctx)
+        assert result.row == {"total": 6, "count": 3}
+
+    def test_transform_is_batch_aware_default_false(self) -> None:
+        """Transforms have is_batch_aware=False by default."""
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class AnySchema(PluginSchema):
+            value: int
+
+        class RegularTransform(BaseTransform):
+            name = "regular"
+            input_schema = AnySchema
+            output_schema = AnySchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+                return TransformResult.success(row, success_reason={"action": "test"})
+
+        regular = RegularTransform({})
+        assert regular.is_batch_aware is False
+
+    def test_transform_is_batch_aware_can_be_set_true(self) -> None:
+        """Transforms can declare is_batch_aware=True for batch support."""
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.base import BaseTransform
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class AnySchema(PluginSchema):
+            pass
+
+        class BatchAwareTransform(BaseTransform):
+            name = "batch_aware"
+            is_batch_aware = True  # Declares batch support
+            input_schema = AnySchema
+            output_schema = AnySchema
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+
+            def process(self, row: dict[str, Any] | list[dict[str, Any]], ctx: PluginContext) -> TransformResult:
+                if isinstance(row, list):
+                    return TransformResult.success({"count": len(row)}, success_reason={"action": "test"})
+                return TransformResult.success(row, success_reason={"action": "test"})
+
+        batch = BatchAwareTransform({})
+        assert batch.is_batch_aware is True
+
+
+class TestAggregationProtocolDeleted:
+    """Verify AggregationProtocol has been deleted.
+
+    Aggregation is now fully structural:
+    - Engine buffers rows internally
+    - Engine evaluates triggers (WP-06)
+    - Engine calls batch-aware Transform.process(rows: list[dict])
+    - No plugin-level aggregation interface
+
+    Use is_batch_aware=True on BaseTransform for batch processing.
+    """
+
+    def test_aggregation_protocol_deleted(self) -> None:
+        """AggregationProtocol should be deleted (aggregation is structural)."""
+        import elspeth.plugins.protocols as protocols
+
+        assert not hasattr(protocols, "AggregationProtocol"), "AggregationProtocol should be deleted - aggregation is structural"
+
+    def test_base_aggregation_deleted(self) -> None:
+        """BaseAggregation should be deleted (aggregation is structural)."""
+        import elspeth.plugins.base as base
+
+        assert not hasattr(base, "BaseAggregation"), "BaseAggregation should be deleted - use is_batch_aware=True on BaseTransform"
+
+
+class TestCoalesceProtocol:
+    """Coalesce plugin protocol (merge parallel paths)."""
+
+    def test_coalesce_policy_types(self) -> None:
+        from elspeth.plugins.protocols import CoalescePolicy
+
+        # All policies should exist
+        assert CoalescePolicy.REQUIRE_ALL.value == "require_all"
+        assert CoalescePolicy.QUORUM.value == "quorum"
+        assert CoalescePolicy.BEST_EFFORT.value == "best_effort"
+        assert CoalescePolicy.FIRST.value == "first"
+
+    def test_quorum_requires_threshold(self) -> None:
+        """QUORUM policy needs a quorum_threshold."""
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import CoalescePolicy, CoalesceProtocol
+
+        class OutputSchema(PluginSchema):
+            combined: str
+
+        class QuorumCoalesce:
+            name = "quorum_merge"
+            policy = CoalescePolicy.QUORUM
+            quorum_threshold = 2  # At least 2 branches must arrive
+            output_schema = OutputSchema
+            node_id: str | None = None  # Set by orchestrator
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.expected_branches = ["branch_a", "branch_b", "branch_c"]
+
+            def merge(self, branch_outputs: dict[str, dict[str, Any]], ctx: PluginContext) -> dict[str, Any]:
+                return {"combined": "+".join(branch_outputs.keys())}
+
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
+        coalesce = QuorumCoalesce({})
+
+        # IMPORTANT: Verify protocol conformance at runtime
+        # mypy may report this as unreachable due to structural subtyping analysis
+        # but runtime_checkable protocols DO work at runtime
+        assert isinstance(
+            coalesce,  # type: ignore[unreachable]
+            CoalesceProtocol,
+        ), "Must conform to CoalesceProtocol"
+
+        assert coalesce.quorum_threshold == 2  # type: ignore[unreachable]
+        assert len(coalesce.expected_branches) == 3  # type: ignore[unreachable]
+
+    def test_coalesce_merge_behavior(self) -> None:
+        """Test merge() combines branch outputs correctly."""
+        from elspeth.contracts import Determinism, PluginSchema
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import CoalescePolicy, CoalesceProtocol
+
+        class OutputSchema(PluginSchema):
+            total: int
+
+        class SumCoalesce:
+            name = "sum_merge"
+            policy = CoalescePolicy.REQUIRE_ALL
+            quorum_threshold = None
+            output_schema = OutputSchema
+            node_id: str | None = None  # Set by orchestrator
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.expected_branches = ["branch_a", "branch_b"]
+
+            def merge(self, branch_outputs: dict[str, dict[str, Any]], ctx: PluginContext) -> dict[str, Any]:
+                total = sum(out["value"] for out in branch_outputs.values())
+                return {"total": total}
+
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
+        coalesce = SumCoalesce({})
+        # mypy may report this as unreachable due to structural subtyping analysis
+        # but runtime_checkable protocols DO work at runtime
+        assert isinstance(coalesce, CoalesceProtocol)  # type: ignore[unreachable]
+
+        ctx = PluginContext(run_id="test", config={})  # type: ignore[unreachable]
+
+        branch_outputs = {
+            "branch_a": {"value": 10},
+            "branch_b": {"value": 20},
+        }
+        result = coalesce.merge(branch_outputs, ctx)
+        assert result == {"total": 30}
+
+
+class TestSinkProtocol:
+    """Sink plugin protocol."""
+
+    def test_sink_batch_write_signature(self) -> None:
+        """Sink.write() accepts batch and returns ArtifactDescriptor."""
+        import inspect
+
+        from elspeth.plugins.protocols import SinkProtocol
+
+        # Get the write method signature
+        sig = inspect.signature(SinkProtocol.write)
+        params = list(sig.parameters.keys())
+
+        # Should have 'rows' not 'row'
+        assert "rows" in params, "write() should accept 'rows' (batch), not 'row'"
+        assert "row" not in params, "write() should NOT have 'row' parameter"
+
+        # Return annotation should be ArtifactDescriptor (may be forward ref string)
+        return_annotation = sig.return_annotation
+        # Handle both string forward reference and actual class
+        if isinstance(return_annotation, str):
+            assert return_annotation == "ArtifactDescriptor"
+        else:
+            from elspeth.contracts import ArtifactDescriptor
+
+            assert return_annotation == ArtifactDescriptor
+
+    def test_batch_sink_implementation(self) -> None:
+        """Test sink with batch write returning ArtifactDescriptor."""
+        from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
+        from elspeth.contracts.sink import OutputValidationResult
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import SinkProtocol
+
+        class InputSchema(PluginSchema):
+            value: int
+
+        class BatchMemorySink:
+            name = "batch_memory"
+            input_schema = InputSchema
+            idempotent = True
+            node_id: str | None = None
+            determinism = Determinism.IO_WRITE
+            plugin_version = "1.0.0"
+            supports_resume = False  # Required by SinkProtocol
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.rows: list[dict[str, Any]] = []
+
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
+                self.rows.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="/tmp/test.json",
+                    content_hash="abc123",
+                    size_bytes=len(str(rows)),
+                )
+
+            def flush(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
+            def configure_for_resume(self) -> None:
+                raise NotImplementedError("BatchMemorySink does not support resume")
+
+            def validate_output_target(self) -> OutputValidationResult:
+                return OutputValidationResult.success()
+
+        sink = BatchMemorySink({})
+        assert isinstance(sink, SinkProtocol)  # type: ignore[unreachable]
+
+        ctx = PluginContext(run_id="test", config={})  # type: ignore[unreachable]
+        artifact = sink.write([{"value": 1}, {"value": 2}], ctx)
+
+        assert isinstance(artifact, ArtifactDescriptor)
+        assert artifact.content_hash == "abc123"
+        assert len(sink.rows) == 2
+
+    def test_sink_implementation(self) -> None:
+        """Test sink conforming to updated batch protocol."""
+
+        from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
+        from elspeth.contracts.sink import OutputValidationResult
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.protocols import SinkProtocol
+
+        class InputSchema(PluginSchema):
+            value: int
+
+        class MemorySink:
+            """Test sink that stores rows in memory."""
+
+            name = "memory"
+            input_schema = InputSchema
+            idempotent = True
+            node_id: str | None = None  # Set by orchestrator
+            determinism = Determinism.IO_WRITE
+            plugin_version = "1.0.0"
+            supports_resume = False  # Required by SinkProtocol
+            rows: ClassVar[list[dict[str, Any]]] = []
+
+            def __init__(self, config: dict[str, Any]) -> None:
+                self.instance_rows: list[dict[str, Any]] = []
+                self.config = config
+
+            def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> ArtifactDescriptor:
+                self.rows.extend(rows)
+                return ArtifactDescriptor.for_file(
+                    path="/tmp/memory",
+                    content_hash="test",
+                    size_bytes=len(str(rows)),
+                )
+
+            def flush(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def on_start(self, ctx: PluginContext) -> None:
+                pass
+
+            def on_complete(self, ctx: PluginContext) -> None:
+                pass
+
+            def configure_for_resume(self) -> None:
+                raise NotImplementedError("MemorySink does not support resume")
+
+            def validate_output_target(self) -> OutputValidationResult:
+                return OutputValidationResult.success()
+
+        sink = MemorySink({})
+
+        # IMPORTANT: Verify protocol conformance at runtime
+        assert isinstance(sink, SinkProtocol), "Must conform to SinkProtocol"  # type: ignore[unreachable]
+
+        ctx = PluginContext(run_id="test", config={})  # type: ignore[unreachable]
+
+        # Batch write
+        artifact = sink.write([{"value": 1}, {"value": 2}], ctx)
+
+        assert len(sink.rows) == 2
+        assert sink.rows[0] == {"value": 1}
+        assert isinstance(artifact, ArtifactDescriptor)
+
+    def test_sink_has_idempotency_support(self) -> None:
+        """Sinks should support idempotency keys."""
+        from elspeth.plugins.protocols import SinkProtocol
+
+        # Protocol should have idempotent attribute
+        assert hasattr(SinkProtocol, "__protocol_attrs__")
+
+
+class TestProtocolMetadata:
+    """Test that protocols include metadata attributes."""
+
+    def test_transform_has_determinism_attribute(self) -> None:
+        from elspeth.plugins.protocols import TransformProtocol
+
+        # Protocol attributes are tracked in __protocol_attrs__ (runtime Protocol internals)
+        assert "determinism" in TransformProtocol.__protocol_attrs__  # type: ignore[attr-defined]
+
+    def test_transform_has_version_attribute(self) -> None:
+        from elspeth.plugins.protocols import TransformProtocol
+
+        # __protocol_attrs__ is a runtime attribute on @runtime_checkable Protocols
+        assert "plugin_version" in TransformProtocol.__protocol_attrs__  # type: ignore[attr-defined]
+
+    def test_deterministic_transform(self) -> None:
+        from elspeth.contracts import Determinism
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class MyTransform:
+            name = "my_transform"
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+                return TransformResult.success(row, success_reason={"action": "test"})
+
+        t = MyTransform()
+        assert t.determinism == Determinism.DETERMINISTIC
+
+    def test_nondeterministic_transform(self) -> None:
+        from elspeth.contracts import Determinism
+        from elspeth.plugins.context import PluginContext
+        from elspeth.plugins.results import TransformResult
+
+        class LLMTransform:
+            name = "llm_classifier"
+            determinism = Determinism.EXTERNAL_CALL
+            plugin_version = "0.1.0"
+
+            def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+                return TransformResult.success(row, success_reason={"action": "test"})
+
+        t = LLMTransform()
+        assert t.determinism == Determinism.EXTERNAL_CALL

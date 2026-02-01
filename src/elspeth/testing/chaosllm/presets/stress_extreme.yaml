@@ -1,0 +1,63 @@
+# ChaosLLM Preset: stress_extreme
+# Purpose: Maximum stress - 40%+ total error rate for stress testing.
+# Use when: Testing pipeline survival under harsh conditions.
+
+server:
+  host: "127.0.0.1"
+  port: 8000
+  workers: 4
+
+metrics:
+  database: "file:chaosllm-metrics?mode=memory&cache=shared"
+  timeseries_bucket_sec: 1
+
+response:
+  mode: random
+  random:
+    min_words: 10
+    max_words: 50
+    vocabulary: english
+
+latency:
+  base_ms: 10
+  jitter_ms: 5
+
+error_injection:
+  # Primary errors - high rates
+  rate_limit_pct: 20.0
+  capacity_529_pct: 10.0
+
+  # Server errors
+  service_unavailable_pct: 3.0
+  bad_gateway_pct: 1.0
+  gateway_timeout_pct: 1.0
+  internal_error_pct: 5.0
+
+  # Retry-After header range for rate limit and capacity errors
+  retry_after_sec: [1, 3]
+
+  # No client errors (not useful for stress testing)
+  forbidden_pct: 0.0
+  not_found_pct: 0.0
+
+  # No connection-level failures (focus on HTTP errors)
+  timeout_pct: 0.0
+  timeout_sec: [30, 60]
+  connection_reset_pct: 0.0
+  slow_response_pct: 0.0
+  slow_response_sec: [5, 10]
+
+  # Malformed responses - small but present
+  invalid_json_pct: 3.0
+  truncated_pct: 2.0
+  empty_body_pct: 0.0
+  missing_fields_pct: 0.0
+  wrong_content_type_pct: 0.0
+
+  # Aggressive bursts - every 15 seconds for 5 seconds
+  burst:
+    enabled: true
+    interval_sec: 15
+    duration_sec: 5
+    rate_limit_pct: 90.0
+    capacity_pct: 70.0

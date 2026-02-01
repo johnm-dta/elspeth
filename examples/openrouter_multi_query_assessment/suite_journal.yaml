@@ -1,0 +1,137 @@
+# ELSPETH Multi-Query Case Study Assessment Example (OpenRouter)
+#
+# Variant that enables the optional Landscape JSONL change journal for emergency backups.
+#
+# Run with:
+#   uv run elspeth run -s examples/openrouter_multi_query_assessment/suite_journal.yaml --execute
+
+source:
+  plugin: csv
+  options:
+    path: examples/openrouter_multi_query_assessment/input.csv
+    schema:
+      mode: free
+      fields:
+        - "user_id: str"
+        - "cs1_background: str"
+        - "cs1_symptoms: str"
+        - "cs1_history: str"
+        - "cs2_background: str"
+        - "cs2_symptoms: str"
+        - "cs2_history: str"
+    on_validation_failure: discard
+
+transforms:
+  - plugin: openrouter_multi_query_llm
+    options:
+      # OpenRouter model - choose from 100+ providers
+      # Popular options:
+      #   - anthropic/claude-3-opus (best quality)
+      #   - anthropic/claude-3-sonnet (balanced)
+      #   - openai/gpt-4o (fast, capable)
+      #   - meta-llama/llama-3.1-70b-instruct (open source)
+      model: "anthropic/claude-3-5-sonnet"
+      api_key: "${OPENROUTER_API_KEY}"
+
+      system_prompt: |
+        You are a medical assessment AI. For each case study and criterion,
+        provide a score (0-100) and rationale. Respond ONLY in JSON format:
+        {"score": <number>, "rationale": "<explanation>"}
+
+      template: |
+        ## Case Study
+        **Background:** {{ row.input_1 }}
+        **Symptoms:** {{ row.input_2 }}
+        **History:** {{ row.input_3 }}
+
+        ## Evaluation Criterion: {{ row.criterion.name }}
+        {{ row.criterion.description }}
+
+        {% if row.criterion.subcriteria %}
+        Consider these subcriteria:
+        {% for sub in row.criterion.subcriteria %}
+        - {{ sub }}
+        {% endfor %}
+        {% endif %}
+
+        Provide your assessment.
+
+      lookup_file: criteria_lookup.yaml
+
+      # Multi-query plugin generates input_1/2/3 and criterion from case_studies × criteria
+      required_input_fields: []  # Opt-out: fields are generated dynamically by plugin
+
+      case_studies:
+        - name: cs1
+          input_fields: [cs1_background, cs1_symptoms, cs1_history]
+        - name: cs2
+          input_fields: [cs2_background, cs2_symptoms, cs2_history]
+
+      criteria:
+        - name: diagnosis
+          code: DIAG
+          description: "Assess the accuracy and completeness of the diagnosis"
+          subcriteria:
+            - Correct primary diagnosis
+            - Appropriate differential diagnoses considered
+            - Evidence-based reasoning
+        - name: treatment
+          code: TREAT
+          description: "Assess the appropriateness of the treatment plan"
+          subcriteria:
+            - Guideline-concordant treatment
+            - Patient-specific considerations
+            - Risk-benefit analysis
+        - name: prognosis
+          code: PROG
+          description: "Assess the accuracy of prognostic assessment"
+          subcriteria:
+            - Realistic timeline
+            - Key prognostic factors identified
+            - Clear communication
+        - name: risk
+          code: RISK
+          description: "Assess identification of risks and complications"
+          subcriteria:
+            - Comprehensive risk identification
+            - Appropriate severity assessment
+            - Mitigation strategies
+        - name: followup
+          code: FOLLOW
+          description: "Assess the follow-up and monitoring plan"
+          subcriteria:
+            - Appropriate follow-up timeline
+            - Clear monitoring parameters
+            - Escalation criteria defined
+
+      response_format: standard
+      output_mapping:
+        score:
+          suffix: score
+          type: integer
+        rationale:
+          suffix: rationale
+          type: string
+
+      pool_size: 10
+      temperature: 0.0
+      max_tokens: 500
+
+      schema:
+        fields: dynamic
+
+sinks:
+  output:
+    plugin: csv
+    options:
+      path: examples/openrouter_multi_query_assessment/output/results.csv
+      schema:
+        fields: dynamic
+
+default_sink: output
+
+landscape:
+  url: sqlite:///examples/openrouter_multi_query_assessment/runs/audit.db
+  dump_to_jsonl: true
+  dump_to_jsonl_path: examples/openrouter_multi_query_assessment/runs/audit.journal.jsonl
+  dump_to_jsonl_include_payloads: true

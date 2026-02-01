@@ -1,0 +1,58 @@
+# ELSPETH Aggregation Example Pipeline
+#
+# This pipeline demonstrates batch aggregation by computing statistics
+# over groups of transactions. Each batch of 5 rows is aggregated into
+# a single summary row with count, sum, and mean.
+#
+# Run with:
+#   uv run elspeth run -s examples/batch_aggregation/settings.yaml --execute
+
+source:
+  plugin: csv
+  options:
+    path: examples/batch_aggregation/input.csv
+    schema:
+      mode: strict
+      fields:
+        - "id: int"
+        - "date: str"
+        - "category: str"
+        - "amount: int"  # Coerce to int for numeric aggregation
+        - "region: str"
+    on_validation_failure: discard
+
+# Aggregation batches rows and computes statistics
+# Trigger fires every 5 rows, producing one summary row per batch
+aggregations:
+  - name: batch_totals
+    plugin: batch_stats
+    trigger:
+      count: 5  # Aggregate every 5 rows
+    output_mode: transform  # Produce one summary row per batch
+    # Use expected_output_count: 1 to validate N→1 cardinality
+    options:
+      schema:
+        fields: dynamic
+      value_field: amount
+      group_by: category
+      compute_mean: true
+
+sinks:
+  output:
+    plugin: csv
+    options:
+      path: examples/batch_aggregation/output/batch_summaries.csv
+      schema:
+        mode: strict
+        fields:
+          - "count: int"
+          - "sum: float"
+          - "batch_size: int"
+          - "mean: float"
+          - "category: str"
+
+default_sink: output
+
+# Audit trail for traceability
+landscape:
+  url: sqlite:///examples/batch_aggregation/runs/audit.db

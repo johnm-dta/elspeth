@@ -1,0 +1,8 @@
+# Group 3: LLM Plugins (HIGH RISK - External Boundary)
+# Trust boundary code with external APIs
+src/elspeth/plugins/llm/azure_multi_query.py
+src/elspeth/plugins/llm/azure_batch.py
+src/elspeth/plugins/llm/openrouter_multi_query.py
+src/elspeth/plugins/llm/openrouter_batch.py
+src/elspeth/plugins/clients/llm.py
+src/elspeth/plugins/clients/http.py

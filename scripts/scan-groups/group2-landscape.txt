@@ -1,0 +1,8 @@
+# Group 2: Audit Trail (HIGH RISK)
+# The Landscape is the legal record - bugs here destroy auditability
+src/elspeth/core/landscape/recorder.py
+src/elspeth/core/landscape/database.py
+src/elspeth/core/landscape/exporter.py
+src/elspeth/core/landscape/repositories.py
+src/elspeth/core/landscape/schema.py
+src/elspeth/core/checkpoint/recovery.py

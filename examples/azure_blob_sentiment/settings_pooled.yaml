@@ -1,0 +1,92 @@
+# ELSPETH Azure Blob Sentiment Analysis Example - POOLED EXECUTION
+#
+# Multi-threaded variant: reads from Azure Blob Storage, processes concurrently
+# using Azure OpenAI with AIMD throttling, writes results to Azure Blob Storage.
+#
+# Prerequisites:
+#   # Azure OpenAI
+#   export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com"
+#   export AZURE_OPENAI_KEY="your-openai-api-key"
+#   export AZURE_OPENAI_DEPLOYMENT="your-gpt-deployment-name"
+#   export AZURE_OPENAI_API_VERSION="2024-12-01-preview"
+#
+#   # Azure Storage (SAS token auth)
+#   export AZURE_STORAGE_ACCOUNT_URL="https://youraccount.blob.core.windows.net"
+#   export AZURE_STORAGE_SAS_TOKEN="sv=2022-11-02&ss=b&srt=sco&sp=rwdlacyx..."
+#   export AZURE_STORAGE_CONTAINER="elspeth-demo"
+#
+# Run with:
+#   uv run elspeth run -s examples/azure_blob_sentiment/settings_pooled.yaml --execute
+#
+# Key differences from settings.yaml:
+#   - pool_size: 3 (processes 3 rows concurrently)
+#   - AIMD throttling automatically backs off on rate limits
+#   - Results maintain submission order despite concurrent processing
+
+source:
+  plugin: azure_blob
+  options:
+    sas_token: "${AZURE_STORAGE_SAS_TOKEN}"
+    account_url: "${AZURE_STORAGE_ACCOUNT_URL}"
+    container: "${AZURE_STORAGE_CONTAINER}"
+    blob_path: "input/sentiment_data.csv"
+    format: csv
+    csv_options:
+      delimiter: ","
+      has_header: true
+      encoding: utf-8
+    schema:
+      mode: free
+      fields:
+        - "id: int"
+        - "text: str"
+    on_validation_failure: discard
+
+transforms:
+  - plugin: azure_llm
+    options:
+      deployment_name: "${AZURE_OPENAI_DEPLOYMENT}"
+      endpoint: "${AZURE_OPENAI_ENDPOINT}"
+      api_key: "${AZURE_OPENAI_KEY}"
+      api_version: "${AZURE_OPENAI_API_VERSION}"
+      template: |
+        Analyze the sentiment of the following text and respond with ONLY a JSON object.
+
+        Text: {{ row.text }}
+
+        Respond with exactly this format (no other text):
+        {"sentiment": "positive" or "negative" or "neutral", "confidence": 0.0-1.0, "summary": "brief explanation"}
+      temperature: 0.0
+      response_field: sentiment_analysis
+      schema:
+        fields: dynamic
+
+      # === POOLED EXECUTION CONFIG ===
+      pool_size: 3  # Number of concurrent workers
+
+      # AIMD throttling options (optional - these are defaults)
+      # max_dispatch_delay_ms: 5000
+      # max_capacity_retry_seconds: 60
+
+sinks:
+  output:
+    plugin: azure_blob
+    options:
+      sas_token: "${AZURE_STORAGE_SAS_TOKEN}"
+      account_url: "${AZURE_STORAGE_ACCOUNT_URL}"
+      container: "${AZURE_STORAGE_CONTAINER}"
+      blob_path: "output/{{ run_id }}/results_pooled.csv"
+      format: csv
+      overwrite: true
+      csv_options:
+        delimiter: ","
+        encoding: utf-8
+        include_header: true
+      schema:
+        fields: dynamic
+
+default_sink: output
+
+# Audit trail stored locally
+landscape:
+  url: sqlite:///examples/azure_blob_sentiment/runs/audit_pooled.db

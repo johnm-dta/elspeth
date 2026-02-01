@@ -1,0 +1,83 @@
+{
+  "_comment": [
+    "Example MCP configurations for Claude Code.",
+    "Copy the relevant section to ~/.claude/settings.json or .mcp.json in project root.",
+    "See docs/guides/landscape-mcp-analysis.md for full documentation."
+  ],
+
+  "examples": {
+    "auto-discovery": {
+      "_description": "Auto-discover databases in project (recommended)",
+      "mcpServers": {
+        "elspeth-landscape": {
+          "command": "elspeth-mcp",
+          "args": [],
+          "description": "ELSPETH Landscape audit database analysis"
+        }
+      }
+    },
+
+    "local-sqlite": {
+      "_description": "Explicit SQLite database path",
+      "mcpServers": {
+        "elspeth-landscape": {
+          "command": "elspeth-mcp",
+          "args": ["--database", "sqlite:///./examples/my_pipeline/runs/audit.db"]
+        }
+      }
+    },
+
+    "environment-variable": {
+      "_description": "Use ELSPETH_DATABASE_URL environment variable",
+      "mcpServers": {
+        "elspeth-landscape": {
+          "command": "elspeth-mcp",
+          "env": {
+            "ELSPETH_DATABASE_URL": "sqlite:///./examples/my_pipeline/runs/audit.db"
+          }
+        }
+      }
+    },
+
+    "postgresql": {
+      "_description": "PostgreSQL database (production)",
+      "mcpServers": {
+        "elspeth-landscape": {
+          "command": "elspeth-mcp",
+          "args": ["--database", "postgresql://user:pass@localhost:5432/elspeth_audit"]
+        }
+      }
+    },
+
+    "absolute-path": {
+      "_description": "Absolute path to SQLite database",
+      "mcpServers": {
+        "elspeth-landscape": {
+          "command": "elspeth-mcp",
+          "args": ["--database", "sqlite:////var/lib/elspeth/audit.db"]
+        }
+      }
+    },
+
+    "with-python-path": {
+      "_description": "Explicit Python path (if not in PATH)",
+      "mcpServers": {
+        "elspeth-landscape": {
+          "command": "/home/user/elspeth/.venv/bin/elspeth-mcp",
+          "args": []
+        }
+      }
+    }
+  },
+
+  "recommended-for-project": {
+    "_description": "Copy this to .mcp.json in project root. Auto-discovers databases, prioritizing audit.db in runs/ directories.",
+    "mcpServers": {
+      "elspeth-landscape": {
+        "command": "elspeth-mcp",
+        "args": [],
+        "description": "ELSPETH Landscape audit database analysis"
+      }
+    }
+  }
+}

@@ -1,0 +1,60 @@
+# ELSPETH Example Pipeline
+#
+# This pipeline reads a CSV, routes high-value transactions to a separate
+# output, and writes normal transactions to the main output.
+#
+# Run with:
+#   uv run elspeth run -s examples/threshold_gate/settings.yaml --execute
+
+source:
+  plugin: csv
+  options:
+    path: examples/threshold_gate/input.csv
+    schema:
+      mode: strict
+      fields:
+        - "id: int"
+        - "name: str"
+        - "amount: int"  # Coerce to int for numeric comparisons
+        - "category: str"
+    on_validation_failure: discard  # or a sink name for quarantine
+
+# Config-driven gate: route based on amount threshold
+# Note: CSV source coerces numeric fields, so row['amount'] is already a number
+# Route labels must be "true"/"false" for boolean conditions
+gates:
+  - name: amount_threshold
+    condition: "row['amount'] > 1000"
+    routes:
+      "true": high_values   # condition true -> high_values sink
+      "false": continue     # condition false -> continue to output_sink
+
+sinks:
+  output:
+    plugin: csv
+    options:
+      path: examples/threshold_gate/output/normal.csv
+      schema:
+        mode: strict
+        fields:
+          - "id: int"
+          - "name: str"
+          - "amount: int"
+          - "category: str"
+  high_values:
+    plugin: csv
+    options:
+      path: examples/threshold_gate/output/high_values.csv
+      schema:
+        mode: strict
+        fields:
+          - "id: int"
+          - "name: str"
+          - "amount: int"
+          - "category: str"
+
+default_sink: output
+
+# Audit trail stored in examples/runs/
+landscape:
+  url: sqlite:///examples/threshold_gate/runs/audit.db

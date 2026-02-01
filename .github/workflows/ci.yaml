@@ -1,0 +1,290 @@
+# CI Pipeline - Lint and Test
+#
+# Runs on every push and PR. Fast feedback loop with:
+#   - Linting (ruff, mypy) - ~30 seconds
+#   - Testing (pytest with coverage) - ~3-5 minutes
+#   - Bug-hiding pattern detection
+#   - Contract enforcement (Settings→Runtime alignment, type boundaries)
+#
+# All checks must pass before merging to main.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# Cancel in-progress runs when a new commit is pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+  UV_VERSION: "0.5"
+
+jobs:
+  # ===========================================================================
+  # Stage 1: Lint (Fast feedback - ~30 seconds)
+  # ===========================================================================
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          uv venv
+          source .venv/bin/activate
+          uv pip install -e ".[all]"
+
+      - name: Check code style (ruff)
+        run: |
+          source .venv/bin/activate
+          ruff check src/ tests/
+
+      - name: Check formatting (ruff format)
+        run: |
+          source .venv/bin/activate
+          ruff format --check src/ tests/
+
+      - name: Type check (mypy)
+        run: |
+          source .venv/bin/activate
+          mypy src/
+
+  # ===========================================================================
+  # Stage 2a: Tier Model Enforcement
+  # ===========================================================================
+  enforce-tier-model:
+    name: Enforce Tier Model
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run tier model enforcement
+        run: |
+          python scripts/cicd/enforce_tier_model.py check \
+            --root src/elspeth \
+            --allowlist config/cicd/enforce_tier_model.yaml \
+            --exclude "**/__pycache__/*" \
+            --format text
+
+  # ===========================================================================
+  # Stage 2b: Contract Enforcement (Settings→Runtime alignment)
+  # ===========================================================================
+  contract-enforcement:
+    name: Contract Enforcement
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          uv venv
+          source .venv/bin/activate
+          uv pip install -e ".[all]"
+
+      - name: Enforce contract alignment
+        run: |
+          source .venv/bin/activate
+          python scripts/check_contracts.py
+
+  # ===========================================================================
+  # Stage 3: Test (Quality gate - ~3-5 minutes)
+  # ===========================================================================
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: [lint, enforce-tier-model, contract-enforcement]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+        include:
+          - python-version: "3.12"
+            coverage: true
+          - python-version: "3.13"
+            coverage: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          uv venv
+          source .venv/bin/activate
+          uv pip install -e ".[all]"
+
+      - name: Run tests with coverage
+        if: matrix.coverage
+        run: |
+          source .venv/bin/activate
+          pytest tests/ \
+            --cov=src/elspeth \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=80 \
+            -v \
+            -m "not slow and not stress" \
+            --ignore=tests/examples/test_llm_examples.py
+
+      - name: Run tests without coverage
+        if: ${{ !matrix.coverage }}
+        run: |
+          source .venv/bin/activate
+          pytest tests/ \
+            -v \
+            -m "not slow and not stress" \
+            --ignore=tests/examples/test_llm_examples.py
+
+      - name: Upload coverage report
+        if: matrix.coverage && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 7
+
+  # ===========================================================================
+  # Stage 4: Stress Tests (ChaosLLM HTTP server - ~5-10 minutes)
+  # ===========================================================================
+  stress-tests:
+    name: Stress Tests
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          uv venv
+          source .venv/bin/activate
+          uv pip install -e ".[all]"
+          uv pip install uvicorn
+
+      - name: Run stress tests
+        run: |
+          source .venv/bin/activate
+          pytest tests/stress/ -m stress --timeout=300 -v
+        timeout-minutes: 15
+
+  # ===========================================================================
+  # Stage 5: Integration Tests (Optional - requires secrets)
+  # ===========================================================================
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          uv venv
+          source .venv/bin/activate
+          uv pip install -e ".[all]"
+
+      - name: Run integration tests
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          source .venv/bin/activate
+          pytest tests/integration/ -v -m integration || echo "Integration tests skipped (no API keys)"
+
+  # ===========================================================================
+  # Summary Job - Required for branch protection
+  # ===========================================================================
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    needs: [lint, enforce-tier-model, contract-enforcement, test]
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ needs.lint.result }}" != "success" ]]; then
+            echo "Lint job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.enforce-tier-model.result }}" != "success" ]]; then
+            echo "Tier model enforcement job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.contract-enforcement.result }}" != "success" ]]; then
+            echo "Contract enforcement job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "Test job failed"
+            exit 1
+          fi
+          echo "All CI checks passed!"

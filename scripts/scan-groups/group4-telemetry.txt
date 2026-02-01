@@ -1,0 +1,8 @@
+# Group 4: Telemetry (MEDIUM RISK - New Feature)
+# Just implemented backpressure - worth validating
+src/elspeth/telemetry/manager.py
+src/elspeth/telemetry/exporters/otlp.py
+src/elspeth/telemetry/exporters/azure_monitor.py
+src/elspeth/telemetry/exporters/datadog.py
+src/elspeth/telemetry/filtering.py
+src/elspeth/telemetry/events.py

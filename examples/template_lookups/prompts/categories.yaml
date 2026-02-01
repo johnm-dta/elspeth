@@ -1,0 +1,50 @@
+# Category and priority lookup data for support ticket classification
+# This file is loaded at config time and accessible via lookup.* in templates
+
+categories:
+  billing:
+    name: "Billing & Payments"
+    description: "Payment issues, refunds, subscription management, invoices"
+    team: "finance"
+    sla_hours: 24
+  technical:
+    name: "Technical Support"
+    description: "App bugs, crashes, performance issues, feature malfunctions"
+    team: "engineering"
+    sla_hours: 48
+  general:
+    name: "General Inquiry"
+    description: "Feature requests, feedback, general questions, account info"
+    team: "customer_success"
+    sla_hours: 72
+
+priorities:
+  high:
+    level: 1
+    instructions: "Respond within 4 hours. Escalate immediately if unresolved after first response. Customer may be experiencing service disruption or financial impact."
+    tone: "urgent and empathetic"
+  medium:
+    level: 2
+    instructions: "Respond within 24 hours. Follow up if no customer response within 48 hours."
+    tone: "professional and helpful"
+  low:
+    level: 3
+    instructions: "Respond within 72 hours. Batch with similar requests if possible."
+    tone: "friendly and informative"
+
+# Response templates for different sentiment outcomes
+response_templates:
+  frustrated: "I sincerely apologize for the inconvenience. Let me resolve this for you right away."
+  neutral: "Thank you for contacting us. I'd be happy to help with your request."
+  positive: "Thank you for reaching out! I appreciate your patience and am here to assist."
+
+# Classification labels
+sentiment_labels:
+  - frustrated
+  - neutral
+  - positive
+
+urgency_labels:
+  - immediate_action
+  - standard_handling
+  - can_wait

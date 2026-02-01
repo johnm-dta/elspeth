@@ -1,0 +1,20 @@
+# examples/openrouter_multi_query_assessment/criteria_lookup.yaml
+DIAG:
+  weight: 0.25
+  guidance: "Focus on evidence-based diagnosis with clear reasoning chain"
+
+TREAT:
+  weight: 0.25
+  guidance: "Ensure treatment aligns with current guidelines and patient factors"
+
+PROG:
+  weight: 0.20
+  guidance: "Base prognosis on established prognostic factors"
+
+RISK:
+  weight: 0.15
+  guidance: "Consider both common and serious complications"
+
+FOLLOW:
+  weight: 0.15
+  guidance: "Define clear monitoring schedule and escalation triggers"

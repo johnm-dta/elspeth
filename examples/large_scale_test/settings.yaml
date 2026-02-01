@@ -1,0 +1,72 @@
+# ELSPETH Large-Scale Test Pipeline
+#
+# This pipeline demonstrates ELSPETH's performance with large datasets (10k-100k rows).
+# It includes a transform and a gate to route high-value transactions.
+#
+# Generate test data first:
+#   python examples/large_scale_test/generate_data.py 50000
+#
+# Run with:
+#   uv run elspeth run -s examples/large_scale_test/settings.yaml --execute
+#
+# Explore lineage:
+#   elspeth explain --run latest --row 1234 --database examples/large_scale_test/runs/audit.db
+
+source:
+  plugin: csv
+  options:
+    path: examples/large_scale_test/input.csv
+    schema:
+      mode: strict
+      fields:
+        - "id: int"
+        - "value: float"
+        - "category: str"
+        - "priority: int"
+        - "timestamp: str"
+    on_validation_failure: discard
+
+# Gate: Route based on value threshold
+# High-value transactions (>= 5000) go to high_value sink
+# Everything else goes to normal sink
+gates:
+  - name: value_threshold
+    condition: "row['value'] >= 5000"
+    routes:
+      "true": high_value    # High-value transactions
+      "false": continue     # Normal transactions -> output_sink
+
+sinks:
+  # Normal transactions sink
+  output:
+    plugin: csv
+    options:
+      path: examples/large_scale_test/output/normal.csv
+      schema:
+        mode: strict
+        fields:
+          - "id: int"
+          - "value: float"
+          - "category: str"
+          - "priority: int"
+          - "timestamp: str"
+
+  # High-value transactions sink
+  high_value:
+    plugin: csv
+    options:
+      path: examples/large_scale_test/output/high_value.csv
+      schema:
+        mode: strict
+        fields:
+          - "id: int"
+          - "value: float"
+          - "category: str"
+          - "priority: int"
+          - "timestamp: str"
+
+default_sink: output
+
+# Audit trail
+landscape:
+  url: sqlite:///examples/large_scale_test/runs/audit.db

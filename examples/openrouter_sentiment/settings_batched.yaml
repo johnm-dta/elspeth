@@ -1,0 +1,90 @@
+# ELSPETH OpenRouter Sentiment Analysis Example - BATCH AGGREGATION
+#
+# This variant demonstrates batch aggregation with parallel LLM processing.
+# Instead of processing rows one at a time (settings.yaml) or streaming them
+# through a pool (settings_pooled.yaml), this buffers rows until the trigger
+# fires, then processes the entire batch in parallel.
+#
+# How batch aggregation works:
+#   1. Rows are buffered by the engine until trigger fires (e.g., every 5 rows)
+#   2. When triggered, all buffered rows are sent to transform._process_batch()
+#   3. Parallel execution via PooledExecutor processes rows concurrently
+#   4. Each input row produces one output row (N->N with output_mode: passthrough)
+#   5. Results maintain input order despite parallel processing
+#
+# Comparison with other modes:
+#   - settings.yaml: Sequential (1 row at a time, simple but slow)
+#   - settings_pooled.yaml: Streaming parallel (rows flow through pool continuously)
+#   - settings_batched.yaml: Batch parallel (buffer N rows, process all at once)
+#
+# When to use batched mode:
+#   - When you need to coordinate processing across multiple rows
+#   - When API rate limits are per-batch (not per-request)
+#   - When you want clear batch boundaries for checkpointing/auditing
+#
+# Prerequisites:
+#   export OPENROUTER_API_KEY="your-api-key-here"
+#
+# Run with:
+#   uv run elspeth run -s examples/openrouter_sentiment/settings_batched.yaml --execute
+
+source:
+  plugin: csv
+  options:
+    path: examples/openrouter_sentiment/input.csv
+    schema:
+      mode: strict
+      fields:
+        - "id: int"
+        - "text: str"
+    on_validation_failure: discard
+
+# Batch aggregation using OpenRouter Batch LLM transform
+# The openrouter_batch_llm transform is batch-aware (is_batch_aware=True), so the engine:
+#   1. Buffers incoming rows until trigger condition is met
+#   2. Calls transform._process_batch(rows) with the full batch
+#   3. With output_mode: passthrough, each input row gets enriched output
+aggregations:
+  - name: sentiment_batch
+    plugin: openrouter_batch_llm
+    trigger:
+      count: 5  # Buffer 5 rows, then process batch in parallel
+    output_mode: passthrough  # Each input row produces one output row (N->N)
+    options:
+      api_key: "${OPENROUTER_API_KEY}"
+      model: "openai/gpt-4o-mini"  # Fast and cheap for demos
+      template: |
+        Analyze the sentiment of the following text and respond with ONLY a JSON object.
+
+        Text: {{ row.text }}
+
+        Respond with exactly this format (no other text):
+        {"sentiment": "positive" or "negative" or "neutral", "confidence": 0.0-1.0, "summary": "brief explanation"}
+      temperature: 0.0  # Deterministic for consistent results
+      response_field: sentiment_analysis
+      required_input_fields: [text]  # Template uses row.text
+      schema:
+        fields: dynamic
+
+      # === BATCH PARALLEL EXECUTION CONFIG ===
+      # Process buffered rows in parallel when batch is released
+      pool_size: 3  # Number of concurrent workers within the batch
+
+      # AIMD throttling options (optional - these are defaults)
+      # max_dispatch_delay_ms: 5000      # Maximum backoff delay (5 seconds)
+      # max_capacity_retry_seconds: 60   # Timeout for retrying rate-limited requests
+
+sinks:
+  output:
+    plugin: json
+    options:
+      path: examples/openrouter_sentiment/output/results_batched.json
+      schema:
+        fields: dynamic
+      format: jsonl
+
+default_sink: output
+
+# Audit trail stored in runs/
+landscape:
+  url: sqlite:///examples/openrouter_sentiment/runs/audit_batched.db

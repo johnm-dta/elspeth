@@ -1,0 +1,6 @@
+# Group 6: Sources/Sinks (MEDIUM RISK)
+# Trust boundary with external data
+src/elspeth/plugins/sources/json_source.py
+src/elspeth/plugins/sources/csv_source.py
+src/elspeth/plugins/sources/field_normalization.py
+src/elspeth/plugins/sinks/csv_sink.py

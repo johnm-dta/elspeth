@@ -1,0 +1,10 @@
+{
+  "name": "elspeth-rapid",
+  "private": true,
+  "devDependencies": {
+    "azurite": "^3.30.0"
+  },
+  "scripts": {
+    "azurite": "azurite --silent"
+  }
+}

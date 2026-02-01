@@ -1,0 +1,55 @@
+# ELSPETH Boolean Routing Example
+#
+# Routes messages based on their 'approved' field (true/false).
+#
+# Run with:
+#   uv run elspeth run -s examples/boolean_routing/settings.yaml --execute
+
+source:
+  plugin: csv
+  options:
+    path: examples/boolean_routing/input.csv
+    schema:
+      mode: strict
+      fields:
+        - "id: int"
+        - "message: str"
+        - "approved: str"
+    on_validation_failure: discard  # or a sink name for quarantine
+
+# Config-driven gate: route based on approved field
+# Note: Check for exact string match 'true' (case-sensitive)
+# Route labels must be "true"/"false" for boolean conditions
+gates:
+  - name: approval_check
+    condition: "row['approved'] == 'true'"
+    routes:
+      "true": approved      # condition true -> approved sink
+      "false": continue     # condition false -> continue to rejected (output_sink)
+
+sinks:
+  approved:
+    plugin: csv
+    options:
+      path: examples/boolean_routing/output/approved.csv
+      schema:
+        mode: strict
+        fields:
+          - "id: int"
+          - "message: str"
+          - "approved: str"
+  rejected:
+    plugin: csv
+    options:
+      path: examples/boolean_routing/output/rejected.csv
+      schema:
+        mode: strict
+        fields:
+          - "id: int"
+          - "message: str"
+          - "approved: str"
+
+default_sink: rejected
+
+landscape:
+  url: sqlite:///examples/boolean_routing/runs/audit.db

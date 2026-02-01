@@ -1,0 +1,321 @@
+[project]
+name = "elspeth"
+version = "0.1.0"
+description = "Auditable Sense/Decide/Act pipelines for high-reliability systems"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "John" }]
+keywords = ["elspeth", "audit", "pipeline", "sda", "traceability", "data-processing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    # CLI and TUI
+    "typer>=0.21,<1",  # Stable CLI framework
+    "textual>=7.2,<8",  # TUI framework with breaking changes in major versions
+
+    # Configuration
+    "dynaconf>=3.2,<4",  # Configuration management
+    "pydantic>=2.12,<3",  # Data validation with v2 API
+    "python-dotenv>=1.2,<2",  # .env file loading
+    "pyyaml>=6.0,<7",  # YAML parsing
+
+    # Plugin system
+    "pluggy>=1.6,<2",  # Plugin architecture (pytest uses this)
+
+    # Data handling
+    "pandas>=2.2,<3",  # DataFrame operations
+
+    # HTTP client
+    "httpx>=0.27,<1",  # Async HTTP client
+
+    # Database
+    "sqlalchemy>=2.0,<3",  # SQL toolkit and ORM
+    "alembic>=1.18,<2",  # Database migrations
+
+    # Retries
+    "tenacity>=9.0,<10",  # Retry logic with backoff
+
+    # === Acceleration Stack ===
+    # Canonical JSON (RFC 8785/JCS)
+    "rfc8785>=0.1.4,<0.2",  # Deterministic JSON serialization
+
+    # DAG validation
+    "networkx>=3.6,<4",  # Graph algorithms
+
+    # Observability
+    "opentelemetry-api>=1.39,<2",  # OpenTelemetry tracing API
+    "opentelemetry-sdk>=1.39,<2",  # OpenTelemetry SDK
+    "opentelemetry-exporter-otlp>=1.39,<2",  # OTLP exporter
+
+    # Structured logging
+    "structlog>=25.0,<26",  # Structured logging
+
+    # Rate limiting
+    "pyrate-limiter>=3.9,<4",  # Rate limiting (requires max_delay parameter)
+
+    # Diffing (for verify mode)
+    "deepdiff>=8.6,<9",  # Deep comparison for data structures
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0,<10",  # Testing framework
+    "pytest-cov>=4.1,<6",  # Coverage plugin
+    "pytest-asyncio>=1.0,<2",  # Async test support
+    "pytest-dotenv>=0.5,<1",  # Load .env for integration tests
+    "pytest-timeout>=2.3,<3",  # Test timeouts for stress tests
+    "hypothesis>=6.98,<7",  # Property-based testing
+    "mypy>=1.19,<2",  # Static type checking
+    "ruff>=0.14,<1",  # Linting and formatting
+    "pre-commit>=3.6,<4",  # Git hooks
+    # Type stubs
+    "pandas-stubs>=2.2,<3",  # Pandas type hints
+    "types-networkx>=3.2,<4",  # NetworkX type hints
+    "types-PyYAML>=6.0,<7",  # PyYAML type hints
+    # Mutation testing (Phase 3)
+    "mutmut>=2.4,<3",  # Mutation testing
+    # ChaosLLM test server
+    "starlette>=0.45,<1",  # ASGI framework for ChaosLLM
+    "uvicorn>=0.34,<1",  # ASGI server for ChaosLLM
+]
+
+llm = [
+    # Phase 6: LLM plugin pack
+    "jinja2>=3.1,<4",  # Template engine for prompts
+    "httpx>=0.27,<1",  # HTTP client (inherited from main deps)
+    "openai>=2.15,<3",  # OpenAI SDK
+    "litellm>=1.81,<2",  # Multi-provider LLM interface
+]
+
+azure = [
+    # Phase 7: Azure plugin pack
+    "azure-storage-blob>=12.28,<13",  # Azure Blob Storage
+    "azure-identity>=1.25,<2",  # Azure authentication
+    "azure-keyvault-secrets>=4.10,<5",  # Key Vault for fingerprint key
+    "azure-monitor-opentelemetry-exporter>=1.0.0b46,<2",  # b46+ fixes LogData import error  # Azure Monitor / App Insights telemetry
+    "jinja2>=3.1,<4",  # Template engine for path templating
+]
+
+mcp = [
+    # MCP server for Landscape analysis
+    "mcp>=1.0,<2",  # Model Context Protocol SDK
+]
+
+all = [
+    # dev dependencies
+    "pytest>=9.0,<10",
+    "pytest-cov>=4.1,<6",
+    "pytest-asyncio>=1.0,<2",
+    "pytest-dotenv>=0.5,<1",
+    "pytest-timeout>=2.3,<3",
+    "hypothesis>=6.98,<7",
+    "mypy>=1.19,<2",
+    "ruff>=0.14,<1",
+    "pre-commit>=3.6,<4",
+    "pandas-stubs>=2.2,<3",
+    "types-networkx>=3.2,<4",
+    "types-PyYAML>=6.0,<7",
+    "mutmut>=2.4,<3",
+    "starlette>=0.45,<1",
+    "uvicorn>=0.34,<1",
+    # llm dependencies
+    "jinja2>=3.1,<4",
+    "openai>=2.15,<3",
+    "litellm>=1.81,<2",
+    # azure dependencies
+    "azure-storage-blob>=12.28,<13",
+    "azure-identity>=1.25,<2",
+    "azure-keyvault-secrets>=4.10,<5",
+    "azure-monitor-opentelemetry-exporter>=1.0.0b46,<2",  # b46+ fixes LogData import error
+    # mcp dependencies
+    "mcp>=1.0,<2",
+]
+
+[project.scripts]
+elspeth = "elspeth.cli:app"
+elspeth-mcp = "elspeth.mcp:main"
+chaosllm = "elspeth.testing.chaosllm.cli:main"
+chaosllm-mcp = "elspeth.testing.chaosllm.cli:mcp_main_entry"
+check-contracts = "scripts.check_contracts:main"
+
+[project.urls]
+Homepage = "https://github.com/your-org/elspeth"
+Documentation = "https://github.com/your-org/elspeth#readme"
+Repository = "https://github.com/your-org/elspeth"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/elspeth"]
+
+# === Ruff Configuration ===
+[tool.ruff]
+target-version = "py313"
+line-length = 140
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "W",      # pycodestyle warnings
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "C4",     # flake8-comprehensions
+    "DTZ",    # flake8-datetimez (important for audit timestamps!)
+    "T20",    # flake8-print (no stray prints in production)
+    "RUF",    # Ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "SIM108", # ternary operator - prefer explicit if/else for readability with comments
+    "UP043",  # unnecessary default type args - keep explicit for Python 3.12 compatibility
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["elspeth"]
+
+[tool.ruff.lint.flake8-bugbear]
+# typer.Option/Argument are immutable and safe in function defaults
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["T20"]  # Allow print in tests
+"scripts/**/*.py" = ["T20"]  # Allow print in CLI scripts
+"alembic/**/*.py" = ["E402"]  # Alembic env.py has imports after config setup
+"vulture_whitelist.py" = ["B018", "F821"]  # Vulture whitelist uses bare names
+# Package __init__ files use categorical __all__ grouping for readability
+"src/elspeth/contracts/__init__.py" = ["RUF022"]
+"src/elspeth/plugins/__init__.py" = ["RUF022"]
+
+# === Mypy Configuration ===
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+warn_unreachable = true
+show_error_codes = true
+plugins = ["pydantic.mypy"]
+# Allow unused ignores - needed for pre-commit which runs in isolated env
+warn_unused_ignores = false
+# Exclude alembic migration files - they're not packages
+exclude = ["alembic/versions/.*\\.py$"]
+
+[[tool.mypy.overrides]]
+module = [
+    "dynaconf.*",
+    "pluggy.*",
+    "rfc8785.*",
+    "pyrate_limiter.*",
+    "deepdiff.*",
+    "textual.*",
+    "opentelemetry.*",
+    "hypothesis.*",
+    "azure.*",
+    "mcp.*",
+    "ddtrace.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+# Test files use hypothesis decorators that don't have type stubs
+disallow_untyped_decorators = false
+# Pytest functions don't need complete type annotations
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "elspeth.tui.*"
+# TUI uses textual which has incomplete type stubs
+# App[None] inheritance triggers "Class cannot subclass value of type Any"
+disallow_subclassing_any = false
+
+[[tool.mypy.overrides]]
+module = "scripts.*"
+# Script modules may have relaxed type checking
+ignore_missing_imports = true
+# Scripts are auxiliary tools, not production code
+check_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "examples.*"
+# Examples don't need complete type annotations
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+# === Pytest Configuration ===
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "-m", "not slow and not stress",  # Skip slow/stress tests by default
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests requiring external services",
+    "asyncio: marks tests as async (handled by pytest-asyncio)",
+    "performance: marks tests as performance benchmarks",
+    "stress: marks tests as stress tests requiring ChaosLLM HTTP server (deselect with '-m \"not stress\"')",
+    "chaosllm: Configure ChaosLLM server for the test (preset=None, **kwargs)",
+]
+# Load .env file for integration tests (API keys)
+env_files = [".env"]
+
+# === Coverage Configuration ===
+[tool.coverage.run]
+source = ["src/elspeth"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@abstractmethod",
+]
+
+# === Mutation Testing Configuration (mutmut 2.x) ===
+[tool.mutmut]
+# Paths to mutate - audit-critical code that MUST have effective tests
+# Target mutation scores:
+#   - canonical.py: 95%+ (hash integrity is critical)
+#   - landscape/: 90%+ (audit trail must be bulletproof)
+#   - engine/: 85%+ (orchestration must be reliable)
+paths_to_mutate = [
+    # Core audit infrastructure
+    "src/elspeth/core/canonical.py",
+    "src/elspeth/core/payload_store.py",
+    "src/elspeth/core/landscape/",
+    "src/elspeth/core/checkpoint/",
+    # Engine - row processing and orchestration
+    "src/elspeth/engine/orchestrator.py",
+    "src/elspeth/engine/processor.py",
+    "src/elspeth/engine/executors.py",
+    "src/elspeth/engine/coalesce_executor.py",
+    "src/elspeth/engine/tokens.py",
+]
+# Test runner - include engine tests, use short traceback for debugging
+runner = "python -m pytest tests/core/ tests/engine/ tests/property/ --tb=short"
+# Tests directory
+tests_dir = "tests/"
+# Disable backup files - we use git
+backup = false

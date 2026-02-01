@@ -1,0 +1,61 @@
+# ChaosLLM Preset: realistic
+# Purpose: Mimics typical Azure OpenAI behavior under normal production load.
+# Use when: Testing how pipelines behave in realistic production conditions.
+
+server:
+  host: "127.0.0.1"
+  port: 8000
+  workers: 4
+
+metrics:
+  database: "file:chaosllm-metrics?mode=memory&cache=shared"
+  timeseries_bucket_sec: 1
+
+response:
+  mode: random
+  random:
+    min_words: 20
+    max_words: 100
+    vocabulary: english
+
+latency:
+  base_ms: 100
+  jitter_ms: 50
+
+error_injection:
+  # Realistic Azure error rates
+  rate_limit_pct: 5.0
+  capacity_529_pct: 2.0
+  service_unavailable_pct: 0.5
+  retry_after_sec: [1, 5]
+
+  # Occasional server errors
+  internal_error_pct: 0.2
+  bad_gateway_pct: 0.1
+  gateway_timeout_pct: 0.2
+
+  # Rare client errors
+  forbidden_pct: 0.0
+  not_found_pct: 0.0
+
+  # Occasional connection issues
+  timeout_pct: 0.2
+  timeout_sec: [30, 60]
+  connection_reset_pct: 0.1
+  slow_response_pct: 1.0
+  slow_response_sec: [5, 15]
+
+  # Rare malformed responses (real APIs occasionally glitch)
+  invalid_json_pct: 0.1
+  truncated_pct: 0.1
+  empty_body_pct: 0.0
+  missing_fields_pct: 0.1
+  wrong_content_type_pct: 0.0
+
+  # Occasional bursts (realistic provider stress)
+  burst:
+    enabled: true
+    interval_sec: 60
+    duration_sec: 5
+    rate_limit_pct: 50
+    capacity_pct: 30

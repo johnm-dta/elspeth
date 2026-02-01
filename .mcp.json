@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/claude-code/main/schemas/mcp-config.schema.json",
+  "mcpServers": {
+    "elspeth-landscape": {
+      "command": "elspeth-mcp",
+      "args": [],
+      "description": "ELSPETH Landscape audit database analysis - query runs, trace lineage, debug failures"
+    }
+  }
+}

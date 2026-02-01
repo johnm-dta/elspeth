@@ -1,0 +1,138 @@
+# ELSPETH Multi-Query Case Study Assessment Example
+#
+# This pipeline reads case studies from a CSV, evaluates each against multiple
+# criteria using Azure OpenAI, and outputs assessment scores and rationales.
+#
+# Prerequisites:
+#   export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com"
+#   export AZURE_OPENAI_KEY="your-api-key-here"
+#   export AZURE_OPENAI_DEPLOYMENT="your-gpt-deployment-name"
+#
+# Run with:
+#   uv run elspeth run -s examples/multi_query_assessment/suite.yaml --execute
+
+name: case_study_assessment
+description: Assess multiple case studies against multiple criteria
+
+source:
+  plugin: csv
+  options:
+    path: examples/multi_query_assessment/input.csv
+    schema:
+      mode: free
+      fields:
+        - "user_id: str"
+        - "cs1_background: str"
+        - "cs1_symptoms: str"
+        - "cs1_history: str"
+        - "cs2_background: str"
+        - "cs2_symptoms: str"
+        - "cs2_history: str"
+    on_validation_failure: discard
+
+transforms:
+  - plugin: azure_multi_query_llm
+    options:
+      deployment_name: "${AZURE_OPENAI_DEPLOYMENT}"
+      endpoint: "${AZURE_OPENAI_ENDPOINT}"
+      api_key: "${AZURE_OPENAI_KEY}"
+
+      system_prompt: |
+        You are a medical assessment AI. For each case study and criterion,
+        provide a score (0-100) and rationale. Respond ONLY in JSON format:
+        {"score": <number>, "rationale": "<explanation>"}
+
+      template: |
+        ## Case Study
+        **Background:** {{ row.input_1 }}
+        **Symptoms:** {{ row.input_2 }}
+        **History:** {{ row.input_3 }}
+
+        ## Evaluation Criterion: {{ row.criterion.name }}
+        {{ row.criterion.description }}
+
+        {% if row.criterion.subcriteria %}
+        Consider these subcriteria:
+        {% for sub in row.criterion.subcriteria %}
+        - {{ sub }}
+        {% endfor %}
+        {% endif %}
+
+        Provide your assessment.
+
+      lookup_file: criteria_lookup.yaml
+
+      # Multi-query plugin generates input_1/2/3 and criterion from case_studies × criteria
+      required_input_fields: []  # Opt-out: fields are generated dynamically by plugin
+
+      case_studies:
+        - name: cs1
+          input_fields: [cs1_background, cs1_symptoms, cs1_history]
+        - name: cs2
+          input_fields: [cs2_background, cs2_symptoms, cs2_history]
+
+      criteria:
+        - name: diagnosis
+          code: DIAG
+          description: "Assess the accuracy and completeness of the diagnosis"
+          subcriteria:
+            - Correct primary diagnosis
+            - Appropriate differential diagnoses considered
+            - Evidence-based reasoning
+        - name: treatment
+          code: TREAT
+          description: "Assess the appropriateness of the treatment plan"
+          subcriteria:
+            - Guideline-concordant treatment
+            - Patient-specific considerations
+            - Risk-benefit analysis
+        - name: prognosis
+          code: PROG
+          description: "Assess the accuracy of prognostic assessment"
+          subcriteria:
+            - Realistic timeline
+            - Key prognostic factors identified
+            - Clear communication
+        - name: risk
+          code: RISK
+          description: "Assess identification of risks and complications"
+          subcriteria:
+            - Comprehensive risk identification
+            - Appropriate severity assessment
+            - Mitigation strategies
+        - name: followup
+          code: FOLLOW
+          description: "Assess the follow-up and monitoring plan"
+          subcriteria:
+            - Appropriate follow-up timeline
+            - Clear monitoring parameters
+            - Escalation criteria defined
+
+      response_format: standard
+      output_mapping:
+        score:
+          suffix: score
+          type: integer
+        rationale:
+          suffix: rationale
+          type: string
+
+      pool_size: 10
+      temperature: 0.0
+      max_tokens: 500
+
+      schema:
+        fields: dynamic
+
+sinks:
+  results:
+    plugin: csv
+    options:
+      path: examples/multi_query_assessment/output/results.csv
+      schema:
+        fields: dynamic
+
+default_sink: results
+
+landscape:
+  url: sqlite:///examples/multi_query_assessment/runs/audit.db

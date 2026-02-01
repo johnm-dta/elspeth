@@ -1,0 +1,5 @@
+[
+  {"order_id": 1, "items": [{"sku": "A1", "qty": 2}, {"sku": "B2", "qty": 1}]},
+  {"order_id": 2, "items": [{"sku": "C3", "qty": 5}]},
+  {"order_id": 3, "items": [{"sku": "A1", "qty": 1}, {"sku": "D4", "qty": 3}, {"sku": "E5", "qty": 2}]}
+]

@@ -1,0 +1,66 @@
+# Tier Model Enforcement
+#
+# Runs AST-based static analysis to detect defensive programming patterns
+# that violate the three-tier trust model. Fails on:
+#   - Unallowlisted tier violations
+#   - Stale allowlist entries (entries that don't match any code)
+#   - Expired allowlist entries
+
+name: Enforce Tier Model
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'src/**/*.py'
+      - 'scripts/cicd/enforce_tier_model.py'
+      - 'config/cicd/enforce_tier_model.yaml'
+  pull_request:
+    paths:
+      - 'src/**/*.py'
+      - 'scripts/cicd/enforce_tier_model.py'
+      - 'config/cicd/enforce_tier_model.yaml'
+
+jobs:
+  check:
+    name: Check for tier model violations
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: Run tier model enforcement
+        run: |
+          python scripts/cicd/enforce_tier_model.py check \
+            --root src/elspeth \
+            --allowlist config/cicd/enforce_tier_model.yaml \
+            --exclude "**/__pycache__/*" \
+            --format text
+
+      - name: Upload JSON report (on failure)
+        if: failure()
+        run: |
+          python scripts/cicd/enforce_tier_model.py check \
+            --root src/elspeth \
+            --allowlist config/cicd/enforce_tier_model.yaml \
+            --exclude "**/__pycache__/*" \
+            --format json > enforce-tier-model-report.json || true
+
+      - name: Upload report artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: enforce-tier-model-report
+          path: enforce-tier-model-report.json
+          retention-days: 7

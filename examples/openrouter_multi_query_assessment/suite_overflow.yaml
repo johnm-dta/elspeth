@@ -1,0 +1,138 @@
+# ELSPETH Multi-Query Overflow Stress Test
+#
+# This test is designed to stress the pool_size overflow behavior:
+# - 20 rows in input
+# - 2 case studies × 5 criteria = 10 queries per row
+# - pool_size: 5 (so 10 queries must compete for 5 slots)
+# - 200 total LLM calls
+#
+# DIAGNOSTIC DESIGN:
+# Each query asks the LLM to echo back unique identifiers:
+# - Row ID (row-01 through row-20)
+# - Case study name (cs1 or cs2)
+# - Criterion code (A through E)
+# - The word/number/color from that case study
+#
+# If the plugin has bugs causing out-of-order execution or data mixing,
+# the echoed values won't match the expected combination.
+#
+# Run with:
+#   uv run elspeth run -s examples/openrouter_multi_query_assessment/suite_overflow.yaml --execute
+
+source:
+  plugin: csv
+  options:
+    path: examples/openrouter_multi_query_assessment/input_overflow.csv
+    schema:
+      mode: free
+      fields:
+        - "user_id: str"
+        - "cs1_word: str"
+        - "cs1_number: str"
+        - "cs1_color: str"
+        - "cs2_word: str"
+        - "cs2_number: str"
+        - "cs2_color: str"
+    on_validation_failure: discard
+
+transforms:
+  - plugin: openrouter_multi_query_llm
+    options:
+      model: "anthropic/claude-3-5-sonnet"
+      api_key: "${OPENROUTER_API_KEY}"
+
+      system_prompt: |
+        You are an echo bot. Your ONLY job is to echo back the exact values
+        provided in the query. Respond in this EXACT JSON format:
+        {
+          "echo_row": "<the ROW value>",
+          "echo_case": "<the CASE value>",
+          "echo_criterion": "<the CRITERION value>",
+          "echo_word": "<the WORD value>",
+          "echo_number": "<the NUMBER value>",
+          "echo_color": "<the COLOR value>"
+        }
+
+        Copy the values EXACTLY as provided. Do not add or change anything.
+
+      template: |
+        ECHO THESE VALUES EXACTLY:
+
+        ROW={{ row.row.user_id }}
+        CASE={{ row.case_study.name }}
+        CRITERION={{ row.criterion.code }}
+        WORD={{ row.input_1 }}
+        NUMBER={{ row.input_2 }}
+        COLOR={{ row.input_3 }}
+
+        Respond with JSON containing these exact values.
+
+      # Multi-query plugin generates input_1/2/3 and criterion from case_studies × criteria
+      required_input_fields: []  # Opt-out: fields are generated dynamically by plugin
+
+      case_studies:
+        - name: cs1
+          input_fields: [cs1_word, cs1_number, cs1_color]
+        - name: cs2
+          input_fields: [cs2_word, cs2_number, cs2_color]
+
+      criteria:
+        - name: criterion_a
+          code: CRIT-A
+          description: "First criterion"
+        - name: criterion_b
+          code: CRIT-B
+          description: "Second criterion"
+        - name: criterion_c
+          code: CRIT-C
+          description: "Third criterion"
+        - name: criterion_d
+          code: CRIT-D
+          description: "Fourth criterion"
+        - name: criterion_e
+          code: CRIT-E
+          description: "Fifth criterion"
+
+      response_format: standard
+      output_mapping:
+        echo_row:
+          suffix: echo_row
+          type: string
+        echo_case:
+          suffix: echo_case
+          type: string
+        echo_criterion:
+          suffix: echo_criterion
+          type: string
+        echo_word:
+          suffix: echo_word
+          type: string
+        echo_number:
+          suffix: echo_number
+          type: string
+        echo_color:
+          suffix: echo_color
+          type: string
+
+      # STRESS TEST: pool_size (5) < queries per row (10)
+      # This forces overflow and tests backpressure handling
+      pool_size: 5
+
+      temperature: 0.0
+      max_tokens: 200
+
+      schema:
+        fields: dynamic
+
+sinks:
+  output:
+    plugin: csv
+    options:
+      path: examples/openrouter_multi_query_assessment/output/overflow_results.csv
+      schema:
+        fields: dynamic
+
+default_sink: output
+
+landscape:
+  url: sqlite:///examples/openrouter_multi_query_assessment/runs/overflow_audit.db

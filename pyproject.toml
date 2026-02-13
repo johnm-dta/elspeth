@@ -1,6 +1,6 @@
 [project]
 name = "elspeth"
-version = "0.1.0"
+version = "0.3.0"
 description = "Auditable Sense/Decide/Act pipelines for high-reliability systems"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -8,7 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "John" }]
 keywords = ["elspeth", "audit", "pipeline", "sda", "traceability", "data-processing"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -193,9 +193,9 @@ chaosweb = "elspeth.testing.chaosweb.cli:main"
 check-contracts = "scripts.check_contracts:main"
 
 [project.urls]
-Homepage = "https://github.com/your-org/elspeth"
-Documentation = "https://github.com/your-org/elspeth#readme"
-Repository = "https://github.com/your-org/elspeth"
+Homepage = "https://github.com/johnm-dta/elspeth"
+Documentation = "https://github.com/johnm-dta/elspeth#readme"
+Repository = "https://github.com/johnm-dta/elspeth"
 
 [build-system]
 requires = ["hatchling"]
@@ -257,8 +257,6 @@ show_error_codes = true
 plugins = ["pydantic.mypy"]
 # Allow unused ignores - needed for pre-commit which runs in isolated env
 warn_unused_ignores = false
-# Exclude alembic migration files - they're not packages
-exclude = ["alembic/versions/.*\\.py$"]
 
 [[tool.mypy.overrides]]
 module = [
@@ -353,9 +351,9 @@ paths_to_mutate = [
     "src/elspeth/core/landscape/",
     "src/elspeth/core/checkpoint/",
     # Engine - row processing and orchestration
-    "src/elspeth/engine/orchestrator.py",
+    "src/elspeth/engine/orchestrator/",
     "src/elspeth/engine/processor.py",
-    "src/elspeth/engine/executors.py",
+    "src/elspeth/engine/executors/",
     "src/elspeth/engine/coalesce_executor.py",
     "src/elspeth/engine/tokens.py",
 ]

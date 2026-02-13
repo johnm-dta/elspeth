@@ -100,6 +100,9 @@ class RecoveryManager:
         if run.status == RunStatus.RUNNING:
             return ResumeCheck(can_resume=False, reason="Run is still in progress")
 
+        # Any other status (FAILED, INTERRUPTED) is eligible for resume
+        # if a valid checkpoint exists.
+
         try:
             checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
         except IncompatibleCheckpointError as e:

@@ -377,6 +377,51 @@ class TestOrchestratorEmptyPipeline:
         assert run_result.rows_processed == 0
         assert len(sink.results) == 0
 
+    def test_flexible_source_contract_persisted_when_all_rows_quarantined(self, tmp_path, payload_store) -> None:
+        """All-invalid FLEXIBLE runs still persist declared run contract."""
+        from elspeth.core.landscape import LandscapeDB, LandscapeRecorder
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "all_invalid.json"
+        json_file.write_text('[{"id": "bad"}, {"id": "still_bad"}]')
+
+        db = LandscapeDB.in_memory()
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {"mode": "flexible", "fields": ["id: int"]},
+                "on_validation_failure": "quarantine",
+            }
+        )
+        default_sink = CollectSink(name="default")
+        quarantine_sink = CollectSink(name="quarantine")
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[],
+            sinks={
+                "default": as_sink(default_sink),
+                "quarantine": as_sink(quarantine_sink),
+            },
+        )
+
+        orchestrator = Orchestrator(db)
+        run_result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
+
+        assert run_result.status == RunStatus.COMPLETED
+        assert run_result.rows_processed == 2
+        assert run_result.rows_quarantined == 2
+        assert len(default_sink.results) == 0
+        assert len(quarantine_sink.results) == 2
+
+        recorder = LandscapeRecorder(db)
+        contract = recorder.get_run_contract(run_result.run_id)
+        assert contract is not None
+        assert contract.mode == "FLEXIBLE"
+        assert contract.locked is True
+        assert [field.normalized_name for field in contract.fields] == ["id"]
+
 
 class TestOrchestratorAcceptsGraph:
     """Orchestrator accepts ExecutionGraph parameter."""

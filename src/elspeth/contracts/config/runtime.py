@@ -280,9 +280,10 @@ class RuntimeRateLimitConfig:
         - services: RateLimitSettings.services
 
     Protocol Coverage:
-        RuntimeRateLimitProtocol requires: enabled, default_requests_per_minute.
-        The additional fields (persistence_path, services) are preserved for
-        full Settings fidelity but not part of the protocol.
+        RuntimeRateLimitProtocol requires: enabled, default_requests_per_minute,
+        persistence_path, and get_service_config(service_name).
+        services remains a concrete RuntimeRateLimitConfig field used to
+        implement get_service_config().
 
     Note: Unlike RetryConfig, there are no plugin-level rate limit overrides.
     Rate limiting is configured globally in Settings only.

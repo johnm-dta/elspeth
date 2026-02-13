@@ -2,8 +2,8 @@
 
 C4 model documentation for the ELSPETH auditable pipeline framework.
 
-**Last Updated:** 2026-02-12 (synchronized with RC-2.5 branch)
-**Framework Version:** 0.1.0 (RC-2.5)
+**Last Updated:** 2026-02-13 (synchronized with RC-3 branch)
+**Framework Version:** 0.3.0 (RC-3)
 **Architecture Grade:** A- (Production Ready)
 
 ---
@@ -17,8 +17,8 @@ C4 model documentation for the ELSPETH auditable pipeline framework.
 | **Data flow?** | Source → Transforms/Gates → Sinks (all recorded) |
 | **Audit storage?** | SQLite/SQLCipher (dev) / PostgreSQL (prod) |
 | **Extension model?** | pluggy-based plugin system |
-| **Production LOC** | ~74,000 Python lines |
-| **Test LOC** | ~201,000 Python lines (2.7:1 ratio) |
+| **Production LOC** | ~76,000 Python lines |
+| **Test LOC** | ~207,000 Python lines (2.7:1 ratio) |
 | **Architecture Grade** | A- (Production Ready) |
 
 ---
@@ -166,7 +166,7 @@ C4Container
 | **Audit DB** | SQLite/SQLCipher/PostgreSQL | — | Complete audit trail storage (21 tables) |
 | **Payload Store** | Filesystem | — | Content-addressable blob storage with retention |
 
-**Total Production LOC:** ~74,000 | **Total Test LOC:** ~201,000 | **Test Ratio:** 2.7:1
+**Total Production LOC:** ~74,000 | **Total Test LOC:** ~207,000 | **Test Ratio:** 2.7:1
 
 ---
 
@@ -949,7 +949,7 @@ Based on comprehensive analysis (2026-02-02), ELSPETH demonstrates exceptional a
 12. **Quality Assessment** - Architecture grade and risk analysis
 
 **Key Metrics:**
-- Production LOC: ~74,000 (234 Python files)
+- Production LOC: ~76,000 (234 Python files)
 - Test LOC: ~201,000 (2.7:1 ratio)
 - Subsystems: 22
 - Plugins: 29+

@@ -104,7 +104,8 @@ class JSONFormatter:
 
     def format(self, record: dict[str, Any]) -> str:
         """Format as JSON line."""
-        return json.dumps(record, default=str)
+        normalized = serialize_datetime(record)
+        return json.dumps(normalized, allow_nan=False)
 
 
 class LineageTextFormatter:
@@ -220,7 +221,8 @@ class CSVFormatter:
                 # Use serialize_datetime to validate (rejects NaN/Infinity) and convert datetimes
                 result[full_key] = json.dumps(serialize_datetime(value))
             else:
-                result[full_key] = value
+                # Validate scalar values and normalize datetimes to ISO strings.
+                result[full_key] = serialize_datetime(value)
 
         return result
 

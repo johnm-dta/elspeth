@@ -543,6 +543,8 @@ landscape:
 | `format` | string | `csv` | Export format: `csv`, `json` |
 | `sign` | bool | `false` | HMAC sign each record for integrity |
 
+**Audit export signing:** For legal-grade audit trail integrity, enable export signing by setting `landscape.export.sign = true` in your pipeline settings. This produces cryptographically signed exports (HMAC) that can be independently verified. Requires `ELSPETH_SIGNING_KEY` to be set (see [Environment Variables](environment-variables.md)).
+
 ### JSONL Change Journal
 
 Enable a redundant JSONL change journal for emergency backup. This is **not** the canonical audit record—use when you need a text-based, append-only backup stream.
@@ -847,7 +849,7 @@ telemetry:
 | Level | Events Emitted | Volume | Use Case |
 |-------|----------------|--------|----------|
 | `lifecycle` | Run start/complete, phase transitions | ~10-20/run | Production monitoring |
-| `rows` | Lifecycle + row creation, transform completion, gate routing | N × M events | Debugging, progress tracking |
+| `rows` | Lifecycle + row creation, transform completion, gate routing, field-resolution mapping | N × M events | Debugging, progress tracking |
 | `full` | Rows + external call details (LLM prompts/responses, HTTP, SQL) | High | Deep debugging, call analysis |
 
 **Choosing a granularity:**
@@ -928,7 +930,6 @@ options:
 **Datadog**
 ```yaml
 options:
-  api_key: ${DD_API_KEY}          # optional if using local agent
   service_name: "elspeth"         # optional
   env: "production"               # optional
   agent_host: "localhost"         # optional

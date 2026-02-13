@@ -254,7 +254,9 @@ class LandscapeExporter:
                 "error_message": operation.error_message,
                 # BUG #9: Add payload reference fields
                 "input_data_ref": operation.input_data_ref,
+                "input_data_hash": operation.input_data_hash,
                 "output_data_ref": operation.output_data_ref,
+                "output_data_hash": operation.output_data_hash,
             }
 
             # External calls for this operation (from pre-loaded dict)

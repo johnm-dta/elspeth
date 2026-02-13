@@ -62,8 +62,8 @@ def _build_simple_graph(config: PipelineConfig) -> ExecutionGraph:
         graph.add_edge("source", node_id, label="continue", mode=RoutingMode.MOVE)
 
     # Set the internal mappings that orchestrator expects
-    graph._sink_id_map = sink_ids
-    graph._transform_id_map = {}  # No transforms in this simple test
+    graph.set_sink_id_map(sink_ids)
+    graph.set_transform_id_map({})  # No transforms in this simple test
 
     return graph
 

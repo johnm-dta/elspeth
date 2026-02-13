@@ -27,7 +27,7 @@ from pydantic import Field
 from elspeth.contracts.contract_propagation import narrow_contract_to_output
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema import SchemaConfig
-from elspeth.contracts.schema_contract import PipelineRow
+from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.base import BaseTransform
 from elspeth.plugins.config_base import DataPluginConfig, PluginConfigError
 from elspeth.plugins.results import TransformResult
@@ -152,9 +152,13 @@ class JSONExplode(BaseTransform):
                 f"This indicates an upstream validation bug - check source schema or prior transforms."
             )
 
-        # Build base output (all fields except the array field)
-        row_dict = row.to_dict()
-        base = {k: v for k, v in row_dict.items() if k != self._array_field}
+        row_data = row.to_dict()
+        if self._array_field in row_data:
+            normalized_array_field = self._array_field
+        else:
+            # row[self._array_field] above already validated resolvability.
+            normalized_array_field = row.contract.resolve_name(self._array_field)
+        base = {k: v for k, v in row_data.items() if k != normalized_array_field}
 
         # Empty array: nothing to deaggregate — quarantine with clear audit trail
         if len(array_value) == 0:
@@ -196,6 +200,21 @@ class JSONExplode(BaseTransform):
             input_contract=row.contract,
             output_row=output_rows[0],
         )
+        if output_contract.find_field(self._output_field) is None:
+            output_contract = SchemaContract(
+                mode=output_contract.mode,
+                fields=(
+                    *output_contract.fields,
+                    FieldContract(
+                        normalized_name=self._output_field,
+                        original_name=self._output_field,
+                        python_type=object,
+                        required=False,
+                        source="inferred",
+                    ),
+                ),
+                locked=True,
+            )
 
         return TransformResult.success_multi(
             [PipelineRow(r, output_contract) for r in output_rows],

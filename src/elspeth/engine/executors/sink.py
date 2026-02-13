@@ -70,6 +70,23 @@ class SinkExecutor:
         self._spans = span_factory
         self._run_id = run_id
 
+    def _complete_states_failed(
+        self,
+        *,
+        states: list[tuple[TokenInfo, NodeStateOpen]],
+        duration_ms: float,
+        error: ExecutionError,
+    ) -> None:
+        """Complete all opened sink states as FAILED."""
+        per_token_ms = duration_ms / len(states)
+        for _, state in states:
+            self._recorder.complete_node_state(
+                state_id=state.state_id,
+                status=NodeStateStatus.FAILED,
+                duration_ms=per_token_ms,
+                error=error,
+            )
+
     def write(
         self,
         sink: SinkProtocol,
@@ -141,6 +158,28 @@ class SinkExecutor:
                 input_data=input_dict,
             )
             states.append((token, state))
+        # Synchronize context contract to the sink-bound tokens.
+        # Sinks (e.g., headers: original) lazily capture ctx.contract during write().
+        # For mixed batches, merge contracts to preserve all available header lineage.
+        contract_merge_start = time.perf_counter()
+        try:
+            batch_contract = tokens[0].row_data.contract
+            for token in tokens[1:]:
+                batch_contract = batch_contract.merge(token.row_data.contract)
+        except Exception as e:
+            merge_duration_ms = (time.perf_counter() - contract_merge_start) * 1000
+            merge_error: ExecutionError = {
+                "exception": str(e),
+                "type": type(e).__name__,
+                "phase": "contract_merge",
+            }
+            self._complete_states_failed(
+                states=states,
+                duration_ms=merge_duration_ms,
+                error=merge_error,
+            )
+            raise
+        ctx.contract = batch_contract
 
         # CRITICAL: Clear state_id before entering operation context.
         # The ctx.state_id may still be set from the last transform that processed
@@ -175,19 +214,15 @@ class SinkExecutor:
                     duration_ms = (time.perf_counter() - start) * 1000
                 except Exception as e:
                     duration_ms = (time.perf_counter() - start) * 1000
-                    per_token_ms = duration_ms / len(tokens)
-                    # Mark all token states as failed
                     error: ExecutionError = {
                         "exception": str(e),
                         "type": type(e).__name__,
                     }
-                    for _, state in states:
-                        self._recorder.complete_node_state(
-                            state_id=state.state_id,
-                            status=NodeStateStatus.FAILED,
-                            duration_ms=per_token_ms,
-                            error=error,
-                        )
+                    self._complete_states_failed(
+                        states=states,
+                        duration_ms=duration_ms,
+                        error=error,
+                    )
                     raise
 
             # CRITICAL: Flush sink to ensure durability BEFORE checkpointing
@@ -204,14 +239,11 @@ class SinkExecutor:
                     "phase": "flush",
                 }
                 flush_duration_ms = (time.perf_counter() - start) * 1000
-                per_token_flush_ms = flush_duration_ms / len(tokens)
-                for _, state in states:
-                    self._recorder.complete_node_state(
-                        state_id=state.state_id,
-                        status=NodeStateStatus.FAILED,
-                        duration_ms=per_token_flush_ms,
-                        error=flush_error,
-                    )
+                self._complete_states_failed(
+                    states=states,
+                    duration_ms=flush_duration_ms,
+                    error=flush_error,
+                )
                 raise
 
             # Set output data on operation handle for audit trail

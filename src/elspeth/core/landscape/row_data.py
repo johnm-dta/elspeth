@@ -36,7 +36,7 @@ class RowDataResult:
     """Result of a row data retrieval with explicit state.
 
     Invariants:
-        - AVAILABLE state requires non-None data
+        - AVAILABLE state requires dict data
         - All other states require None data
 
     Example:
@@ -54,7 +54,15 @@ class RowDataResult:
     data: dict[str, Any] | None
 
     def __post_init__(self) -> None:
-        if self.state == RowDataState.AVAILABLE and self.data is None:
-            raise ValueError("AVAILABLE state requires non-None data")
+        if self.state == RowDataState.AVAILABLE:
+            if self.data is None:
+                raise ValueError("AVAILABLE state requires non-None data")
+            payload: object = self.data
+            match payload:
+                case dict():
+                    pass
+                case _:
+                    actual_type = type(payload).__name__
+                    raise TypeError(f"AVAILABLE state requires dict data, got {actual_type}")
         if self.state != RowDataState.AVAILABLE and self.data is not None:
             raise ValueError(f"{self.state} state requires None data")

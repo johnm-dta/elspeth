@@ -32,6 +32,7 @@ from elspeth.engine.orchestrator.types import (
     ExecutionCounters,
     RunResult,
 )
+from elspeth.testing import make_pipeline_row
 
 # Shared contract for test helpers — OBSERVED mode with no fixed fields
 _TEST_CONTRACT = SchemaContract(mode="OBSERVED", fields=())
@@ -113,7 +114,7 @@ def _make_row_result(
     token = _make_token(branch_name=branch_name)
     return RowResult(
         token=token,
-        final_data={"field": "value"},
+        final_data=make_pipeline_row({"field": "value"}),
         outcome=outcome,
         sink_name=sink_name,
     )
@@ -549,7 +550,7 @@ class TestAccumulateRowOutcomesProperties:
         with pytest.raises(OrchestrationInvariantError, match="ROUTED outcome requires sink_name"):
             RowResult(
                 token=_make_token(),
-                final_data={"field": "value"},
+                final_data=make_pipeline_row({"field": "value"}),
                 outcome=RowOutcome.ROUTED,
                 sink_name=None,
             )

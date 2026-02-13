@@ -129,6 +129,22 @@ class TestBackpressure:
         with pytest.raises(TimeoutError, match="buffer space"):
             buffer.submit("row-2", timeout=0.1)
 
+    def test_submit_timeout_zero_is_immediate(self) -> None:
+        """submit(timeout=0.0) is an immediate timeout, not infinite wait."""
+        buffer: RowReorderBuffer[str] = RowReorderBuffer(max_pending=1)
+
+        buffer.submit("row-1")
+
+        with pytest.raises(TimeoutError, match="buffer space"):
+            buffer.submit("row-2", timeout=0.0)
+
+    def test_wait_for_next_release_timeout_zero_is_immediate(self) -> None:
+        """wait_for_next_release(timeout=0.0) times out immediately when not ready."""
+        buffer: RowReorderBuffer[str] = RowReorderBuffer(max_pending=1)
+
+        with pytest.raises(TimeoutError, match="sequence"):
+            buffer.wait_for_next_release(timeout=0.0)
+
 
 class TestShutdown:
     """Shutdown and error handling tests."""

@@ -59,6 +59,10 @@ def normalize_type_for_contract(value: Any) -> type:
     if value is None:
         return type(None)
 
+    # Missing-value sentinels normalize to NoneType
+    if value is pd.NA:
+        return type(None)
+
     # pd.NaT = "Not a Time" (missing datetime), treat like None
     if value is pd.NaT:
         return type(None)
@@ -78,6 +82,8 @@ def normalize_type_for_contract(value: Any) -> type:
     if isinstance(value, pd.Timestamp):
         return datetime
     if isinstance(value, np.datetime64):
+        if np.isnat(value):
+            return type(None)
         return datetime
     if isinstance(value, (np.str_, np.bytes_)):
         return str

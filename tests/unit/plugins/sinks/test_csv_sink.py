@@ -84,7 +84,7 @@ class TestCSVSink:
         output_file = tmp_path / "output.csv"
         sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
 
-        sink.write([{"id": "1"}], ctx)
+        sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.close()
         sink.close()  # Should not raise
 
@@ -95,7 +95,7 @@ class TestCSVSink:
         output_file = tmp_path / "output.csv"
         sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
 
-        sink.write([{"id": "1"}], ctx)
+        sink.write([{"id": "1", "name": "alice"}], ctx)
         sink.flush()
 
         # File should have content before close
@@ -175,6 +175,54 @@ class TestCSVSink:
         assert artifact.size_bytes == 0
         # Empty write still has a hash (of empty content)
         assert artifact.content_hash == hashlib.sha256(b"").hexdigest()
+
+    def test_missing_required_field_fails_fast_even_without_validate_input(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Missing required fields must fail fast with validate_input=False."""
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+
+        with pytest.raises(ValueError, match="missing required fields"):
+            sink.write([{"id": "1"}], ctx)
+
+        sink.close()
+        assert not output_file.exists()
+
+    def test_missing_required_field_mid_batch_writes_nothing(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """If any row misses required fields, entire batch fails before writes."""
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+
+        rows = [
+            {"id": "1", "name": "alice"},
+            {"id": "2"},  # Missing required field "name"
+        ]
+        with pytest.raises(ValueError, match="missing required fields"):
+            sink.write(rows, ctx)
+
+        sink.close()
+        assert not output_file.exists()
+
+    def test_missing_optional_field_is_allowed(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Optional schema fields may be omitted without failing."""
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        optional_schema = {"mode": "fixed", "fields": ["id: str", "name: str?"]}
+        output_file = tmp_path / "output.csv"
+        sink = CSVSink({"path": str(output_file), "schema": optional_schema})
+
+        sink.write([{"id": "1"}], ctx)
+        sink.close()
+
+        with open(output_file) as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        assert len(rows) == 1
+        assert rows[0]["id"] == "1"
+        assert rows[0]["name"] == ""
 
     def test_has_plugin_version(self) -> None:
         """CSVSink has plugin_version attribute."""

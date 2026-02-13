@@ -142,3 +142,11 @@ class TestTracingConfigValidation:
         config = TracingConfig(provider="none")
         errors = validate_tracing_config(config)
         assert len(errors) == 0
+
+    def test_unknown_provider_returns_validation_error(self) -> None:
+        """Unknown provider returns explicit validation error."""
+        config = TracingConfig(provider="unknown_provider")
+        errors = validate_tracing_config(config)
+        assert len(errors) == 1
+        assert "Unknown tracing provider" in errors[0]
+        assert "unknown_provider" in errors[0]

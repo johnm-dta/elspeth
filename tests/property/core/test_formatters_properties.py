@@ -400,8 +400,8 @@ class TestJSONFormatterProperties:
         parsed = json.loads(result)
         assert parsed == record
 
-    def test_format_handles_datetime_via_default_str(self) -> None:
-        """Property: Datetimes are handled by default=str in json.dumps."""
+    def test_format_handles_datetime_as_iso_string(self) -> None:
+        """Property: Datetimes are normalized to ISO-8601 strings."""
         import json
 
         dt = datetime(2024, 6, 15, 12, 0, 0, tzinfo=UTC)
@@ -409,4 +409,4 @@ class TestJSONFormatterProperties:
         formatter = JSONFormatter()
         result = formatter.format(record)
         parsed = json.loads(result)
-        assert isinstance(parsed["ts"], str)
+        assert parsed["ts"] == "2024-06-15T12:00:00+00:00"

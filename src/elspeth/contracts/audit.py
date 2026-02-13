@@ -630,9 +630,22 @@ class Operation:
     status: Literal["open", "completed", "failed", "pending"]
     completed_at: datetime | None = None
     input_data_ref: str | None = None
+    input_data_hash: str | None = None
     output_data_ref: str | None = None
+    output_data_hash: str | None = None
     error_message: str | None = None
     duration_ms: float | None = None
+
+    _ALLOWED_OPERATION_TYPES: ClassVar[frozenset[str]] = frozenset({"source_load", "sink_write"})
+    _ALLOWED_STATUSES: ClassVar[frozenset[str]] = frozenset({"open", "completed", "failed", "pending"})
+
+    def __post_init__(self) -> None:
+        """Validate constrained literal fields for Tier 1 audit integrity."""
+        if self.operation_type not in self._ALLOWED_OPERATION_TYPES:
+            raise ValueError(f"operation_type must be one of {sorted(self._ALLOWED_OPERATION_TYPES)}, got {self.operation_type!r}")
+
+        if self.status not in self._ALLOWED_STATUSES:
+            raise ValueError(f"status must be one of {sorted(self._ALLOWED_STATUSES)}, got {self.status!r}")
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for database insertion.
@@ -648,7 +661,9 @@ class Operation:
             "completed_at": self.completed_at,
             "status": self.status,
             "input_data_ref": self.input_data_ref,
+            "input_data_hash": self.input_data_hash,
             "output_data_ref": self.output_data_ref,
+            "output_data_hash": self.output_data_hash,
             "error_message": self.error_message,
             "duration_ms": self.duration_ms,
         }

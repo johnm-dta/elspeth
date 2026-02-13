@@ -7,7 +7,7 @@ import json
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from elspeth.contracts import (
     Call,
@@ -57,8 +57,9 @@ class CallRecordingMixin:
             indices concurrently. Safe for pooled execution scenarios.
 
         Persistence:
-            Counter persists across retries within the same run. The LandscapeRecorder
-            lifecycle matches the run lifecycle, not the execution attempt.
+            Counter seeds from the database on first access per state_id,
+            so it survives recorder recreation (e.g., on resume). Subsequent
+            allocations are pure in-memory for performance.
 
         Args:
             state_id: Node state ID to allocate index for
@@ -77,7 +78,13 @@ class CallRecordingMixin:
         """
         with self._call_index_lock:
             if state_id not in self._call_indices:
-                self._call_indices[state_id] = 0
+                # Seed from database to survive recorder recreation on resume.
+                # Without this, a new recorder would restart indices at 0 for
+                # any state_id that already has recorded calls, causing
+                # UNIQUE(state_id, call_index) violations.
+                row = self._ops.execute_fetchone(select(func.max(calls_table.c.call_index)).where(calls_table.c.state_id == state_id))
+                existing_max = row[0] if row is not None and row[0] is not None else -1
+                self._call_indices[state_id] = existing_max + 1
             idx = self._call_indices[state_id]
             self._call_indices[state_id] += 1
             return idx
@@ -207,9 +214,12 @@ class CallRecordingMixin:
         operation_id = f"op_{uuid4().hex}"  # "op_" + 32 hex = 35 chars, well under 64
 
         input_ref = None
-        if input_data and self._payload_store is not None:
-            input_bytes = canonical_json(input_data).encode("utf-8")
-            input_ref = self._payload_store.store(input_bytes)
+        input_hash = None
+        if input_data:
+            input_hash = stable_hash(input_data)
+            if self._payload_store is not None:
+                input_bytes = canonical_json(input_data).encode("utf-8")
+                input_ref = self._payload_store.store(input_bytes)
 
         timestamp = now()
         operation = Operation(
@@ -220,6 +230,7 @@ class CallRecordingMixin:
             started_at=timestamp,
             status="open",
             input_data_ref=input_ref,
+            input_data_hash=input_hash,
         )
 
         self._ops.execute_insert(operations_table.insert().values(**operation.to_dict()))
@@ -251,6 +262,7 @@ class CallRecordingMixin:
         # Payload storage is deferred until AFTER the status check succeeds
         # to avoid orphaned blobs on duplicate-completion races or invalid IDs.
         timestamp = now()
+        output_hash = stable_hash(output_data) if output_data else None
         stmt = (
             operations_table.update()
             .where((operations_table.c.operation_id == operation_id) & (operations_table.c.status == "open"))
@@ -259,6 +271,7 @@ class CallRecordingMixin:
                 status=status,
                 error_message=error,
                 duration_ms=duration_ms,
+                output_data_hash=output_hash,
             )
         )
         with self._ops._db.connection() as conn:
@@ -294,7 +307,12 @@ class CallRecordingMixin:
         """
         with self._call_index_lock:  # Reuse existing lock
             if operation_id not in self._operation_call_indices:
-                self._operation_call_indices[operation_id] = 0
+                # Seed from database to survive recorder recreation on resume.
+                row = self._ops.execute_fetchone(
+                    select(func.max(calls_table.c.call_index)).where(calls_table.c.operation_id == operation_id)
+                )
+                existing_max = row[0] if row is not None and row[0] is not None else -1
+                self._operation_call_indices[operation_id] = existing_max + 1
             idx = self._operation_call_indices[operation_id]
             self._operation_call_indices[operation_id] += 1
             return idx
@@ -413,7 +431,9 @@ class CallRecordingMixin:
             completed_at=row.completed_at,
             status=row.status,
             input_data_ref=row.input_data_ref,
+            input_data_hash=row.input_data_hash,
             output_data_ref=row.output_data_ref,
+            output_data_hash=row.output_data_hash,
             error_message=row.error_message,
             duration_ms=row.duration_ms,
         )
@@ -452,7 +472,9 @@ class CallRecordingMixin:
                 completed_at=row.completed_at,
                 status=row.status,
                 input_data_ref=row.input_data_ref,
+                input_data_hash=row.input_data_hash,
                 output_data_ref=row.output_data_ref,
+                output_data_hash=row.output_data_hash,
                 error_message=row.error_message,
                 duration_ms=row.duration_ms,
             )

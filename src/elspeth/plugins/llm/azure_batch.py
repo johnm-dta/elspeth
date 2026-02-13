@@ -242,8 +242,13 @@ class AzureBatchLLMTransform(BaseTransform):
                 return
             case "langfuse":
                 self._setup_langfuse_tracing(logger)
-            case "none" | _:
+            case "none":
                 pass  # No tracing
+            case _:
+                logger.warning(
+                    "Unknown tracing provider encountered after validation - tracing disabled",
+                    provider=self._tracing_config.provider,
+                )
 
     def _setup_langfuse_tracing(self, logger: Any) -> None:
         """Initialize Langfuse tracing for batch job tracking (v3 API).
@@ -519,7 +524,7 @@ class AzureBatchLLMTransform(BaseTransform):
             custom_id = f"row-{idx}-{uuid.uuid4().hex[:8]}"
 
             try:
-                rendered = self._template.render_with_metadata(row.to_dict())
+                rendered = self._template.render_with_metadata(row, contract=row.contract)
             except TemplateError as e:
                 template_errors.append((idx, str(e)))
                 continue
@@ -1052,8 +1057,21 @@ class AzureBatchLLMTransform(BaseTransform):
 
                 # Don't overwrite successful results from output file
                 if custom_id not in results_by_id:
-                    # Normalize to standard error format for downstream handling
-                    error_body = error_result.get("error", error_result.get("response", {}).get("body", {}))
+                    # Extract error body with explicit structure checking.
+                    # Azure batch errors appear in two formats:
+                    #   {"error": {...}}  or  {"response": {"body": {...}}}
+                    # Preserve raw structure when neither matches, rather than
+                    # silently falling back to an empty dict.
+                    if "error" in error_result:
+                        error_body = error_result["error"]
+                    elif "response" in error_result and isinstance(error_result["response"], dict) and "body" in error_result["response"]:
+                        error_body = error_result["response"]["body"]
+                    else:
+                        error_body = {
+                            "reason": "unrecognized_error_format",
+                            "raw_keys": list(error_result.keys()),
+                            "raw_preview": str(error_result)[:500],
+                        }
                     results_by_id[custom_id] = {
                         "custom_id": custom_id,
                         "error": error_body,

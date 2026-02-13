@@ -34,6 +34,7 @@ from elspeth.contracts.enums import (
 )
 from elspeth.contracts.events import (
     ExternalCallCompleted,
+    FieldResolutionApplied,
     GateEvaluated,
     PhaseAction,
     PhaseChanged,
@@ -136,6 +137,21 @@ row_events = st.one_of(
         token_id=_short_ids,
         outcome=st.sampled_from(list(RowOutcome)),
         sink_name=_sink_names,
+    ),
+    st.builds(
+        FieldResolutionApplied,
+        timestamp=timestamps,
+        run_id=run_ids,
+        source_plugin=_plugin_names,
+        field_count=st.integers(min_value=1, max_value=3),
+        normalization_version=st.one_of(st.none(), st.sampled_from(["v1", "v2"])),
+        resolution_mapping=st.sampled_from(
+            [
+                {"Customer ID": "customer_id"},
+                {"Order Amount": "order_amount", "Order Date": "order_date"},
+                {"E-mail": "e_mail", "ZIP": "zip"},
+            ]
+        ),
     ),
 )
 

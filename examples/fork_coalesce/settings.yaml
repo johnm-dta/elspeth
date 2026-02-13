@@ -1,0 +1,87 @@
+# Fork/Coalesce Example — Parallel Path Merging
+#
+# Demonstrates the fork/join DAG pattern:
+#
+#   source ─(raw)─> truncate ─(preprocessed)─> [fork_gate] ─┬─ path_a ─┐
+#                                                             └─ path_b ─┤
+#                                                                        ├─ [merge_results]
+#                                                              ─(merged)─> [route_output] ─> output
+#
+# Each input row is duplicated into two tokens (one per fork path).
+# The coalesce waits for both to arrive, then merges them using the
+# 'nested' strategy — the output row contains both branches' data
+# under separate keys.
+#
+# Key scenarios fork/coalesce enables:
+#   - Redundancy: send to 3 LLM models, take quorum (2-of-3)
+#   - Fan-out: enrich the same row via multiple external APIs
+#   - Safety: require all paths before emitting (no partial results)
+
+source:
+  plugin: csv
+  on_success: raw
+  options:
+    path: examples/fork_coalesce/input.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'product: str'
+      - 'price: int'
+      - 'category: str'
+      - 'description: str'
+    on_validation_failure: discard
+
+transforms:
+# Pre-fork transform — shared processing before the split
+- name: preprocess
+  plugin: truncate
+  input: raw
+  on_success: preprocessed
+  on_error: discard
+  options:
+    fields:
+      description: 40
+    suffix: "..."
+    schema:
+      mode: observed
+
+gates:
+# Fork every row into two parallel paths
+- name: fork_gate
+  input: preprocessed
+  condition: "True"
+  routes:
+    'true': fork
+    'false': output
+  fork_to:
+    - path_a
+    - path_b
+
+# Route merged results to output sink
+- name: route_output
+  input: merge_results
+  condition: "True"
+  routes:
+    'true': output
+    'false': output
+
+coalesce:
+- name: merge_results
+  branches:
+    - path_a
+    - path_b
+  policy: require_all
+  merge: nested
+
+sinks:
+  output:
+    plugin: json
+    options:
+      path: examples/fork_coalesce/output/merged_results.json
+      schema:
+        mode: observed
+      format: jsonl
+
+landscape:
+  url: sqlite:///examples/fork_coalesce/runs/audit.db

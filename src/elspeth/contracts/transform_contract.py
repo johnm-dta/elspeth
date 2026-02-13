@@ -8,7 +8,7 @@ their input and output contracts. This module bridges PluginSchema
 from __future__ import annotations
 
 from types import UnionType
-from typing import Any, Union, cast, get_args, get_origin
+from typing import Annotated, Any, Union, cast, get_args, get_origin
 
 from elspeth.contracts.data import PluginSchema
 from elspeth.contracts.errors import ContractViolation
@@ -20,6 +20,17 @@ def _is_union_type(t: Any) -> bool:
     """Check if type is a Union (typing.Union or types.UnionType)."""
     origin = get_origin(t)
     return origin is Union or isinstance(t, UnionType)
+
+
+def _unwrap_annotated(annotation: Any) -> Any:
+    """Unwrap typing.Annotated recursively to its underlying type."""
+    current = annotation
+    while get_origin(current) is Annotated:
+        args = get_args(current)
+        if not args:
+            return current
+        current = args[0]
+    return current
 
 
 def _get_python_type(annotation: Any) -> type:
@@ -34,21 +45,26 @@ def _get_python_type(annotation: Any) -> type:
     Returns:
         Python primitive type, or object for unknown types
     """
+    unwrapped = _unwrap_annotated(annotation)
+
     # Handle Optional[X] which is Union[X, None] or X | None
-    if _is_union_type(annotation):
+    if _is_union_type(unwrapped):
         # Union type - get first non-None arg
-        args = get_args(annotation)
+        args = get_args(unwrapped)
+        saw_non_none = False
         for arg in args:
             if arg is not type(None):
-                # Return type if in allowed set, or 'object' for unknown types
-                if arg in ALLOWED_CONTRACT_TYPES:
-                    return cast(type, arg)
-                return object
+                saw_non_none = True
+                resolved = _get_python_type(arg)
+                if resolved is not object:
+                    return resolved
+        if saw_non_none:
+            return object
         return type(None)
 
     # Simple type - return if in allowed set, or 'object' for unknown types
-    if annotation in ALLOWED_CONTRACT_TYPES:
-        return cast(type, annotation)
+    if unwrapped in ALLOWED_CONTRACT_TYPES:
+        return cast(type, unwrapped)
     return object
 
 

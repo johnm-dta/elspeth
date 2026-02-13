@@ -16,7 +16,7 @@ class TestRowResultOutcome:
         token = TokenInfo(row_id="r1", token_id="t1", row_data=make_pipeline_row({}), branch_name=None)
         result = RowResult(
             token=token,
-            final_data={},
+            final_data=make_pipeline_row({}),
             outcome=RowOutcome.COMPLETED,
             sink_name="output",
         )
@@ -31,7 +31,7 @@ class TestRowResultOutcome:
             sink_name = "output" if outcome in (RowOutcome.COMPLETED, RowOutcome.ROUTED, RowOutcome.COALESCED) else None
             result = RowResult(
                 token=token,
-                final_data={},
+                final_data=make_pipeline_row({}),
                 outcome=outcome,
                 sink_name=sink_name,
             )
@@ -53,7 +53,7 @@ class TestRowResultOutcome:
         token = TokenInfo(row_id="r1", token_id="t1", row_data=make_pipeline_row({}), branch_name=None)
         result = RowResult(
             token=token,
-            final_data={},
+            final_data=make_pipeline_row({}),
             outcome=RowOutcome.COMPLETED,
             sink_name="output",
         )
@@ -69,7 +69,7 @@ class TestRowResultOutcome:
         token = TokenInfo(row_id="r1", token_id="t1", row_data=make_pipeline_row({}), branch_name=None)
         result = RowResult(
             token=token,
-            final_data={},
+            final_data=make_pipeline_row({}),
             outcome=RowOutcome.CONSUMED_IN_BATCH,
         )
         assert result.outcome is RowOutcome.CONSUMED_IN_BATCH
@@ -100,7 +100,7 @@ class TestRowResultOutcome:
         token = TokenInfo(row_id="r1", token_id="t1", row_data=make_pipeline_row({}), branch_name=None)
         result = RowResult(
             token=token,
-            final_data={},
+            final_data=make_pipeline_row({}),
             outcome=RowOutcome.BUFFERED,
         )
         assert result.outcome.is_terminal is False

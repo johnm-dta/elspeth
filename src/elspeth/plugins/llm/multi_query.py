@@ -8,6 +8,7 @@ from typing import Any, Self
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.config_base import PluginConfig
 from elspeth.plugins.llm.azure import AzureOpenAIConfig
 
@@ -93,13 +94,13 @@ class QuerySpec:
     case_study_data: dict[str, Any]
     max_tokens: int | None = None  # Per-query override for max_tokens
 
-    def build_template_context(self, row: dict[str, Any]) -> dict[str, Any]:
+    def build_template_context(self, row: PipelineRow | dict[str, Any]) -> dict[str, Any]:
         """Build template context for this query.
 
         Maps input_fields to input_1, input_2, etc. and injects criterion and case_study data.
 
         Args:
-            row: Full row data
+            row: Full row data (dict or PipelineRow)
 
         Returns:
             Context dict with input_N, criterion, case_study, and row
@@ -192,14 +193,15 @@ def validate_multi_query_key_collisions(
     criteria: list[CriterionConfig],
     output_mapping: dict[str, OutputFieldConfig],
 ) -> None:
-    """Validate no duplicate names or reserved suffix collisions.
+    """Validate no duplicate names or output key collisions.
 
     Shared validation for both Azure and OpenRouter multi-query configs.
 
     Checks:
     1. No duplicate case_study names
     2. No duplicate criterion names
-    3. No output_mapping suffixes that collide with reserved LLM suffixes
+    3. No duplicate output_mapping suffixes
+    4. No output_mapping suffixes that collide with reserved LLM suffixes
 
     Raises:
         ValueError: If duplicates or collisions are detected.
@@ -219,6 +221,22 @@ def validate_multi_query_key_collisions(
         if crit.name in criterion_names:
             raise ValueError(f"Duplicate criterion name: '{crit.name}'. Each criterion must have a unique name.")
         criterion_names.add(crit.name)
+
+    # Check output_mapping suffixes are unique (duplicate suffixes overwrite keys)
+    suffix_to_fields: dict[str, list[str]] = {}
+    for json_field, field_config in output_mapping.items():
+        suffix = field_config.suffix
+        if suffix not in suffix_to_fields:
+            suffix_to_fields[suffix] = [json_field]
+        else:
+            suffix_to_fields[suffix].append(json_field)
+
+    duplicate_suffixes = {suffix: fields for suffix, fields in suffix_to_fields.items() if len(fields) > 1}
+    if duplicate_suffixes:
+        details = ", ".join(f"'{suffix}' (fields: {sorted(fields)})" for suffix, fields in sorted(duplicate_suffixes.items()))
+        raise ValueError(
+            f"Duplicate output_mapping suffixes detected. Each suffix must be unique to avoid output key overwrites: {details}"
+        )
 
     # Build set of reserved suffixes (strip leading underscore for comparison)
     reserved_suffixes = set()

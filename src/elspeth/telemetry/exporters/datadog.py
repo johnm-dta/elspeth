@@ -50,9 +50,9 @@ class DatadogExporter:
               agent_port: 8126
 
     Note:
-        Authentication is handled by the Datadog agent itself (via DD_API_KEY
-        environment variable read by ddtrace). This exporter communicates with
-        the local agent, not the Datadog API directly.
+        Authentication is handled by the Datadog agent process. This exporter
+        communicates with the local agent and does not send traces directly to
+        the Datadog API.
     """
 
     _name = "datadog"
@@ -110,6 +110,16 @@ class DatadogExporter:
                 f"'version' must be a string or null, got {type(version).__name__}",
             )
         self._version = version
+
+        # This exporter supports agent-based Datadog export only.
+        # Direct API (agentless) mode is not implemented in this code path.
+        api_key = config.get("api_key")
+        if api_key is not None:
+            raise TelemetryExporterError(
+                self._name,
+                "Datadog exporter does not support 'api_key' in exporter options. "
+                "Configure a local Datadog Agent and use agent_host/agent_port instead.",
+            )
 
         # Validate and extract agent_host
         agent_host = config.get("agent_host", "localhost")

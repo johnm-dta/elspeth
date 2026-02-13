@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-![Status: RC-2.5](https://img.shields.io/badge/status-RC--2.5-yellow.svg)
+![Status: RC-3](https://img.shields.io/badge/status-RC--3-yellow.svg)
 
 Auditable Sense/Decide/Act pipelines for high-stakes data processing. Every decision traceable to its source.
 
@@ -253,7 +253,7 @@ chaosllm-mcp --database ./chaosllm-metrics.db
 
 > **Note:** All `chaosllm` commands also work as `elspeth chaosllm`.
 
-See `docs/testing/chaosllm.md` for complete configuration and usage.
+See `docs/reference/chaosllm.md` for complete configuration and usage.
 
 ### ChaosWeb
 
@@ -477,7 +477,7 @@ concurrency:
   max_workers: 4  # Available for plugin use (e.g., LLM thread pools)
 ```
 
-This design ensures audit trail integrity while optimizing performance where it matters. See [ADR-001](docs/design/adr/001-plugin-level-concurrency.md) for rationale.
+This design ensures audit trail integrity while optimizing performance where it matters. See [ADR-001](docs/architecture/adr/001-plugin-level-concurrency.md) for rationale.
 
 ### Rate Limiting
 
@@ -512,7 +512,7 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/johnm-dta/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:v0.3.0 \
   run --settings /app/config/pipeline.yaml --execute
 
 # Health check
@@ -577,8 +577,8 @@ See [Architecture Documentation](ARCHITECTURE.md) for C4 diagrams and detailed d
 | -------- | -------- | ------- |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Developers | C4 diagrams, data flows, component details |
 | [PLUGIN.md](PLUGIN.md) | Plugin Authors | How to create sources, transforms, sinks |
-| [docs/design/requirements.md](docs/design/requirements.md) | All | 323 verified requirements with implementation status |
-| [docs/design/adr/](docs/design/adr/) | Architects | Architecture Decision Records (5 ADRs including sink routing and DAG wiring) |
+| [docs/architecture/requirements.md](docs/architecture/requirements.md) | All | 323 verified requirements with implementation status |
+| [docs/architecture/adr/](docs/architecture/adr/) | Architects | Architecture Decision Records (5 ADRs including sink routing and DAG wiring) |
 | [CLAUDE.md](CLAUDE.md) | AI Assistants | Project context, trust model, patterns |
 | [docs/guides/](docs/guides/) | All | Tutorials, MCP analysis guide, data trust model |
 | [docs/reference/](docs/reference/) | Developers | Configuration reference |

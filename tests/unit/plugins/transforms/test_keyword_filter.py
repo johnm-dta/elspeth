@@ -431,3 +431,38 @@ class TestKeywordFilterProcessing:
         assert result.status == "error"
         assert result.reason is not None
         assert result.reason["field"] == "content"
+
+    def test_blocks_when_config_uses_original_field_name(self) -> None:
+        """Configured original field names resolve through PipelineRow contract."""
+        from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
+        from elspeth.plugins.transforms.keyword_filter import KeywordFilter
+
+        transform = KeywordFilter(
+            {
+                "fields": ["Amount USD"],
+                "blocked_patterns": [r"secret"],
+                "schema": {"mode": "observed"},
+            }
+        )
+
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                FieldContract(
+                    normalized_name="amount_usd",
+                    original_name="Amount USD",
+                    python_type=str,
+                    required=False,
+                    source="inferred",
+                ),
+            ),
+            locked=True,
+        )
+        row = PipelineRow({"amount_usd": "contains secret value"}, contract)
+
+        result = transform.process(row, make_mock_context())
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "blocked_content"
+        assert result.reason["field"] == "Amount USD"

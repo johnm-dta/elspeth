@@ -441,7 +441,7 @@ class TokenRecordingMixin:
     ) -> None:
         """Validate required fields are present for each outcome type.
 
-        Enforces the token outcome contract from docs/audit/tokens/00-token-outcome-contract.md.
+        Enforces the token outcome contract from docs/contracts/token-outcomes/00-token-outcome-contract.md.
         This is defense-in-depth: callers SHOULD pass correct fields, but this catches bugs.
 
         Raises:
@@ -453,53 +453,53 @@ class TokenRecordingMixin:
             if sink_name is None:
                 raise ValueError(
                     "COMPLETED outcome requires sink_name but got None. "
-                    "Contract violation - see docs/audit/tokens/00-token-outcome-contract.md"
+                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
                 )
         elif outcome == RowOutcome.ROUTED:
             if sink_name is None:
                 raise ValueError(
                     "ROUTED outcome requires sink_name but got None. "
-                    "Contract violation - see docs/audit/tokens/00-token-outcome-contract.md"
+                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
                 )
         elif outcome == RowOutcome.FORKED:
             if fork_group_id is None:
                 raise ValueError(
                     "FORKED outcome requires fork_group_id but got None. "
-                    "Contract violation - see docs/audit/tokens/00-token-outcome-contract.md"
+                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
                 )
         elif outcome == RowOutcome.FAILED:
             if error_hash is None:
                 raise ValueError(
                     "FAILED outcome requires error_hash but got None. "
-                    "Contract violation - see docs/audit/tokens/00-token-outcome-contract.md"
+                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
                 )
         elif outcome == RowOutcome.QUARANTINED:
             if error_hash is None:
                 raise ValueError(
                     "QUARANTINED outcome requires error_hash but got None. "
-                    "Contract violation - see docs/audit/tokens/00-token-outcome-contract.md"
+                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
                 )
         elif outcome == RowOutcome.CONSUMED_IN_BATCH:
             if batch_id is None:
                 raise ValueError(
                     "CONSUMED_IN_BATCH outcome requires batch_id but got None. "
-                    "Contract violation - see docs/audit/tokens/00-token-outcome-contract.md"
+                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
                 )
         elif outcome == RowOutcome.COALESCED:
             if join_group_id is None:
                 raise ValueError(
                     "COALESCED outcome requires join_group_id but got None. "
-                    "Contract violation - see docs/audit/tokens/00-token-outcome-contract.md"
+                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
                 )
         elif outcome == RowOutcome.EXPANDED:
             if expand_group_id is None:
                 raise ValueError(
                     "EXPANDED outcome requires expand_group_id but got None. "
-                    "Contract violation - see docs/audit/tokens/00-token-outcome-contract.md"
+                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
                 )
         elif outcome == RowOutcome.BUFFERED and batch_id is None:
             raise ValueError(
-                "BUFFERED outcome requires batch_id but got None. Contract violation - see docs/audit/tokens/00-token-outcome-contract.md"
+                "BUFFERED outcome requires batch_id but got None. Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
             )
         # No else needed - exhaustive enum handling above
 
@@ -543,7 +543,7 @@ class TokenRecordingMixin:
             IntegrityError: If terminal outcome already exists for token
         """
         # Validate required fields per outcome type (contract enforcement)
-        # See docs/audit/tokens/00-token-outcome-contract.md
+        # See docs/contracts/token-outcomes/00-token-outcome-contract.md
         self._validate_outcome_fields(
             outcome=outcome,
             sink_name=sink_name,

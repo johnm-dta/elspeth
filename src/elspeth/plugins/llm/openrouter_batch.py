@@ -249,8 +249,13 @@ class OpenRouterBatchLLMTransform(BaseTransform):
                 return
             case "langfuse":
                 self._setup_langfuse_tracing(logger)
-            case "none" | _:
+            case "none":
                 pass  # No tracing
+            case _:
+                logger.warning(
+                    "Unknown tracing provider encountered after validation - tracing disabled",
+                    provider=self._tracing_config.provider,
+                )
 
     def _setup_langfuse_tracing(self, logger: Any) -> None:
         """Initialize Langfuse tracing (v3 API).
@@ -452,7 +457,7 @@ class OpenRouterBatchLLMTransform(BaseTransform):
         results: dict[int, dict[str, Any] | Exception] = {}
 
         with ThreadPoolExecutor(max_workers=self._pool_size) as executor:
-            futures = {executor.submit(self._process_single_row, idx, row.to_dict(), ctx): idx for idx, row in enumerate(rows)}
+            futures = {executor.submit(self._process_single_row, idx, row, ctx): idx for idx, row in enumerate(rows)}
 
             # Collect results - catch only transport exceptions, let plugin bugs crash.
             # _process_single_row already handles HTTPStatusError and RequestError
@@ -538,7 +543,7 @@ class OpenRouterBatchLLMTransform(BaseTransform):
             success_reason={"action": "enriched", "fields_added": [self._response_field]},
         )
 
-    def _get_http_client(self, state_id: str) -> AuditedHTTPClient:
+    def _get_http_client(self, state_id: str, *, token_id: str | None = None) -> AuditedHTTPClient:
         """Get or create AuditedHTTPClient for a state_id.
 
         Clients are cached to preserve call_index across retries within the
@@ -559,13 +564,14 @@ class OpenRouterBatchLLMTransform(BaseTransform):
                     base_url=self._base_url,
                     headers=self._request_headers,
                     limiter=self._limiter,
+                    token_id=token_id,
                 )
             return self._http_clients[state_id]
 
     def _process_single_row(
         self,
         idx: int,
-        row: dict[str, Any],
+        row: PipelineRow,
         ctx: PluginContext,
     ) -> dict[str, Any]:
         """Process a single row through OpenRouter API.
@@ -587,7 +593,7 @@ class OpenRouterBatchLLMTransform(BaseTransform):
         """
         # 1. Render template (THEIR DATA - wrap)
         try:
-            rendered = self._template.render_with_metadata(row)
+            rendered = self._template.render_with_metadata(row, contract=row.contract)
         except TemplateError as e:
             # Record template error to audit trail — this happens before any HTTP
             # call, so AuditedHTTPClient can't record it. Use ctx.record_call().
@@ -626,18 +632,30 @@ class OpenRouterBatchLLMTransform(BaseTransform):
         # 3. Make API call via AuditedHTTPClient (automatically records to audit trail)
         state_id = ctx.state_id
         if state_id is None:
-            return {"error": {"reason": "missing_state_id"}}
+            raise RuntimeError("OpenRouter batch transform requires state_id. Ensure transform is executed through the engine.")
 
-        http_client = self._get_http_client(state_id)
+        # Resolve per-row token_id for telemetry attribution. In batch mode,
+        # ctx.batch_token_ids maps row index to token_id (set by AggregationExecutor).
+        # Falls back to ctx.token for single-row mode or legacy callers.
+        if ctx.batch_token_ids is not None and idx < len(ctx.batch_token_ids):
+            row_token_id = ctx.batch_token_ids[idx]
+        elif ctx.token is not None:
+            row_token_id = ctx.token.token_id
+        else:
+            row_token_id = None
+
+        http_client = self._get_http_client(state_id, token_id=row_token_id)
 
         try:
             # AuditedHTTPClient.post() records the call to Landscape and emits
             # telemetry automatically. It does NOT call raise_for_status() — we
             # do that ourselves below to handle error responses per-row.
+            # Per-call token_id ensures correct telemetry attribution in batches.
             response = http_client.post(
                 "/chat/completions",
                 json=request_body,
                 headers={"Content-Type": "application/json"},
+                token_id=row_token_id,
             )
             response.raise_for_status()
 
@@ -729,7 +747,7 @@ class OpenRouterBatchLLMTransform(BaseTransform):
         )
 
         # 7. Build output row (OUR CODE - let exceptions crash)
-        output: dict[str, Any] = dict(row)
+        output = row.to_dict()
         output[self._response_field] = content
         output[f"{self._response_field}_usage"] = usage
         output[f"{self._response_field}_template_hash"] = rendered.template_hash

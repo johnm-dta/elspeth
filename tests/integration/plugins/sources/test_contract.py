@@ -335,7 +335,7 @@ class TestSourceContractIntegration:
         assert "nonexistent" not in pipeline_row
 
     def test_contract_mode_flexible_with_declared_fields(self, tmp_path: Path) -> None:
-        """FLEXIBLE mode validates declared fields; extras pass validation but aren't in contract."""
+        """FLEXIBLE mode infers first-row extras into the locked contract."""
         csv_file = tmp_path / "data.csv"
         csv_file.write_text(
             dedent("""\
@@ -362,21 +362,18 @@ class TestSourceContractIntegration:
 
         contract = source.get_schema_contract()
         assert contract is not None
-        # FLEXIBLE mode allows extras in validation
         assert contract.mode == "FLEXIBLE"
-        # Contract starts locked for explicit schemas
         assert contract.locked is True
 
-        # Contract only contains declared fields
-        assert len(contract.fields) == 1
-        assert contract.fields[0].normalized_name == "id"
+        # Contract contains declared and inferred first-row fields
+        field_names = {field.normalized_name for field in contract.fields}
+        assert field_names == {"id", "name", "extra_field"}
 
         # Declared field accessible via PipelineRow
         pipeline_row = rows[0].to_pipeline_row()
         assert pipeline_row["id"] == 1
 
-        # FLEXIBLE mode allows access to extra fields in data not in contract
-        # This is the key difference from FIXED mode: extras are accessible
+        # FLEXIBLE mode allows access to extra fields and keeps them in contract
         assert "name" in pipeline_row
         assert pipeline_row["name"] == "Alice"
         assert "extra_field" in pipeline_row

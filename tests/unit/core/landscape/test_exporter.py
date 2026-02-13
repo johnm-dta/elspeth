@@ -140,7 +140,9 @@ _OPERATION = Operation(
     status="completed",
     completed_at=_DT2,
     input_data_ref=None,
+    input_data_hash=None,
     output_data_ref="out-ref",
+    output_data_hash="abc123def456",
     error_message=None,
     duration_ms=1234.5,
 )
@@ -533,6 +535,8 @@ class TestOperationRecords:
         assert op["operation_type"] == "source_load"
         assert op["status"] == "completed"
         assert op["duration_ms"] == 1234.5
+        assert op["input_data_hash"] is None
+        assert op["output_data_hash"] == "abc123def456"
 
     def test_operation_call_follows_operation(self) -> None:
         exporter = _make_exporter(

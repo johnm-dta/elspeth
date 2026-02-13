@@ -45,7 +45,7 @@ FROM python:3.12-slim AS runtime
 # Labels for container registry
 LABEL org.opencontainers.image.title="ELSPETH"
 LABEL org.opencontainers.image.description="Auditable Sense/Decide/Act Pipelines"
-LABEL org.opencontainers.image.source="https://github.com/your-org/elspeth"
+LABEL org.opencontainers.image.source="https://github.com/johnm-dta/elspeth"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Create non-root user for security

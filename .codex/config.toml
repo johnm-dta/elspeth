@@ -1,4 +1,0 @@
-
-[mcp_servers.keel]
-command = "/home/john/elspeth-rapid/.venv/bin/keel-mcp"
-args = ["--project", "/home/john/elspeth-rapid"]

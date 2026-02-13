@@ -73,6 +73,7 @@ class DAGNavigator:
         coalesce_name_by_node_id: Mapping[NodeID, CoalesceName],
         coalesce_on_success_map: Mapping[CoalesceName, str],
         sink_names: frozenset[str],
+        branch_first_node: Mapping[str, NodeID] | None = None,
     ) -> None:
         # Wrap all mappings in MappingProxyType for true immutability
         self._node_to_plugin: Mapping[NodeID, RowPlugin | GateSettings] = MappingProxyType(dict(node_to_plugin))
@@ -82,6 +83,7 @@ class DAGNavigator:
         self._coalesce_name_by_node_id: Mapping[NodeID, CoalesceName] = MappingProxyType(dict(coalesce_name_by_node_id))
         self._coalesce_on_success_map: Mapping[CoalesceName, str] = MappingProxyType(dict(coalesce_on_success_map))
         self._sink_names = sink_names
+        self._branch_first_node: Mapping[str, NodeID] = MappingProxyType(dict(branch_first_node or {}))
 
     @classmethod
     def from_traversal_context(
@@ -110,6 +112,7 @@ class DAGNavigator:
             coalesce_name_by_node_id=coalesce_name_by_node_id,
             coalesce_on_success_map=coalesce_on_success_map or {},
             sink_names=sink_names or frozenset(),
+            branch_first_node=dict(traversal.branch_first_node),
         )
 
     def create_work_item(
@@ -245,12 +248,27 @@ class DAGNavigator:
         coalesce_name: CoalesceName | None = None,
         on_success_sink: str | None = None,
     ) -> WorkItem:
-        """Create child work item that continues after current node or resumes at coalesce."""
+        """Create child work item that continues after current node or resumes at coalesce.
+
+        For fork children (coalesce_name is set), routes the token to the first
+        processing node for its branch:
+        - Identity branches: first_node == coalesce_node_id (same as before)
+        - Transform branches: first_node is the first transform in the chain
+        """
         if coalesce_name is not None:
             coalesce_node_id = self._coalesce_node_ids[coalesce_name]
+            # Direct access — all coalesce branches are populated in _branch_first_node.
+            # branch_name is always set on fork children; None here is an invariant violation.
+            branch_name = token.branch_name
+            if branch_name is None:
+                raise OrchestrationInvariantError(
+                    f"Token '{token.token_id}' has coalesce_name='{coalesce_name}' but branch_name is None. "
+                    "Fork children must have branch_name set."
+                )
+            first_node = self._branch_first_node[branch_name]
             return self.create_work_item(
                 token=token,
-                current_node_id=coalesce_node_id,
+                current_node_id=first_node,
                 coalesce_name=coalesce_name,
                 coalesce_node_id=coalesce_node_id,
                 on_success_sink=on_success_sink,

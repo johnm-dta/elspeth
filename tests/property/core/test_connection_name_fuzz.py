@@ -255,7 +255,7 @@ class TestWhitespaceStripping:
             branches=["  branch_a  ", " branch_b"],
             on_success="output",
         )
-        assert coal.branches == ["branch_a", "branch_b"]
+        assert coal.branches == {"branch_a": "branch_a", "branch_b": "branch_b"}
 
 
 # =============================================================================

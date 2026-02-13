@@ -114,7 +114,7 @@ class TestRunRepository:
             export_format="csv",
             export_sink="output",
         )
-        repo = RunRepository(session=Mock())
+        repo = RunRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, Run)
@@ -129,7 +129,7 @@ class TestRunRepository:
 
     def test_valid_load_minimal_fields(self) -> None:
         sa_row = self._make_run_row()
-        repo = RunRepository(session=Mock())
+        repo = RunRepository()
         result = repo.load(sa_row)
 
         assert result.status == RunStatus.RUNNING
@@ -142,13 +142,13 @@ class TestRunRepository:
     )
     def test_valid_run_status_values(self, status_value: str) -> None:
         sa_row = self._make_run_row(status=status_value)
-        repo = RunRepository(session=Mock())
+        repo = RunRepository()
         result = repo.load(sa_row)
         assert result.status == RunStatus(status_value)
 
     def test_invalid_status_raises_value_error(self) -> None:
         sa_row = self._make_run_row(status="bogus_status")
-        repo = RunRepository(session=Mock())
+        repo = RunRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
@@ -158,26 +158,26 @@ class TestRunRepository:
     )
     def test_valid_export_status_values(self, export_value: str) -> None:
         sa_row = self._make_run_row(export_status=export_value)
-        repo = RunRepository(session=Mock())
+        repo = RunRepository()
         result = repo.load(sa_row)
         assert result.export_status == ExportStatus(export_value)
 
     def test_none_export_status_stays_none(self) -> None:
         sa_row = self._make_run_row(export_status=None)
-        repo = RunRepository(session=Mock())
+        repo = RunRepository()
         result = repo.load(sa_row)
         assert result.export_status is None
 
     def test_invalid_export_status_raises_value_error(self) -> None:
         sa_row = self._make_run_row(export_status="bogus_export")
-        repo = RunRepository(session=Mock())
+        repo = RunRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
     def test_empty_string_export_status_raises_value_error(self) -> None:
         """Empty string should NOT become None -- Tier 1 trust."""
         sa_row = self._make_run_row(export_status="")
-        repo = RunRepository(session=Mock())
+        repo = RunRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
@@ -219,7 +219,7 @@ class TestNodeRepository:
             schema_mode="fixed",
             schema_fields_json=json.dumps(schema_fields),
         )
-        repo = NodeRepository(session=Mock())
+        repo = NodeRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, Node)
@@ -232,7 +232,7 @@ class TestNodeRepository:
 
     def test_valid_load_minimal_fields(self) -> None:
         sa_row = self._make_node_row()
-        repo = NodeRepository(session=Mock())
+        repo = NodeRepository()
         result = repo.load(sa_row)
 
         assert result.node_type == NodeType.SOURCE
@@ -245,7 +245,7 @@ class TestNodeRepository:
     )
     def test_valid_node_type_values(self, node_type_value: str) -> None:
         sa_row = self._make_node_row(node_type=node_type_value)
-        repo = NodeRepository(session=Mock())
+        repo = NodeRepository()
         result = repo.load(sa_row)
         assert result.node_type == NodeType(node_type_value)
 
@@ -262,40 +262,58 @@ class TestNodeRepository:
     )
     def test_valid_determinism_values(self, det_value: str) -> None:
         sa_row = self._make_node_row(determinism=det_value)
-        repo = NodeRepository(session=Mock())
+        repo = NodeRepository()
         result = repo.load(sa_row)
         assert result.determinism == Determinism(det_value)
 
     def test_invalid_node_type_raises_value_error(self) -> None:
         sa_row = self._make_node_row(node_type="bogus_type")
-        repo = NodeRepository(session=Mock())
+        repo = NodeRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
     def test_invalid_determinism_raises_value_error(self) -> None:
         sa_row = self._make_node_row(determinism="sometimes")
-        repo = NodeRepository(session=Mock())
+        repo = NodeRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
     def test_schema_fields_json_none_becomes_none(self) -> None:
         sa_row = self._make_node_row(schema_fields_json=None)
-        repo = NodeRepository(session=Mock())
+        repo = NodeRepository()
         result = repo.load(sa_row)
         assert result.schema_fields is None
 
     def test_schema_fields_json_valid_json_becomes_list(self) -> None:
         fields = [{"name": "amount", "type": "float"}]
         sa_row = self._make_node_row(schema_fields_json=json.dumps(fields))
-        repo = NodeRepository(session=Mock())
+        repo = NodeRepository()
         result = repo.load(sa_row)
         assert result.schema_fields == fields
 
     def test_schema_fields_json_empty_list(self) -> None:
         sa_row = self._make_node_row(schema_fields_json="[]")
-        repo = NodeRepository(session=Mock())
+        repo = NodeRepository()
         result = repo.load(sa_row)
         assert result.schema_fields == []
+
+    def test_schema_fields_json_null_raises_value_error(self) -> None:
+        sa_row = self._make_node_row(schema_fields_json="null")
+        repo = NodeRepository()
+        with pytest.raises(ValueError, match="must decode to list"):
+            repo.load(sa_row)
+
+    def test_schema_fields_json_object_raises_value_error(self) -> None:
+        sa_row = self._make_node_row(schema_fields_json='{"name": "id"}')
+        repo = NodeRepository()
+        with pytest.raises(ValueError, match="must decode to list"):
+            repo.load(sa_row)
+
+    def test_schema_fields_json_non_dict_element_raises_value_error(self) -> None:
+        sa_row = self._make_node_row(schema_fields_json='[{"name": "id"}, 42]')
+        repo = NodeRepository()
+        with pytest.raises(ValueError, match="must be object/dict"):
+            repo.load(sa_row)
 
 
 # ---------------------------------------------------------------------------
@@ -322,14 +340,14 @@ class TestEdgeRepository:
     @pytest.mark.parametrize("mode_value", ["move", "copy", "divert"])
     def test_valid_routing_modes(self, mode_value: str) -> None:
         sa_row = self._make_edge_row(default_mode=mode_value)
-        repo = EdgeRepository(session=Mock())
+        repo = EdgeRepository()
         result = repo.load(sa_row)
         assert isinstance(result, Edge)
         assert result.default_mode == RoutingMode(mode_value)
 
     def test_valid_load_all_fields(self) -> None:
         sa_row = self._make_edge_row()
-        repo = EdgeRepository(session=Mock())
+        repo = EdgeRepository()
         result = repo.load(sa_row)
         assert result.edge_id == "edge-1"
         assert result.from_node_id == "node-1"
@@ -338,7 +356,7 @@ class TestEdgeRepository:
 
     def test_invalid_mode_raises_value_error(self) -> None:
         sa_row = self._make_edge_row(default_mode="teleport")
-        repo = EdgeRepository(session=Mock())
+        repo = EdgeRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
@@ -366,7 +384,7 @@ class TestRowRepository:
 
     def test_valid_load(self) -> None:
         sa_row = self._make_row_row()
-        repo = RowRepository(session=Mock())
+        repo = RowRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, Row)
@@ -377,7 +395,7 @@ class TestRowRepository:
 
     def test_valid_load_with_none_ref(self) -> None:
         sa_row = self._make_row_row(source_data_ref=None)
-        repo = RowRepository(session=Mock())
+        repo = RowRepository()
         result = repo.load(sa_row)
         assert result.source_data_ref is None
 
@@ -406,7 +424,7 @@ class TestTokenRepository:
 
     def test_valid_load_minimal(self) -> None:
         sa_row = self._make_token_row()
-        repo = TokenRepository(session=Mock())
+        repo = TokenRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, Token)
@@ -423,7 +441,7 @@ class TestTokenRepository:
             branch_name="path_a",
             step_in_pipeline=3,
         )
-        repo = TokenRepository(session=Mock())
+        repo = TokenRepository()
         result = repo.load(sa_row)
         assert result.fork_group_id == "fg-1"
         assert result.join_group_id == "jg-1"
@@ -446,7 +464,7 @@ class TestTokenParentRepository:
             parent_token_id="tok-parent",
             ordinal=0,
         )
-        repo = TokenParentRepository(session=Mock())
+        repo = TokenParentRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, TokenParent)
@@ -460,7 +478,7 @@ class TestTokenParentRepository:
             parent_token_id="tok-parent-2",
             ordinal=5,
         )
-        repo = TokenParentRepository(session=Mock())
+        repo = TokenParentRepository()
         result = repo.load(sa_row)
         assert result.ordinal == 5
 
@@ -494,7 +512,7 @@ class TestCallRepository:
 
     def test_valid_load_state_parented(self) -> None:
         sa_row = self._make_call_row(state_id="state-1", operation_id=None)
-        repo = CallRepository(session=Mock())
+        repo = CallRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, Call)
@@ -510,7 +528,7 @@ class TestCallRepository:
             call_type="http",
             status="error",
         )
-        repo = CallRepository(session=Mock())
+        repo = CallRepository()
         result = repo.load(sa_row)
 
         assert result.call_type == CallType.HTTP
@@ -524,7 +542,7 @@ class TestCallRepository:
             response_ref="ref://resp/abc",
             latency_ms=42.5,
         )
-        repo = CallRepository(session=Mock())
+        repo = CallRepository()
         result = repo.load(sa_row)
         assert result.response_hash == "resp123"
         assert result.response_ref == "ref://resp/abc"
@@ -535,7 +553,7 @@ class TestCallRepository:
             status="error",
             error_json='{"reason": "timeout"}',
         )
-        repo = CallRepository(session=Mock())
+        repo = CallRepository()
         result = repo.load(sa_row)
         assert result.error_json == '{"reason": "timeout"}'
 
@@ -545,26 +563,26 @@ class TestCallRepository:
     )
     def test_valid_call_type_values(self, call_type_value: str) -> None:
         sa_row = self._make_call_row(call_type=call_type_value)
-        repo = CallRepository(session=Mock())
+        repo = CallRepository()
         result = repo.load(sa_row)
         assert result.call_type == CallType(call_type_value)
 
     @pytest.mark.parametrize("status_value", ["success", "error"])
     def test_valid_call_status_values(self, status_value: str) -> None:
         sa_row = self._make_call_row(status=status_value)
-        repo = CallRepository(session=Mock())
+        repo = CallRepository()
         result = repo.load(sa_row)
         assert result.status == CallStatus(status_value)
 
     def test_invalid_call_type_raises_value_error(self) -> None:
         sa_row = self._make_call_row(call_type="carrier_pigeon")
-        repo = CallRepository(session=Mock())
+        repo = CallRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
     def test_invalid_call_status_raises_value_error(self) -> None:
         sa_row = self._make_call_row(status="maybe")
-        repo = CallRepository(session=Mock())
+        repo = CallRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
@@ -595,7 +613,7 @@ class TestRoutingEventRepository:
     @pytest.mark.parametrize("mode_value", ["move", "copy", "divert"])
     def test_valid_routing_modes(self, mode_value: str) -> None:
         sa_row = self._make_routing_row(mode=mode_value)
-        repo = RoutingEventRepository(session=Mock())
+        repo = RoutingEventRepository()
         result = repo.load(sa_row)
         assert isinstance(result, RoutingEvent)
         assert result.mode == RoutingMode(mode_value)
@@ -605,7 +623,7 @@ class TestRoutingEventRepository:
             reason_hash="hash456",
             reason_ref="ref://reason/abc",
         )
-        repo = RoutingEventRepository(session=Mock())
+        repo = RoutingEventRepository()
         result = repo.load(sa_row)
         assert result.event_id == "evt-1"
         assert result.reason_hash == "hash456"
@@ -613,7 +631,7 @@ class TestRoutingEventRepository:
 
     def test_invalid_mode_raises_value_error(self) -> None:
         sa_row = self._make_routing_row(mode="warp")
-        repo = RoutingEventRepository(session=Mock())
+        repo = RoutingEventRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
@@ -648,7 +666,7 @@ class TestBatchRepository:
     )
     def test_valid_batch_status_values(self, status_value: str) -> None:
         sa_row = self._make_batch_row(status=status_value)
-        repo = BatchRepository(session=Mock())
+        repo = BatchRepository()
         result = repo.load(sa_row)
         assert isinstance(result, Batch)
         assert result.status == BatchStatus(status_value)
@@ -661,7 +679,7 @@ class TestBatchRepository:
             trigger_reason="threshold=10",
             completed_at=NOW,
         )
-        repo = BatchRepository(session=Mock())
+        repo = BatchRepository()
         result = repo.load(sa_row)
         assert result.batch_id == "batch-1"
         assert result.aggregation_state_id == "agg-state-1"
@@ -672,13 +690,13 @@ class TestBatchRepository:
 
     def test_invalid_status_raises_value_error(self) -> None:
         sa_row = self._make_batch_row(status="cooking")
-        repo = BatchRepository(session=Mock())
+        repo = BatchRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
     def test_invalid_trigger_type_raises_value_error(self) -> None:
         sa_row = self._make_batch_row(trigger_type="not_a_trigger")
-        repo = BatchRepository(session=Mock())
+        repo = BatchRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
@@ -721,7 +739,7 @@ class TestNodeStateRepository:
 
     def test_open_valid(self) -> None:
         sa_row = self._make_node_state_row(status="open")
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, NodeStateOpen)
@@ -735,7 +753,7 @@ class TestNodeStateRepository:
             status="open",
             context_before_json='{"key": "value"}',
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         result = repo.load(sa_row)
         assert isinstance(result, NodeStateOpen)
         assert result.context_before_json == '{"key": "value"}'
@@ -745,7 +763,7 @@ class TestNodeStateRepository:
             status="open",
             output_hash="bad_hash",
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError, match="non-NULL output_hash"):
             repo.load(sa_row)
 
@@ -754,7 +772,7 @@ class TestNodeStateRepository:
             status="open",
             completed_at=NOW,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError, match="non-NULL completed_at"):
             repo.load(sa_row)
 
@@ -763,7 +781,7 @@ class TestNodeStateRepository:
             status="open",
             duration_ms=100.0,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError, match="non-NULL duration_ms"):
             repo.load(sa_row)
 
@@ -775,7 +793,7 @@ class TestNodeStateRepository:
             completed_at=NOW,
             duration_ms=50.0,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError, match="audit integrity violation"):
             repo.load(sa_row)
 
@@ -787,7 +805,7 @@ class TestNodeStateRepository:
             completed_at=NOW,
             duration_ms=150.5,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, NodeStatePending)
@@ -803,7 +821,7 @@ class TestNodeStateRepository:
             context_before_json='{"before": true}',
             context_after_json='{"after": true}',
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         result = repo.load(sa_row)
         assert isinstance(result, NodeStatePending)
         assert result.context_before_json == '{"before": true}'
@@ -815,7 +833,7 @@ class TestNodeStateRepository:
             completed_at=NOW,
             duration_ms=None,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError, match="NULL duration_ms"):
             repo.load(sa_row)
 
@@ -825,7 +843,7 @@ class TestNodeStateRepository:
             completed_at=None,
             duration_ms=100.0,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError, match="NULL completed_at"):
             repo.load(sa_row)
 
@@ -836,7 +854,7 @@ class TestNodeStateRepository:
             duration_ms=100.0,
             output_hash="unexpected_hash",
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError, match="non-NULL output_hash"):
             repo.load(sa_row)
 
@@ -849,7 +867,7 @@ class TestNodeStateRepository:
             completed_at=NOW,
             duration_ms=200.0,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, NodeStateCompleted)
@@ -868,7 +886,7 @@ class TestNodeStateRepository:
             context_after_json='{"a": 2}',
             success_reason_json='{"action": "classified"}',
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         result = repo.load(sa_row)
         assert isinstance(result, NodeStateCompleted)
         assert result.success_reason_json == '{"action": "classified"}'
@@ -882,7 +900,7 @@ class TestNodeStateRepository:
             completed_at=NOW,
             duration_ms=100.0,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError, match="NULL output_hash"):
             repo.load(sa_row)
 
@@ -893,7 +911,7 @@ class TestNodeStateRepository:
             completed_at=NOW,
             duration_ms=None,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError, match="NULL duration_ms"):
             repo.load(sa_row)
 
@@ -904,7 +922,7 @@ class TestNodeStateRepository:
             completed_at=None,
             duration_ms=100.0,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError, match="NULL completed_at"):
             repo.load(sa_row)
 
@@ -916,7 +934,7 @@ class TestNodeStateRepository:
             completed_at=NOW,
             duration_ms=50.0,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, NodeStateFailed)
@@ -933,7 +951,7 @@ class TestNodeStateRepository:
             duration_ms=50.0,
             error_json='{"reason": "division by zero"}',
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         result = repo.load(sa_row)
         assert isinstance(result, NodeStateFailed)
         assert result.error_json == '{"reason": "division by zero"}'
@@ -946,7 +964,7 @@ class TestNodeStateRepository:
             duration_ms=50.0,
             output_hash="partial_out",
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         result = repo.load(sa_row)
         assert isinstance(result, NodeStateFailed)
         assert result.output_hash == "partial_out"
@@ -959,7 +977,7 @@ class TestNodeStateRepository:
             context_before_json='{"b": 1}',
             context_after_json='{"a": 2}',
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         result = repo.load(sa_row)
         assert isinstance(result, NodeStateFailed)
         assert result.context_before_json == '{"b": 1}'
@@ -971,7 +989,7 @@ class TestNodeStateRepository:
             completed_at=NOW,
             duration_ms=None,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError, match="NULL duration_ms"):
             repo.load(sa_row)
 
@@ -981,7 +999,7 @@ class TestNodeStateRepository:
             completed_at=None,
             duration_ms=50.0,
         )
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError, match="NULL completed_at"):
             repo.load(sa_row)
 
@@ -989,13 +1007,13 @@ class TestNodeStateRepository:
 
     def test_unknown_status_string_raises_value_error(self) -> None:
         sa_row = self._make_node_state_row(status="processing")
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
     def test_empty_status_string_raises_value_error(self) -> None:
         sa_row = self._make_node_state_row(status="")
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
@@ -1023,7 +1041,7 @@ class TestNodeStateRepository:
             }
 
         sa_row = self._make_node_state_row(status=status_str, **extra)
-        repo = NodeStateRepository(session=Mock())
+        repo = NodeStateRepository()
         result = repo.load(sa_row)
         assert isinstance(result, expected_type)
 
@@ -1048,7 +1066,7 @@ class TestValidationErrorRepository:
             created_at=NOW,
             row_data_json='{"name": "test"}',
         )
-        repo = ValidationErrorRepository(session=Mock())
+        repo = ValidationErrorRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, ValidationErrorRecord)
@@ -1069,7 +1087,7 @@ class TestValidationErrorRepository:
             created_at=NOW,
             row_data_json=None,
         )
-        repo = ValidationErrorRepository(session=Mock())
+        repo = ValidationErrorRepository()
         result = repo.load(sa_row)
         assert result.node_id is None
         assert result.row_data_json is None
@@ -1095,7 +1113,7 @@ class TestTransformErrorRepository:
             row_data_json='{"x": 1}',
             error_details_json='{"reason": "division by zero"}',
         )
-        repo = TransformErrorRepository(session=Mock())
+        repo = TransformErrorRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, TransformErrorRecord)
@@ -1116,7 +1134,7 @@ class TestTransformErrorRepository:
             row_data_json=None,
             error_details_json=None,
         )
-        repo = TransformErrorRepository(session=Mock())
+        repo = TransformErrorRepository()
         result = repo.load(sa_row)
         assert result.row_data_json is None
         assert result.error_details_json is None
@@ -1156,7 +1174,7 @@ class TestTokenOutcomeRepository:
             is_terminal=1,
             sink_name="output",
         )
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, TokenOutcome)
@@ -1169,7 +1187,7 @@ class TestTokenOutcomeRepository:
             outcome="buffered",
             is_terminal=0,
         )
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         result = repo.load(sa_row)
 
         assert result.outcome == RowOutcome.BUFFERED
@@ -1190,45 +1208,59 @@ class TestTokenOutcomeRepository:
         ],
     )
     def test_all_row_outcome_values(self, outcome_value: str) -> None:
-        sa_row = self._make_outcome_row(outcome=outcome_value, is_terminal=1)
-        repo = TokenOutcomeRepository(session=Mock())
+        expected_outcome = RowOutcome(outcome_value)
+        sa_row = self._make_outcome_row(outcome=outcome_value, is_terminal=1 if expected_outcome.is_terminal else 0)
+        repo = TokenOutcomeRepository()
         result = repo.load(sa_row)
-        assert result.outcome == RowOutcome(outcome_value)
+        assert result.outcome == expected_outcome
+        assert result.is_terminal is expected_outcome.is_terminal
 
     def test_is_terminal_1_becomes_true(self) -> None:
         sa_row = self._make_outcome_row(is_terminal=1)
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         result = repo.load(sa_row)
         assert result.is_terminal is True
 
     def test_is_terminal_0_becomes_false(self) -> None:
-        sa_row = self._make_outcome_row(is_terminal=0)
-        repo = TokenOutcomeRepository(session=Mock())
+        sa_row = self._make_outcome_row(outcome="buffered", is_terminal=0)
+        repo = TokenOutcomeRepository()
         result = repo.load(sa_row)
         assert result.is_terminal is False
 
+    def test_outcome_buffered_with_terminal_1_raises_value_error(self) -> None:
+        sa_row = self._make_outcome_row(outcome="buffered", is_terminal=1)
+        repo = TokenOutcomeRepository()
+        with pytest.raises(ValueError, match="inconsistent is_terminal"):
+            repo.load(sa_row)
+
+    def test_outcome_completed_with_terminal_0_raises_value_error(self) -> None:
+        sa_row = self._make_outcome_row(outcome="completed", is_terminal=0)
+        repo = TokenOutcomeRepository()
+        with pytest.raises(ValueError, match="inconsistent is_terminal"):
+            repo.load(sa_row)
+
     def test_is_terminal_2_raises_value_error(self) -> None:
         sa_row = self._make_outcome_row(is_terminal=2)
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         with pytest.raises(ValueError, match="invalid is_terminal"):
             repo.load(sa_row)
 
     def test_is_terminal_negative_1_raises_value_error(self) -> None:
         sa_row = self._make_outcome_row(is_terminal=-1)
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         with pytest.raises(ValueError, match="invalid is_terminal"):
             repo.load(sa_row)
 
     def test_is_terminal_none_raises_value_error(self) -> None:
         sa_row = self._make_outcome_row(is_terminal=None)
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         with pytest.raises(ValueError, match="invalid is_terminal"):
             repo.load(sa_row)
 
     def test_is_terminal_string_raises_value_error(self) -> None:
         """String '1' is NOT in (0, 1) -- Tier 1, no coercion."""
         sa_row = self._make_outcome_row(is_terminal="1")
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         with pytest.raises(ValueError, match="invalid is_terminal"):
             repo.load(sa_row)
 
@@ -1239,13 +1271,13 @@ class TestTokenOutcomeRepository:
         # True is in (0, 1) because True == 1 in Python, so the repo
         # check passes. The resulting is_terminal = (True == 1) = True.
         sa_row = self._make_outcome_row(is_terminal=True)
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         result = repo.load(sa_row)
         assert result.is_terminal is True
 
     def test_invalid_outcome_raises_value_error(self) -> None:
         sa_row = self._make_outcome_row(outcome="vanished")
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         with pytest.raises(ValueError):
             repo.load(sa_row)
 
@@ -1262,7 +1294,7 @@ class TestTokenOutcomeRepository:
             context_json='{"paths": ["a", "b"]}',
             expected_branches_json='["path_a", "path_b"]',
         )
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         result = repo.load(sa_row)
         assert result.outcome == RowOutcome.FORKED
         assert result.fork_group_id == "fg-1"
@@ -1275,7 +1307,7 @@ class TestTokenOutcomeRepository:
             is_terminal=1,
             sink_name="priority_output",
         )
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         result = repo.load(sa_row)
         assert result.outcome == RowOutcome.ROUTED
         assert result.sink_name == "priority_output"
@@ -1286,7 +1318,7 @@ class TestTokenOutcomeRepository:
             is_terminal=1,
             batch_id="batch-1",
         )
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         result = repo.load(sa_row)
         assert result.outcome == RowOutcome.CONSUMED_IN_BATCH
         assert result.batch_id == "batch-1"
@@ -1297,7 +1329,7 @@ class TestTokenOutcomeRepository:
             is_terminal=1,
             error_hash="err123",
         )
-        repo = TokenOutcomeRepository(session=Mock())
+        repo = TokenOutcomeRepository()
         result = repo.load(sa_row)
         assert result.outcome == RowOutcome.FAILED
         assert result.error_hash == "err123"
@@ -1324,7 +1356,7 @@ class TestArtifactRepository:
             created_at=NOW,
             idempotency_key=None,
         )
-        repo = ArtifactRepository(session=Mock())
+        repo = ArtifactRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, Artifact)
@@ -1347,7 +1379,7 @@ class TestArtifactRepository:
             created_at=NOW,
             idempotency_key="retry-key-42",
         )
-        repo = ArtifactRepository(session=Mock())
+        repo = ArtifactRepository()
         result = repo.load(sa_row)
         assert result.idempotency_key == "retry-key-42"
 
@@ -1366,7 +1398,7 @@ class TestBatchMemberRepository:
             token_id="tok-1",
             ordinal=0,
         )
-        repo = BatchMemberRepository(session=Mock())
+        repo = BatchMemberRepository()
         result = repo.load(sa_row)
 
         assert isinstance(result, BatchMember)
@@ -1380,6 +1412,6 @@ class TestBatchMemberRepository:
             token_id="tok-5",
             ordinal=10,
         )
-        repo = BatchMemberRepository(session=Mock())
+        repo = BatchMemberRepository()
         result = repo.load(sa_row)
         assert result.ordinal == 10

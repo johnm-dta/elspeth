@@ -44,8 +44,11 @@ def get_nested_field(
     parts = path.split(".")
     current: Any = data
 
-    for part in parts:
-        if not isinstance(current, dict) or part not in current:
+    for index, part in enumerate(parts):
+        if not isinstance(current, dict):
+            parent_path = ".".join(parts[:index]) or "<root>"
+            raise TypeError(f"Path '{path}' expected dict at '{parent_path}', got {type(current).__name__}")
+        if part not in current:
             return default
         current = current[part]
 

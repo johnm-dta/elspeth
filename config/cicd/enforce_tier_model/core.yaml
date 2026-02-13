@@ -47,21 +47,6 @@ allow_hits:
   reason: Optional field access at trust boundary
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
-- key: core/templates.py:R8:extract_jinja2_fields_with_details:walk:fp=735ac69d4aadbe9f
-  owner: architecture
-  reason: setdefault for lazy initialization
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: core/templates.py:R8:extract_jinja2_fields_with_details:walk:fp=136394dfb22a90ee
-  owner: architecture
-  reason: setdefault for lazy initialization
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: core/templates.py:R6:extract_jinja2_fields_with_names:fp=f6a3eb1805fd5f66
-  owner: architecture
-  reason: Contract resolution attempt - KeyError means field not in contract, handled as unresolved
-  safety: Returns explicit resolved=False state, never silently drops - legitimate boundary handling
-  expires: '2026-05-02'
 - key: core/canonical.py:R5:_normalize_value:fp=4438a2dca309b0e4
   owner: architecture
   reason: AST/type checking - required for safe parsing or discriminated unions
@@ -313,52 +298,116 @@ allow_hits:
 - key: core/landscape/_call_recording.py:R6:CallRecordingMixin:get_call_response_data:fp=0bc9a6b3b94f93c9
   owner: architecture
   reason: Graceful handling of purged payloads - retention policy may have deleted response data
-- key: core/dag/builder.py:R2:build_execution_graph:fp=41b8bffbf0744eea
+- key: core/dag/builder.py:R2:build_execution_graph:fp=baf69eb5ca987e9b
   owner: architecture
   reason: Optional _output_schema_config metadata is present only on select plugins
   safety: Missing metadata is handled as None; core schema enforcement still validates edges
   expires: '2026-03-10'
-- key: core/dag/builder.py:R2:build_execution_graph:fp=406e4b57a6bea9e5
+- key: core/dag/builder.py:R2:build_execution_graph:fp=49a3d77058c7a7d7
   owner: architecture
   reason: Optional _output_schema_config metadata is present only on select aggregation plugins
   safety: Missing metadata is handled as None; aggregation schemas still validated via contracts
   expires: '2026-03-10'
-- key: core/dag/builder.py:R8:build_execution_graph:fp=46f830f519308eec
+- key: core/dag/builder.py:R8:build_execution_graph:fp=7b0726f8e1455aea
   owner: architecture
   reason: setdefault used for route-label grouping while building gate continue-route diagnostics
   safety: Grouping is deterministic and validated before runtime routing
-  expires: '2026-03-10'
-- key: core/dag/builder.py:R1:build_execution_graph:fp=bcb4e6135cfe02c1
+  expires: '2026-03-13'
+- key: core/dag/builder.py:R1:build_execution_graph:fp=aa4e5110b73377ae
   owner: architecture
   reason: Optional gate connection route label lookup for coalesce provenance wiring
   safety: Missing lookup returns None — handled explicitly by conditional check
-  expires: '2026-03-10'
-- key: core/dag/builder.py:R1:build_execution_graph:fp=558ac31b1c086a15
+  expires: '2026-03-13'
+- key: core/dag/builder.py:R1:build_execution_graph:fp=de6bafe99825dba9
   owner: architecture
   reason: Gate default-continue target lookup during fallthrough edge wiring
   safety: Missing target is handled explicitly — ambiguous gates are skipped
-  expires: '2026-03-10'
-- key: core/dag/builder.py:R5:build_execution_graph:fp=2bcc9328e8841353
+  expires: '2026-03-13'
+- key: core/dag/builder.py:R5:build_execution_graph:fp=01dbfe027a81e071
   owner: architecture
   reason: isinstance check for dict vs NodeConfig on config field during schema population
   safety: Crashes on type mismatch - no silent fallback
-  expires: '2026-03-10'
-- key: core/dag/graph.py:R1:ExecutionGraph:_get_schema_config_from_node:fp=9e0e42e0fd1769e8
+  expires: '2026-03-13'
+# ARCH-15: select merge trace-back in get_effective_producer_schema
+- key: core/dag/graph.py:R1:ExecutionGraph:get_effective_producer_schema:fp=325a69d2950c4941
+  owner: ARCH-15
+  reason: Optional select_branch config lookup — not all coalesce nodes have select_branch
+  safety: Falls through to return None if missing — conservative (skips type validation)
+  expires: '2026-05-13'
+- key: core/dag/graph.py:R1:ExecutionGraph:get_effective_producer_schema:fp=d8b32ff273cc26f0
+  owner: ARCH-15
+  reason: Optional select_branch config lookup for select-merge schema trace-back
+  safety: Falls through to return None if missing — conservative (skips type validation)
+  expires: '2026-05-13'
+- key: core/dag/graph.py:R1:ExecutionGraph:get_effective_producer_schema:fp=c694d1a0eefa512f
+  owner: ARCH-15
+  reason: Edge mode/label lookup to identify identity branch's COPY edge
+  safety: Falls through to transform-branch trace if no match — no silent fallback
+  expires: '2026-05-13'
+- key: core/dag/graph.py:R6:ExecutionGraph:get_effective_producer_schema:fp=6f04b07a1f9c377c
+  owner: ARCH-15
+  reason: GraphValidationError catch during transform-branch trace-back for select merge
+  safety: Falls through to return None — conservative (skips type validation rather than crashing)
+  expires: '2026-05-13'
+# Coalesce optionality fix: _field_required isinstance checks for polymorphic field spec parsing
+- key: core/dag/builder.py:R5:_field_required:fp=1b28cb82858d9ed5
+  owner: bugfix
+  reason: isinstance check for str field spec format in schema optionality helper
+  safety: Crashes with default True on unrecognised format — no silent fallback
+  expires: '2026-05-13'
+- key: core/dag/builder.py:R5:_field_required:fp=b29194701d89d9d9
+  owner: bugfix
+  reason: isinstance check for dict field spec format in schema optionality helper
+  safety: Crashes with default True on unrecognised format — no silent fallback
+  expires: '2026-05-13'
+# ARCH-15: per-branch transform field parsing
+- key: core/dag/builder.py:R5:_field_name_type:fp=b7ead318ec3c86b3
+  owner: ARCH-15
+  reason: isinstance check for dict vs str field spec in schema parsing helper
+  safety: Crashes with ValueError on unrecognised format — no silent fallback
+  expires: '2026-05-13'
+- key: core/dag/builder.py:R5:_field_name_type:fp=fd4b76a8459735b1
+  owner: ARCH-15
+  reason: isinstance check for dict vs str field spec (second branch) in schema parsing helper
+  safety: Crashes with ValueError on unrecognised format — no silent fallback
+  expires: '2026-05-13'
+# ARCH-15: coalesce schema population uses .get() for optional schema metadata
+- key: core/dag/builder.py:R1:build_execution_graph:fp=d635a4a4e2e52d0b
+  owner: ARCH-15
+  reason: Optional schema_config access during coalesce branch schema population
+  safety: Missing schema yields None — handled explicitly by conditional skip
+  expires: '2026-05-13'
+- key: core/dag/builder.py:R1:build_execution_graph:fp=4366c507d69abe93
+  owner: ARCH-15
+  reason: Optional guaranteed_fields access during coalesce contract propagation
+  safety: Missing key yields empty list — intersection logic still correct
+  expires: '2026-05-13'
+- key: core/dag/builder.py:R1:build_execution_graph:fp=0c00b8bad4547a7f
+  owner: ARCH-15
+  reason: Optional audit_fields access during coalesce contract propagation
+  safety: Missing key yields empty list — union logic still correct
+  expires: '2026-05-13'
+- key: core/dag/builder.py:R1:build_execution_graph:fp=3429228dc05cfeca
+  owner: ARCH-15
+  reason: Optional select_branch config access during coalesce select-merge population
+  safety: Crashes with GraphValidationError if missing — explicit failure
+  expires: '2026-05-13'
+- key: core/dag/graph.py:R1:ExecutionGraph:get_schema_config_from_node:fp=1b03f0b2e721c007
   owner: architecture
   reason: Optional schema access for mixed node types (source/sink/gate/coalesce)
   safety: Crashes on malformed schema payloads; None is an intentional non-schema state
   expires: '2026-03-10'
-- key: core/dag/graph.py:R5:ExecutionGraph:_get_schema_config_from_node:fp=eb8794673e8182ba
+- key: core/dag/graph.py:R5:ExecutionGraph:get_schema_config_from_node:fp=e904c9147bcf1cba
   owner: architecture
   reason: Runtime shape check before coercing schema dict to SchemaConfig
   safety: Non-dict payloads are rejected and converted to explicit validation failures
   expires: '2026-03-10'
-- key: core/dag/graph.py:R1:ExecutionGraph:_get_required_fields:fp=d073823b3a3e0dc9
+- key: core/dag/graph.py:R1:ExecutionGraph:get_required_fields:fp=278c202848087fbf
   owner: architecture
   reason: Optional required_input_fields key supports transforms with implicit/no required field contract
   safety: Missing key yields empty set; downstream schema checks still enforce compatibility
   expires: '2026-03-10'
-- key: core/dag/graph.py:R5:ExecutionGraph:_get_required_fields:fp=4925783a4368c59d
+- key: core/dag/graph.py:R5:ExecutionGraph:get_required_fields:fp=b55e79530607dc41
   owner: architecture
   reason: Options payload shape check at config boundary before extracting nested required_input_fields
   safety: Non-dict options are treated as no declared requirements and never silently coerced

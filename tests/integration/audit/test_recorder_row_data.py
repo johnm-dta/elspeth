@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from elspeth.contracts.enums import NodeType
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.recorder import LandscapeRecorder
@@ -256,4 +257,34 @@ class TestGetRowDataTier1Corruption:
 
         # get_row_data must raise JSONDecodeError, not return None or garbage
         with pytest.raises(json.JSONDecodeError):
+            recorder.get_row_data(row.row_id)
+
+    def test_non_object_json_raises_audit_integrity_error(self, tmp_path: Path, payload_store) -> None:
+        """JSON payloads must decode to objects for AVAILABLE row data."""
+        import pytest
+
+        db = LandscapeDB.in_memory()
+        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+        recorder = LandscapeRecorder(db, payload_store=payload_store)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        payload_ref = payload_store.store(json.dumps([1, 2, 3]).encode())
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={"placeholder": "ignored"},
+            payload_ref=payload_ref,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="expected JSON object"):
             recorder.get_row_data(row.row_id)

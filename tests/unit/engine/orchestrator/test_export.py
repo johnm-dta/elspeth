@@ -20,6 +20,7 @@ from unittest.mock import Mock, patch
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from elspeth.engine.orchestrator.export import (
     _export_csv_multifile,
@@ -462,6 +463,19 @@ class TestReconstructSchemaBasic:
         instance = model(tags=["a", "b"])
         assert instance.tags == ["a", "b"]
 
+    def test_array_field_with_items_enforces_item_type(self) -> None:
+        """Array with items schema enforces item type on resume."""
+        schema = {
+            "properties": {"scores": {"type": "array", "items": {"type": "integer"}}},
+            "required": ["scores"],
+        }
+        model = reconstruct_schema_from_json(schema)
+        instance = model(scores=[1, 2, 3])
+        assert instance.scores == [1, 2, 3]
+
+        with pytest.raises(ValidationError, match="scores\\.0"):
+            model(scores=["not-an-int"])
+
     def test_object_field(self) -> None:
         """Object type maps to dict."""
         schema = {
@@ -471,6 +485,32 @@ class TestReconstructSchemaBasic:
         model = reconstruct_schema_from_json(schema)
         instance = model(metadata={"key": "val"})
         assert instance.metadata == {"key": "val"}
+
+    def test_object_field_with_properties_enforces_nested_schema(self) -> None:
+        """Nested object properties are reconstructed and validated."""
+        schema = {
+            "properties": {
+                "profile": {
+                    "type": "object",
+                    "properties": {
+                        "age": {"type": "integer"},
+                        "name": {"type": "string"},
+                    },
+                    "required": ["age", "name"],
+                }
+            },
+            "required": ["profile"],
+        }
+        model = reconstruct_schema_from_json(schema)
+        instance = model(profile={"age": 42, "name": "Ada"})
+        assert instance.profile.age == 42
+        assert instance.profile.name == "Ada"
+
+        with pytest.raises(ValidationError, match="profile\\.age"):
+            model(profile={"age": "not-an-int", "name": "Ada"})
+
+        with pytest.raises(ValidationError, match="profile\\.name"):
+            model(profile={"age": 42})
 
 
 # =============================================================================
@@ -568,7 +608,7 @@ class TestReconstructSchemaAnyOf:
         assert instance.amount == Decimal("123.45")
 
     def test_nullable_type_pattern(self) -> None:
-        """anyOf with type+null maps to the non-null type."""
+        """anyOf with type+null maps to Optional[type] — accepts both values and None."""
         schema = {
             "properties": {
                 "name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
@@ -578,9 +618,12 @@ class TestReconstructSchemaAnyOf:
         model = reconstruct_schema_from_json(schema)
         instance = model(name="Alice")
         assert instance.name == "Alice"
+        # Nullable fields must also accept None
+        instance_none = model(name=None)
+        assert instance_none.name is None
 
     def test_nullable_datetime_pattern(self) -> None:
-        """anyOf with datetime+null resolves to datetime."""
+        """anyOf with datetime+null resolves to Optional[datetime]."""
         schema = {
             "properties": {
                 "ts": {
@@ -596,6 +639,9 @@ class TestReconstructSchemaAnyOf:
         now = datetime.now(tz=UTC)
         instance = model(ts=now)
         assert instance.ts == now
+        # Nullable datetime must accept None
+        instance_none = model(ts=None)
+        assert instance_none.ts is None
 
     def test_unsupported_anyof_raises(self) -> None:
         """Unsupported anyOf pattern (e.g., Union[str, int]) raises."""
@@ -701,7 +747,92 @@ class TestJsonSchemaToPythonType:
         field_info = {"anyOf": [{"type": "number"}, {"type": "string"}]}
         assert _json_schema_to_python_type("price", field_info) is Decimal
 
-    def test_nullable_resolves_inner_type(self) -> None:
-        """Nullable pattern resolves to inner type."""
+    def test_nullable_resolves_to_optional(self) -> None:
+        """Nullable pattern resolves to Optional[inner_type]."""
         field_info = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
-        assert _json_schema_to_python_type("count", field_info) is int
+        result = _json_schema_to_python_type("count", field_info)
+        # Should be int | None (UnionType), not bare int
+        assert result == int | None
+
+    def test_nullable_ref_resolves_through_defs(self) -> None:
+        """Nullable $ref pattern (Optional[NestedModel]) resolves via $defs.
+
+        Regression: Pydantic emits Optional[NestedModel] as:
+          {"anyOf": [{"$ref": "#/$defs/M"}, {"type": "null"}]}
+        The $ref entry has NO "type" key, so filtering on item["type"]
+        raised KeyError.
+        """
+        import types
+
+        from pydantic import BaseModel, create_model
+
+        field_info: dict[str, Any] = {
+            "anyOf": [
+                {"$ref": "#/$defs/Address"},
+                {"type": "null"},
+            ],
+        }
+        schema_defs: dict[str, Any] = {
+            "Address": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "zip": {"type": "string"},
+                },
+                "required": ["city", "zip"],
+            }
+        }
+        # Must not raise KeyError — the $ref item lacks a "type" key
+        result = _json_schema_to_python_type(
+            "address",
+            field_info,
+            schema_defs=schema_defs,
+            create_model=create_model,
+            schema_base=BaseModel,
+        )
+        # Should be Optional[AddressModel] — a UnionType containing the model and None
+        assert isinstance(result, types.UnionType)
+        type_args = result.__args__
+        assert type(None) in type_args
+        # The non-None arg should be a Pydantic model subclass
+        model_type = next(t for t in type_args if t is not type(None))
+        assert issubclass(model_type, BaseModel)
+        instance = model_type(city="London", zip="SW1A 1AA")
+        assert instance.city == "London"
+
+    def test_nullable_ref_full_schema_roundtrip(self) -> None:
+        """Full schema with Optional[NestedModel] field reconstructs correctly.
+
+        Regression: reconstruct_schema_from_json crashed on schemas containing
+        fields like Optional[Address] because the anyOf filter accessed
+        item["type"] on $ref entries that have no "type" key.
+        """
+        schema: dict[str, Any] = {
+            "$defs": {
+                "Address": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                    },
+                    "required": ["city"],
+                }
+            },
+            "properties": {
+                "name": {"type": "string"},
+                "address": {
+                    "anyOf": [
+                        {"$ref": "#/$defs/Address"},
+                        {"type": "null"},
+                    ],
+                },
+            },
+            "required": ["name"],
+        }
+        model = reconstruct_schema_from_json(schema)
+        # Non-null value
+        instance = model(name="Alice", address={"city": "London"})
+        assert instance.name == "Alice"
+        assert instance.address.city == "London"
+        # Null value (optional)
+        instance2 = model(name="Bob", address=None)
+        assert instance2.address is None

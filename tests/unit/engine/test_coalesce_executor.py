@@ -465,8 +465,9 @@ class TestLateArrival:
         o = executor.accept(late_token, "merge")
         assert o.held is False
         assert o.failure_reason == "late_arrival_after_merge"
+        assert o.outcomes_recorded is True
 
-    def test_late_arrival_records_failed_state(self):
+    def test_late_arrival_records_failed_state_and_outcome(self):
         executor, recorder, _, _ = _make_executor()
         executor.register_coalesce(_settings(), "node_1")
         executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
@@ -474,11 +475,20 @@ class TestLateArrival:
         recorder.reset_mock()
         late = _make_token(branch_name="a", token_id="t_late", row_id="row_1")
         executor.accept(late, "merge")
+
         # Should begin + complete with FAILED
         recorder.begin_node_state.assert_called_once()
         recorder.complete_node_state.assert_called_once()
         fail_call = recorder.complete_node_state.call_args
         assert fail_call.kwargs["status"] == NodeStateStatus.FAILED
+
+        # Should record a terminal FAILED token outcome immediately
+        recorder.record_token_outcome.assert_called_once()
+        outcome_call = recorder.record_token_outcome.call_args
+        assert outcome_call.kwargs["token_id"] == "t_late"
+        assert outcome_call.kwargs["outcome"] == RowOutcome.FAILED
+        assert isinstance(outcome_call.kwargs["error_hash"], str)
+        assert len(outcome_call.kwargs["error_hash"]) == 16
 
     def test_late_arrival_consumed_tokens(self):
         executor, _, _, _ = _make_executor()

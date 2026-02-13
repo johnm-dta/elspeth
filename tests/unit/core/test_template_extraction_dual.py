@@ -1,6 +1,8 @@
 # tests/core/test_template_extraction_dual.py
 """Tests for extracting fields with original name annotation."""
 
+import types
+
 import pytest
 
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
@@ -95,3 +97,11 @@ class TestExtractWithNames:
         assert "amount_usd" in result  # Resolved to normalized
         assert "customer_id" in result
         assert len(result) == 2
+
+    def test_extract_raises_on_contract_corruption_after_name_resolution(self, contract: SchemaContract) -> None:
+        """Resolved names should fail fast if contract field index is corrupted."""
+        corrupted_index = {k: v for k, v in contract._by_normalized.items() if k != "customer_id"}
+        object.__setattr__(contract, "_by_normalized", types.MappingProxyType(corrupted_index))
+
+        with pytest.raises(KeyError, match="customer_id"):
+            extract_jinja2_fields_with_names('{{ row["Customer ID"] }}', contract)

@@ -52,6 +52,7 @@ def _make_nav(
     coalesce_name_by_node_id: dict | None = None,
     coalesce_on_success_map: dict | None = None,
     sink_names: frozenset[str] | None = None,
+    branch_first_node: dict[str, NodeID] | None = None,
 ) -> DAGNavigator:
     """Create a DAGNavigator with sensible defaults."""
     _node_to_plugin = node_to_plugin or {}
@@ -70,6 +71,7 @@ def _make_nav(
         coalesce_name_by_node_id=_coalesce_name_by_node_id,
         coalesce_on_success_map=coalesce_on_success_map or {},
         sink_names=sink_names or frozenset(),
+        branch_first_node=branch_first_node or {},
     )
 
 
@@ -339,12 +341,13 @@ class TestCreateContinuationWorkItem:
         assert item.current_node_id == NodeID("t-2")
 
     def test_jumps_to_coalesce_when_name_provided(self) -> None:
-        """With coalesce name, jumps to coalesce node."""
-        token = make_token_info(data={"v": 1})
+        """With coalesce name, routes to branch first node (identity → coalesce node)."""
+        token = make_token_info(data={"v": 1}, branch_name="path_a")
         coalesce_node = NodeID("coalesce::merge")
         nav = _make_nav(
             coalesce_node_ids={CoalesceName("merge"): coalesce_node},
             node_to_next={NodeID("t-1"): NodeID("t-2"), coalesce_node: None},
+            branch_first_node={"path_a": coalesce_node},
         )
         item = nav.create_continuation_work_item(
             token=token,
@@ -434,3 +437,122 @@ class TestFromTraversalContext:
             sink_names=frozenset({"out", "err"}),
         )
         assert nav.resolve_coalesce_sink(CoalesceName("merge"), context="test") == "out"
+
+
+# =============================================================================
+# ARCH-15: Per-branch transform routing
+# =============================================================================
+
+
+class TestBranchTransformRouting:
+    """Tests for per-branch transform routing in create_continuation_work_item.
+
+    ARCH-15 introduces per-branch transforms: fork children can now be routed
+    to the first transform in their branch chain instead of directly to the
+    coalesce node. The _branch_first_node mapping controls this.
+    """
+
+    def test_continuation_routes_through_branch_transform(self) -> None:
+        """Fork child should go to the first transform, not coalesce.
+
+        When branch_first_node maps a branch to a transform node (not the
+        coalesce), the fork child should be routed to that transform first.
+        """
+        transform = _make_mock_transform(node_id="branch-t1", name="enrich")
+        coalesce_node = NodeID("coalesce::merge")
+        branch_t1 = NodeID("branch-t1")
+
+        nav = _make_nav(
+            node_to_plugin={branch_t1: transform},
+            node_to_next={
+                branch_t1: coalesce_node,
+                coalesce_node: None,
+            },
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            structural_node_ids=frozenset({coalesce_node}),
+            branch_first_node={"path_a": branch_t1},  # Transform branch
+        )
+
+        token = make_token_info(data={"v": 1}, branch_name="path_a")
+        item = nav.create_continuation_work_item(
+            token=token,
+            current_node_id=NodeID("gate-1"),
+            coalesce_name=CoalesceName("merge"),
+        )
+
+        # Should route to the branch transform, not directly to coalesce
+        assert item.current_node_id == branch_t1
+        assert item.coalesce_name == CoalesceName("merge")
+        assert item.coalesce_node_id == coalesce_node
+
+    def test_continuation_identity_branch_goes_to_coalesce(self) -> None:
+        """Identity branch should route directly to the coalesce node.
+
+        When branch_first_node maps a branch to the coalesce node itself,
+        the fork child goes straight there (preserving pre-ARCH-15 behavior).
+        """
+        coalesce_node = NodeID("coalesce::merge")
+
+        nav = _make_nav(
+            node_to_next={
+                NodeID("gate-1"): None,
+                coalesce_node: None,
+            },
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            structural_node_ids=frozenset({coalesce_node}),
+            branch_first_node={"path_a": coalesce_node},  # Identity branch
+        )
+
+        token = make_token_info(data={"v": 1}, branch_name="path_a")
+        item = nav.create_continuation_work_item(
+            token=token,
+            current_node_id=NodeID("gate-1"),
+            coalesce_name=CoalesceName("merge"),
+        )
+
+        assert item.current_node_id == coalesce_node
+        assert item.coalesce_name == CoalesceName("merge")
+
+    def test_work_item_coalesce_name_propagation(self) -> None:
+        """coalesce_name must be preserved through the branch transform chain.
+
+        When a work item is created for a branch transform, the coalesce_name
+        and coalesce_node_id must be carried forward so the processor knows
+        to route to the coalesce node after the branch chain completes.
+        """
+        transform = _make_mock_transform(node_id="branch-t1", name="enrich")
+        coalesce_node = NodeID("coalesce::merge")
+        branch_t1 = NodeID("branch-t1")
+        branch_t2 = NodeID("branch-t2")
+
+        nav = _make_nav(
+            node_to_plugin={branch_t1: transform},
+            node_to_next={
+                branch_t1: branch_t2,
+                branch_t2: coalesce_node,
+                coalesce_node: None,
+            },
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            structural_node_ids=frozenset({coalesce_node}),
+            branch_first_node={"path_a": branch_t1},
+        )
+
+        token = make_token_info(data={"v": 1}, branch_name="path_a")
+
+        # First: fork creates work item at branch start
+        item1 = nav.create_continuation_work_item(
+            token=token,
+            current_node_id=NodeID("gate-1"),
+            coalesce_name=CoalesceName("merge"),
+        )
+        assert item1.current_node_id == branch_t1
+        assert item1.coalesce_name == CoalesceName("merge")
+        assert item1.coalesce_node_id == coalesce_node
+
+        # Second: processor continues from branch-t1 to branch-t2
+        # This uses normal continuation (no coalesce_name — it's mid-chain)
+        item2 = nav.create_continuation_work_item(
+            token=token,
+            current_node_id=branch_t1,
+        )
+        assert item2.current_node_id == branch_t2

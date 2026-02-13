@@ -411,3 +411,98 @@ class TestHTTPClientTelemetry:
         assert len(emitted_events) == 1
         event = emitted_events[0]
         assert event.provider == "api.example.com"
+
+
+class TestHTTPClientPerCallTokenId:
+    """Tests for per-call token_id override on post()/get().
+
+    Batch transforms share one AuditedHTTPClient across multiple tokens.
+    The per-call token_id parameter ensures correct telemetry attribution.
+    """
+
+    def _create_mock_recorder(self) -> MagicMock:
+        recorder = MagicMock()
+        counter = itertools.count()
+        recorder.allocate_call_index.side_effect = lambda _: next(counter)
+        return recorder
+
+    def test_per_call_token_id_overrides_client_default(self) -> None:
+        """post(token_id=...) overrides the constructor token_id in telemetry."""
+        recorder = self._create_mock_recorder()
+        emitted_events: list[ExternalCallCompleted] = []
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = '{"ok": true}'
+        mock_response.content = b'{"ok": true}'
+        mock_response.headers = {"content-type": "application/json"}
+
+        with patch("httpx.Client") as mock_client_class:
+            client = AuditedHTTPClient(
+                recorder=recorder,
+                state_id="state_batch",
+                base_url="https://api.example.com",
+                run_id="run_batch",
+                telemetry_emit=emitted_events.append,
+                token_id="token-constructor",  # Client-level default
+            )
+            mock_client_instance = mock_client_class.return_value
+            mock_client_instance.post.return_value = mock_response
+
+            # Call with per-call override
+            client.post("/v1/chat", json={"msg": "hello"}, token_id="token-row-42")
+
+        assert len(emitted_events) == 1
+        assert emitted_events[0].token_id == "token-row-42"
+
+    def test_client_default_token_id_when_no_override(self) -> None:
+        """Without per-call override, client-level token_id is used."""
+        recorder = self._create_mock_recorder()
+        emitted_events: list[ExternalCallCompleted] = []
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = '{"ok": true}'
+        mock_response.content = b'{"ok": true}'
+        mock_response.headers = {"content-type": "application/json"}
+
+        with patch("httpx.Client") as mock_client_class:
+            client = AuditedHTTPClient(
+                recorder=recorder,
+                state_id="state_single",
+                base_url="https://api.example.com",
+                run_id="run_single",
+                telemetry_emit=emitted_events.append,
+                token_id="token-constructor",
+            )
+            mock_client_instance = mock_client_class.return_value
+            mock_client_instance.post.return_value = mock_response
+
+            client.post("/v1/chat", json={"msg": "hello"})
+
+        assert len(emitted_events) == 1
+        assert emitted_events[0].token_id == "token-constructor"
+
+    def test_per_call_token_id_on_error_path(self) -> None:
+        """Per-call token_id is used even when the request fails."""
+        recorder = self._create_mock_recorder()
+        emitted_events: list[ExternalCallCompleted] = []
+
+        with patch("httpx.Client") as mock_client_class:
+            client = AuditedHTTPClient(
+                recorder=recorder,
+                state_id="state_err",
+                base_url="https://api.example.com",
+                run_id="run_err",
+                telemetry_emit=emitted_events.append,
+                token_id="token-default",
+            )
+            mock_client_instance = mock_client_class.return_value
+            mock_client_instance.post.side_effect = httpx.ConnectError("Connection failed")
+
+            with pytest.raises(httpx.ConnectError):
+                client.post("/v1/chat", json={"msg": "hello"}, token_id="token-row-99")
+
+        assert len(emitted_events) == 1
+        assert emitted_events[0].token_id == "token-row-99"
+        assert emitted_events[0].status == CallStatus.ERROR

@@ -93,6 +93,68 @@ source:
         assert "traceback" not in result.output.lower()
 
 
+class TestYamlRootTypeErrors:
+    """Test that non-mapping YAML roots produce clean configuration errors."""
+
+    @staticmethod
+    def _write_non_mapping_yaml(path: Path) -> None:
+        path.write_text("""
+- foo: bar
+""")
+
+    def test_run_non_mapping_yaml_shows_configuration_error(self, tmp_path: Path) -> None:
+        """run should fail cleanly when settings root is not a mapping."""
+        settings_file = tmp_path / "settings.yaml"
+        self._write_non_mapping_yaml(settings_file)
+
+        result = runner.invoke(app, ["run", "-s", str(settings_file), "--dry-run"])
+
+        assert result.exit_code == 1
+        output = result.output.lower()
+        assert "mapping/object" in output
+        assert "traceback" not in output
+
+    def test_validate_non_mapping_yaml_shows_configuration_error(self, tmp_path: Path) -> None:
+        """validate should fail cleanly when settings root is not a mapping."""
+        settings_file = tmp_path / "settings.yaml"
+        self._write_non_mapping_yaml(settings_file)
+
+        result = runner.invoke(app, ["validate", "-s", str(settings_file)])
+
+        assert result.exit_code == 1
+        output = result.output.lower()
+        assert "configuration error" in output
+        assert "mapping/object" in output
+        assert "traceback" not in output
+
+    def test_resume_non_mapping_yaml_shows_configuration_error(self, tmp_path: Path) -> None:
+        """resume should fail cleanly when settings root is not a mapping."""
+        settings_file = tmp_path / "settings.yaml"
+        self._write_non_mapping_yaml(settings_file)
+
+        result = runner.invoke(app, ["resume", "run-123", "-s", str(settings_file)])
+
+        assert result.exit_code == 1
+        output = result.output.lower()
+        assert "configuration error" in output
+        assert "mapping/object" in output
+        assert "traceback" not in output
+
+    def test_purge_non_mapping_yaml_without_database_fails_cleanly(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """purge should fail cleanly when local settings.yaml root is not a mapping."""
+        settings_file = tmp_path / "settings.yaml"
+        self._write_non_mapping_yaml(settings_file)
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(app, ["purge", "--dry-run"])
+
+        assert result.exit_code == 1
+        output = result.output.lower()
+        assert "configuration error in settings.yaml" in output
+        assert "mapping/object" in output
+        assert "traceback" not in output
+
+
 class TestDatabaseConnectionErrors:
     """Test database connection error handling."""
 

@@ -133,7 +133,15 @@ def _create_node_state(
     )
 
 
-def _create_operation(conn: Connection, *, operation_id: str, run_id: str, node_id: str) -> None:
+def _create_operation(
+    conn: Connection,
+    *,
+    operation_id: str,
+    run_id: str,
+    node_id: str,
+    input_data_ref: str | None = None,
+    output_data_ref: str | None = None,
+) -> None:
     conn.execute(
         operations_table.insert().values(
             operation_id=operation_id,
@@ -142,6 +150,8 @@ def _create_operation(conn: Connection, *, operation_id: str, run_id: str, node_
             operation_type="sink_write",
             started_at=datetime.now(UTC),
             status="completed",
+            input_data_ref=input_data_ref,
+            output_data_ref=output_data_ref,
         )
     )
 
@@ -429,6 +439,8 @@ class TestFindExpiredPayloadRefs:
                 operation_id="op-expired",
                 run_id="expired-run",
                 node_id="expired-node-a",
+                input_data_ref="ref-op-input-expired",
+                output_data_ref="ref-op-output-expired",
             )
             _create_call_for_operation(
                 conn,
@@ -463,13 +475,23 @@ class TestFindExpiredPayloadRefs:
                 row_index=0,
                 source_data_ref="ref-op-res-expired",
             )
+            _create_operation(
+                conn,
+                operation_id="op-active",
+                run_id="active-run",
+                node_id="active-node",
+                input_data_ref="ref-op-input-expired",
+                output_data_ref=None,
+            )
 
         refs = set(manager.find_expired_payload_refs(retention_days=30, as_of=now))
         assert "ref-row-expired" in refs
+        assert "ref-op-output-expired" in refs
         assert "ref-state-req-expired" in refs
         assert "ref-state-res-expired" in refs
         assert "ref-op-req-expired" in refs
         assert "ref-routing-expired" in refs
+        assert "ref-op-input-expired" not in refs
         assert "ref-op-res-expired" not in refs
 
     def test_find_affected_run_ids_covers_row_state_call_op_call_and_routing_refs(self, db: LandscapeDB) -> None:
@@ -527,6 +549,18 @@ class TestFindExpiredPayloadRefs:
                 response_ref="ref-op-call",
             )
 
+            # Operation input/output ref run
+            _create_run(conn, "run-op-io", status=RunStatus.COMPLETED, completed_at=old)
+            _create_node(conn, "run-op-io", "node-op-io")
+            _create_operation(
+                conn,
+                operation_id="op-op-io",
+                run_id="run-op-io",
+                node_id="node-op-io",
+                input_data_ref="ref-op-input",
+                output_data_ref="ref-op-output",
+            )
+
             # Routing ref run
             _create_run(conn, "run-routing", status=RunStatus.COMPLETED, completed_at=old)
             _create_node(conn, "run-routing", "node-routing-a")
@@ -562,8 +596,10 @@ class TestFindExpiredPayloadRefs:
                 reason_ref="ref-routing",
             )
 
-        affected = manager._find_affected_run_ids(["ref-row", "ref-state-call", "ref-op-call", "ref-routing"])
-        assert affected == {"run-row", "run-state-call", "run-op-call", "run-routing"}
+        affected = manager._find_affected_run_ids(
+            ["ref-row", "ref-state-call", "ref-op-call", "ref-op-input", "ref-op-output", "ref-routing"]
+        )
+        assert affected == {"run-row", "run-state-call", "run-op-call", "run-op-io", "run-routing"}
 
 
 class TestPurgePayloads:

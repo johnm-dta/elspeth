@@ -1,5 +1,7 @@
 """Tests for plugin utilities."""
 
+import pytest
+
 
 class TestGetNestedField:
     """Tests for get_nested_field utility."""
@@ -71,11 +73,10 @@ class TestGetNestedField:
         assert result is None
         assert result is not MISSING
 
-    def test_non_dict_intermediate_returns_sentinel(self) -> None:
-        """Non-dict intermediate value returns MISSING."""
-        from elspeth.plugins.sentinels import MISSING
+    def test_non_dict_intermediate_raises_type_error(self) -> None:
+        """Non-dict intermediate value is a type violation, not missing."""
         from elspeth.plugins.utils import get_nested_field
 
         data = {"user": "string_not_dict"}
-        result = get_nested_field(data, "user.name")
-        assert result is MISSING
+        with pytest.raises(TypeError, match="expected dict"):
+            get_nested_field(data, "user.name")

@@ -729,7 +729,7 @@ class TestExecutionGraphAccessors:
         graph.add_edge("gate", "sink", label="flagged", mode=RoutingMode.MOVE)
 
         # Gate's effective producer schema should be source's output schema
-        effective_schema = graph._get_effective_producer_schema("gate")
+        effective_schema = graph.get_effective_producer_schema("gate")
 
         assert effective_schema == OutputSchema
 
@@ -744,7 +744,7 @@ class TestExecutionGraphAccessors:
         # Gate with no inputs is a bug in our code - should crash
         # ValueError is raised by internal validation during edge compatibility checking
         with pytest.raises(ValueError) as exc_info:
-            graph._get_effective_producer_schema("gate")
+            graph.get_effective_producer_schema("gate")
 
         assert "no incoming edges" in str(exc_info.value).lower()
         assert "bug in graph construction" in str(exc_info.value).lower()
@@ -771,7 +771,7 @@ class TestExecutionGraphAccessors:
         graph.add_edge("gate2", "sink", label="approved", mode=RoutingMode.MOVE)
 
         # gate2's effective schema should trace back to source
-        effective_schema = graph._get_effective_producer_schema("gate2")
+        effective_schema = graph.get_effective_producer_schema("gate2")
 
         assert effective_schema == SourceOutput
 
@@ -813,7 +813,7 @@ class TestExecutionGraphAccessors:
             output_schema=TransformOutput,
         )
 
-        effective_schema = graph._get_effective_producer_schema("transform")
+        effective_schema = graph.get_effective_producer_schema("transform")
 
         assert effective_schema == TransformOutput
 
@@ -3185,7 +3185,7 @@ class TestCoalesceNodes:
         node_info = graph.get_node_info(coalesce_id)
 
         # Verify config is stored
-        assert node_info.config["branches"] == ["path_a", "path_b"]
+        assert node_info.config["branches"] == {"path_a": "path_a", "path_b": "path_b"}
         assert node_info.config["policy"] == "quorum"
         assert node_info.config["merge"] == "nested"
         assert node_info.config["timeout_seconds"] == 30.0
@@ -3946,7 +3946,6 @@ def test_from_plugin_instances_extracts_schemas():
     import tempfile
     from pathlib import Path
 
-    from elspeth.contracts import NodeType
     from elspeth.core.config import load_settings
     from elspeth.core.dag import ExecutionGraph
 
@@ -4004,8 +4003,9 @@ sinks:
         )
 
         # Verify schemas extracted
-        source_nodes = [n for n, d in graph._graph.nodes(data=True) if d["info"].node_type == NodeType.SOURCE]
-        source_info = graph.get_node_info(source_nodes[0])
+        source_id = graph.get_source()
+        assert source_id is not None
+        source_info = graph.get_node_info(source_id)
         assert source_info.output_schema is not None
 
     finally:
@@ -4444,12 +4444,12 @@ class TestDeterministicNodeIDs:
             )
 
 
-class TestCoalesceGateIndex:
-    """Test coalesce_gate_index exposure from ExecutionGraph."""
+class TestBranchGateMap:
+    """Test branch_gate_map exposure from ExecutionGraph."""
 
-    def test_get_coalesce_gate_index_returns_copy(self) -> None:
+    def test_get_branch_gate_map_returns_copy(self) -> None:
         """Getter should return a copy to prevent external mutation."""
-        from elspeth.contracts.types import CoalesceName
+        from elspeth.contracts.types import BranchName, NodeID
         from elspeth.core.config import (
             CoalesceSettings,
             ElspethSettings,
@@ -4491,21 +4491,21 @@ class TestCoalesceGateIndex:
             coalesce_settings=settings.coalesce,
         )
 
-        # Get the index
-        index = graph.get_coalesce_gate_index()
+        # Get the map
+        branch_map = graph.get_branch_gate_map()
 
-        # Verify it contains expected mapping
-        assert CoalesceName("merge_branches") in index
-        assert isinstance(index[CoalesceName("merge_branches")], int)
+        # Verify it contains expected mappings (each branch maps to a NodeID)
+        assert BranchName("branch_a") in branch_map
+        assert BranchName("branch_b") in branch_map
 
         # Verify it's a copy (mutation doesn't affect internal state)
-        original_value = index[CoalesceName("merge_branches")]
-        index[CoalesceName("merge_branches")] = 999
+        original_value = branch_map[BranchName("branch_a")]
+        branch_map[BranchName("branch_a")] = NodeID("fake")
 
-        fresh_index = graph.get_coalesce_gate_index()
-        assert fresh_index[CoalesceName("merge_branches")] == original_value
+        fresh_map = graph.get_branch_gate_map()
+        assert fresh_map[BranchName("branch_a")] == original_value
 
-    def test_get_coalesce_gate_index_empty_when_no_coalesce(self) -> None:
+    def test_get_branch_gate_map_empty_when_no_coalesce(self) -> None:
         """Getter returns empty dict when no coalesce configured."""
         from elspeth.core.config import ElspethSettings, SinkSettings, SourceSettings
         from elspeth.core.dag import ExecutionGraph
@@ -4526,8 +4526,8 @@ class TestCoalesceGateIndex:
             coalesce_settings=settings.coalesce,
         )
 
-        index = graph.get_coalesce_gate_index()
-        assert index == {}
+        branch_map = graph.get_branch_gate_map()
+        assert branch_map == {}
 
 
 class TestDivertEdges:

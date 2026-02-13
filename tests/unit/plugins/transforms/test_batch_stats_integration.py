@@ -126,3 +126,27 @@ def test_batch_stats_contract_without_mean():
     contract_field_names = {fc.normalized_name for fc in result.row.contract.fields}
     assert "mean" not in contract_field_names, "Contract should not include mean when disabled"
     assert contract_field_names == {"count", "sum", "batch_size"}
+
+
+def test_batch_stats_contract_empty_batch_without_mean():
+    """Empty batch contract also omits mean when compute_mean=False."""
+    transform = BatchStats(
+        {
+            "schema": {"mode": "observed"},
+            "value_field": "amount",
+            "compute_mean": False,
+        }
+    )
+
+    ctx = PluginContext(run_id="test-run", config={})
+    result = transform.process([], ctx)
+
+    assert not result.is_multi_row
+    assert result.row is not None
+    assert "mean" not in result.row
+    assert result.row["batch_empty"] is True
+
+    assert isinstance(result.row, PipelineRow)
+    contract_field_names = {fc.normalized_name for fc in result.row.contract.fields}
+    assert "mean" not in contract_field_names
+    assert contract_field_names == {"count", "sum", "batch_empty"}

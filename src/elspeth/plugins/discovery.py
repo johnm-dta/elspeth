@@ -128,19 +128,25 @@ def _discover_in_file(py_file: Path, base_class: type) -> list[type]:
         if inspect.isabstract(obj):
             continue
 
-        # Must have a `name` attribute with non-empty value
-        # NOTE: This getattr is at a PLUGIN DISCOVERY TRUST BOUNDARY - we're scanning
-        # arbitrary Python files and can't know at compile time which classes have
-        # a `name` attribute. This is legitimate framework-level polymorphism.
-        plugin_name = getattr(obj, "name", None)
-        if not plugin_name:
-            logger.warning(
-                "Class %s in %s inherits from %s but has no/empty 'name' attribute - skipping",
-                name,
-                py_file,
-                base_class.__name__,
+        # Plugin code is system-owned; missing metadata is a bug, not recoverable input.
+        try:
+            plugin_name = obj.name  # type: ignore[attr-defined]
+        except AttributeError as e:
+            raise ValueError(
+                f"Plugin class {name} in {py_file} inherits from {base_class.__name__} but is missing required class attribute 'name'."
+            ) from e
+        try:
+            normalized_plugin_name = plugin_name.strip()
+        except AttributeError as e:
+            raise ValueError(
+                f"Plugin class {name} in {py_file} inherits from {base_class.__name__} "
+                f"but has invalid 'name' value {plugin_name!r}. Expected non-empty string."
+            ) from e
+        if not normalized_plugin_name:
+            raise ValueError(
+                f"Plugin class {name} in {py_file} inherits from {base_class.__name__} "
+                f"but has invalid 'name' value {plugin_name!r}. Expected non-empty string."
             )
-            continue
 
         discovered.append(obj)
 

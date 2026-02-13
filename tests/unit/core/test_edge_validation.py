@@ -115,7 +115,13 @@ def test_coalesce_branch_compatibility() -> None:
     )
 
     # Coalesce node
-    graph.add_node("coalesce", node_type=NodeType.COALESCE, plugin_name="merge", input_schema=SchemaA)  # Expects SchemaA from both branches
+    graph.add_node(
+        "coalesce",
+        node_type=NodeType.COALESCE,
+        plugin_name="merge",
+        input_schema=SchemaA,
+        config={"merge": "union", "branches": {}, "policy": "require_all"},
+    )  # Expects SchemaA from both branches
 
     # Wire up
     graph.add_edge("source", "transform1", label="fork_path_1")

@@ -18,6 +18,7 @@ from elspeth.contracts.enums import (
 )
 from elspeth.contracts.events import (
     ExternalCallCompleted,
+    FieldResolutionApplied,
     GateEvaluated,
     PhaseAction,
     PhaseChanged,
@@ -128,6 +129,17 @@ def _external_call() -> ExternalCallCompleted:
     )
 
 
+def _field_resolution_applied() -> FieldResolutionApplied:
+    return FieldResolutionApplied(
+        timestamp=_NOW,
+        run_id=_RUN_ID,
+        source_plugin="csv",
+        field_count=2,
+        normalization_version="v1",
+        resolution_mapping={"Customer ID": "customer_id", "Order Amount": "order_amount"},
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _UnknownEvent(TelemetryEvent):
     """Custom event subclass to test forward-compatible filtering."""
@@ -208,6 +220,15 @@ class TestRowEventsFilteredByGranularity:
     def test_token_completed_emits_at_full(self) -> None:
         assert should_emit(_token_completed(), FULL) is True
 
+    def test_field_resolution_applied_suppressed_at_lifecycle(self) -> None:
+        assert should_emit(_field_resolution_applied(), LIFECYCLE) is False
+
+    def test_field_resolution_applied_emits_at_rows(self) -> None:
+        assert should_emit(_field_resolution_applied(), ROWS) is True
+
+    def test_field_resolution_applied_emits_at_full(self) -> None:
+        assert should_emit(_field_resolution_applied(), FULL) is True
+
 
 # =============================================================================
 # External Call Events: Emit Only at FULL
@@ -257,6 +278,7 @@ _ROW_FACTORIES = [
     pytest.param(_transform_completed, id="TransformCompleted"),
     pytest.param(_gate_evaluated, id="GateEvaluated"),
     pytest.param(_token_completed, id="TokenCompleted"),
+    pytest.param(_field_resolution_applied, id="FieldResolutionApplied"),
 ]
 
 

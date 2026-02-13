@@ -282,13 +282,17 @@ class AzureContentSafety(BaseTransform, BatchTransformMixin):
         """
         if ctx.state_id is None:
             raise RuntimeError("state_id is required for batch processing. Ensure transform is executed through the engine.")
+        token_id = ctx.token.token_id if ctx.token is not None else None
 
         try:
-            return self._process_single_with_state(row, ctx.state_id)
+            return self._process_single_with_state(row, ctx.state_id, token_id=token_id)
         finally:
             # Clean up cached HTTP client for this state_id
             with self._http_clients_lock:
-                client = self._http_clients.pop(ctx.state_id, None)
+                if ctx.state_id in self._http_clients:
+                    client = self._http_clients.pop(ctx.state_id)
+                else:
+                    client = None
             if client is not None:
                 client.close()
 
@@ -296,6 +300,8 @@ class AzureContentSafety(BaseTransform, BatchTransformMixin):
         self,
         row: PipelineRow,
         state_id: str,
+        *,
+        token_id: str | None = None,
     ) -> TransformResult:
         """Process a single row with explicit state_id.
 
@@ -304,15 +310,25 @@ class AzureContentSafety(BaseTransform, BatchTransformMixin):
         Raises:
             CapacityError: On rate limit errors (for worker pool retry)
         """
-        # Get dict representation for field scanning
-        row_dict = row.to_dict()
-        fields_to_scan = self._get_fields_to_scan(row_dict)
+        fields_to_scan = self._get_fields_to_scan(row)
+        all_mode = self._fields == "all"
 
         for field_name in fields_to_scan:
-            if field_name not in row_dict:
-                continue  # Skip fields not present in this row
+            if field_name not in row:
+                if all_mode:
+                    continue  # "all" mode scans only present string fields
+                # Explicitly-configured field is missing — fail CLOSED.
+                # Security transform must not report "validated" when configured
+                # fields were never analyzed.
+                return TransformResult.error(
+                    {
+                        "reason": "missing_field",
+                        "field": field_name,
+                    },
+                    retryable=False,
+                )
 
-            value = row_dict[field_name]
+            value = row[field_name]
             if not isinstance(value, str):
                 # Explicitly-configured field is non-string — fail CLOSED.
                 # Security transform cannot analyze non-string content for safety.
@@ -329,7 +345,7 @@ class AzureContentSafety(BaseTransform, BatchTransformMixin):
 
             # Call Azure API with state_id for audit trail
             try:
-                analysis = self._analyze_content(value, state_id)
+                analysis = self._analyze_content(value, state_id, token_id=token_id)
             except httpx.HTTPStatusError as e:
                 status_code = e.response.status_code
                 if is_capacity_error(status_code):
@@ -390,20 +406,20 @@ class AzureContentSafety(BaseTransform, BatchTransformMixin):
                 )
 
         return TransformResult.success(
-            PipelineRow(row_dict, row.contract),
+            row,
             success_reason={"action": "validated"},
         )
 
-    def _get_fields_to_scan(self, row: dict[str, Any]) -> list[str]:
+    def _get_fields_to_scan(self, row: PipelineRow) -> list[str]:
         """Determine which fields to scan based on config."""
         if self._fields == "all":
-            return [k for k, v in row.items() if isinstance(v, str)]
+            return [field_name for field_name in row if isinstance(row[field_name], str)]
         elif isinstance(self._fields, str):
             return [self._fields]
         else:
             return self._fields
 
-    def _get_http_client(self, state_id: str) -> Any:  # Returns AuditedHTTPClient
+    def _get_http_client(self, state_id: str, *, token_id: str | None = None) -> Any:  # Returns AuditedHTTPClient
         """Get or create audited HTTP client for a state_id.
 
         Clients are cached to preserve call_index across retries.
@@ -435,6 +451,7 @@ class AzureContentSafety(BaseTransform, BatchTransformMixin):
                         "Content-Type": "application/json",
                     },
                     limiter=self._limiter,
+                    token_id=token_id,
                 )
             return self._http_clients[state_id]
 
@@ -442,6 +459,8 @@ class AzureContentSafety(BaseTransform, BatchTransformMixin):
         self,
         text: str,
         state_id: str,
+        *,
+        token_id: str | None = None,
     ) -> dict[str, int]:
         """Call Azure Content Safety API.
 
@@ -454,7 +473,7 @@ class AzureContentSafety(BaseTransform, BatchTransformMixin):
         Uses AuditedHTTPClient for automatic audit recording and telemetry emission.
         """
         # Use AuditedHTTPClient - handles recording and telemetry automatically
-        http_client = self._get_http_client(state_id)
+        http_client = self._get_http_client(state_id, token_id=token_id)
 
         url = f"{self._endpoint}/contentsafety/text:analyze?api-version={self.API_VERSION}"
 

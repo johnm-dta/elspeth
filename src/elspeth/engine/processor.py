@@ -48,6 +48,7 @@ from elspeth.engine.retry import MaxRetriesExceeded, RetryManager
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenManager
 from elspeth.plugins.clients.llm import LLMClientError
+from elspeth.plugins.pooling import CapacityError
 from elspeth.plugins.protocols import BatchTransformProtocol, TransformProtocol
 
 # Iteration guard to prevent infinite loops from bugs
@@ -68,12 +69,14 @@ class DAGTraversalContext:
     first_transform_node_id: NodeID | None
     node_to_next: Mapping[NodeID, NodeID | None]
     coalesce_node_map: Mapping[CoalesceName, NodeID]
+    branch_first_node: Mapping[str, NodeID] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "node_step_map", MappingProxyType(dict(self.node_step_map)))
         object.__setattr__(self, "node_to_plugin", MappingProxyType(dict(self.node_to_plugin)))
         object.__setattr__(self, "node_to_next", MappingProxyType(dict(self.node_to_next)))
         object.__setattr__(self, "coalesce_node_map", MappingProxyType(dict(self.coalesce_node_map)))
+        object.__setattr__(self, "branch_first_node", MappingProxyType(dict(self.branch_first_node)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +254,7 @@ class RowProcessor:
             coalesce_name_by_node_id=self._coalesce_name_by_node_id,
             coalesce_on_success_map=self._coalesce_on_success_map,
             sink_names=self._sink_names,
+            branch_first_node=dict(traversal.branch_first_node),
         )
 
         # Build error edge map: transform node_id -> DIVERT edge_id.
@@ -1027,7 +1031,7 @@ class RowProcessor:
                     )
                 # Non-retryable errors re-raise (already handled by transform)
                 raise
-            except (ConnectionError, TimeoutError, OSError) as e:
+            except (ConnectionError, TimeoutError, OSError, CapacityError) as e:
                 # Other retryable errors - convert to error result
                 #
                 # BUG FIX (P2-2026-01-27): Must validate on_error and record transform_error
@@ -1094,7 +1098,7 @@ class RowProcessor:
             # - ContentPolicyError, ContextLengthError: retryable=False
             if isinstance(e, LLMClientError):
                 return e.retryable
-            return isinstance(e, ConnectionError | TimeoutError | OSError)
+            return isinstance(e, ConnectionError | TimeoutError | OSError | CapacityError)
 
         return self._retry_manager.execute_with_retry(
             operation=execute_attempt,

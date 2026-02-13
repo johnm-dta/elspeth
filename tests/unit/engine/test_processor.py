@@ -47,6 +47,7 @@ from elspeth.engine.processor import (
 from elspeth.engine.retry import MaxRetriesExceeded, RetryManager
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.clients.llm import LLMClientError
+from elspeth.plugins.pooling import CapacityError
 from elspeth.plugins.protocols import TransformProtocol
 from elspeth.testing import make_contract, make_row, make_source_row, make_token_info
 
@@ -1684,6 +1685,28 @@ class TestExecuteTransformNoRetry:
         assert result.status == "error"
         assert error_sink == "discard"
 
+    def test_capacity_error_with_on_error_returns_row_scoped_error(self) -> None:
+        """CapacityError with no retry manager returns retryable row error."""
+        _, _, processor = self._setup()
+        transform = _make_mock_transform(node_id="t1", on_error="discard")
+        token = make_token_info(data={"value": 42})
+        ctx = PluginContext(run_id="test-run", config={})
+
+        with patch.object(
+            processor._transform_executor,
+            "execute_transform",
+            side_effect=CapacityError(429, "rate limited"),
+        ):
+            result, _out_token, error_sink = processor._execute_transform_with_retry(
+                transform=transform,
+                token=token,
+                ctx=ctx,
+            )
+
+        assert result.status == "error"
+        assert result.retryable is True
+        assert error_sink == "discard"
+
     def test_transient_error_on_error_is_always_set(self) -> None:
         """on_error is now required at config time — None no longer reaches runtime.
 
@@ -1834,6 +1857,7 @@ class TestExecuteTransformWithRetry:
         assert is_retryable(LLMClientError("content policy", retryable=False)) is False
         assert is_retryable(ConnectionError("conn reset")) is True
         assert is_retryable(TimeoutError("timeout")) is True
+        assert is_retryable(CapacityError(429, "rate limited")) is True
         assert is_retryable(AttributeError("bug")) is False
         assert is_retryable(TypeError("bug")) is False
 
@@ -1947,6 +1971,47 @@ class TestMaybeCoalesceToken:
 
         assert handled is True
         assert result is None
+
+    def test_coalesce_failure_with_outcomes_recorded_does_not_duplicate_recording(self) -> None:
+        """When executor already recorded FAILED outcome, processor must not record again."""
+        _, recorder = _make_recorder()
+        coalesce = Mock()
+        coalesce.accept.return_value = Mock(
+            held=False,
+            merged_token=None,
+            failure_reason="late_arrival_after_merge",
+            outcomes_recorded=True,
+        )
+        processor = _make_processor(
+            recorder,
+            coalesce_executor=coalesce,
+            coalesce_node_ids={CoalesceName("merge"): NodeID("coalesce::merge")},
+            node_step_map={NodeID("coalesce::merge"): 2},
+        )
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="token-1",
+            row_data=make_row({}),
+            branch_name="path_a",
+        )
+
+        with (
+            patch.object(recorder, "record_token_outcome") as record_outcome,
+            patch.object(processor, "_emit_token_completed") as emit_token_completed,
+        ):
+            handled, result = processor._maybe_coalesce_token(
+                token,
+                current_node_id=NodeID("coalesce::merge"),
+                coalesce_node_id=NodeID("coalesce::merge"),
+                coalesce_name=CoalesceName("merge"),
+                child_items=[],
+            )
+
+        assert handled is True
+        assert result is not None
+        assert result.outcome == RowOutcome.FAILED
+        record_outcome.assert_not_called()
+        emit_token_completed.assert_called_once()
 
     def test_coalesce_merged_at_terminal_returns_coalesced_result(self) -> None:
         """All branches arrived at terminal coalesce → COALESCED result."""

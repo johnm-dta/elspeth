@@ -150,10 +150,10 @@ def _build_linear_graph(config: PipelineConfig) -> ExecutionGraph:
             mode=RoutingMode.MOVE,
         )
 
-    graph._sink_id_map = sink_ids
-    graph._transform_id_map = transform_ids
-    graph._route_resolution_map = {}
-    graph._config_gate_id_map = {}
+    graph.set_sink_id_map(sink_ids)
+    graph.set_transform_id_map(transform_ids)
+    graph.set_route_resolution_map({})
+    graph.set_config_gate_id_map({})
 
     return graph
 
@@ -417,10 +417,10 @@ class TestResumeIdempotence:
         )
         graph_b.add_edge("source", "transform_0", label="continue", mode=RoutingMode.MOVE)
         graph_b.add_edge("transform_0", "sink_default", label="continue", mode=RoutingMode.MOVE)
-        graph_b._sink_id_map = {SinkName("default"): NodeID("sink_default")}
-        graph_b._transform_id_map = {0: NodeID("transform_0")}
-        graph_b._route_resolution_map = {}
-        graph_b._config_gate_id_map = {}
+        graph_b.set_sink_id_map({SinkName("default"): NodeID("sink_default")})
+        graph_b.set_transform_id_map({0: NodeID("transform_0")})
+        graph_b.set_route_resolution_map({})
+        graph_b.set_config_gate_id_map({})
 
         # Simulate that first 3 rows were processed (doubled)
         pre_crash_output = [{"id": i, "value": (i + 1) * 10 * 2} for i in range(3)]

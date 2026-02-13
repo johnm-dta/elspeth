@@ -225,6 +225,14 @@ def _normalize_field_spec(spec: Any, *, index: int) -> str:
         return spec
 
     if isinstance(spec, dict):
+        # Handle to_dict() round-trip format: {"name": "x", "type": "str", "required": true}
+        # This enables SchemaConfig.from_dict(schema_config.to_dict()) to work.
+        if "name" in spec and "type" in spec:
+            name = spec["name"]
+            type_spec = spec["type"]
+            optional = not spec.get("required", True)
+            return f"{name}: {type_spec}{'?' if optional else ''}"
+
         # YAML `- id: int` parses as {"id": "int"}
         if len(spec) != 1:
             raise ValueError(
@@ -326,8 +334,9 @@ class SchemaConfig:
             # Observed schemas may have optional fields for contracts (guaranteed_fields)
             # but don't define explicit field types
             fields_value = config.get("fields")
-            # Allow empty list or None, but not explicit field definitions
-            if fields_value is not None and isinstance(fields_value, list) and len(fields_value) > 0:
+            # Allow only None or [] for backwards compatibility; any other value
+            # is an explicit schema declaration and must be rejected.
+            if fields_value is not None and fields_value != []:
                 raise ValueError(
                     "Observed schemas (mode: observed) cannot have explicit field definitions. "
                     "Use guaranteed_fields/required_fields for contracts instead."

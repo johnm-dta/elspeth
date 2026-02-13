@@ -1,0 +1,103 @@
+# Fork/Coalesce Example — Per-Branch Transforms (ARCH-15)
+#
+# Demonstrates fork/join with DIFFERENT transforms on each branch:
+#
+#   source ─(raw)─> [fork_gate] ─┬─ path_a ─> truncate ─(truncated_a)─┐
+#                                 └─ path_b ─> field_mapper ─(mapped_b)─┤
+#                                                                        ├─ [merge_results]
+#                                                             (merged)──> [route_output] ─> output
+#
+# NEW in ARCH-15: Dict syntax for coalesce branches maps branch identity
+# to input connection name. This allows transforms to run on each branch
+# independently before merging.
+#
+# - path_a: Truncates description to 20 chars
+# - path_b: Renames/selects specific fields
+#
+# The coalesce waits for both branches to arrive, then merges using
+# the 'nested' strategy — output contains data from both branches under
+# separate keys.
+
+source:
+  plugin: csv
+  on_success: raw
+  options:
+    path: examples/fork_coalesce/input.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'product: str'
+      - 'price: int'
+      - 'category: str'
+      - 'description: str'
+    on_validation_failure: discard
+
+gates:
+# Fork every row into two parallel paths
+- name: fork_gate
+  input: raw
+  condition: "True"
+  routes:
+    'true': fork
+    'false': output
+  fork_to:
+    - path_a
+    - path_b
+
+# Route merged results to output sink
+- name: route_output
+  input: merge_results
+  condition: "True"
+  routes:
+    'true': output
+    'false': output
+
+transforms:
+# Branch A: Truncate description to 20 characters
+- name: truncate_branch_a
+  plugin: truncate
+  input: path_a                    # Consumes from fork branch path_a
+  on_success: truncated_a
+  on_error: discard
+  options:
+    fields:
+      description: 20
+    suffix: "..."
+    schema:
+      mode: observed
+
+# Branch B: Rename and select specific fields
+- name: map_branch_b
+  plugin: field_mapper
+  input: path_b                    # Consumes from fork branch path_b
+  on_success: mapped_b
+  on_error: discard
+  options:
+    mapping:
+      product_name: product        # Rename: product → product_name
+      item_id: id                  # Rename: id → item_id
+      cost: price                  # Rename: price → cost
+    select_only: true              # Only include mapped fields (drops category, description)
+    schema:
+      mode: observed
+
+coalesce:
+- name: merge_results
+  branches:                        # Dict format — maps branch identity → input connection
+    path_a: truncated_a            # Collect tokens from 'truncated_a' as branch path_a
+    path_b: mapped_b               # Collect tokens from 'mapped_b' as branch path_b
+  policy: require_all
+  merge: nested
+
+sinks:
+  output:
+    plugin: json
+    options:
+      path: examples/fork_coalesce/output/per_branch_results.json
+      schema:
+        mode: observed
+      format: jsonl
+
+landscape:
+  url: sqlite:///examples/fork_coalesce/runs/audit.db

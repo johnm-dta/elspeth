@@ -247,6 +247,35 @@ class TestContractPreservationThroughTransforms:
         assert computed_field.python_type is int
         assert computed_field.source == "inferred"
 
+    def test_contract_with_added_dict_field_uses_object_type(self, tmp_path: Path) -> None:
+        """Contract propagation preserves added dict fields as object type."""
+        input_csv = tmp_path / "input.csv"
+        input_csv.write_text("name,value\nTest,123\n")
+
+        source = CSVSource(
+            {
+                "path": str(input_csv),
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "discard",
+            }
+        )
+
+        ctx = make_test_context()
+        rows = list(source.load(ctx))
+        source_row = rows[0]
+        input_contract = source_row.contract
+        assert input_contract is not None
+
+        output_row = {**source_row.row, "metadata": {"source": "pipeline", "valid": True}}
+
+        output_contract = propagate_contract(input_contract, output_row)
+
+        metadata_field = output_contract.get_field("metadata")
+        assert metadata_field is not None
+        assert metadata_field.python_type is object
+        assert metadata_field.source == "inferred"
+        assert metadata_field.required is False
+
     def test_propagate_contract_preserves_original_names(self, tmp_path: Path) -> None:
         """propagate_contract preserves original names from source contract."""
         input_csv = tmp_path / "input.csv"

@@ -288,6 +288,50 @@ class TestAzureBlobSinkWriteCSV:
         lines = uploaded_content.decode().strip().split("\n")
         assert lines[0].startswith("User ID,Amount $")
 
+    def test_csv_multiple_writes_uploads_cumulative_content(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+        """Repeated writes should upload all rows seen so far, not only latest batch."""
+        mock_blob_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.get_blob_client.return_value = mock_blob_client
+        mock_container_client.return_value = mock_container
+
+        sink = AzureBlobSink(make_config(format="csv"))
+        sink.write([{"id": 1, "name": "alice"}], ctx)
+        sink.write([{"id": 2, "name": "bob"}], ctx)
+
+        assert mock_blob_client.upload_blob.call_count == 2
+
+        second_upload = mock_blob_client.upload_blob.call_args_list[1][0][0].decode()
+        assert "id,name" in second_upload
+        assert "1,alice" in second_upload
+        assert "2,bob" in second_upload
+
+    def test_csv_multiple_writes_flexible_schema_includes_new_late_columns(
+        self,
+        mock_container_client: MagicMock,
+        ctx: PluginContext,
+    ) -> None:
+        """Late columns in later batches must not crash cumulative CSV uploads."""
+        mock_blob_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.get_blob_client.return_value = mock_blob_client
+        mock_container_client.return_value = mock_container
+
+        sink = AzureBlobSink(
+            make_config(
+                format="csv",
+                schema={"mode": "flexible", "fields": ["id: int", "name: str"]},
+            )
+        )
+
+        sink.write([{"id": 1, "name": "alice"}], ctx)
+        sink.write([{"id": 2, "name": "bob", "score": 0.9}], ctx)
+
+        second_upload = mock_blob_client.upload_blob.call_args_list[1][0][0].decode().strip().splitlines()
+        assert second_upload[0] == "id,name,score"
+        assert second_upload[1] == "1,alice,"
+        assert second_upload[2] == "2,bob,0.9"
+
 
 class TestAzureBlobSinkWriteJSON:
     """Tests for JSON writing to Azure Blob."""
@@ -338,6 +382,24 @@ class TestAzureBlobSinkWriteJSON:
 
         parsed = json.loads(uploaded_content.decode())
         assert parsed == [{"ID": 1, "Full Name": "alice"}]
+
+    def test_json_multiple_writes_uploads_cumulative_content(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+        """JSON format should rewrite blob with cumulative array content."""
+        mock_blob_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.get_blob_client.return_value = mock_blob_client
+        mock_container_client.return_value = mock_container
+
+        sink = AzureBlobSink(make_config(format="json"))
+        sink.write([{"id": 1, "name": "alice"}], ctx)
+        sink.write([{"id": 2, "name": "bob"}], ctx)
+
+        assert mock_blob_client.upload_blob.call_count == 2
+        second_upload = mock_blob_client.upload_blob.call_args_list[1][0][0].decode()
+        import json
+
+        parsed = json.loads(second_upload)
+        assert parsed == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
 
 
 class TestAzureBlobSinkWriteJSONL:
@@ -392,6 +454,26 @@ class TestAzureBlobSinkWriteJSONL:
 
         assert json.loads(lines[0]) == {"ID": 1, "name": "alice"}
 
+    def test_jsonl_multiple_writes_uploads_cumulative_content(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+        """JSONL format should rewrite blob with cumulative line-delimited content."""
+        mock_blob_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.get_blob_client.return_value = mock_blob_client
+        mock_container_client.return_value = mock_container
+
+        sink = AzureBlobSink(make_config(format="jsonl"))
+        sink.write([{"id": 1, "name": "alice"}], ctx)
+        sink.write([{"id": 2, "name": "bob"}], ctx)
+
+        assert mock_blob_client.upload_blob.call_count == 2
+        second_upload = mock_blob_client.upload_blob.call_args_list[1][0][0].decode()
+        lines = second_upload.strip().split("\n")
+        import json
+
+        assert len(lines) == 2
+        assert json.loads(lines[0]) == {"id": 1, "name": "alice"}
+        assert json.loads(lines[1]) == {"id": 2, "name": "bob"}
+
 
 class TestAzureBlobSinkPathTemplating:
     """Tests for Jinja2 path templating."""
@@ -434,6 +516,22 @@ class TestAzureBlobSinkPathTemplating:
         assert rendered_path.startswith("results/20")
         assert "T" in rendered_path  # ISO format has T separator
 
+    def test_blob_path_with_timestamp_template_is_frozen_across_writes(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+        """Timestamp templates should resolve once so repeated writes target one blob."""
+        mock_blob_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.get_blob_client.return_value = mock_blob_client
+        mock_container_client.return_value = mock_container
+
+        sink = AzureBlobSink(make_config(blob_path="results/{{ timestamp }}/output.csv"))
+        sink.write([{"id": 1, "name": "alice"}], ctx)
+        sink.write([{"id": 2, "name": "bob"}], ctx)
+
+        assert mock_container.get_blob_client.call_count == 2
+        first_path = mock_container.get_blob_client.call_args_list[0][0][0]
+        second_path = mock_container.get_blob_client.call_args_list[1][0][0]
+        assert first_path == second_path
+
 
 class TestAzureBlobSinkOverwriteBehavior:
     """Tests for overwrite behavior."""
@@ -464,6 +562,8 @@ class TestAzureBlobSinkOverwriteBehavior:
         Azure SDK raises ResourceExistsError atomically from upload_blob(overwrite=False),
         which blob_sink converts to ValueError for a consistent API.
         """
+        ctx.record_call = MagicMock()  # type: ignore[method-assign]
+
         # Create a fake ResourceExistsError (avoid importing azure SDK in tests)
         resource_exists = type("ResourceExistsError", (Exception,), {})("Blob already exists")
 
@@ -478,6 +578,12 @@ class TestAzureBlobSinkOverwriteBehavior:
 
         with pytest.raises(ValueError, match="already exists"):
             sink.write(rows, ctx)
+
+        ctx.record_call.assert_called_once()
+        call_kwargs = ctx.record_call.call_args.kwargs
+        assert call_kwargs["status"].name == "ERROR"
+        assert call_kwargs["request_data"]["operation"] == "upload_blob"
+        assert call_kwargs["error"]["reason"] == "blob_exists"
 
     def test_overwrite_false_succeeds_if_blob_not_exists(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """With overwrite=False, succeeds if blob does not exist."""
@@ -494,6 +600,21 @@ class TestAzureBlobSinkOverwriteBehavior:
         # Verify upload_blob was called with overwrite=False
         mock_blob_client.upload_blob.assert_called_once()
         assert mock_blob_client.upload_blob.call_args[1]["overwrite"] is False
+
+    def test_overwrite_false_second_write_uses_overwrite_true(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+        """With overwrite=False, first write guards existing blob and second write can rewrite cumulative output."""
+        mock_blob_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.get_blob_client.return_value = mock_blob_client
+        mock_container_client.return_value = mock_container
+
+        sink = AzureBlobSink(make_config(overwrite=False))
+        sink.write([{"id": 1, "name": "alice"}], ctx)
+        sink.write([{"id": 2, "name": "bob"}], ctx)
+
+        assert mock_blob_client.upload_blob.call_count == 2
+        assert mock_blob_client.upload_blob.call_args_list[0][1]["overwrite"] is False
+        assert mock_blob_client.upload_blob.call_args_list[1][1]["overwrite"] is True
 
 
 class TestAzureBlobSinkArtifactDescriptor:
@@ -576,6 +697,71 @@ class TestAzureBlobSinkErrors:
         # Original exception preserved in cause chain
         assert exc_info.value.__cause__ is not None
         assert "Network error" in str(exc_info.value.__cause__)
+
+    def test_retry_after_failed_upload_does_not_duplicate_rows(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
+        """Failed upload must not mutate cumulative buffer before a retry."""
+        mock_blob_client = MagicMock()
+        mock_blob_client.upload_blob.side_effect = [Exception("Network error"), None]
+        mock_container = MagicMock()
+        mock_container.get_blob_client.return_value = mock_blob_client
+        mock_container_client.return_value = mock_container
+
+        sink = AzureBlobSink(make_config(format="csv"))
+        rows = [{"id": 1, "name": "alice"}]
+
+        with pytest.raises(RuntimeError, match="Failed to upload blob"):
+            sink.write(rows, ctx)
+
+        # Failed upload must not commit to cumulative state.
+        assert sink._buffered_rows == []
+
+        result = sink.write(rows, ctx)
+        assert isinstance(result, ArtifactDescriptor)
+        assert mock_blob_client.upload_blob.call_count == 2
+
+        second_upload_lines = mock_blob_client.upload_blob.call_args_list[1][0][0].decode().strip().splitlines()
+        assert second_upload_lines[0] == "id,name"
+        assert second_upload_lines[1] == "1,alice"
+        assert len(second_upload_lines) == 2
+        assert sink._buffered_rows == [{"id": 1, "name": "alice"}]
+
+    def test_retry_after_post_upload_recording_failure_does_not_duplicate_rows(
+        self,
+        mock_container_client: MagicMock,
+        ctx: PluginContext,
+    ) -> None:
+        """Audit recording failure after upload keeps retries idempotent."""
+        mock_blob_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.get_blob_client.return_value = mock_blob_client
+        mock_container_client.return_value = mock_container
+
+        # First success record raises; error record succeeds; retry succeeds.
+        ctx.record_call = MagicMock(  # type: ignore[method-assign]
+            side_effect=[Exception("Audit DB unavailable"), None, None]
+        )
+
+        sink = AzureBlobSink(make_config(format="csv", overwrite=False))
+        rows = [{"id": 1, "name": "alice"}]
+
+        with pytest.raises(RuntimeError, match="Failed to upload blob"):
+            sink.write(rows, ctx)
+
+        # Post-upload failure must not commit cumulative rows.
+        assert sink._buffered_rows == []
+
+        result = sink.write(rows, ctx)
+        assert isinstance(result, ArtifactDescriptor)
+
+        assert mock_blob_client.upload_blob.call_count == 2
+        assert mock_blob_client.upload_blob.call_args_list[0][1]["overwrite"] is False
+        assert mock_blob_client.upload_blob.call_args_list[1][1]["overwrite"] is True
+
+        second_upload_lines = mock_blob_client.upload_blob.call_args_list[1][0][0].decode().strip().splitlines()
+        assert second_upload_lines[0] == "id,name"
+        assert second_upload_lines[1] == "1,alice"
+        assert len(second_upload_lines) == 2
+        assert sink._buffered_rows == [{"id": 1, "name": "alice"}]
 
     def test_connection_error_propagates(self, mock_container_client: MagicMock, ctx: PluginContext) -> None:
         """Connection errors propagate to caller."""

@@ -118,6 +118,7 @@ class PurgeManager:
 
         This includes payloads from:
         - rows.source_data_ref (source row payloads)
+        - operations.input_data_ref and operations.output_data_ref (source/sink operation payloads)
         - calls.request_ref and calls.response_ref (external call payloads)
         - routing_events.reason_ref (routing reason payloads)
 
@@ -167,7 +168,22 @@ class PurgeManager:
             .where(and_(run_expired_condition, rows_table.c.source_data_ref.isnot(None)))
         )
 
-        # 2. Call payloads from expired runs (transform calls via state_id)
+        # 2. Operation input/output payloads from expired runs
+        operation_expired_join = operations_table.join(runs_table, operations_table.c.run_id == runs_table.c.run_id)
+
+        operation_input_expired_query = (
+            select(operations_table.c.input_data_ref)
+            .select_from(operation_expired_join)
+            .where(and_(run_expired_condition, operations_table.c.input_data_ref.isnot(None)))
+        )
+
+        operation_output_expired_query = (
+            select(operations_table.c.output_data_ref)
+            .select_from(operation_expired_join)
+            .where(and_(run_expired_condition, operations_table.c.output_data_ref.isnot(None)))
+        )
+
+        # 3. Call payloads from expired runs (transform calls via state_id)
         # NOTE: Use node_states.run_id directly (denormalized column) instead of
         # joining through nodes table. The nodes table has composite PK (node_id, run_id),
         # so joining on node_id alone would be ambiguous when node_id is reused across runs.
@@ -187,7 +203,7 @@ class PurgeManager:
             .where(and_(run_expired_condition, calls_table.c.response_ref.isnot(None)))
         )
 
-        # 3. Call payloads from expired runs (source/sink calls via operation_id)
+        # 4. Call payloads from expired runs (source/sink calls via operation_id)
         # XOR constraint: calls have either state_id OR operation_id, not both
         call_op_join = calls_table.join(operations_table, calls_table.c.operation_id == operations_table.c.operation_id).join(
             runs_table, operations_table.c.run_id == runs_table.c.run_id
@@ -205,7 +221,7 @@ class PurgeManager:
             .where(and_(run_expired_condition, calls_table.c.response_ref.isnot(None)))
         )
 
-        # 4. Routing payloads from expired runs
+        # 5. Routing payloads from expired runs
         # NOTE: Same pattern as call_state_join - use node_states.run_id directly
         routing_join = routing_events_table.join(node_states_table, routing_events_table.c.state_id == node_states_table.c.state_id).join(
             runs_table, node_states_table.c.run_id == runs_table.c.run_id
@@ -220,6 +236,8 @@ class PurgeManager:
         # Combine all expired refs
         expired_refs_query = union(
             row_expired_query,
+            operation_input_expired_query,
+            operation_output_expired_query,
             call_state_request_expired_query,
             call_state_response_expired_query,
             call_op_request_expired_query,
@@ -236,7 +254,22 @@ class PurgeManager:
             .where(and_(run_active_condition, rows_table.c.source_data_ref.isnot(None)))
         )
 
-        # 2. Call payloads from active runs (transform calls via state_id)
+        # 2. Operation input/output payloads from active runs
+        operation_active_join = operations_table.join(runs_table, operations_table.c.run_id == runs_table.c.run_id)
+
+        operation_input_active_query = (
+            select(operations_table.c.input_data_ref)
+            .select_from(operation_active_join)
+            .where(and_(run_active_condition, operations_table.c.input_data_ref.isnot(None)))
+        )
+
+        operation_output_active_query = (
+            select(operations_table.c.output_data_ref)
+            .select_from(operation_active_join)
+            .where(and_(run_active_condition, operations_table.c.output_data_ref.isnot(None)))
+        )
+
+        # 3. Call payloads from active runs (transform calls via state_id)
         call_state_request_active_query = (
             select(calls_table.c.request_ref)
             .select_from(call_state_join)
@@ -249,7 +282,7 @@ class PurgeManager:
             .where(and_(run_active_condition, calls_table.c.response_ref.isnot(None)))
         )
 
-        # 3. Call payloads from active runs (source/sink calls via operation_id)
+        # 4. Call payloads from active runs (source/sink calls via operation_id)
         call_op_request_active_query = (
             select(calls_table.c.request_ref)
             .select_from(call_op_join)
@@ -262,7 +295,7 @@ class PurgeManager:
             .where(and_(run_active_condition, calls_table.c.response_ref.isnot(None)))
         )
 
-        # 4. Routing payloads from active runs
+        # 5. Routing payloads from active runs
         routing_active_query = (
             select(routing_events_table.c.reason_ref)
             .select_from(routing_join)
@@ -272,6 +305,8 @@ class PurgeManager:
         # Combine all active refs
         active_refs_query = union(
             row_active_query,
+            operation_input_active_query,
+            operation_output_active_query,
             call_state_request_active_query,
             call_state_response_active_query,
             call_op_request_active_query,
@@ -320,7 +355,11 @@ class PurgeManager:
         # 1. From rows.source_data_ref
         row_runs_query = select(rows_table.c.run_id).distinct().where(rows_table.c.source_data_ref.in_(refs_set))
 
-        # 2. From calls.request_ref and calls.response_ref (transform calls via state_id)
+        # 2. From operations.input_data_ref and operations.output_data_ref
+        operation_input_runs_query = select(operations_table.c.run_id).distinct().where(operations_table.c.input_data_ref.in_(refs_set))
+        operation_output_runs_query = select(operations_table.c.run_id).distinct().where(operations_table.c.output_data_ref.in_(refs_set))
+
+        # 3. From calls.request_ref and calls.response_ref (transform calls via state_id)
         # Use node_states.run_id directly (denormalized column)
         call_state_join = calls_table.join(node_states_table, calls_table.c.state_id == node_states_table.c.state_id)
 
@@ -332,7 +371,7 @@ class PurgeManager:
             select(node_states_table.c.run_id).distinct().select_from(call_state_join).where(calls_table.c.response_ref.in_(refs_set))
         )
 
-        # 3. From calls.request_ref and calls.response_ref (source/sink calls via operation_id)
+        # 4. From calls.request_ref and calls.response_ref (source/sink calls via operation_id)
         # XOR constraint: calls have either state_id OR operation_id, not both
         call_op_join = calls_table.join(operations_table, calls_table.c.operation_id == operations_table.c.operation_id)
 
@@ -344,7 +383,7 @@ class PurgeManager:
             select(operations_table.c.run_id).distinct().select_from(call_op_join).where(calls_table.c.response_ref.in_(refs_set))
         )
 
-        # 4. From routing_events.reason_ref
+        # 5. From routing_events.reason_ref
         routing_join = routing_events_table.join(node_states_table, routing_events_table.c.state_id == node_states_table.c.state_id)
 
         routing_runs_query = (
@@ -354,6 +393,8 @@ class PurgeManager:
         # Union all run_id queries
         all_runs_query = union(
             row_runs_query,
+            operation_input_runs_query,
+            operation_output_runs_query,
             call_state_request_runs_query,
             call_state_response_runs_query,
             call_op_request_runs_query,

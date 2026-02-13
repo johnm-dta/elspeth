@@ -15,7 +15,8 @@ from elspeth.telemetry.exporters import (
     DatadogExporter,
     OTLPExporter,
 )
-from elspeth.telemetry.factory import _EXPORTER_REGISTRY, create_telemetry_manager
+from elspeth.telemetry.factory import _discover_exporter_registry, create_telemetry_manager
+from elspeth.telemetry.hookspecs import hookimpl
 from elspeth.telemetry.manager import TelemetryManager
 
 
@@ -48,15 +49,15 @@ class TestCreateTelemetryManagerDisabled:
         result = create_telemetry_manager(config)
         assert result is None
 
-    def test_disabled_does_not_instantiate_exporters(self):
+    def test_disabled_does_not_run_discovery(self):
         config = _make_config(
             enabled=False,
             exporter_configs=(ExporterConfig(name="console", options={}),),
         )
-        with patch.dict(_EXPORTER_REGISTRY, {"console": MagicMock()}) as mock_registry:
+        with patch("elspeth.telemetry.factory._discover_exporter_registry") as mock_discover:
             result = create_telemetry_manager(config)
             assert result is None
-            mock_registry["console"].assert_not_called()
+            mock_discover.assert_not_called()
 
 
 class TestCreateTelemetryManagerEnabled:
@@ -101,7 +102,7 @@ class TestCreateTelemetryManagerEnabled:
         mock_class = MagicMock(return_value=mock_exporter)
         options = {"endpoint": "http://localhost:4317"}
 
-        with patch.dict(_EXPORTER_REGISTRY, {"mock_exp": mock_class}):
+        with patch("elspeth.telemetry.factory._discover_exporter_registry", return_value={"mock_exp": mock_class}):
             config = _make_config(
                 enabled=True,
                 exporter_configs=(ExporterConfig(name="mock_exp", options=options),),
@@ -119,7 +120,7 @@ class TestCreateTelemetryManagerEnabled:
         mock_exporter = MagicMock()
         mock_class = MagicMock(return_value=mock_exporter)
 
-        with patch.dict(_EXPORTER_REGISTRY, {"mock_exp": mock_class}):
+        with patch("elspeth.telemetry.factory._discover_exporter_registry", return_value={"mock_exp": mock_class}):
             config = _make_config(
                 enabled=True,
                 exporter_configs=(ExporterConfig(name="mock_exp", options={}),),
@@ -138,9 +139,9 @@ class TestCreateTelemetryManagerEnabled:
         mock_exporter_b = MagicMock()
         mock_class_b = MagicMock(return_value=mock_exporter_b)
 
-        with patch.dict(
-            _EXPORTER_REGISTRY,
-            {"exp_a": mock_class_a, "exp_b": mock_class_b},
+        with patch(
+            "elspeth.telemetry.factory._discover_exporter_registry",
+            return_value={"exp_a": mock_class_a, "exp_b": mock_class_b},
         ):
             config = _make_config(
                 enabled=True,
@@ -164,17 +165,17 @@ class TestCreateTelemetryManagerEnabled:
         call_order: list[str] = []
 
         def make_mock(label: str) -> MagicMock:
-            m = MagicMock()
-            m.configure.side_effect = lambda _opts: call_order.append(label)
-            return m
+            mock = MagicMock()
+            mock.configure.side_effect = lambda _opts: call_order.append(label)
+            return mock
 
         mock_a = make_mock("first")
         mock_b = make_mock("second")
         mock_c = make_mock("third")
 
-        with patch.dict(
-            _EXPORTER_REGISTRY,
-            {"ea": MagicMock(return_value=mock_a), "eb": MagicMock(return_value=mock_b), "ec": MagicMock(return_value=mock_c)},
+        with patch(
+            "elspeth.telemetry.factory._discover_exporter_registry",
+            return_value={"ea": MagicMock(return_value=mock_a), "eb": MagicMock(return_value=mock_b), "ec": MagicMock(return_value=mock_c)},
         ):
             config = _make_config(
                 enabled=True,
@@ -195,7 +196,7 @@ class TestCreateTelemetryManagerEnabled:
         mock_exporter = MagicMock()
         mock_class = MagicMock(return_value=mock_exporter)
 
-        with patch.dict(_EXPORTER_REGISTRY, {"mock_exp": mock_class}):
+        with patch("elspeth.telemetry.factory._discover_exporter_registry", return_value={"mock_exp": mock_class}):
             config = _make_config(
                 enabled=True,
                 exporter_configs=(ExporterConfig(name="mock_exp", options={}),),
@@ -212,7 +213,7 @@ class TestCreateTelemetryManagerEnabled:
         mock_exporter = MagicMock()
         mock_class = MagicMock(return_value=mock_exporter)
 
-        with patch.dict(_EXPORTER_REGISTRY, {"mock_exp": mock_class}):
+        with patch("elspeth.telemetry.factory._discover_exporter_registry", return_value={"mock_exp": mock_class}):
             config = _make_config(
                 enabled=True,
                 exporter_configs=(ExporterConfig(name="mock_exp", options={}),),
@@ -225,6 +226,133 @@ class TestCreateTelemetryManagerEnabled:
             finally:
                 if manager is not None:
                     manager.close()
+
+
+class TestHookDiscovery:
+    def test_custom_hook_exporter_is_discovered(self):
+        class CustomExporter:
+            _name = "custom_exporter"
+
+            @property
+            def name(self) -> str:
+                return self._name
+
+            def configure(self, config: dict[str, object]) -> None:
+                self._config = config
+
+            def export(self, event: object) -> None:
+                return None
+
+            def flush(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class CustomPlugin:
+            @hookimpl
+            def elspeth_get_exporters(self) -> list[type[CustomExporter]]:
+                return [CustomExporter]
+
+        config = _make_config(
+            enabled=True,
+            exporter_configs=(ExporterConfig(name="custom_exporter", options={"k": "v"}),),
+        )
+
+        manager = create_telemetry_manager(config, exporter_plugins=(CustomPlugin(),))
+        try:
+            assert manager is not None
+            assert len(manager._exporters) == 1
+            assert manager._exporters[0].name == "custom_exporter"
+        finally:
+            manager.close()
+
+    def test_duplicate_exporter_names_across_hooks_raise(self):
+        class ExporterA:
+            _name = "dup"
+
+            @property
+            def name(self) -> str:
+                return self._name
+
+            def configure(self, config: dict[str, object]) -> None:
+                return None
+
+            def export(self, event: object) -> None:
+                return None
+
+            def flush(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class ExporterB:
+            _name = "dup"
+
+            @property
+            def name(self) -> str:
+                return self._name
+
+            def configure(self, config: dict[str, object]) -> None:
+                return None
+
+            def export(self, event: object) -> None:
+                return None
+
+            def flush(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class PluginA:
+            @hookimpl
+            def elspeth_get_exporters(self) -> list[type[ExporterA]]:
+                return [ExporterA]
+
+        class PluginB:
+            @hookimpl
+            def elspeth_get_exporters(self) -> list[type[ExporterB]]:
+                return [ExporterB]
+
+        config = _make_config(enabled=True, exporter_configs=())
+
+        with pytest.raises(TelemetryExporterError, match="Duplicate telemetry exporter name"):
+            create_telemetry_manager(config, exporter_plugins=(PluginA(), PluginB()))
+
+    def test_invalid_exporter_plugin_hook_raises(self):
+        class InvalidPlugin:
+            @hookimpl
+            def elspeth_get_exporter(self) -> list[type]:  # pragma: no cover - typo under test
+                return []
+
+        config = _make_config(enabled=True, exporter_configs=())
+
+        with pytest.raises(TelemetryExporterError, match="Invalid telemetry exporter plugin"):
+            create_telemetry_manager(config, exporter_plugins=(InvalidPlugin(),))
+
+    def test_hook_returning_none_raises_actionable_error(self):
+        class NoneReturningPlugin:
+            @hookimpl
+            def elspeth_get_exporters(self):  # type: ignore[no-untyped-def]
+                return None
+
+        config = _make_config(enabled=True, exporter_configs=())
+
+        with pytest.raises(TelemetryExporterError, match="returned None"):
+            create_telemetry_manager(config, exporter_plugins=(NoneReturningPlugin(),))
+
+    def test_hook_returning_non_iterable_raises_actionable_error(self):
+        class NonIterablePlugin:
+            @hookimpl
+            def elspeth_get_exporters(self):  # type: ignore[no-untyped-def]
+                return 42
+
+        config = _make_config(enabled=True, exporter_configs=())
+
+        with pytest.raises(TelemetryExporterError, match="returned int"):
+            create_telemetry_manager(config, exporter_plugins=(NonIterablePlugin(),))
 
 
 class TestUnknownExporter:
@@ -271,34 +399,62 @@ class TestUnknownExporter:
             create_telemetry_manager(config)
 
 
-class TestExporterRegistry:
+class TestExporterDiscoveryRegistry:
     def test_registry_contains_console(self):
-        assert "console" in _EXPORTER_REGISTRY
+        registry = _discover_exporter_registry()
+        assert "console" in registry
 
     def test_registry_contains_otlp(self):
-        assert "otlp" in _EXPORTER_REGISTRY
+        registry = _discover_exporter_registry()
+        assert "otlp" in registry
 
     def test_registry_contains_azure_monitor(self):
-        assert "azure_monitor" in _EXPORTER_REGISTRY
+        registry = _discover_exporter_registry()
+        assert "azure_monitor" in registry
 
     def test_registry_contains_datadog(self):
-        assert "datadog" in _EXPORTER_REGISTRY
+        registry = _discover_exporter_registry()
+        assert "datadog" in registry
 
-    def test_registry_has_exactly_four_entries(self):
-        assert len(_EXPORTER_REGISTRY) == 4
+    def test_registry_has_exactly_four_builtin_entries(self):
+        registry = _discover_exporter_registry()
+        assert len(registry) == 4
 
     def test_registry_console_is_console_exporter(self):
-        assert _EXPORTER_REGISTRY["console"] is ConsoleExporter
+        registry = _discover_exporter_registry()
+        assert registry["console"] is ConsoleExporter
 
     def test_registry_otlp_is_otlp_exporter(self):
-        assert _EXPORTER_REGISTRY["otlp"] is OTLPExporter
+        registry = _discover_exporter_registry()
+        assert registry["otlp"] is OTLPExporter
 
     def test_registry_azure_monitor_is_azure_monitor_exporter(self):
-        assert _EXPORTER_REGISTRY["azure_monitor"] is AzureMonitorExporter
+        registry = _discover_exporter_registry()
+        assert registry["azure_monitor"] is AzureMonitorExporter
 
     def test_registry_datadog_is_datadog_exporter(self):
-        assert _EXPORTER_REGISTRY["datadog"] is DatadogExporter
+        registry = _discover_exporter_registry()
+        assert registry["datadog"] is DatadogExporter
 
     def test_registry_values_are_types(self):
-        for name, cls in _EXPORTER_REGISTRY.items():
+        registry = _discover_exporter_registry()
+        for name, cls in registry.items():
             assert isinstance(cls, type), f"Registry entry '{name}' is not a type: {cls!r}"
+
+    def test_duplicate_plugin_object_raises_telemetry_error(self):
+        """Registering the same plugin object twice should raise TelemetryExporterError.
+
+        Regression test: pluggy.PluginManager.register() raises ValueError
+        for duplicate plugin objects, which must be wrapped in the function's
+        documented TelemetryExporterError contract.
+        """
+
+        class DuplicatePlugin:
+            @hookimpl
+            def elspeth_get_exporters(self) -> list[type]:
+                return []
+
+        same_instance = DuplicatePlugin()
+
+        with pytest.raises(TelemetryExporterError, match="Invalid telemetry exporter plugin"):
+            _discover_exporter_registry(exporter_plugins=(same_instance, same_instance))

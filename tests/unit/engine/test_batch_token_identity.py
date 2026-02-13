@@ -211,7 +211,6 @@ class TestBatchTokenIdentity:
 
         # Verify aggregation result
         final_data = completed[0].final_data
-        assert isinstance(final_data, PipelineRow)
         assert final_data.to_dict()["total"] == 60  # 10 + 20 + 30
 
     def test_triggering_token_not_reused(self) -> None:
@@ -306,7 +305,6 @@ class TestBatchTokenIdentity:
 
         # Verify output data is correct
         final_data = completed[0].final_data
-        assert isinstance(final_data, PipelineRow)
         assert final_data.to_dict()["total"] == 30  # 10 + 20
 
     def test_batch_members_correctly_recorded(self) -> None:

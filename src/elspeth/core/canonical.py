@@ -87,6 +87,9 @@ def _normalize_value(obj: Any) -> Any:
                 # np.isnan/isinf raise TypeError for non-numeric dtypes (e.g., strings)
                 # This is expected and safe - non-numeric arrays can't contain NaN/Inf
                 pass
+        # 0-D arrays convert to scalars via tolist()/item(); normalize that scalar directly.
+        if obj.ndim == 0:
+            return _normalize_value(obj.item())
         return [_normalize_value(x) for x in obj.tolist()]
 
     # Pandas types

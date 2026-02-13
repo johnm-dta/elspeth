@@ -106,6 +106,9 @@ def _create_mock_context(
     # Rate limit registry (disabled for tests)
     ctx.rate_limit_registry = None
 
+    # Batch token identity (None = single-row mode, set by AggregationExecutor for batches)
+    ctx.batch_token_ids = None
+
     return ctx
 
 
@@ -524,19 +527,17 @@ class TestOpenRouterBatchErrorHandling:
         assert result.row["llm_response"] is None
         assert result.row["llm_response_error"]["reason"] == "empty_choices"
 
-    def test_missing_state_id_returns_error(self, chaosllm_server) -> None:
-        """Missing state_id on context returns row-level error."""
+    def test_missing_state_id_raises_runtime_error(self, chaosllm_server) -> None:
+        """Missing state_id on context is a framework bug and must crash."""
         transform, ctx = _create_transform_with_context()
         ctx.state_id = None  # No state_id
         row = {"text": "Test"}
 
-        with mock_httpx_client(chaosllm_server, _create_mock_response(chaosllm_server)):
-            result = transform.process(make_pipeline_row(row), ctx)
-
-        assert result.status == "success"
-        assert result.row is not None
-        assert result.row["llm_response"] is None
-        assert result.row["llm_response_error"]["reason"] == "missing_state_id"
+        with (
+            mock_httpx_client(chaosllm_server, _create_mock_response(chaosllm_server)),
+            pytest.raises(RuntimeError, match="state_id"),
+        ):
+            transform.process(make_pipeline_row(row), ctx)
 
 
 class TestOpenRouterBatchAuditFields:
@@ -707,3 +708,68 @@ class TestOpenRouterBatchSingleRowFallback:
                 reason=None,
                 success_reason={"action": "processed"},  # Required for success status
             )
+
+
+class TestOpenRouterBatchTelemetryAttribution:
+    """Tests for per-row token_id telemetry attribution in batch mode.
+
+    Regression: Before the fix, all rows in a batch had their telemetry
+    tagged with the flush-triggering token's ID, breaking per-token
+    correlation in observability workflows.
+    """
+
+    def test_batch_uses_per_row_token_ids_for_telemetry(self, chaosllm_server) -> None:
+        """Each row's HTTP call emits telemetry with its own token_id."""
+        from elspeth.contracts.events import ExternalCallCompleted
+
+        emitted_events: list[ExternalCallCompleted] = []
+        original_emit = None
+
+        # Create transform and context
+        transform, ctx = _create_transform_with_context({"pool_size": 1})
+
+        # Set batch_token_ids as AggregationExecutor would
+        ctx.batch_token_ids = ["token-aaa", "token-bbb", "token-ccc"]
+
+        # Intercept telemetry emissions from the AuditedHTTPClient.
+        # The transform's on_start() stores self._telemetry_emit from ctx,
+        # so we need to capture events at that level.
+        original_emit = transform._telemetry_emit
+
+        def capture_emit(event: ExternalCallCompleted) -> None:
+            emitted_events.append(event)
+            if original_emit is not None:
+                original_emit(event)
+
+        transform._telemetry_emit = capture_emit
+
+        rows = [{"text": "Row A"}, {"text": "Row B"}, {"text": "Row C"}]
+        responses = [_create_mock_response(chaosllm_server, content=f"Result {i}") for i in range(3)]
+
+        with mock_httpx_client(chaosllm_server, responses):
+            result = transform.process([make_pipeline_row(r) for r in rows], ctx)
+
+        assert result.status == "success"
+        assert result.rows is not None
+        assert len(result.rows) == 3
+
+        # Verify telemetry events have distinct, correct token_ids
+        assert len(emitted_events) == 3
+        emitted_token_ids = {e.token_id for e in emitted_events}
+        assert emitted_token_ids == {"token-aaa", "token-bbb", "token-ccc"}
+
+    def test_batch_falls_back_to_ctx_token_without_batch_token_ids(self, chaosllm_server) -> None:
+        """Without batch_token_ids, falls back to ctx.token (single-row mode)."""
+        transform, ctx = _create_transform_with_context()
+
+        # Simulate single-row mode: batch_token_ids is None, ctx.token set
+        ctx.batch_token_ids = None
+        token_mock = Mock()
+        token_mock.token_id = "token-single"
+        ctx.token = token_mock
+
+        row = {"text": "Solo row"}
+        with mock_httpx_client(chaosllm_server, _create_mock_response(chaosllm_server)):
+            result = transform.process(make_pipeline_row(row), ctx)
+
+        assert result.status == "success"

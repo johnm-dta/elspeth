@@ -124,6 +124,7 @@ class AuditedHTTPClient(AuditedClientBase):
         base_url: str | None = None,
         headers: dict[str, str] | None = None,
         limiter: Any = None,  # RateLimiter | NoOpLimiter | None
+        token_id: str | None = None,
     ) -> None:
         """Initialize audited HTTP client.
 
@@ -136,8 +137,9 @@ class AuditedHTTPClient(AuditedClientBase):
             base_url: Optional base URL to prepend to all requests
             headers: Default headers for all requests
             limiter: Optional rate limiter for throttling requests
+            token_id: Optional token identity for telemetry correlation
         """
-        super().__init__(recorder, state_id, run_id, telemetry_emit, limiter=limiter)
+        super().__init__(recorder, state_id, run_id, telemetry_emit, limiter=limiter, token_id=token_id)
         self._timeout = timeout
         self._base_url = base_url
         self._default_headers = headers or {}
@@ -361,8 +363,15 @@ class AuditedHTTPClient(AuditedClientBase):
         error_data: dict[str, Any] | None,
         latency_ms: float,
         call_status: CallStatus,
+        token_id_override: str | None = None,
     ) -> None:
-        """Record call to audit trail and emit telemetry event."""
+        """Record call to audit trail and emit telemetry event.
+
+        Args:
+            token_id_override: Per-call token_id for telemetry. When provided,
+                overrides the client-level token_id. Used by batch transforms
+                where a single client serves multiple tokens.
+        """
         self._recorder.record_call(
             state_id=self._state_id,
             call_index=call_index,
@@ -376,6 +385,7 @@ class AuditedHTTPClient(AuditedClientBase):
 
         # Telemetry emitted AFTER successful Landscape recording
         # Wrapped in try/except to prevent telemetry failures from corrupting audit trail
+        effective_token_id = token_id_override if token_id_override is not None else self._telemetry_token_id()
         try:
             self._telemetry_emit(
                 ExternalCallCompleted(
@@ -387,6 +397,7 @@ class AuditedHTTPClient(AuditedClientBase):
                     latency_ms=latency_ms,
                     state_id=self._state_id,
                     operation_id=None,
+                    token_id=effective_token_id,
                     request_hash=stable_hash(request_data),
                     response_hash=stable_hash(response_data) if response_data else None,
                     request_payload=request_data,
@@ -413,6 +424,7 @@ class AuditedHTTPClient(AuditedClientBase):
         timeout: float | None,
         json: dict[str, Any] | None = None,
         params: dict[str, str | int | float] | None = None,
+        token_id: str | None = None,
     ) -> httpx.Response:
         """Execute an HTTP request with audit recording and telemetry.
 
@@ -426,6 +438,8 @@ class AuditedHTTPClient(AuditedClientBase):
             timeout: Request timeout override (uses client default if None)
             json: JSON body (POST only)
             params: Query parameters (GET only)
+            token_id: Per-call token_id for telemetry (overrides client default).
+                Used by batch transforms where one client serves multiple tokens.
 
         Returns:
             httpx.Response object
@@ -503,6 +517,7 @@ class AuditedHTTPClient(AuditedClientBase):
                 error_data=error_data,
                 latency_ms=latency_ms,
                 call_status=call_status,
+                token_id_override=token_id,
             )
 
             return response
@@ -522,6 +537,7 @@ class AuditedHTTPClient(AuditedClientBase):
                 },
                 latency_ms=latency_ms,
                 call_status=CallStatus.ERROR,
+                token_id_override=token_id,
             )
 
             raise
@@ -533,6 +549,7 @@ class AuditedHTTPClient(AuditedClientBase):
         json: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
+        token_id: str | None = None,
     ) -> httpx.Response:
         """Make POST request with automatic audit recording.
 
@@ -541,6 +558,8 @@ class AuditedHTTPClient(AuditedClientBase):
             json: JSON body to send (optional)
             headers: Additional headers for this request
             timeout: Request timeout in seconds (uses client default if None)
+            token_id: Per-call token_id for telemetry (overrides client default).
+                Used by batch transforms where one client serves multiple tokens.
 
         Returns:
             httpx.Response object
@@ -554,6 +573,7 @@ class AuditedHTTPClient(AuditedClientBase):
             headers=headers,
             timeout=timeout,
             json=json,
+            token_id=token_id,
         )
 
     def get(
@@ -563,6 +583,7 @@ class AuditedHTTPClient(AuditedClientBase):
         headers: dict[str, str] | None = None,
         params: dict[str, str | int | float] | None = None,
         timeout: float | None = None,
+        token_id: str | None = None,
     ) -> httpx.Response:
         """Make GET request with automatic audit recording.
 
@@ -571,6 +592,8 @@ class AuditedHTTPClient(AuditedClientBase):
             headers: Additional headers for this request
             params: Query parameters to append to URL
             timeout: Request timeout in seconds (uses client default if None)
+            token_id: Per-call token_id for telemetry (overrides client default).
+                Used by batch transforms where one client serves multiple tokens.
 
         Returns:
             httpx.Response object
@@ -584,6 +607,7 @@ class AuditedHTTPClient(AuditedClientBase):
             headers=headers,
             timeout=timeout,
             params=params,
+            token_id=token_id,
         )
 
     def get_ssrf_safe(
@@ -741,6 +765,7 @@ class AuditedHTTPClient(AuditedClientBase):
                         latency_ms=latency_ms,
                         state_id=self._state_id,
                         operation_id=None,
+                        token_id=self._telemetry_token_id(),
                         request_hash=stable_hash(request_data),
                         response_hash=stable_hash(response_data),
                         request_payload=request_data,
@@ -787,6 +812,7 @@ class AuditedHTTPClient(AuditedClientBase):
                         latency_ms=latency_ms,
                         state_id=self._state_id,
                         operation_id=None,
+                        token_id=self._telemetry_token_id(),
                         request_hash=stable_hash(request_data),
                         response_hash=None,
                         request_payload=request_data,

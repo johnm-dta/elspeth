@@ -16,7 +16,7 @@ allow_hits:
   reason: Defense-in-depth - ExpressionParser returns Any; boundary validation before use
   safety: TypeError raised with expression details - explicit failure, not silent coercion
   expires: null
-- key: engine/executors/sink.py:R4:SinkExecutor:write:fp=577d6a5d44fcb40f
+- key: engine/executors/sink.py:R4:SinkExecutor:write:fp=dc430210d80d21b8
   owner: architecture
   reason: 'Post-durability callbacks: checkpoint callback fails after durable sink write'
   safety: Logged with error - sink artifact exists but checkpoint failed, resume will replay
@@ -101,69 +101,54 @@ allow_hits:
   reason: AST/type checking - required for safe parsing or discriminated unions
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=864f8798598aa264
-  owner: architecture
-  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
-  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
-  expires: '2026-05-02'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=3817cd2e5ac65a61
-  owner: architecture
-  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
-  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
-  expires: '2026-05-02'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=a300ae0fe73eeee2
-  owner: architecture
-  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
-  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
-  expires: '2026-05-02'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=ac3b6fcee8eeed57
-  owner: architecture
-  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
-  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
-  expires: '2026-05-02'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=411616af5f2ca497
-  owner: architecture
-  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
-  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
-  expires: '2026-05-02'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=932619974f1d8566
-  owner: architecture
-  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
-  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
-  expires: '2026-05-02'
-- key: engine/orchestrator/export.py:R1:_json_schema_to_python_type:fp=76eb122944753b45
+- key: engine/orchestrator/export.py:R1:_json_schema_to_python_type:fp=ff8235b7d923ad65
   owner: bugfix
-  reason: JSON Schema items may not have "type" key - external data at trust boundary
-  safety: Missing type handled by subsequent "type" in item check; falls through to error
+  reason: Framework boundary - Pydantic JSON schema anyOf entries may be $ref (no "type" key) or typed (has "type" key); .get() filters null vs non-null items
+  safety: Non-null items fed to recursive resolver which crashes on unrecognized schemas
   expires: null
-- key: engine/orchestrator/export.py:R1:_json_schema_to_python_type:fp=ff1b7e567dcc1a55
-  owner: bugfix
-  reason: JSON Schema items may not have "type" key - external data at trust boundary
-  safety: Filters items by type != "null"; items without type are correctly excluded
-  expires: null
-- key: engine/orchestrator/export.py:R1:_json_schema_to_python_type:fp=117a3e0e68aa409d
-  owner: bugfix
-  reason: JSON Schema "format" field is optional per spec - external data at trust boundary
-  safety: Missing format defaults to None, falls through to plain str return - correct behavior
-  expires: null
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=faa39c8895409dcf
+  owner: architecture
+  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
+  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
+  expires: '2026-05-02'
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=9cea4b0ac8613ba3
+  owner: architecture
+  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
+  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
+  expires: '2026-05-02'
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=8dd314c8cb06ec7b
+  owner: architecture
+  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
+  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
+  expires: '2026-05-02'
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=290f6cec737a6720
+  owner: architecture
+  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
+  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
+  expires: '2026-05-02'
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=4faf4ee46f696935
+  owner: architecture
+  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
+  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
+  expires: '2026-05-02'
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=dce6e715e1fbc973
+  owner: architecture
+  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
+  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
+  expires: '2026-05-02'
 - key: engine/tokens.py:R5:TokenManager:create_quarantine_token:fp=dcd7d270154917c7
   owner: P1-2026-02-05-typecheck
   reason: Internal boundary - PipelineRow vs dict discrimination after mypy typecheck fixes
   safety: isinstance() check converts PipelineRow to dict for audit trail consistency
   expires: null
-- key: engine/orchestrator/export.py:R1:reconstruct_schema_from_json:fp=64bce9b651db0fad
-  owner: bugfix
-  reason: JSON Schema field access - external data at trust boundary
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: engine/processor.py:R5:RowProcessor:_execute_transform_with_retry:is_retryable:fp=4d50cc10e8cea6d5
+- key: engine/processor.py:R5:RowProcessor:_execute_transform_with_retry:is_retryable:fp=442c13d215077904
   owner: architecture
   reason: Retry boundary - LLMClientError exception type check for retryable classification
   safety: Crashes on type mismatch - no silent fallback
   expires: '2026-03-11'
-- key: engine/processor.py:R5:RowProcessor:_execute_transform_with_retry:is_retryable:fp=7b9aada179d30aca
+- key: engine/processor.py:R5:RowProcessor:_execute_transform_with_retry:is_retryable:fp=207511cf2bd8b73e
   owner: architecture
-  reason: Retry boundary - ConnectionError/TimeoutError/OSError type check for retryable classification
+  reason: Retry boundary - ConnectionError/TimeoutError/OSError/CapacityError type check for retryable classification
   safety: Crashes on type mismatch - no silent fallback
   expires: '2026-03-11'
 - key: engine/dag_navigator.py:R5:DAGNavigator:resolve_jump_target_sink:fp=6b717dfbcce9a3ae
@@ -176,32 +161,32 @@ allow_hits:
   reason: Protocol dispatch to detect transforms with on_success during jump-target sink resolution
   safety: Traversal map invariants are enforced; raises on cycles or when no sink and no gate found
   expires: '2026-03-11'
-- key: engine/processor.py:R1:RowProcessor:_notify_coalesce_of_lost_branch:fp=a3519ef1a40e4c56
+- key: engine/processor.py:R1:RowProcessor:_notify_coalesce_of_lost_branch:fp=d9917e18ce071880
   owner: architecture
   reason: dict.get() correct - not all branch names have coalesce point mapping
   safety: Crashes on type mismatch - no silent fallback
   expires: '2026-03-11'
-- key: engine/processor.py:R5:RowProcessor:_drain_work_queue:fp=36db507326d3c53f
+- key: engine/processor.py:R5:RowProcessor:_drain_work_queue:fp=d3d41ce5136954cb
   owner: architecture
   reason: Type dispatch on _process_single_token return (RowResult | list[RowResult] | None)
   safety: Crashes on type mismatch - no silent fallback
   expires: '2026-03-11'
-- key: engine/orchestrator/core.py:R5:Orchestrator:_execute_run:fp=7c5419575b2202aa
+- key: engine/orchestrator/core.py:R5:Orchestrator:_execute_run:fp=37f2b01e27bbadea
   owner: architecture
   reason: Type dispatch - RowPlugin is union of TransformProtocol|GateProtocol, must distinguish to access is_batch_aware
   safety: Crashes on type mismatch - no silent fallback
   expires: '2026-03-09'
-- key: engine/orchestrator/core.py:R5:Orchestrator:_execute_run:fp=41dd0edfdcabc69e
+- key: engine/orchestrator/core.py:R5:Orchestrator:_execute_run:fp=db519e29e1e3386e
   owner: architecture
   reason: Tier 3 boundary - quarantine path handles non-dict source rows
   safety: Crashes on type mismatch - no silent fallback
   expires: '2026-03-09'
-- key: engine/orchestrator/core.py:R6:Orchestrator:_execute_run:fp=c77f343cb78be3af
+- key: engine/orchestrator/core.py:R6:Orchestrator:_execute_run:fp=6dae427ebe4be8dc
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
   safety: Falls back to repr_hash for telemetry content_hash; audit trail uses separate hashing path
   expires: '2026-05-12'
-- key: engine/orchestrator/core.py:R5:Orchestrator:_process_resumed_rows:fp=2d1ec064511f75a9
+- key: engine/orchestrator/core.py:R5:Orchestrator:_process_resumed_rows:fp=aa05bb91d32c9a05
   owner: architecture
   reason: Type dispatch - RowPlugin is union of TransformProtocol|GateProtocol, must distinguish to access is_batch_aware
   safety: Crashes on type mismatch - no silent fallback
@@ -231,12 +216,12 @@ allow_hits:
   reason: Optional edge_id lookup - edge map may not have all node combinations during routing
   safety: Falls back to generating edge_id when not in prebuilt map
   expires: '2026-05-13'
-- key: engine/processor.py:R5:RowProcessor:_process_single_token:fp=f09f1a84533309b2
+- key: engine/processor.py:R5:RowProcessor:_process_single_token:fp=e5d39bf6e7d7aefe
   owner: architecture
   reason: Protocol dispatch - isinstance for plugin type routing in unified node traversal
   safety: isinstance for NodeType discrimination - TransformProtocol vs GateSettings
   expires: '2026-05-13'
-- key: engine/processor.py:R5:RowProcessor:_process_single_token:fp=0cf05b64b2027cef
+- key: engine/processor.py:R5:RowProcessor:_process_single_token:fp=d060a37bc6e4c0e7
   owner: architecture
   reason: Protocol dispatch - isinstance for plugin type routing in unified node traversal
   safety: isinstance for NodeType discrimination - TransformProtocol vs GateSettings

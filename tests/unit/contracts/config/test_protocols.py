@@ -14,6 +14,7 @@ from elspeth.contracts.config.protocols import (
     RuntimeRateLimitProtocol,
     RuntimeRetryProtocol,
     RuntimeTelemetryProtocol,
+    ServiceRateLimitProtocol,
 )
 from elspeth.contracts.config.runtime import (
     ExporterConfig,
@@ -57,6 +58,7 @@ PROTOCOL_EXPECTED_PROPERTIES: dict[type, set[str]] = {
     RuntimeRateLimitProtocol: {
         "enabled",
         "default_requests_per_minute",
+        "persistence_path",
     },
     RuntimeConcurrencyProtocol: {
         "max_workers",
@@ -74,6 +76,14 @@ PROTOCOL_EXPECTED_PROPERTIES: dict[type, set[str]] = {
         "max_consecutive_failures",
         "exporter_configs",
     },
+}
+
+PROTOCOL_EXPECTED_METHODS: dict[type, set[str]] = {
+    RuntimeRetryProtocol: set(),
+    RuntimeRateLimitProtocol: {"get_service_config"},
+    RuntimeConcurrencyProtocol: set(),
+    RuntimeCheckpointProtocol: set(),
+    RuntimeTelemetryProtocol: set(),
 }
 
 
@@ -148,10 +158,24 @@ class _FakeRetryWrongTypes:
 class _FakeRateLimitComplete:
     enabled: bool = True
     default_requests_per_minute: int = 60
+    persistence_path: str | None = None
+
+    def get_service_config(self, service_name: str) -> ServiceRateLimitProtocol:
+        return _FakeServiceRateLimit(requests_per_minute=self.default_requests_per_minute)
 
 
 @dataclass
 class _FakeRateLimitMissingEnabled:
+    default_requests_per_minute: int = 60
+    persistence_path: str | None = None
+
+    def get_service_config(self, service_name: str) -> ServiceRateLimitProtocol:
+        return _FakeServiceRateLimit(requests_per_minute=self.default_requests_per_minute)
+
+
+@dataclass
+class _FakeRateLimitLegacyOnly:
+    enabled: bool = True
     default_requests_per_minute: int = 60
 
 
@@ -195,6 +219,11 @@ class _FakeTelemetryMissingGranularity:
     fail_on_total_exporter_failure: bool = True
     max_consecutive_failures: int = 10
     exporter_configs: tuple[ExporterConfig, ...] = ()
+
+
+@dataclass
+class _FakeServiceRateLimit:
+    requests_per_minute: int
 
 
 # ============================================================================
@@ -318,6 +347,10 @@ class TestStructuralTyping:
     def test_missing_property_fails_rate_limit_protocol(self) -> None:
         assert not isinstance(_FakeRateLimitMissingEnabled(), RuntimeRateLimitProtocol)
 
+    def test_legacy_only_rate_limit_shape_fails_protocol(self) -> None:
+        """Protocol must include all attributes used by RateLimitRegistry."""
+        assert not isinstance(_FakeRateLimitLegacyOnly(), RuntimeRateLimitProtocol)
+
     def test_matching_dataclass_satisfies_concurrency_protocol(self) -> None:
         assert isinstance(_FakeConcurrencyComplete(), RuntimeConcurrencyProtocol)
 
@@ -368,9 +401,9 @@ class TestProtocolCompleteness:
         props = _get_protocol_property_names(RuntimeRetryProtocol)
         assert len(props) == 5
 
-    def test_rate_limit_protocol_has_2_properties(self) -> None:
+    def test_rate_limit_protocol_has_3_properties(self) -> None:
         props = _get_protocol_property_names(RuntimeRateLimitProtocol)
-        assert len(props) == 2
+        assert len(props) == 3
 
     def test_concurrency_protocol_has_1_property(self) -> None:
         props = _get_protocol_property_names(RuntimeConcurrencyProtocol)
@@ -395,11 +428,12 @@ class TestProtocolCompleteness:
         ],
     )
     def test_no_non_property_public_methods(self, protocol: type) -> None:
-        # Protocols should only define properties, no regular methods
+        # Protocols may define explicit methods when required by runtime call sites.
         public_attrs = {name for name in dir(protocol) if not name.startswith("_")}
         property_attrs = _get_protocol_property_names(protocol)
-        non_property = public_attrs - property_attrs
-        assert not non_property, f"{protocol.__name__} has non-property public attributes: {non_property}"
+        allowed_methods = PROTOCOL_EXPECTED_METHODS[protocol]
+        non_property = public_attrs - property_attrs - allowed_methods
+        assert not non_property, f"{protocol.__name__} has unexpected non-property public attributes: {non_property}"
 
     @pytest.mark.parametrize(
         "protocol",

@@ -165,6 +165,51 @@ class TestAuditedLLMClient:
         assert call_kwargs["response_data"]["content"] == "Hello!"
         assert call_kwargs["latency_ms"] > 0
 
+    def test_telemetry_emits_token_id_when_configured(self) -> None:
+        """Telemetry event should carry token_id when provided."""
+        recorder = self._create_mock_recorder()
+        openai_client = self._create_mock_openai_client()
+        emitted_events: list[object] = []
+
+        client = AuditedLLMClient(
+            recorder=recorder,
+            state_id="state_123",
+            run_id="run_abc",
+            telemetry_emit=lambda event: emitted_events.append(event),
+            underlying_client=openai_client,
+            token_id="tok-123",
+        )
+
+        client.chat_completion(
+            model="gpt-4",
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+
+        assert len(emitted_events) == 1
+        assert emitted_events[0].token_id == "tok-123"
+
+    def test_telemetry_uses_none_token_id_when_unset(self) -> None:
+        """Telemetry event should allow token_id=None when not provided."""
+        recorder = self._create_mock_recorder()
+        openai_client = self._create_mock_openai_client()
+        emitted_events: list[object] = []
+
+        client = AuditedLLMClient(
+            recorder=recorder,
+            state_id="state_123",
+            run_id="run_abc",
+            telemetry_emit=lambda event: emitted_events.append(event),
+            underlying_client=openai_client,
+        )
+
+        client.chat_completion(
+            model="gpt-4",
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+
+        assert len(emitted_events) == 1
+        assert emitted_events[0].token_id is None
+
     def test_call_index_increments(self) -> None:
         """Each call gets a unique, incrementing call index."""
         recorder = self._create_mock_recorder()
@@ -265,6 +310,31 @@ class TestAuditedLLMClient:
                 model="gpt-4",
                 messages=[{"role": "user", "content": "Hello"}],
             )
+
+    def test_non_rate_substring_does_not_raise_rate_limit_error(self) -> None:
+        """Errors like 'enumerate' should not be misclassified as rate limit."""
+        recorder = self._create_mock_recorder()
+        openai_client = MagicMock()
+        openai_client.chat.completions.create.side_effect = Exception("400 Bad Request: enumerate at least one item")
+
+        client = AuditedLLMClient(
+            recorder=recorder,
+            state_id="state_123",
+            run_id="run_abc",
+            telemetry_emit=lambda event: None,
+            underlying_client=openai_client,
+        )
+
+        with pytest.raises(LLMClientError) as exc_info:
+            client.chat_completion(
+                model="gpt-4",
+                messages=[{"role": "user", "content": "Hello"}],
+            )
+
+        assert type(exc_info.value) is LLMClientError
+        assert exc_info.value.retryable is False
+        call_kwargs = recorder.record_call.call_args[1]
+        assert call_kwargs["error"]["retryable"] is False
 
     def test_temperature_and_max_tokens_recorded(self) -> None:
         """Temperature and max_tokens are recorded in request."""

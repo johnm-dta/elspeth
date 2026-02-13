@@ -109,12 +109,24 @@ class TestNormalizeTypeForContract:
 
         assert normalize_type_for_contract(pd.NaT) is type(None)
 
+    def test_pandas_na_returns_nonetype(self) -> None:
+        """pd.NA (missing scalar) normalizes to type(None)."""
+        from elspeth.contracts.type_normalization import normalize_type_for_contract
+
+        assert normalize_type_for_contract(pd.NA) is type(None)
+
     def test_numpy_datetime64_returns_datetime(self) -> None:
         """np.datetime64('2024-01-01') -> datetime."""
         from elspeth.contracts.type_normalization import normalize_type_for_contract
 
         result = normalize_type_for_contract(np.datetime64("2024-01-01"))
         assert result is datetime
+
+    def test_numpy_datetime64_nat_returns_nonetype(self) -> None:
+        """np.datetime64('NaT') normalizes to type(None)."""
+        from elspeth.contracts.type_normalization import normalize_type_for_contract
+
+        assert normalize_type_for_contract(np.datetime64("NaT")) is type(None)
 
     # -------------------------------------------------------------------------
     # NaN/Infinity rejection (Tier 1 audit integrity)

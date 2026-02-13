@@ -15,54 +15,84 @@ allow_hits:
   owner: architecture
   reason: Optional field access at trust boundary
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
+  expires: '2026-05-15'
 - key: telemetry/manager.py:R6:TelemetryManager:_export_loop:fp=146e33a3af87bc33
   owner: architecture
   reason: Silent recovery with explicit error handling path
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
+  expires: '2026-05-15'
 - key: telemetry/manager.py:R4:TelemetryManager:_export_loop:fp=71069f18769cb05f
   owner: architecture
   reason: Broad exception handling at external boundary with logging
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
+  expires: '2026-05-15'
 - key: telemetry/manager.py:R4:TelemetryManager:_dispatch_to_exporters:fp=4923356726bbe345
   owner: architecture
   reason: Broad exception handling at external boundary with logging
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
+  expires: '2026-05-15'
 - key: telemetry/manager.py:R1:TelemetryManager:_dispatch_to_exporters:fp=c94c1534c6a1ab0a
   owner: architecture
   reason: Optional field access at trust boundary
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=d47e99102dd6d3e7
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=4862bd7085ecb6e8
   owner: architecture
   reason: Silent recovery with explicit error handling path
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
+  expires: '2026-05-15'
 - key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=5a8a81b7924e3145
   owner: architecture
   reason: Silent recovery with explicit error handling path
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: telemetry/manager.py:R4:TelemetryManager:flush:fp=e70fb48b4433493e
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=fa9c7097f1c1e794
+  owner: architecture
+  reason: Queue overflow handling at telemetry backpressure boundary
+  safety: Queue.Empty indicates race during overflow handling; safe fallback keeps newest event path explicit
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=fe59cf071879bd1c
+  owner: architecture
+  reason: DROP mode intentionally counts and discards newest event when replacement enqueue races with producers
+  safety: Exception path records drop metrics, logs aggregate drops, and keeps queue task accounting balanced via finally task_done
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=86d01b5df37aef96
+  owner: P2-2026-02-13
+  reason: Sentinel requeue failure during shutdown race — caught to prevent telemetry from crashing pipeline code
+  safety: Logged with warning, event counted as dropped, close() retries sentinel insertion independently
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel_or_raise:fp=6557d5ad1d4d8bc4
+  owner: architecture
+  reason: Sentinel reinsertion loop handles bounded queue contention
+  safety: Full queue retries with bounded drain then explicit RuntimeError fail-fast
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel_or_raise:fp=e119525a4dfa1926
+  owner: architecture
+  reason: Sentinel reinsertion loop handles bounded queue contention
+  safety: Empty queue during contention is a race retry path only; loop continues and fails loudly if unresolved
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R4:TelemetryManager:flush:fp=c2b74304503abf32
   owner: architecture
   reason: Broad exception handling at external boundary with logging
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: telemetry/manager.py:R6:TelemetryManager:close:fp=820b592a6ee95462
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:close:fp=9a5b0d10051f8281
   owner: architecture
   reason: Silent recovery with explicit error handling path
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: telemetry/manager.py:R6:TelemetryManager:close:fp=60d6c2e8ccf5ffd2
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R6:TelemetryManager:close:fp=ab5ccc9a67eb0dad
   owner: architecture
   reason: Silent recovery with explicit error handling path
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: telemetry/manager.py:R4:TelemetryManager:close:fp=19041855a23c60b0
+  expires: '2026-05-15'
+- key: telemetry/manager.py:R4:TelemetryManager:close:fp=68940f3fab2966a2
   owner: architecture
   reason: Broad exception handling at external boundary with logging
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
+  expires: '2026-05-15'
+- key: telemetry/factory.py:R5:_discover_exporter_registry:fp=1f3cc7f6698cb122
+  owner: architecture
+  reason: isinstance() distinguishes PluginValidationError from ValueError to determine safe unregister
+  safety: Only calls unregister() when plugin was successfully registered; both paths raise TelemetryExporterError
+  expires: null

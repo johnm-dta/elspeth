@@ -237,7 +237,9 @@ operations_table = Table(
     Column("completed_at", DateTime(timezone=True)),
     Column("status", String(16), nullable=False),  # 'open' | 'completed' | 'failed' | 'pending'
     Column("input_data_ref", String(256)),  # Payload store reference for operation input
+    Column("input_data_hash", String(64)),  # SHA-256 of canonical JSON (survives purge)
     Column("output_data_ref", String(256)),  # Payload store reference for operation output
+    Column("output_data_hash", String(64)),  # SHA-256 of canonical JSON (survives purge)
     Column("error_message", Text),  # Error details if failed
     Column("duration_ms", Float),
     # Composite FK to nodes (node_id, run_id)

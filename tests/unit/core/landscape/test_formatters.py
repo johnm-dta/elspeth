@@ -323,6 +323,31 @@ class TestCSVFormatter:
 
         assert flat["scores"] == "[0.1, 0.5, 0.9]"
 
+    def test_csv_formatter_serializes_scalar_datetime_to_iso(self) -> None:
+        """CSV formatter should serialize scalar datetimes to ISO strings."""
+        formatter = CSVFormatter()
+        record = {
+            "timestamp": datetime(2026, 2, 4, 10, 11, 12, tzinfo=UTC),
+        }
+
+        flat = formatter.flatten(record)
+
+        assert flat["timestamp"] == "2026-02-04T10:11:12+00:00"
+
+    def test_csv_formatter_rejects_scalar_nan(self) -> None:
+        """CSV formatter must reject scalar NaN values for audit integrity."""
+        formatter = CSVFormatter()
+
+        with pytest.raises(ValueError, match="NaN"):
+            formatter.flatten({"latency_ms": float("nan")})
+
+    def test_csv_formatter_rejects_scalar_infinity(self) -> None:
+        """CSV formatter must reject scalar Infinity values for audit integrity."""
+        formatter = CSVFormatter()
+
+        with pytest.raises(ValueError, match="Infinity"):
+            formatter.flatten({"latency_ms": float("inf")})
+
 
 class TestJSONFormatter:
     """JSONFormatter preserves nested structure for JSON output."""
@@ -351,8 +376,8 @@ class TestJSONFormatter:
 
         assert isinstance(output, str)
 
-    def test_json_formatter_handles_datetime_via_default(self) -> None:
-        """JSON formatter should handle datetime via default=str."""
+    def test_json_formatter_serializes_datetime_to_iso(self) -> None:
+        """JSON formatter serializes datetime via serialize_datetime()."""
         formatter = JSONFormatter()
 
         record = {
@@ -362,7 +387,31 @@ class TestJSONFormatter:
         output = formatter.format(record)
 
         parsed = json.loads(output)
-        assert "2024-01-15" in parsed["timestamp"]
+        assert parsed["timestamp"] == "2024-01-15T10:30:00+00:00"
+
+    def test_json_formatter_rejects_nan(self) -> None:
+        """JSON formatter must reject NaN values for audit integrity."""
+        formatter = JSONFormatter()
+
+        with pytest.raises(ValueError, match="NaN"):
+            formatter.format({"latency_ms": float("nan")})
+
+    def test_json_formatter_rejects_infinity(self) -> None:
+        """JSON formatter must reject Infinity values for audit integrity."""
+        formatter = JSONFormatter()
+
+        with pytest.raises(ValueError, match="Infinity"):
+            formatter.format({"latency_ms": float("inf")})
+
+    def test_json_formatter_rejects_unknown_object_types(self) -> None:
+        """Unknown objects should fail instead of being silently coerced."""
+        formatter = JSONFormatter()
+
+        class UnknownType:
+            pass
+
+        with pytest.raises(TypeError):
+            formatter.format({"obj": UnknownType()})
 
     def test_json_formatter_handles_lists(self) -> None:
         """JSON formatter should preserve lists."""

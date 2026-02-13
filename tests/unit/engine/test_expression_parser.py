@@ -847,8 +847,14 @@ class TestExpressionParserFuzz:
 
     @given(expression=expression_like_input())
     @settings(max_examples=300, deadline=None)
+    @pytest.mark.filterwarnings("ignore::SyntaxWarning")
     def test_expression_like_input(self, expression: str) -> None:
-        """Random expression-like strings should not crash the parser."""
+        """Random expression-like strings should not crash the parser.
+
+        Note: Random text can include backslash sequences (e.g., "\\p", "\\q")
+        that trigger SyntaxWarning from Python's ast.parse(). This is expected
+        and suppressed — the parser handles these correctly as syntax errors.
+        """
         self._assert_safe_parse(expression)
 
     @given(expression=nested_expression())

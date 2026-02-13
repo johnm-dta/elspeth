@@ -57,6 +57,9 @@ class PluginConfig(BaseModel):
         Raises:
             PluginConfigError: If configuration is invalid.
         """
+        if not isinstance(config, dict):
+            raise PluginConfigError(f"Invalid configuration for {cls.__name__}: config must be a dict, got {type(config).__name__}.")
+
         try:
             config_copy = dict(config)
             if "schema" in config_copy:
@@ -171,7 +174,6 @@ class TabularSourceDataConfig(SourceDataConfig):
     - normalize_fields: Auto-normalize messy headers to identifiers
     - field_mapping: Override specific normalized names
 
-    See docs/plans/2026-01-29-field-normalization-design.md for full specification.
     """
 
     columns: list[str] | None = None

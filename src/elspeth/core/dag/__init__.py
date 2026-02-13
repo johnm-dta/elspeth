@@ -4,6 +4,7 @@
 from elspeth.core.dag.graph import ExecutionGraph
 from elspeth.core.dag.models import (
     GraphValidationError,
+    GraphValidationWarning,
     NodeConfig,
     NodeInfo,
     WiredTransform,
@@ -12,6 +13,7 @@ from elspeth.core.dag.models import (
 __all__ = [
     "ExecutionGraph",
     "GraphValidationError",
+    "GraphValidationWarning",
     "NodeConfig",
     "NodeInfo",
     "WiredTransform",

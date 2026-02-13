@@ -4,15 +4,13 @@ This module implements the Unified Schema Contracts design:
 - FieldContract: Immutable field metadata (normalized name, original name, type)
 - SchemaContract: Per-node schema with O(1) name resolution
 - PipelineRow: Row wrapper enabling dual-name access
-
-Design doc: docs/plans/2026-02-02-unified-schema-contracts-design.md
 """
 
 from __future__ import annotations
 
 import hashlib
 import types
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -84,8 +82,8 @@ class SchemaContract:
     locked: bool = False
 
     # Computed indices - populated in __post_init__
-    _by_normalized: dict[str, FieldContract] = field(default_factory=dict, repr=False, compare=False, hash=False)
-    _by_original: dict[str, str] = field(default_factory=dict, repr=False, compare=False, hash=False)
+    _by_normalized: Mapping[str, FieldContract] = field(default_factory=dict, repr=False, compare=False, hash=False)
+    _by_original: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         """Build O(1) lookup indices after initialization.
@@ -100,10 +98,12 @@ class SchemaContract:
             duplicates = [n for n in normalized_names if normalized_names.count(n) > 1]
             raise ValueError(f"Duplicate normalized_name in fields: {set(duplicates)}")
 
-        by_norm = {fc.normalized_name: fc for fc in self.fields}
-        by_orig = {fc.original_name: fc.normalized_name for fc in self.fields}
+        by_norm: dict[str, FieldContract] = {fc.normalized_name: fc for fc in self.fields}
+        by_orig: dict[str, str] = {fc.original_name: fc.normalized_name for fc in self.fields}
         object.__setattr__(self, "_by_normalized", by_norm)
         object.__setattr__(self, "_by_original", by_orig)
+        object.__setattr__(self, "_by_normalized", types.MappingProxyType(by_norm))
+        object.__setattr__(self, "_by_original", types.MappingProxyType(by_orig))
 
     def resolve_name(self, key: str) -> str:
         """Resolve original or normalized name to normalized name.
@@ -119,14 +119,45 @@ class SchemaContract:
         Raises:
             KeyError: If the key is not found in the schema
         """
+        normalized = self.find_name(key)
+        if normalized is None:
+            raise KeyError(f"'{key}' not found in schema contract")
+        return normalized
+
+    def find_name(self, key: str) -> str | None:
+        """Resolve original/normalized name when present (optional lookup).
+
+        Args:
+            key: Either an original_name or normalized_name
+
+        Returns:
+            The normalized_name if found, None otherwise
+        """
         if key in self._by_normalized:
             return key  # Already normalized
         if key in self._by_original:
             return self._by_original[key]
-        raise KeyError(f"'{key}' not found in schema contract")
+        return None
 
-    def get_field(self, normalized_name: str) -> FieldContract | None:
-        """Get FieldContract by normalized name.
+    def get_field(self, normalized_name: str) -> FieldContract:
+        """Get FieldContract by normalized name (strict lookup).
+
+        Args:
+            normalized_name: The normalized field name to look up
+
+        Returns:
+            The FieldContract for the requested field.
+
+        Raises:
+            KeyError: If the field is not found in the contract
+        """
+        try:
+            return self._by_normalized[normalized_name]
+        except KeyError as e:
+            raise KeyError(f"'{normalized_name}' not found in schema contract") from e
+
+    def find_field(self, normalized_name: str) -> FieldContract | None:
+        """Find FieldContract by normalized name (optional lookup).
 
         Args:
             normalized_name: The normalized field name to look up
@@ -134,7 +165,9 @@ class SchemaContract:
         Returns:
             The FieldContract if found, None otherwise
         """
-        return self._by_normalized.get(normalized_name)
+        if normalized_name in self._by_normalized:
+            return self._by_normalized[normalized_name]
+        return None
 
     def with_locked(self) -> SchemaContract:
         """Return new contract with locked=True.
@@ -415,7 +448,7 @@ class SchemaContract:
 
         all_names = {fc.normalized_name for fc in self.fields} | {fc.normalized_name for fc in other.fields}
 
-        for name in all_names:
+        for name in sorted(all_names):
             in_self = name in self._by_normalized
             in_other = name in other._by_normalized
 

@@ -347,7 +347,7 @@ class TestRecordTokenOutcome:
 class TestOutcomeContractValidation:
     """Test that record_token_outcome enforces required fields per outcome type.
 
-    See docs/audit/tokens/00-token-outcome-contract.md for the contract.
+    See docs/contracts/token-outcomes/00-token-outcome-contract.md for the contract.
     """
 
     @pytest.fixture

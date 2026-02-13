@@ -5,7 +5,7 @@ These tests verify the invariants of RowDataResult - ELSPETH's
 discriminated union for audit data retrieval:
 
 State-Data Invariants:
-- AVAILABLE state requires non-None data
+- AVAILABLE state requires dict data
 - All other states require None data
 - No other state-data combinations are valid
 
@@ -60,6 +60,15 @@ row_data_dicts = st.dictionaries(
     max_size=10,
 )
 
+# Non-dict payloads that are invalid for AVAILABLE state
+non_dict_data = st.one_of(
+    st.booleans(),
+    st.integers(),
+    st.floats(allow_nan=False, allow_infinity=False),
+    st.text(max_size=100),
+    st.lists(st.integers(), max_size=10),
+)
+
 
 # =============================================================================
 # State-Data Invariant Property Tests
@@ -82,6 +91,13 @@ class TestRowDataInvariantProperties:
         """Property: AVAILABLE state with None data raises ValueError."""
         with pytest.raises(ValueError, match="AVAILABLE state requires non-None data"):
             RowDataResult(state=RowDataState.AVAILABLE, data=None)
+
+    @given(data=non_dict_data)
+    @settings(max_examples=100)
+    def test_available_with_non_dict_fails(self, data: Any) -> None:
+        """Property: AVAILABLE state with non-dict data raises TypeError."""
+        with pytest.raises(TypeError, match="AVAILABLE state requires dict data"):
+            RowDataResult(state=RowDataState.AVAILABLE, data=data)  # type: ignore[arg-type]
 
     @given(state=non_available_states)
     @settings(max_examples=50)

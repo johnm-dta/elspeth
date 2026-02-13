@@ -139,6 +139,28 @@ class TestSchemaConfig:
         with pytest.raises(ValueError, match=r"Observed schemas.*cannot have explicit field definitions"):
             SchemaConfig.from_dict({"mode": "observed", "fields": ["id: int"]})
 
+    def test_observed_with_string_fields_raises(self) -> None:
+        """Observed mode rejects non-list fields values (string)."""
+        from elspeth.contracts.schema import SchemaConfig
+
+        with pytest.raises(ValueError, match=r"Observed schemas.*cannot have explicit field definitions"):
+            SchemaConfig.from_dict({"mode": "observed", "fields": "id: int"})
+
+    def test_observed_with_dict_fields_raises(self) -> None:
+        """Observed mode rejects non-list fields values (dict)."""
+        from elspeth.contracts.schema import SchemaConfig
+
+        with pytest.raises(ValueError, match=r"Observed schemas.*cannot have explicit field definitions"):
+            SchemaConfig.from_dict({"mode": "observed", "fields": {"id": "int"}})
+
+    def test_observed_with_empty_fields_list_is_allowed(self) -> None:
+        """Observed mode allows explicit empty list as equivalent to no fields."""
+        from elspeth.contracts.schema import SchemaConfig
+
+        config = SchemaConfig.from_dict({"mode": "observed", "fields": []})
+        assert config.mode == "observed"
+        assert config.fields is None
+
     def test_missing_mode_raises(self) -> None:
         """Missing mode key raises error."""
         from elspeth.contracts.schema import SchemaConfig

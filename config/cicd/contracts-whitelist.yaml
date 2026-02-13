@@ -61,9 +61,6 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/sinks/json_sink.py:JSONSink._apply_display_headers:rows (list)"
   - "src/elspeth/plugins/sinks/json_sink.py:JSONSink._apply_display_headers:return (list)"
 
-  # Transform plugins - row processing
-  - "src/elspeth/plugins/transforms/keyword_filter.py:KeywordFilter._get_fields_to_scan:row"
-
   # Source plugins - row validation
   - "src/elspeth/plugins/sources/json_source.py:JSONSource._validate_and_yield:row"
 
@@ -150,8 +147,6 @@ allowed_dict_patterns:
   - "src/elspeth/core/dag/builder.py:_best_schema_dict:return"
 
   # Schema reconstruction - deserializing schemas from landscape database (refactored into orchestrator/export.py)
-  - "src/elspeth/engine/orchestrator/export.py:reconstruct_schema_from_json:schema_dict"
-  - "src/elspeth/engine/orchestrator/export.py:_json_schema_to_python_type:field_info"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # AGGREGATION STATE
@@ -282,17 +277,15 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/azure/blob_sink.py:AzureBlobSink._serialize_json:rows (list)"
   - "src/elspeth/plugins/azure/blob_sink.py:AzureBlobSink._serialize_jsonl:rows (list)"
   - "src/elspeth/plugins/azure/blob_sink.py:AzureBlobSink.write:rows (list)"
-  - "src/elspeth/plugins/azure/blob_sink.py:AzureBlobSink._get_field_names_and_display:row"
+  - "src/elspeth/plugins/azure/blob_sink.py:AzureBlobSink._get_field_names_and_display:rows (list)"
   - "src/elspeth/plugins/azure/blob_sink.py:AzureBlobSink._apply_display_headers:rows (list)"
   - "src/elspeth/plugins/azure/blob_sink.py:AzureBlobSink._apply_display_headers:return (list)"
 
   # Azure content safety (refactored: PipelineRow is now the row type at plugin boundary)
   - "src/elspeth/plugins/transforms/azure/content_safety.py:AzureContentSafety.__init__:config"
-  - "src/elspeth/plugins/transforms/azure/content_safety.py:AzureContentSafety._get_fields_to_scan:row"
 
   # Azure prompt shield (refactored: PipelineRow is now the row type at plugin boundary)
   - "src/elspeth/plugins/transforms/azure/prompt_shield.py:AzurePromptShield.__init__:config"
-  - "src/elspeth/plugins/transforms/azure/prompt_shield.py:AzurePromptShield._get_fields_to_scan:row"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # HTTP CLIENTS - External API trust boundary
@@ -457,7 +450,7 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/batching/mixin.py:BatchTransformMixin.get_batch_metrics:return"
 
   # Azure blob sink - row serialization
-  - "src/elspeth/plugins/azure/blob_sink.py:AzureBlobSink._get_fieldnames_from_schema_or_row:row"
+  - "src/elspeth/plugins/azure/blob_sink.py:AzureBlobSink._get_fieldnames_from_schema_or_rows:rows (list)"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # OPENROUTER MULTI-QUERY - External API trust boundary
@@ -472,12 +465,12 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/llm/multi_query.py:MultiQueryConfigMixin.build_response_format:return"
 
   # Base multi-query transform (shared row processing for Azure/OpenRouter)
-  - "src/elspeth/plugins/llm/base_multi_query.py:BaseMultiQueryTransform._process_single_row_internal:row"
+  - "src/elspeth/plugins/llm/base_multi_query.py:BaseMultiQueryTransform._process_single_row_internal:row_for_queries"
+  - "src/elspeth/plugins/llm/base_multi_query.py:BaseMultiQueryTransform._process_single_row_internal:row_data"
   - "src/elspeth/plugins/llm/base_multi_query.py:BaseMultiQueryTransform._execute_queries_parallel:row"
   - "src/elspeth/plugins/llm/base_multi_query.py:BaseMultiQueryTransform._execute_queries_sequential:row"
   - "src/elspeth/plugins/llm/base_multi_query.py:BaseMultiQueryTransform._process_single_query:row"
 
   # OpenRouter batch LLM (async batch API)
   - "src/elspeth/plugins/llm/openrouter_batch.py:OpenRouterBatchLLMTransform.__init__:config"
-  - "src/elspeth/plugins/llm/openrouter_batch.py:OpenRouterBatchLLMTransform._process_single_row:row"
   - "src/elspeth/plugins/llm/openrouter_batch.py:OpenRouterBatchLLMTransform._process_single_row:return"

@@ -44,6 +44,9 @@ _REQUIRED_COLUMNS: list[tuple[str, str]] = [
     # Phase 5: Plugin contract audit trail - captures input/output contracts per node
     ("nodes", "input_contract_json"),
     ("nodes", "output_contract_json"),
+    # Operation I/O hashes - survive payload purge for integrity verification
+    ("operations", "input_data_hash"),
+    ("operations", "output_data_hash"),
 ]
 
 # Required foreign keys for audit integrity (Tier 1 trust).

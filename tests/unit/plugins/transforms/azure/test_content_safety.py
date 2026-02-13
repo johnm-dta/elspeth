@@ -506,8 +506,8 @@ class TestContentSafetyBatchProcessing:
         finally:
             transform.close()
 
-    def test_skips_missing_configured_field(self, mock_httpx_client: MagicMock) -> None:
-        """Transform skips fields not present in the row."""
+    def test_missing_configured_field_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+        """Missing value in explicitly-configured field fails CLOSED."""
         from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 
         mock_response = _create_mock_http_response(
@@ -526,7 +526,7 @@ class TestContentSafetyBatchProcessing:
             {
                 "endpoint": "https://test.cognitiveservices.azure.com",
                 "api_key": "test-key",
-                "fields": ["content", "optional_field"],
+                "fields": ["optional_field", "content"],
                 "thresholds": {"hate": 2, "violence": 2, "sexual": 2, "self_harm": 2},
                 "schema": {"mode": "observed"},
             }
@@ -538,7 +538,7 @@ class TestContentSafetyBatchProcessing:
         transform.connect_output(collector, max_pending=10)
 
         try:
-            # Row is missing "optional_field"
+            # Row is missing explicitly-configured "optional_field"
             row_data = {"content": "safe data", "id": 1}
             row = make_pipeline_row(row_data)
             transform.accept(row, ctx)
@@ -547,7 +547,12 @@ class TestContentSafetyBatchProcessing:
             assert len(collector.results) == 1
             _, result, _ = collector.results[0]
             assert isinstance(result, TransformResult)
-            assert result.status == "success"
+            assert result.status == "error"
+            assert result.reason is not None
+            assert result.reason["reason"] == "missing_field"
+            assert result.reason["field"] == "optional_field"
+            assert result.retryable is False
+            assert mock_httpx_client.post.call_count == 0
         finally:
             transform.close()
 

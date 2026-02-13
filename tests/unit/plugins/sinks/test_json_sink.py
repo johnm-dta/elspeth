@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.plugins.config_base import PluginConfigError
 
 # Dynamic schema config for tests - PathConfig now requires schema
 DYNAMIC_SCHEMA = {"mode": "observed"}
@@ -87,6 +88,59 @@ class TestJSONSink:
         data = json.loads(output_file.read_text())
         assert isinstance(data, list)
         assert data == [{"id": 1}]
+
+    def test_json_array_append_mode_is_rejected(self, tmp_path: Path) -> None:
+        """JSON array format must reject append mode to prevent silent overwrite."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.json"
+        with pytest.raises(PluginConfigError, match="does not support mode='append'"):
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "format": "json",
+                    "mode": "append",
+                    "schema": DYNAMIC_SCHEMA,
+                }
+            )
+
+    def test_json_extension_append_mode_is_rejected(self, tmp_path: Path) -> None:
+        """Auto-detected JSON array format must also reject append mode."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.json"
+        with pytest.raises(PluginConfigError, match="does not support mode='append'"):
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "mode": "append",
+                    "schema": DYNAMIC_SCHEMA,
+                }
+            )
+
+    def test_jsonl_append_mode_preserves_existing_rows(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """JSONL append mode should remain supported."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.jsonl"
+        output_file.write_text(json.dumps({"id": 1}) + "\n")
+
+        sink = JSONSink(
+            {
+                "path": str(output_file),
+                "format": "jsonl",
+                "mode": "append",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+        sink.write([{"id": 2}], ctx)
+        sink.flush()
+        sink.close()
+
+        lines = output_file.read_text().strip().split("\n")
+        assert len(lines) == 2
+        assert json.loads(lines[0]) == {"id": 1}
+        assert json.loads(lines[1]) == {"id": 2}
 
     def test_close_is_idempotent(self, tmp_path: Path, ctx: PluginContext) -> None:
         """close() can be called multiple times."""
@@ -261,6 +315,19 @@ class TestJSONSink:
         # No .tmp file left behind
         temp_file = output_file.with_suffix(".json.tmp")
         assert not temp_file.exists()
+
+    def test_json_array_write_raises_if_append_mode_is_forced(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Defense-in-depth: JSON array writer fails fast if mode becomes append."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.json"
+        sink = JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA})
+        sink._mode = "append"
+
+        with pytest.raises(ValueError, match="does not support mode='append'"):
+            sink.write([{"id": 1}], ctx)
+
+        sink.close()
 
     def test_json_array_close_releases_buffered_rows(self, tmp_path: Path, ctx: PluginContext) -> None:
         """close() releases buffered rows even without a persistent file handle."""

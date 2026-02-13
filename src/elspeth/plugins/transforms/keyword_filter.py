@@ -147,14 +147,15 @@ class KeywordFilter(BaseTransform):
             TransformResult.success(row) if no patterns match
             TransformResult.error(reason) if any pattern matches
         """
-        row_dict = row.to_dict()
-        fields_to_scan = self._get_fields_to_scan(row_dict)
+        fields_to_scan = self._get_fields_to_scan(row)
 
         for field_name in fields_to_scan:
-            if field_name not in row_dict:
+            # Use PipelineRow access semantics so configured fields can be either
+            # original names or normalized names from the contract.
+            if field_name not in row:
                 continue  # Skip fields not present in this row
 
-            value = row_dict[field_name]
+            value = row[field_name]
 
             # Only scan string values
             if not isinstance(value, str):
@@ -178,15 +179,15 @@ class KeywordFilter(BaseTransform):
 
         # No matches - pass through unchanged
         return TransformResult.success(
-            PipelineRow(row_dict, row.contract),
+            row,
             success_reason={"action": "filtered"},
         )
 
-    def _get_fields_to_scan(self, row: dict[str, Any]) -> list[str]:
+    def _get_fields_to_scan(self, row: PipelineRow) -> list[str]:
         """Determine which fields to scan based on config."""
         if self._fields == "all":
             # Scan all string-valued fields
-            return [k for k, v in row.items() if isinstance(v, str)]
+            return [field_name for field_name in row if isinstance(row[field_name], str)]
         elif isinstance(self._fields, str):
             return [self._fields]
         else:

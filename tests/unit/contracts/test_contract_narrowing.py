@@ -97,8 +97,8 @@ def test_narrow_contract_mixed_operations():
     assert {f.normalized_name for f in inferred_fields} == {"new", "d"}
 
 
-def test_narrow_contract_skips_non_primitive_types():
-    """Test that non-primitive types are skipped (not added to contract)."""
+def test_narrow_contract_preserves_dict_and_list_as_object():
+    """Dict/list additions are preserved as inferred object fields."""
     input_contract = SchemaContract(
         mode="FLEXIBLE",
         fields=(make_field("a", str, original_name="a", required=True, source="declared"),),
@@ -109,7 +109,52 @@ def test_narrow_contract_skips_non_primitive_types():
 
     result = narrow_contract_to_output(input_contract, output_row)
 
-    # dict_field and list_field should be skipped
+    assert len(result.fields) == 3
+    assert {f.normalized_name for f in result.fields} == {"a", "dict_field", "list_field"}
+
+    dict_field = next(f for f in result.fields if f.normalized_name == "dict_field")
+    assert dict_field.python_type is object
+    assert dict_field.source == "inferred"
+    assert dict_field.required is False
+
+    list_field = next(f for f in result.fields if f.normalized_name == "list_field")
+    assert list_field.python_type is object
+    assert list_field.source == "inferred"
+    assert list_field.required is False
+
+
+def test_narrow_contract_skips_unsupported_non_dict_list_type():
+    """Unsupported non-dict/list values preserve existing skip behavior."""
+
+    class _CustomUnsupported:
+        pass
+
+    input_contract = SchemaContract(
+        mode="FLEXIBLE",
+        fields=(make_field("a", str, original_name="a", required=True, source="declared"),),
+        locked=True,
+    )
+
+    output_row = {"a": "value", "custom": _CustomUnsupported()}
+
+    result = narrow_contract_to_output(input_contract, output_row)
+
+    assert len(result.fields) == 1
+    assert result.fields[0].normalized_name == "a"
+
+
+def test_narrow_contract_skips_non_finite_float():
+    """Non-finite floats remain excluded in narrowing inference."""
+    input_contract = SchemaContract(
+        mode="FLEXIBLE",
+        fields=(make_field("a", str, original_name="a", required=True, source="declared"),),
+        locked=True,
+    )
+
+    output_row = {"a": "value", "bad": float("nan")}
+
+    result = narrow_contract_to_output(input_contract, output_row)
+
     assert len(result.fields) == 1
     assert result.fields[0].normalized_name == "a"
 

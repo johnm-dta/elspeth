@@ -2,7 +2,7 @@
 
 Tier 2 tracing provides deep LLM observability beyond the framework's Tier 1 telemetry. While Tier 1 captures latency, status, and content hashes for ALL external calls, Tier 2 captures full prompts, responses, and token-level metrics for LLM calls specifically.
 
-> **Langfuse SDK v3.12+ Required** (as of ELSPETH RC-2)
+> **Langfuse SDK v3.12+ Required** (as of ELSPETH RC-3)
 >
 > ELSPETH now uses Langfuse SDK v3 which is built on OpenTelemetry standards. If you're upgrading from an earlier ELSPETH version with Langfuse v2, update your SDK:
 > ```bash

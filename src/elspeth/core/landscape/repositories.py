@@ -50,9 +50,6 @@ from elspeth.contracts.enums import (
 class RunRepository:
     """Repository for Run records."""
 
-    def __init__(self, session: Any) -> None:
-        self.session = session
-
     def load(self, row: SARow[Any]) -> Run:
         """Load Run from database row.
 
@@ -79,9 +76,6 @@ class RunRepository:
 class NodeRepository:
     """Repository for Node records."""
 
-    def __init__(self, session: Any) -> None:
-        self.session = session
-
     def load(self, row: SARow[Any]) -> Node:
         """Load Node from database row.
 
@@ -90,10 +84,16 @@ class NodeRepository:
         """
         import json
 
-        # Parse schema_fields_json back to list
+        # Parse schema_fields_json back to list[dict[str, object]]
         schema_fields: list[dict[str, object]] | None = None
         if row.schema_fields_json is not None:
-            schema_fields = json.loads(row.schema_fields_json)
+            parsed_fields = json.loads(row.schema_fields_json)
+            if type(parsed_fields) is not list:
+                raise ValueError(f"schema_fields_json must decode to list[dict], got {type(parsed_fields).__name__}")
+            for idx, item in enumerate(parsed_fields):
+                if type(item) is not dict:
+                    raise ValueError(f"schema_fields_json[{idx}] must be object/dict, got {type(item).__name__}")
+            schema_fields = parsed_fields
 
         return Node(
             node_id=row.node_id,
@@ -115,9 +115,6 @@ class NodeRepository:
 class EdgeRepository:
     """Repository for Edge records."""
 
-    def __init__(self, session: Any) -> None:
-        self.session = session
-
     def load(self, row: SARow[Any]) -> Edge:
         """Load Edge from database row.
 
@@ -137,9 +134,6 @@ class EdgeRepository:
 class RowRepository:
     """Repository for Row records."""
 
-    def __init__(self, session: Any) -> None:
-        self.session = session
-
     def load(self, row: SARow[Any]) -> Row:
         """Load Row from database row.
 
@@ -158,9 +152,6 @@ class RowRepository:
 
 class TokenRepository:
     """Repository for Token records."""
-
-    def __init__(self, session: Any) -> None:
-        self.session = session
 
     def load(self, row: SARow[Any]) -> Token:
         """Load Token from database row.
@@ -182,9 +173,6 @@ class TokenRepository:
 class TokenParentRepository:
     """Repository for TokenParent records."""
 
-    def __init__(self, session: Any) -> None:
-        self.session = session
-
     def load(self, row: SARow[Any]) -> TokenParent:
         """Load TokenParent from database row."""
         return TokenParent(
@@ -196,9 +184,6 @@ class TokenParentRepository:
 
 class CallRepository:
     """Repository for Call records."""
-
-    def __init__(self, session: Any) -> None:
-        self.session = session
 
     def load(self, row: SARow[Any]) -> Call:
         """Load Call from database row.
@@ -226,9 +211,6 @@ class CallRepository:
 class RoutingEventRepository:
     """Repository for RoutingEvent records."""
 
-    def __init__(self, session: Any) -> None:
-        self.session = session
-
     def load(self, row: SARow[Any]) -> RoutingEvent:
         """Load RoutingEvent from database row."""
         return RoutingEvent(
@@ -246,9 +228,6 @@ class RoutingEventRepository:
 
 class BatchRepository:
     """Repository for Batch records."""
-
-    def __init__(self, session: Any) -> None:
-        self.session = session
 
     def load(self, row: SARow[Any]) -> Batch:
         """Load Batch from database row."""
@@ -279,9 +258,6 @@ class NodeStateRepository:
     these invariants per the Tier 1 trust model - if invariants are violated,
     we crash immediately (audit integrity violation).
     """
-
-    def __init__(self, session: Any) -> None:
-        self.session = session
 
     def load(self, row: SARow[Any]) -> NodeState:
         """Load NodeState from database row.
@@ -418,9 +394,6 @@ class ValidationErrorRepository:
     No enum conversion needed - all fields are primitives or strings.
     """
 
-    def __init__(self, session: Any) -> None:
-        self.session = session
-
     def load(self, row: SARow[Any]) -> ValidationErrorRecord:
         """Load ValidationErrorRecord from database row.
 
@@ -450,9 +423,6 @@ class TransformErrorRepository:
     No enum conversion needed - all fields are primitives or strings.
     """
 
-    def __init__(self, session: Any) -> None:
-        self.session = session
-
     def load(self, row: SARow[Any]) -> TransformErrorRecord:
         """Load TransformErrorRecord from database row.
 
@@ -481,9 +451,6 @@ class TokenOutcomeRepository:
     Handles terminal token states. Converts outcome string to RowOutcome enum.
     """
 
-    def __init__(self, session: Any) -> None:
-        self.session = session
-
     def load(self, row: SARow[Any]) -> TokenOutcome:
         """Load TokenOutcome from database row.
 
@@ -498,6 +465,7 @@ class TokenOutcomeRepository:
 
         Raises:
             ValueError: If is_terminal is not 0 or 1 (Tier 1 audit integrity violation)
+            ValueError: If outcome and is_terminal disagree (Tier 1 audit integrity violation)
         """
         # Tier 1 validation: is_terminal must be exactly 0 or 1
         # Per Data Manifesto: audit DB is OUR data - crash on any anomaly
@@ -505,12 +473,19 @@ class TokenOutcomeRepository:
             raise ValueError(
                 f"TokenOutcome {row.outcome_id} has invalid is_terminal={row.is_terminal!r} (expected 0 or 1) - audit integrity violation"
             )
+        outcome = RowOutcome(row.outcome)
+        is_terminal = row.is_terminal == 1
+        if is_terminal != outcome.is_terminal:
+            raise ValueError(
+                f"TokenOutcome {row.outcome_id} has inconsistent is_terminal={row.is_terminal!r} for outcome={outcome.value!r} "
+                f"(expected {1 if outcome.is_terminal else 0}) - audit integrity violation"
+            )
         return TokenOutcome(
             outcome_id=row.outcome_id,
             run_id=row.run_id,
             token_id=row.token_id,
-            outcome=RowOutcome(row.outcome),  # Convert HERE
-            is_terminal=row.is_terminal == 1,  # DB stores as Integer, now validated
+            outcome=outcome,
+            is_terminal=is_terminal,  # DB stores as Integer, now fully validated
             recorded_at=row.recorded_at,
             sink_name=row.sink_name,
             batch_id=row.batch_id,
@@ -529,9 +504,6 @@ class ArtifactRepository:
     Handles sink output artifacts with content hashes.
     No enum conversion needed - artifact_type is user-defined string.
     """
-
-    def __init__(self, session: Any) -> None:
-        self.session = session
 
     def load(self, row: SARow[Any]) -> Artifact:
         """Load Artifact from database row.
@@ -562,9 +534,6 @@ class BatchMemberRepository:
     Handles batch membership records for aggregation tracking.
     No enum conversion needed - all fields are primitives.
     """
-
-    def __init__(self, session: Any) -> None:
-        self.session = session
 
     def load(self, row: SARow[Any]) -> BatchMember:
         """Load BatchMember from database row.

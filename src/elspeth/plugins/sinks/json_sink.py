@@ -10,7 +10,10 @@ output correct types. Wrong types = upstream bug = crash.
 import hashlib
 import json
 import os
+from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Literal
+
+from pydantic import model_validator
 
 from elspeth.contracts import ArtifactDescriptor, PluginSchema
 
@@ -38,6 +41,18 @@ class JSONSinkConfig(SinkPathConfig):
     encoding: str = "utf-8"
     validate_input: bool = False  # Optional runtime validation of incoming rows
     mode: Literal["write", "append"] = "write"  # "write" (truncate) or "append"
+
+    @model_validator(mode="after")
+    def _validate_mode_format_compatibility(self) -> "JSONSinkConfig":
+        """Reject append mode for JSON array format."""
+        fmt = self.format
+        if fmt is None:
+            fmt = "jsonl" if Path(self.path).suffix == ".jsonl" else "json"
+
+        if fmt == "json" and self.mode == "append":
+            raise ValueError("JSONSink format='json' does not support mode='append'. Use format='jsonl' for append/resume output.")
+
+        return self
 
 
 class JSONSink(BaseSink):
@@ -316,6 +331,9 @@ class JSONSink(BaseSink):
         artifacts. The original file remains untouched until os.replace()
         succeeds.
         """
+        if self._mode == "append":
+            raise ValueError("JSONSink format='json' does not support mode='append'. Use format='jsonl' for append/resume output.")
+
         temp_path = self._path.with_suffix(self._path.suffix + ".tmp")
         try:
             with open(temp_path, "w", encoding=self._encoding) as f:

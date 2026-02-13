@@ -147,7 +147,7 @@ Used by `azure_blob` source and sink plugins.
 
 | Variable | Purpose |
 |----------|---------|
-| `DD_API_KEY` | Datadog API key (sensitive; optional if using local agent) |
+| `DD_API_KEY` | Datadog API key for Datadog Agent deployment (not read by ELSPETH Datadog exporter options) |
 
 ---
 

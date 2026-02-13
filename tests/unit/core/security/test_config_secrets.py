@@ -836,3 +836,15 @@ landscape:
 
         assert "missing-secret" in str(exc_info.value)
         assert "not found" in str(exc_info.value)
+
+    def test_load_settings_with_secrets_rejects_non_mapping_root(self, tmp_path: Path) -> None:
+        """Top-level YAML must be a mapping/object, not a list/scalar."""
+        settings_file = tmp_path / "settings.yaml"
+        settings_file.write_text("""
+- foo: bar
+""")
+
+        from elspeth.cli import _load_settings_with_secrets
+
+        with pytest.raises(ValueError, match="Settings YAML root must be a mapping/object, got list"):
+            _load_settings_with_secrets(settings_file)

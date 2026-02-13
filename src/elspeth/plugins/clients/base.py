@@ -59,6 +59,7 @@ class AuditedClientBase:
         telemetry_emit: TelemetryEmitCallback,
         *,
         limiter: RateLimiter | NoOpLimiter | None = None,
+        token_id: str | None = None,
     ) -> None:
         """Initialize audited client.
 
@@ -68,12 +69,18 @@ class AuditedClientBase:
             run_id: Pipeline run ID for telemetry correlation
             telemetry_emit: Callback to emit telemetry events (no-op when disabled)
             limiter: Optional rate limiter for throttling requests (from RateLimitRegistry)
+            token_id: Optional token identity for transform-context correlation
         """
         self._recorder = recorder
         self._state_id = state_id
         self._run_id = run_id
         self._telemetry_emit = telemetry_emit
         self._limiter = limiter
+        self._token_id = token_id
+
+    def _telemetry_token_id(self) -> str | None:
+        """Get token_id for telemetry correlation when available."""
+        return self._token_id
 
     def _next_call_index(self) -> int:
         """Get next call index for this state (thread-safe).

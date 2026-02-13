@@ -12,6 +12,7 @@ Phase 3 Integration Points:
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
@@ -103,6 +104,13 @@ class PluginContext:
     # IMPORTANT: This is derivative state - the executor must keep it synchronized
     # with the authoritative token flowing through the pipeline.
     token: TokenInfo | None = field(default=None)
+
+    # === Batch Token Identity (Aggregation) ===
+    # Set by AggregationExecutor.execute_flush() before calling batch-aware transforms.
+    # Maps row index in the batch to the originating token_id. Batch transforms
+    # use this to pass per-row token_id to audited clients for correct telemetry
+    # attribution. When None, the transform falls back to ctx.token (single-token mode).
+    batch_token_ids: list[str] | None = field(default=None)
 
     # === Schema Contract (Phase 3: Transform/Sink Integration) ===
     # Set by executor when processing transforms to enable contract-aware template
@@ -322,12 +330,25 @@ class PluginContext:
             from elspeth.contracts.events import ExternalCallCompleted
             from elspeth.core.canonical import stable_hash
 
+            # Snapshot payloads so async telemetry exports can't drift from call-time hashes.
+            request_snapshot = copy.deepcopy(request_data)
+            response_snapshot = copy.deepcopy(response_data) if response_data is not None else None
+
             # Extract token usage for LLM calls if available
             token_usage = None
-            if call_type == CallTypeEnum.LLM and response_data is not None:
-                usage = response_data.get("usage")
+            if call_type == CallTypeEnum.LLM and response_snapshot is not None:
+                usage = response_snapshot.get("usage")
                 if usage and isinstance(usage, dict):
                     token_usage = usage
+
+            token_id = None
+            if has_state:
+                if self.token is not None:
+                    token_id = self.token.token_id
+                elif self.state_id is not None:
+                    node_state = self.landscape.get_node_state(self.state_id)
+                    if node_state is not None:
+                        token_id = node_state.token_id
 
             self.telemetry_emit(
                 ExternalCallCompleted(
@@ -336,14 +357,15 @@ class PluginContext:
                     # Use correct field based on context type
                     state_id=self.state_id if has_state else None,
                     operation_id=self.operation_id if has_operation else None,
+                    token_id=token_id,
                     call_type=call_type,
                     provider=provider,
                     status=status,
                     latency_ms=latency_ms or 0.0,
-                    request_hash=stable_hash(request_data),
-                    response_hash=stable_hash(response_data) if response_data is not None else None,
-                    request_payload=request_data,  # Full request for observability
-                    response_payload=response_data,  # Full response for observability
+                    request_hash=stable_hash(request_snapshot),
+                    response_hash=stable_hash(response_snapshot) if response_snapshot is not None else None,
+                    request_payload=request_snapshot,  # Full request snapshot for observability
+                    response_payload=response_snapshot,  # Full response snapshot for observability
                     token_usage=token_usage,
                 )
             )

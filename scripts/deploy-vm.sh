@@ -13,7 +13,7 @@
 #
 # Environment Variables:
 #   DEPLOY_DIR   - Deployment directory (default: /srv/elspeth)
-#   REGISTRY     - Container registry (default: ghcr.io/your-org)
+#   REGISTRY     - Container registry (default: ghcr.io/johnm-dta)
 #   SKIP_BACKUP  - Skip database backup (default: false)
 #   SKIP_SMOKE   - Skip smoke tests (default: false)
 #
@@ -32,7 +32,7 @@ set -euo pipefail
 
 IMAGE_TAG="${1:-}"
 DEPLOY_DIR="${DEPLOY_DIR:-/srv/elspeth}"
-REGISTRY="${REGISTRY:-ghcr.io/your-org}"
+REGISTRY="${REGISTRY:-ghcr.io/johnm-dta}"
 SKIP_BACKUP="${SKIP_BACKUP:-false}"
 SKIP_SMOKE="${SKIP_SMOKE:-false}"
 
@@ -68,7 +68,7 @@ show_usage() {
     echo ""
     echo "Environment Variables:"
     echo "  DEPLOY_DIR   Deployment directory (default: /srv/elspeth)"
-    echo "  REGISTRY     Container registry (default: ghcr.io/your-org)"
+    echo "  REGISTRY     Container registry (default: ghcr.io/johnm-dta)"
     echo "  SKIP_BACKUP  Skip database backup (default: false)"
     echo "  SKIP_SMOKE   Skip smoke tests (default: false)"
 }

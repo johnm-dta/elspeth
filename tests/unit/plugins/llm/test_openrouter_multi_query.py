@@ -14,6 +14,7 @@ import pytest
 from elspeth.contracts import Determinism, TransformResult
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.batching.ports import CollectorOutputPort
 from elspeth.plugins.config_base import PluginConfigError
 from elspeth.plugins.llm.openrouter_multi_query import OpenRouterMultiQueryLLMTransform
@@ -581,6 +582,70 @@ class TestRowProcessingWithPipelining:
             assert "cs1_treatment_score" in output
             assert "cs2_diagnosis_score" in output
             assert "cs2_treatment_score" in output
+
+    def test_process_row_supports_original_header_names_in_input_fields(
+        self,
+        ctx: PluginContext,
+        collector: CollectorOutputPort,
+        mock_recorder: Mock,
+        chaosllm_server,
+    ) -> None:
+        """Original source headers in input_fields resolve via PipelineRow contract."""
+        config = make_config(
+            case_studies=[
+                {"name": "cs1", "input_fields": ["Patient Name", "Symptoms", "History"]},
+            ],
+            criteria=[{"name": "diagnosis", "code": "DIAG"}],
+            pool_size=1,
+        )
+        transform = OpenRouterMultiQueryLLMTransform(config)
+        init_ctx = PluginContext(run_id="test", config={}, landscape=mock_recorder)
+        transform.on_start(init_ctx)
+        transform.connect_output(collector, max_pending=10)
+
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                FieldContract("patient_name", "Patient Name", str, False, "inferred"),
+                FieldContract("symptoms", "Symptoms", str, False, "inferred"),
+                FieldContract("history", "History", str, False, "inferred"),
+            ),
+            locked=True,
+        )
+        row = PipelineRow(
+            {
+                "patient_name": "Alice Smith",
+                "symptoms": "chest pain",
+                "history": "family history",
+            },
+            contract,
+        )
+
+        try:
+            with mock_openrouter_http_responses(
+                chaosllm_server,
+                [make_openrouter_response({"score": 85, "rationale": "Looks consistent"})],
+            ) as mock_client:
+                transform.accept(row, ctx)
+                transform.flush_batch_processing(timeout=10.0)
+
+            assert len(collector.results) == 1
+            _, result, _state_id = collector.results[0]
+            assert isinstance(result, TransformResult), f"Expected TransformResult, got {type(result)}"
+            assert result.status == "success"
+            assert result.row is not None
+            assert result.row["cs1_diagnosis_score"] == 85
+            assert result.row["patient_name"] == "Alice Smith"
+
+            call_args = mock_client.post.call_args
+            request_body = call_args.kwargs.get("json") or call_args[1].get("json")
+            assert request_body is not None
+            messages = request_body["messages"]
+            user_message = messages[-1]["content"]
+            assert "Alice Smith" in user_message
+            assert "diagnosis" in user_message.lower()
+        finally:
+            transform.close()
 
     def test_process_row_fails_if_any_query_fails(
         self,

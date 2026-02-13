@@ -631,8 +631,8 @@ class TestGuaranteedFieldsProperties:
             config={"schema": {"mode": "observed", "guaranteed_fields": list(branch_b_guarantees)}},
         )
 
-        # Coalesce node (merge point)
-        graph.add_node("coalesce", node_type="coalesce", plugin_name="test_coalesce")
+        # Coalesce node (merge point) — union merge uses intersection of guarantees
+        graph.add_node("coalesce", node_type="coalesce", plugin_name="test_coalesce", config={"merge": "union"})
 
         # Sink
         graph.add_node("sink", node_type="sink", plugin_name="test_sink")
@@ -645,7 +645,7 @@ class TestGuaranteedFieldsProperties:
         graph.add_edge("coalesce", "sink", label="continue")
 
         # Get effective guarantees after coalesce
-        effective = graph._get_effective_guaranteed_fields("coalesce")
+        effective = graph.get_effective_guaranteed_fields("coalesce")
 
         assert effective == expected_after_coalesce, (
             f"Coalesce should guarantee intersection: {expected_after_coalesce}, "
@@ -682,7 +682,7 @@ class TestGuaranteedFieldsProperties:
         graph.add_edge("gate", "sink", label="continue")
 
         # Effective guarantees after gate should equal source guarantees
-        effective = graph._get_effective_guaranteed_fields("gate")
+        effective = graph.get_effective_guaranteed_fields("gate")
 
         assert effective == guaranteed, f"Gate should inherit upstream guarantees: {guaranteed}, got {effective}"
 
@@ -720,11 +720,11 @@ class TestGuaranteedFieldsProperties:
         graph.add_edge("transform", "sink", label="continue")
 
         # Source's effective guarantees
-        source_effective = graph._get_effective_guaranteed_fields("source")
+        source_effective = graph.get_effective_guaranteed_fields("source")
         assert source_effective == g1
 
         # Transform declares its own guarantees - these become the effective output
-        transform_effective = graph._get_effective_guaranteed_fields("transform")
+        transform_effective = graph.get_effective_guaranteed_fields("transform")
         assert transform_effective == g2, f"Transform with own guarantees should use those: {g2}, got {transform_effective}"
 
     def test_empty_guarantees_fails_any_requirement(self) -> None:

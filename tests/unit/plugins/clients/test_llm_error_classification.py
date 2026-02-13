@@ -34,6 +34,16 @@ class TestErrorClassification:
         error_rate = Exception("Rate limit has been exceeded")
         assert _is_retryable_error(error_rate) is True
 
+    def test_non_rate_substrings_do_not_trigger_rate_limit_retry(self) -> None:
+        """Words containing 'rate' (e.g., enumerate) should not be retryable."""
+        non_rate_errors = [
+            Exception("400 Bad Request: enumerate at least one item"),
+            Exception("Configuration error: inaccurate model id"),
+        ]
+
+        for error in non_rate_errors:
+            assert _is_retryable_error(error) is False, f"Failed for: {error}"
+
     def test_server_errors_are_retryable(self) -> None:
         """Server errors (5xx) should be classified as retryable."""
         server_errors = [
@@ -150,6 +160,37 @@ class TestLLMClientExceptionTypes:
 
         assert exc_info.value.retryable is True
         assert "429" in str(exc_info.value)
+
+    def test_non_rate_substring_error_raises_non_retryable_llm_client_error(
+        self,
+        mock_recorder: Mock,
+        mock_openai_client: Mock,
+    ) -> None:
+        """Non-rate errors containing 'rate' substrings should not raise RateLimitError."""
+        mock_openai_client.chat.completions.create.side_effect = Exception("400 Bad Request: enumerate at least one item")
+
+        client = AuditedLLMClient(
+            recorder=mock_recorder,
+            state_id="test-state",
+            run_id="run_abc",
+            telemetry_emit=lambda event: None,
+            underlying_client=mock_openai_client,
+        )
+
+        with pytest.raises(LLMClientError) as exc_info:
+            client.chat_completion(
+                model="gpt-4",
+                messages=[{"role": "user", "content": "test"}],
+            )
+
+        assert type(exc_info.value) is LLMClientError
+        assert exc_info.value.retryable is False
+        assert "enumerate" in str(exc_info.value)
+
+        mock_recorder.record_call.assert_called_once()
+        call_args = mock_recorder.record_call.call_args
+        assert call_args.kwargs["status"] == CallStatus.ERROR
+        assert call_args.kwargs["error"]["retryable"] is False
 
     def test_server_error_raises_server_error(
         self,

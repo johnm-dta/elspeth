@@ -6,6 +6,7 @@ Uses Pydantic for validation and Dynaconf for multi-source loading.
 Settings are frozen (immutable) after construction.
 """
 
+import ast
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -223,7 +224,7 @@ class TriggerConfig(BaseModel):
         trigger:
           count: 1000           # Fire after 1000 rows
           timeout_seconds: 3600         # Or after 1 hour
-          condition: "batch_count >= 100 and batch_age_seconds < 30"  # Or batch metrics
+          condition: "row['batch_count'] >= 100 and row['batch_age_seconds'] < 30"  # Or batch metrics
     """
 
     model_config = {"frozen": True, "extra": "forbid"}
@@ -266,6 +267,56 @@ class TriggerConfig(BaseModel):
             raise ValueError(f"Invalid condition syntax: {e}") from e
         except ExpressionSecurityError as e:
             raise ValueError(f"Forbidden construct in condition: {e}") from e
+
+        # Trigger conditions are batch-level only: row may only expose these keys.
+        allowed_row_keys = frozenset({"batch_count", "batch_age_seconds"})
+
+        def _extract_string_key(node: ast.AST) -> str | None:
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return node.value
+            return None
+
+        parsed = ast.parse(v, mode="eval")
+        invalid_keys: set[str] = set()
+
+        for node in ast.walk(parsed):
+            key: str | None = None
+
+            # row['key']
+            if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "row":
+                key = _extract_string_key(node.slice)
+                if key is None:
+                    raise ValueError(
+                        "Trigger condition row keys must be string literals. Allowed keys: row['batch_count'], row['batch_age_seconds']."
+                    )
+
+            # row.get('key') / row.get('key', default)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "row"
+                and node.func.attr == "get"
+                and node.args
+            ):
+                key = _extract_string_key(node.args[0])
+                if key is None:
+                    raise ValueError(
+                        "Trigger condition row.get() keys must be string literals. "
+                        "Allowed keys: row['batch_count'], row['batch_age_seconds']."
+                    )
+
+            if key is None:
+                continue
+            if key not in allowed_row_keys:
+                invalid_keys.add(key)
+
+        if invalid_keys:
+            invalid_display = ", ".join(sorted(repr(key) for key in invalid_keys))
+            raise ValueError(
+                "Trigger condition references unsupported row keys: "
+                f"{invalid_display}. Allowed keys: row['batch_count'], row['batch_age_seconds']."
+            )
 
         # P2-2026-01-31: Reject non-boolean expressions
         # Per CLAUDE.md: "if bool(result)" coercion is forbidden for our data
@@ -620,10 +671,29 @@ class CoalesceSettings(BaseModel):
     model_config = {"frozen": True, "extra": "forbid"}
 
     name: str = Field(description="Unique identifier for this coalesce point")
-    branches: list[str] = Field(
+    branches: dict[str, str] = Field(
         min_length=2,
-        description="Branch names to wait for (from fork_to paths)",
+        description="Branch identity → input connection mapping. List format normalized to identity dict.",
     )
+
+    @field_validator("branches", mode="before")
+    @classmethod
+    def normalize_branches(cls, v: Any) -> dict[str, str]:
+        """Normalize list format to identity dict.
+
+        branches: [a, b] becomes branches: {a: a, b: b}
+        This is config ergonomics — list is cleaner when no transforms are needed.
+
+        Rejects duplicate branch names in list form — dict comprehension
+        would silently discard them, hiding a config error.
+        """
+        if isinstance(v, list):
+            if len(v) != len(set(v)):
+                dupes = sorted({b for b in v if v.count(b) > 1})
+                raise ValueError(f"Duplicate branch names in list: {dupes}")
+            return {b: b for b in v}
+        return v  # type: ignore[no-any-return]  # Pydantic validates dict[str, str]
+
     policy: Literal["require_all", "quorum", "best_effort", "first"] = Field(
         default="require_all",
         description="How to handle partial arrivals",
@@ -668,16 +738,20 @@ class CoalesceSettings(BaseModel):
 
     @field_validator("branches")
     @classmethod
-    def validate_branch_names(cls, v: list[str]) -> list[str]:
-        """Ensure coalesce branch names are bounded and non-reserved."""
-        stripped = []
-        for branch in v:
-            if not branch or not branch.strip():
+    def validate_branch_names(cls, v: dict[str, str]) -> dict[str, str]:
+        """Ensure coalesce branch names (keys) and input connections (values) are valid."""
+        validated: dict[str, str] = {}
+        for branch_name, input_connection in v.items():
+            if not branch_name or not branch_name.strip():
                 raise ValueError("Coalesce branch names must not be empty")
-            value = branch.strip()
-            _validate_connection_or_sink_name(value, field_label="Coalesce branch name")
-            stripped.append(value)
-        return stripped
+            if not input_connection or not input_connection.strip():
+                raise ValueError(f"Coalesce branch '{branch_name}' input connection must not be empty")
+            key = branch_name.strip()
+            val = input_connection.strip()
+            _validate_connection_or_sink_name(key, field_label="Coalesce branch name")
+            _validate_connection_or_sink_name(val, field_label=f"Coalesce branch '{key}' input connection")
+            validated[key] = val
+        return validated
 
     @model_validator(mode="after")
     def validate_policy_requirements(self) -> "CoalesceSettings":
@@ -699,7 +773,7 @@ class CoalesceSettings(BaseModel):
             raise ValueError(f"Coalesce '{self.name}': select merge strategy requires select_branch")
         if self.select_branch is not None and self.select_branch not in self.branches:
             raise ValueError(
-                f"Coalesce '{self.name}': select_branch '{self.select_branch}' must be one of the expected branches: {self.branches}"
+                f"Coalesce '{self.name}': select_branch '{self.select_branch}' must be one of the expected branches: {sorted(self.branches.keys())}"
             )
         return self
 

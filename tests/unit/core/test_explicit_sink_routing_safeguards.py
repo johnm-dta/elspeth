@@ -1,7 +1,7 @@
 # tests/unit/core/test_explicit_sink_routing_safeguards.py
 """Safeguard tests for the explicit sink routing (on_success) feature.
 
-ADR: docs/design/adr/adr-explicit-sink-routing.md
+ADR: docs/architecture/adr/004-adr-explicit-sink-routing.md
 
 These tests prevent regressions of the default_sink removal and verify
 the on_success wiring chain remains connected end-to-end.

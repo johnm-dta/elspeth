@@ -7,6 +7,7 @@ IMPORTANT: Sources use allow_coercion=True to normalize external data.
 This is the ONLY place in the pipeline where coercion is allowed.
 """
 
+import contextlib
 import csv
 from collections.abc import Iterator
 from typing import Any
@@ -131,12 +132,17 @@ class CSVSource(BaseSource):
         # CRITICAL: newline='' required for proper embedded newline handling
         # See: https://docs.python.org/3/library/csv.html
         with open(self._path, encoding=self._encoding, newline="") as f:
-            # Skip header rows as configured
-            for _ in range(self._skip_rows):
-                next(f, None)
-
             # Create csv.reader on file handle for multiline field support
             reader = csv.reader(f, delimiter=self._delimiter)
+
+            # Skip CSV records as configured (not raw lines), preserving multiline alignment.
+            # csv.Error is caught because skip_rows targets non-CSV metadata preamble
+            # (comments, version headers, etc.) that may contain unmatched quotes or
+            # other constructs invalid under RFC 4180.  The user explicitly asked to
+            # discard these rows, so a parse failure is not an error worth surfacing.
+            for _ in range(self._skip_rows):
+                with contextlib.suppress(csv.Error):
+                    next(reader, None)
 
             # Determine headers based on config
             if self._columns is not None:
@@ -148,6 +154,30 @@ class CSVSource(BaseSource):
                     raw_headers = next(reader)
                 except StopIteration:
                     return  # Empty file after skip_rows
+                except csv.Error as e:
+                    # Header parse failure at source boundary (Tier 3): record and quarantine/discard
+                    physical_line = reader.line_num if reader.line_num > 0 else self._skip_rows + 1
+                    raw_row = {
+                        "file_path": str(self._path),
+                        "__line_number__": physical_line,
+                        "__raw_line__": "(unparseable CSV header)",
+                    }
+                    error_msg = f"CSV parse error at line {physical_line}: {e}"
+
+                    ctx.record_validation_error(
+                        row=raw_row,
+                        error=error_msg,
+                        schema_mode="parse",
+                        destination=self._on_validation_failure,
+                    )
+
+                    if self._on_validation_failure != "discard":
+                        yield SourceRow.quarantined(
+                            row=raw_row,
+                            error=error_msg,
+                            destination=self._on_validation_failure,
+                        )
+                    return
 
             # Resolve field names (normalization + mapping)
             # This may raise ValueError on collision
@@ -182,7 +212,7 @@ class CSVSource(BaseSource):
                     # CSV parsing error (bad quoting, unmatched quotes, etc.)
                     # Quarantine this row instead of crashing the run
                     row_num += 1
-                    physical_line = reader.line_num + self._skip_rows
+                    physical_line = reader.line_num
                     raw_row = {
                         "__raw_line__": "(unparseable due to csv.Error)",
                         "__line_number__": physical_line,
@@ -211,9 +241,8 @@ class CSVSource(BaseSource):
                     continue
 
                 row_num += 1
-                # reader.line_num tracks physical line position (including multiline fields)
-                # Add skip_rows to get true file position (reader counts from 1 after skipped lines)
-                physical_line = reader.line_num + self._skip_rows
+                # reader.line_num tracks physical file line position (including multiline fields)
+                physical_line = reader.line_num
 
                 # Column count validation - quarantine malformed rows in both header and headerless modes
                 # Per Three-Tier Trust Model: source data is Tier 3 (zero trust), quarantine bad rows
@@ -257,9 +286,31 @@ class CSVSource(BaseSource):
                         self.set_schema_contract(self._contract_builder.contract)
                         first_valid_row_processed = True
 
+                    # Validate against locked contract to catch type drift on
+                    # inferred fields. Pydantic extra="allow" accepts any type
+                    # for extras — the contract enforces inferred types here.
+                    contract = self.get_schema_contract()
+                    if contract is not None and contract.locked:
+                        violations = contract.validate(validated_row)
+                        if violations:
+                            error_msg = "; ".join(str(v) for v in violations)
+                            ctx.record_validation_error(
+                                row=validated_row,
+                                error=error_msg,
+                                schema_mode=self._schema_config.mode,
+                                destination=self._on_validation_failure,
+                            )
+                            if self._on_validation_failure != "discard":
+                                yield SourceRow.quarantined(
+                                    row=validated_row,
+                                    error=error_msg,
+                                    destination=self._on_validation_failure,
+                                )
+                            continue
+
                     yield SourceRow.valid(
                         validated_row,
-                        contract=self.get_schema_contract(),
+                        contract=contract,
                     )
                 except ValidationError as e:
                     ctx.record_validation_error(

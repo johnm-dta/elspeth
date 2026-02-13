@@ -6,10 +6,10 @@ import queue
 import threading
 import time
 from datetime import UTC, datetime
-from typing import Any
 
 import pytest
 
+from elspeth.contracts.config.defaults import INTERNAL_DEFAULTS
 from elspeth.contracts.enums import (
     BackpressureMode,
     CallStatus,
@@ -358,16 +358,15 @@ class TestShutdownGuards:
 
 
 class TestDropBackpressure:
-    def test_drop_mode_drops_when_queue_full(self) -> None:
+    def test_drop_mode_drops_oldest_when_queue_full(self) -> None:
+        original_queue_size = INTERNAL_DEFAULTS["telemetry"]["queue_size"]
+        INTERNAL_DEFAULTS["telemetry"]["queue_size"] = 2
+
         config = MockTelemetryConfig(backpressure_mode=BackpressureMode.DROP)
         exporter = TelemetryTestExporter()
         manager = TelemetryManager(config, exporters=[exporter])
         try:
-            # Replace queue with a tiny one so we can fill it quickly
-            tiny_queue: queue.Queue[Any] = queue.Queue(maxsize=2)
-            manager._queue = tiny_queue
-
-            # Block the export thread so it can't drain
+            # Block the export thread so it can't drain immediately
             blocker = threading.Event()
             original_dispatch = manager._dispatch_to_exporters
 
@@ -377,36 +376,46 @@ class TestDropBackpressure:
 
             object.__setattr__(manager, "_dispatch_to_exporters", slow_dispatch)
 
-            # Send first event (picked up by thread, which then blocks)
-            manager.handle_event(_lifecycle_event())
+            # First event is picked up by thread and blocks in dispatch
+            e1 = RunStarted(timestamp=_NOW, run_id="run-1", config_hash="h", source_plugin="csv")
+            e2 = RunStarted(timestamp=_NOW, run_id="run-2", config_hash="h", source_plugin="csv")
+            e3 = RunStarted(timestamp=_NOW, run_id="run-3", config_hash="h", source_plugin="csv")
+            e4 = RunStarted(timestamp=_NOW, run_id="run-4", config_hash="h", source_plugin="csv")
+
+            manager.handle_event(e1)
             time.sleep(0.05)
 
-            # Fill the tiny queue (2 slots)
-            manager.handle_event(_lifecycle_event())
-            manager.handle_event(_lifecycle_event())
-
-            # This one should be dropped
+            # Fill queue to capacity, then overflow
+            manager.handle_event(e2)
+            manager.handle_event(e3)
             dropped_before = manager.health_metrics["events_dropped"]
-            manager.handle_event(_lifecycle_event())
+            manager.handle_event(e4)
             dropped_after = manager.health_metrics["events_dropped"]
-
             assert dropped_after > dropped_before
-        finally:
-            # Unblock thread, restore dispatch, then close
+
+            # Release exporter and verify oldest queued event (e2) was evicted
             blocker.set()
             object.__setattr__(manager, "_dispatch_to_exporters", original_dispatch)
+            _wait_for_processing(manager)
+
+            run_ids = [event.run_id for event in exporter.events]
+            assert run_ids == ["run-1", "run-3", "run-4"]
+        finally:
+            if "blocker" in locals() and not blocker.is_set():
+                blocker.set()
+            if "original_dispatch" in locals():
+                object.__setattr__(manager, "_dispatch_to_exporters", original_dispatch)
             manager.close()
+            INTERNAL_DEFAULTS["telemetry"]["queue_size"] = original_queue_size
 
     def test_drop_mode_increments_events_dropped(self) -> None:
+        original_queue_size = INTERNAL_DEFAULTS["telemetry"]["queue_size"]
+        INTERNAL_DEFAULTS["telemetry"]["queue_size"] = 2
+
         config = MockTelemetryConfig(backpressure_mode=BackpressureMode.DROP)
         exporter = TelemetryTestExporter()
         manager = TelemetryManager(config, exporters=[exporter])
         try:
-            # Replace queue with a tiny one
-            tiny_queue: queue.Queue[Any] = queue.Queue(maxsize=2)
-            manager._queue = tiny_queue
-
-            # Block the export thread
             blocker = threading.Event()
             original_dispatch = manager._dispatch_to_exporters
 
@@ -416,22 +425,181 @@ class TestDropBackpressure:
 
             object.__setattr__(manager, "_dispatch_to_exporters", slow_dispatch)
 
-            # First event occupies the thread (blocked in dispatch)
+            # First event occupies thread; queue fills with next two; fourth overflows
             manager.handle_event(_lifecycle_event())
             time.sleep(0.05)
-
-            # Fill the tiny queue
             manager.handle_event(_lifecycle_event())
             manager.handle_event(_lifecycle_event())
 
-            # Now the next event should be dropped
             initial_dropped = manager.health_metrics["events_dropped"]
             manager.handle_event(_lifecycle_event())
             assert manager.health_metrics["events_dropped"] > initial_dropped
         finally:
-            blocker.set()
-            object.__setattr__(manager, "_dispatch_to_exporters", original_dispatch)
+            if "blocker" in locals() and not blocker.is_set():
+                blocker.set()
+            if "original_dispatch" in locals():
+                object.__setattr__(manager, "_dispatch_to_exporters", original_dispatch)
             manager.close()
+            INTERNAL_DEFAULTS["telemetry"]["queue_size"] = original_queue_size
+
+    def test_drop_mode_replacement_keeps_join_blocked_until_replacement_queued(self) -> None:
+        """Eviction must not let queue.join() observe a transient zero.
+
+        Regression test for DROP-mode overflow replacement: if task_done() is
+        called before put_nowait(replacement), a concurrent flush() can return
+        before the replacement event is queued.
+        """
+
+        replacement_event = _row_event()
+
+        class BlockingReplacementQueue(queue.Queue):
+            def __init__(self) -> None:
+                super().__init__(maxsize=1)
+                self.replacement_put_entered = threading.Event()
+                self.allow_replacement_put = threading.Event()
+
+            def put_nowait(self, item):
+                if item is replacement_event:
+                    self.replacement_put_entered.set()
+                    assert self.allow_replacement_put.wait(timeout=2.0), "Timed out waiting to release replacement put"
+                return super().put_nowait(item)
+
+        class DummyManager:
+            _LOG_INTERVAL = 100
+
+            def __init__(self, q: BlockingReplacementQueue) -> None:
+                self._queue = q
+                self._dropped_lock = threading.Lock()
+                self._events_dropped = 0
+                self._last_logged_drop_count = 0
+
+            def _log_drops_if_needed(self) -> None:
+                if self._events_dropped - self._last_logged_drop_count >= self._LOG_INTERVAL:
+                    self._last_logged_drop_count = self._events_dropped
+
+        q = BlockingReplacementQueue()
+        dummy = DummyManager(q)
+        old_event = _lifecycle_event()
+        q.put_nowait(old_event)
+
+        flush_returned = threading.Event()
+
+        def flush_waiter() -> None:
+            q.join()
+            flush_returned.set()
+
+        flush_thread = threading.Thread(target=flush_waiter, name="flush-waiter")
+        flush_thread.start()
+
+        drop_thread = threading.Thread(
+            target=TelemetryManager._drop_oldest_and_enqueue_newest,
+            args=(dummy, replacement_event),
+            name="drop-replace",
+        )
+        drop_thread.start()
+
+        assert q.replacement_put_entered.wait(timeout=2.0), "Did not reach replacement put"
+
+        # Critical assertion: join() must still be blocked while replacement
+        # put is in progress. Old ordering (task_done then put) fails here.
+        assert not flush_returned.is_set()
+
+        q.allow_replacement_put.set()
+        drop_thread.join(timeout=2.0)
+        assert not drop_thread.is_alive()
+
+        # Replacement is now queued and unfinished. join() must still block until
+        # the replacement task is completed.
+        assert not flush_returned.is_set()
+
+        queued = q.get_nowait()
+        assert queued is replacement_event
+        q.task_done()
+
+        flush_thread.join(timeout=2.0)
+        assert flush_returned.is_set()
+
+    def test_drop_mode_requeues_shutdown_sentinel_under_contention(self) -> None:
+        """Shutdown sentinel must survive DROP-mode eviction races."""
+
+        incoming_event = _row_event()
+        interloper_event = _lifecycle_event()
+
+        class SentinelContentionQueue(queue.Queue):
+            def __init__(self) -> None:
+                super().__init__(maxsize=1)
+                self._sentinel_requeue_attempts = 0
+
+            def put_nowait(self, item):
+                if item is None:
+                    self._sentinel_requeue_attempts += 1
+                    if self._sentinel_requeue_attempts == 1:
+                        # Simulate another producer taking the slot between
+                        # sentinel eviction and reinsertion.
+                        super().put_nowait(interloper_event)
+                        raise queue.Full
+                return super().put_nowait(item)
+
+        class DummyManager:
+            _LOG_INTERVAL = 100
+
+            def __init__(self, q: SentinelContentionQueue) -> None:
+                self._queue = q
+                self._dropped_lock = threading.Lock()
+                self._events_dropped = 0
+                self._last_logged_drop_count = 0
+
+            def _log_drops_if_needed(self) -> None:
+                if self._events_dropped - self._last_logged_drop_count >= self._LOG_INTERVAL:
+                    self._last_logged_drop_count = self._events_dropped
+
+        q = SentinelContentionQueue()
+        dummy = DummyManager(q)
+        queue.Queue.put_nowait(q, None)
+
+        TelemetryManager._drop_oldest_and_enqueue_newest(dummy, incoming_event)
+
+        queued = q.get_nowait()
+        assert queued is None
+        q.task_done()
+        assert dummy._events_dropped == 2
+
+    def test_drop_mode_degrades_gracefully_when_sentinel_requeue_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Sentinel requeue failure degrades to dropped event, never raises."""
+
+        incoming_event = _row_event()
+
+        class DummyManager:
+            _LOG_INTERVAL = 100
+
+            def __init__(self, q: queue.Queue) -> None:
+                self._queue = q
+                self._dropped_lock = threading.Lock()
+                self._events_dropped = 0
+                self._last_logged_drop_count = 0
+
+            def _log_drops_if_needed(self) -> None:
+                if self._events_dropped - self._last_logged_drop_count >= self._LOG_INTERVAL:
+                    self._last_logged_drop_count = self._events_dropped
+
+        q: queue.Queue = queue.Queue(maxsize=1)
+        dummy = DummyManager(q)
+        q.put_nowait(None)
+
+        def _raise_requeue_failure(_manager: object) -> None:
+            raise RuntimeError("sentinel requeue failure")
+
+        monkeypatch.setattr(TelemetryManager, "_requeue_shutdown_sentinel_or_raise", _raise_requeue_failure)
+
+        # Must NOT raise — telemetry failures never propagate to callers
+        TelemetryManager._drop_oldest_and_enqueue_newest(dummy, incoming_event)
+
+        # Critical regression guard: queue task accounting must remain balanced.
+        assert q.unfinished_tasks == 0
+        q.join()
+
+        # Event counted as dropped (not silently swallowed)
+        assert dummy._events_dropped == 1
 
 
 # =============================================================================

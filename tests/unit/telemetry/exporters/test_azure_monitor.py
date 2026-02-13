@@ -288,6 +288,17 @@ class TestAzureMonitorExporterLifecycle:
         configured_exporter.flush()
         mock_azure_exporter["instance"].export.assert_called_once()
 
+    def test_flush_logs_ack_when_buffer_empty(self, configured_exporter, mock_azure_exporter) -> None:
+        """flush() logs acknowledgment when there are no buffered events."""
+        with patch("elspeth.telemetry.exporters.azure_monitor.logger.debug") as mock_debug:
+            configured_exporter.flush()
+
+        mock_azure_exporter["instance"].export.assert_not_called()
+        mock_debug.assert_called_once_with(
+            "Azure Monitor flush requested with empty buffer",
+            exporter="azure_monitor",
+        )
+
     def test_close_flushes_and_shuts_down(self, configured_exporter, mock_azure_exporter) -> None:
         """close() flushes buffer and shuts down SDK."""
         event = make_run_started()

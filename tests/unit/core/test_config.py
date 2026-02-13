@@ -1526,7 +1526,7 @@ class TestCoalesceSettings:
         )
 
         assert settings.name == "merge_results"
-        assert settings.branches == ["path_a", "path_b"]
+        assert settings.branches == {"path_a": "path_a", "path_b": "path_b"}
         assert settings.policy == "require_all"
         assert settings.merge == "union"
         assert settings.timeout_seconds is None
@@ -1727,6 +1727,143 @@ class TestCoalesceSettings:
                 policy="quorum",
                 merge="union",
                 quorum_count=-1,
+            )
+
+    # --- ARCH-15: dict-format branches (per-branch transforms) ---
+
+    def test_coalesce_branches_list_normalizes_to_dict(self) -> None:
+        """List format [a, b] normalizes to identity dict {a: a, b: b}."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="merge",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+        )
+
+        assert settings.branches == {"path_a": "path_a", "path_b": "path_b"}
+        assert isinstance(settings.branches, dict)
+
+    def test_coalesce_branches_dict_accepted(self) -> None:
+        """Dict format {a: x, b: y} passes validation directly."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="merge",
+            branches={"path_a": "sentiment_done", "path_b": "entities_done"},
+            policy="require_all",
+            merge="nested",
+        )
+
+        assert settings.branches == {"path_a": "sentiment_done", "path_b": "entities_done"}
+
+    def test_coalesce_branches_list_dict_equivalence(self) -> None:
+        """List and identity dict produce the same result.
+
+        branches: [a, b] and branches: {a: a, b: b} should be functionally
+        identical after normalization.
+        """
+        from elspeth.core.config import CoalesceSettings
+
+        from_list = CoalesceSettings(
+            name="merge",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+        )
+
+        from_dict = CoalesceSettings(
+            name="merge",
+            branches={"path_a": "path_a", "path_b": "path_b"},
+            policy="require_all",
+            merge="union",
+        )
+
+        assert from_list.branches == from_dict.branches
+
+    def test_coalesce_branches_list_rejects_duplicates(self) -> None:
+        """Duplicate branch names in list form must be rejected.
+
+        Without this check, dict comprehension {b: b for b in v} silently
+        discards duplicates, hiding a config error.
+        """
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError, match="Duplicate branch names"):
+            CoalesceSettings(
+                name="merge",
+                branches=["path_a", "path_b", "path_a"],
+                policy="require_all",
+                merge="union",
+            )
+
+    def test_coalesce_branches_list_no_duplicates_ok(self) -> None:
+        """Unique list branches should normalize correctly."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="merge",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+        )
+        assert settings.branches == {"path_a": "path_a", "path_b": "path_b"}
+
+    def test_coalesce_branches_dict_unaffected_by_dedup_check(self) -> None:
+        """Dict-form branches bypass the duplicate check (keys inherently unique)."""
+        from elspeth.core.config import CoalesceSettings
+
+        settings = CoalesceSettings(
+            name="merge",
+            branches={"path_a": "path_a", "path_b": "path_b"},
+            policy="require_all",
+            merge="union",
+        )
+        assert settings.branches == {"path_a": "path_a", "path_b": "path_b"}
+
+    def test_coalesce_branches_dict_validates_values(self) -> None:
+        """Invalid connection names in dict values should be rejected.
+
+        Values are input connection names and must pass
+        _validate_connection_or_sink_name validation.
+        """
+        from elspeth.core.config import CoalesceSettings
+
+        with pytest.raises(ValidationError, match="invalid characters"):
+            CoalesceSettings(
+                name="merge",
+                branches={"path_a": "valid_name", "path_b": "inv@lid!"},
+                policy="require_all",
+                merge="union",
+            )
+
+    def test_coalesce_select_branch_with_dict(self) -> None:
+        """select_branch must be validated against dict keys, not values.
+
+        With branches: {a: x, b: y}, select_branch must be "a" or "b"
+        (branch identities), not "x" or "y" (input connections).
+        """
+        from elspeth.core.config import CoalesceSettings
+
+        # Valid: select_branch is a key
+        settings = CoalesceSettings(
+            name="merge",
+            branches={"primary": "enriched_primary", "fallback": "enriched_fallback"},
+            policy="require_all",
+            merge="select",
+            select_branch="primary",
+        )
+        assert settings.select_branch == "primary"
+
+        # Invalid: select_branch is a value, not a key
+        with pytest.raises(ValidationError, match="must be one of"):
+            CoalesceSettings(
+                name="merge",
+                branches={"primary": "enriched_primary", "fallback": "enriched_fallback"},
+                policy="require_all",
+                merge="select",
+                select_branch="enriched_primary",
             )
 
 

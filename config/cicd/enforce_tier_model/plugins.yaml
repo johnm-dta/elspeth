@@ -59,27 +59,12 @@ allow_hits:
   reason: Cleanup/pop with default - key may not exist in race or optional scenarios
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
-- key: plugins/discovery.py:R2:_discover_in_file:fp=f42969a5d77096b3
-  owner: architecture
-  reason: getattr for optional attribute access
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
 - key: plugins/discovery.py:R2:get_plugin_description:fp=0806b3aad609f380
   owner: architecture
   reason: getattr for optional attribute access
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
-- key: plugins/utils.py:R5:get_nested_field:fp=65234e1b71a7a0fc
-  owner: architecture
-  reason: AST/type checking - required for safe parsing or discriminated unions
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: plugins/validation.py:R5:PluginConfigValidator:validate_source_config:fp=3bd8f6558f2b54b2
-  owner: architecture
-  reason: AST/type checking - required for safe parsing or discriminated unions
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: plugins/validation.py:R5:PluginConfigValidator:validate_transform_config:fp=b60f09b21ed871b6
+- key: plugins/utils.py:R5:get_nested_field:fp=b9f0121cf1ecd05f
   owner: architecture
   reason: AST/type checking - required for safe parsing or discriminated unions
   safety: Code reviewed - legitimate pattern
@@ -89,7 +74,7 @@ allow_hits:
   reason: Optional field access at trust boundary
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
-- key: plugins/sinks/json_sink.py:R5:JSONSink:validate_output_target:fp=8dc25260f8a13296
+- key: plugins/sinks/json_sink.py:R5:JSONSink:validate_output_target:fp=78857e43dc69519e
   owner: architecture
   reason: AST/type checking - required for safe parsing or discriminated unions
   safety: Code reviewed - legitimate pattern
@@ -99,27 +84,17 @@ allow_hits:
   reason: Tier 2 contract enforcement - isinstance validates copies_field type before arithmetic
   safety: Wrong types crash (upstream bug); wrong values quarantined via error result
   expires: '2026-05-02'
-- key: plugins/transforms/keyword_filter.py:R5:KeywordFilter:process:fp=9160e4e0b95ed5e8
+- key: plugins/transforms/keyword_filter.py:R5:KeywordFilter:process:fp=215bae67b700c3fd
   owner: architecture
   reason: AST/type checking - required for safe parsing or discriminated unions
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
-- key: plugins/transforms/keyword_filter.py:R5:KeywordFilter:_get_fields_to_scan:fp=af2344f0f0f5938f
+- key: plugins/transforms/keyword_filter.py:R5:KeywordFilter:_get_fields_to_scan:fp=f93822a8a17d752b
   owner: architecture
   reason: AST/type checking - required for safe parsing or discriminated unions
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
 - key: plugins/transforms/keyword_filter.py:R5:KeywordFilter:_get_fields_to_scan:fp=840bd57450114a00
-  owner: architecture
-  reason: AST/type checking - required for safe parsing or discriminated unions
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: plugins/transforms/truncate.py:R5:Truncate:process:fp=bc395c6a768847b9
-  owner: architecture
-  reason: AST/type checking - required for safe parsing or discriminated unions
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: plugins/transforms/truncate.py:R5:Truncate:process:fp=ae444b17b823e17a
   owner: architecture
   reason: AST/type checking - required for safe parsing or discriminated unions
   safety: Code reviewed - legitimate pattern
@@ -189,19 +164,14 @@ allow_hits:
   reason: Optional field access at trust boundary
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
-- key: plugins/clients/llm.py:R1:LLMResponse:total_tokens:fp=5bdbfe7db9e32163
+- key: plugins/clients/llm.py:R1:LLMResponse:total_tokens:fp=f97a4254a3ac6975
   owner: architecture
   reason: Optional field access at trust boundary
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
-- key: plugins/clients/llm.py:R1:LLMResponse:total_tokens:fp=695415b2ec4d8fee
+- key: plugins/clients/llm.py:R1:LLMResponse:total_tokens:fp=66b4ed77a37877c1
   owner: architecture
   reason: Optional field access at trust boundary
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
-- key: plugins/transforms/azure/content_safety.py:R9:AzureContentSafety:_process_row:fp=b18b4272385d82ff
-  owner: architecture
-  reason: Cleanup/pop with default — HTTP client cleanup may race with error paths
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
 - key: plugins/transforms/azure/content_safety.py:R5:AzureContentSafety:_process_single_with_state:fp=8404ee8567c3b226
@@ -209,7 +179,7 @@ allow_hits:
   reason: Tier 3 boundary — validates row field is str before sending to Azure API
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
-- key: plugins/transforms/azure/content_safety.py:R5:AzureContentSafety:_get_fields_to_scan:fp=9bb006a32eb07a28
+- key: plugins/transforms/azure/content_safety.py:R5:AzureContentSafety:_get_fields_to_scan:fp=4bc821183ed1cfbd
   owner: architecture
   reason: Tier 2 row filtering — isinstance selects str fields for content scanning
   safety: Code reviewed - legitimate pattern
@@ -229,17 +199,12 @@ allow_hits:
   reason: Tier 3 boundary — validates severity type from Azure API response is int
   safety: MalformedResponseError raised if type wrong, caught as non-retryable error
   expires: '2026-05-02'
-- key: plugins/transforms/azure/prompt_shield.py:R9:AzurePromptShield:_process_row:fp=5555041200ea3e5a
-  owner: architecture
-  reason: Cleanup/pop with default — HTTP client cleanup may race with error paths
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
 - key: plugins/transforms/azure/prompt_shield.py:R5:AzurePromptShield:_process_single_with_state:fp=69fe83d9ba6aa6e9
   owner: architecture
   reason: Tier 3 boundary — validates row field is str before sending to Azure API
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
-- key: plugins/transforms/azure/prompt_shield.py:R5:AzurePromptShield:_get_fields_to_scan:fp=6756f72f855a6bcf
+- key: plugins/transforms/azure/prompt_shield.py:R5:AzurePromptShield:_get_fields_to_scan:fp=26f6b1fa2d11c919
   owner: architecture
   reason: Tier 2 row filtering — isinstance selects str fields for scanning
   safety: Code reviewed - legitimate pattern
@@ -306,22 +271,22 @@ allow_hits:
   reason: Tier 3 boundary — validates document attackDetected is bool from Azure response
   safety: MalformedResponseError raised on wrong type
   expires: '2026-05-02'
-- key: plugins/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=cb8f391ad82b21df
+- key: plugins/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=bf79975bdf2ede4c
   owner: architecture
   reason: Telemetry emission failure - must not crash main LLM call flow
   safety: Logged and continues - telemetry is non-critical to LLM processing
   expires: '2026-05-02'
-- key: plugins/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=6b5b01f9759184f2
+- key: plugins/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=3979cd7bedc550ef
   owner: architecture
   reason: Telemetry emission failure - must not crash main LLM call flow
   safety: Logged and continues - telemetry is non-critical to LLM processing
   expires: '2026-05-02'
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:_open_file:fp=529df26a8624a42d
+- key: plugins/sinks/csv_sink.py:R1:CSVSink:_open_file:fp=5513c655d6bb1799
   owner: feature
   reason: Intentional fallback - reverse mapping may not contain all fields (transform-added)
   safety: Falls back to original field name - correct behavior for fields not in source
   expires: null
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:_get_field_names_and_display:fp=688e26cbcb3aa309
+- key: plugins/sinks/csv_sink.py:R1:CSVSink:_get_field_names_and_display:fp=4b1188b665744b55
   owner: feature
   reason: Intentional fallback - display mapping may not contain all fields (transform-added)
   safety: Falls back to normalized field name - correct behavior for fields not in source
@@ -331,12 +296,12 @@ allow_hits:
   reason: Display header mapping - fields not in map keep original name (transform-added fields)
   safety: Intentional fallback to original field name, not bug hiding
   expires: null
-- key: plugins/sinks/json_sink.py:R1:JSONSink:validate_output_target:fp=11a12d24c049f460
+- key: plugins/sinks/json_sink.py:R1:JSONSink:validate_output_target:fp=6734d84d40b2178e
   owner: feature
   reason: Display header mapping - fields not in map keep original name (transform-added fields)
   safety: Intentional fallback to original field name, not bug hiding
   expires: null
-- key: plugins/sinks/json_sink.py:R1:JSONSink:_apply_display_headers:fp=c5e1158dff11755a
+- key: plugins/sinks/json_sink.py:R1:JSONSink:_apply_display_headers:fp=e4e90c2776c1a966
   owner: feature
   reason: Display header mapping - fields not in map keep original name (transform-added fields)
   safety: Intentional fallback to original field name, not bug hiding
@@ -376,19 +341,13 @@ allow_hits:
   reason: Tier 3 boundary - response.text is external data, extract_content() can fail unpredictably
   safety: Returns TransformResult.error() for quarantine with reason, error_type, and URL
   expires: '2026-05-02'
-- key: plugins/validation.py:R5:PluginConfigValidator:validate_sink_config:fp=39024a41cd690457
-  owner: architecture
-  reason: AST/type checking - required for safe parsing or discriminated unions
-- key: plugins/validation.py:R1:PluginConfigValidator:_extract_errors:fp=76f7694624d8cfcc
-  owner: architecture
-  reason: Optional field access at trust boundary
 # Refactored: post()/get() shared logic now in _execute_request/_parse_response_body/_record_and_emit
 - key: plugins/clients/http.py:R1:AuditedHTTPClient:_parse_response_body:fp=1b8441ef483bc723
   owner: architecture
   reason: HTTP response content-type header - external system boundary, header may be missing
   safety: Falls back to binary encoding if content-type absent
   expires: '2026-05-02'
-- key: plugins/clients/http.py:R4:AuditedHTTPClient:_record_and_emit:fp=434361e998470580
+- key: plugins/clients/http.py:R4:AuditedHTTPClient:_record_and_emit:fp=e6561b1525ab61cf
   owner: architecture
   reason: Telemetry emission failure - must not crash main request flow
   safety: Logged and continues - telemetry is non-critical to HTTP processing
@@ -428,3 +387,8 @@ allow_hits:
   reason: httpx Client.get() method call - ephemeral client per redirect hop for TLS isolation
   safety: This is the actual external HTTP call, not a defensive dict access
   expires: '2026-05-02'
+- key: plugins/sources/csv_source.py:R7:CSVSource:load:fp=f69de22403a3594b
+  owner: architecture
+  reason: Tier 3 boundary — skip_rows targets non-CSV metadata preamble that may violate RFC 4180
+  safety: User explicitly configured these rows to be discarded; csv.Error during skip is irrelevant
+  expires: null

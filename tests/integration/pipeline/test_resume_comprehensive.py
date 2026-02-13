@@ -310,8 +310,8 @@ class TestResumeComprehensive:
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
         resume_graph.add_edge("xform", "sink", label="continue")
-        resume_graph._sink_id_map = {SinkName("default"): NodeID("sink")}
-        resume_graph._transform_id_map = {0: NodeID("xform")}
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
 
         result = orchestrator.resume(
             resume_point=resume_point,
@@ -417,8 +417,8 @@ class TestResumeComprehensive:
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
         resume_graph.add_edge("xform", "sink", label="continue")
-        resume_graph._sink_id_map = {SinkName("default"): NodeID("sink")}
-        resume_graph._transform_id_map = {0: NodeID("xform")}
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
 
         result = orchestrator.resume(
             resume_point=resume_point,
@@ -621,8 +621,8 @@ class TestResumeComprehensive:
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=resume_schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
         resume_graph.add_edge("xform", "sink", label="continue")
-        resume_graph._sink_id_map = {SinkName("default"): NodeID("sink")}
-        resume_graph._transform_id_map = {0: NodeID("xform")}
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
 
         # Write partial output (row 0 already written before crash)
         with open(output_path, "w") as f:
@@ -825,8 +825,8 @@ class TestResumeComprehensive:
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=resume_schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
         resume_graph.add_edge("xform", "sink", label="continue")
-        resume_graph._sink_id_map = {SinkName("default"): NodeID("sink")}
-        resume_graph._transform_id_map = {0: NodeID("xform")}
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
 
         # Write partial output (row 0 already written before crash)
         with open(output_path, "w") as f:
@@ -1026,8 +1026,8 @@ class TestResumeComprehensive:
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
         resume_graph.add_edge("xform", "sink", label="continue")
-        resume_graph._sink_id_map = {SinkName("default"): NodeID("sink")}
-        resume_graph._transform_id_map = {0: NodeID("xform")}
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
 
         # Write partial output (row 0 already written before crash)
         with open(output_path, "w") as f:
@@ -1226,8 +1226,8 @@ class TestResumeComprehensive:
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
         resume_graph.add_edge("xform", "sink", label="continue")
-        resume_graph._sink_id_map = {SinkName("default"): NodeID("sink")}
-        resume_graph._transform_id_map = {0: NodeID("xform")}
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
 
         # Write partial output (row 0 already written before crash)
         with open(output_path, "w") as f:
@@ -1402,8 +1402,8 @@ class TestResumeComprehensive:
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="json", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
         resume_graph.add_edge("xform", "sink", label="continue")
-        resume_graph._sink_id_map = {SinkName("default"): NodeID("sink")}
-        resume_graph._transform_id_map = {0: NodeID("xform")}
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
 
         # CRITICAL: Must crash with clear error, not silently degrade to str
         with pytest.raises(ValueError, match=r"unsupported type 'geo-point'"):

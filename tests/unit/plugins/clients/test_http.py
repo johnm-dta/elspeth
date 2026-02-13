@@ -210,6 +210,38 @@ def test_post_telemetry_failure_doesnt_corrupt_audit(http_client, mock_recorder,
 
 
 @respx.mock
+def test_post_telemetry_emits_token_id_when_configured(mock_recorder, mock_telemetry_emit):
+    """Telemetry event should include token_id when client has token context."""
+    client = AuditedHTTPClient(
+        recorder=mock_recorder,
+        state_id="test-state-001",
+        run_id="test-run-001",
+        telemetry_emit=mock_telemetry_emit,
+        token_id="tok-123",
+    )
+
+    respx.post("https://api.example.com/token").mock(return_value=httpx.Response(200, json={"ok": True}))
+    response = client.post("https://api.example.com/token", json={"x": 1})
+
+    assert response.status_code == 200
+    assert mock_telemetry_emit.call_count == 1
+    event = mock_telemetry_emit.call_args[0][0]
+    assert event.token_id == "tok-123"
+
+
+@respx.mock
+def test_post_telemetry_token_id_none_when_unset(http_client, mock_telemetry_emit):
+    """Telemetry event should allow token_id=None when token is not provided."""
+    respx.post("https://api.example.com/no-token").mock(return_value=httpx.Response(200, json={"ok": True}))
+    response = http_client.post("https://api.example.com/no-token", json={"x": 1})
+
+    assert response.status_code == 200
+    assert mock_telemetry_emit.call_count == 1
+    event = mock_telemetry_emit.call_args[0][0]
+    assert event.token_id is None
+
+
+@respx.mock
 def test_post_with_error_response(http_client, mock_recorder):
     """POST with 4xx/5xx should record as ERROR status."""
     respx.post("https://api.example.com/fail").mock(return_value=httpx.Response(500, text="Internal Server Error"))

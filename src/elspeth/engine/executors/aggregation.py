@@ -344,12 +344,11 @@ class AggregationExecutor:
         ctx.node_id = node_id
         # Note: call_index allocation handled by LandscapeRecorder.allocate_call_index()
 
-        # Step 3: Execute with timing and span
-        # P2-2026-01-21: Use aggregation_span (not transform_span) for flush operations
-        # This ensures spans are distinguishable from regular transforms and carry batch_id
-        # P2-2026-01-21: Pass node_id for disambiguation when multiple aggregations exist
-        # P3-2026-02-01: Pass input_hash for trace-to-audit correlation
+        # Expose per-row token identity for batch transforms. This allows transforms
+        # like OpenRouterBatchLLMTransform to pass the correct token_id to audited
+        # clients, ensuring per-token telemetry correlation in multi-token batches.
         batch_token_ids = [t.token_id for t in buffered_tokens]
+        ctx.batch_token_ids = batch_token_ids
         with self._spans.aggregation_span(
             transform.name,
             node_id=node_id,
@@ -384,6 +383,10 @@ class AggregationExecutor:
                     state_id=state.state_id,
                 )
 
+                # Clear batch_token_ids before re-raise to prevent stale IDs
+                # leaking to subsequent calls (PluginContext is reused).
+                ctx.batch_token_ids = None
+
                 # Re-raise for orchestrator to schedule retry.
                 # The batch remains in "executing" status, checkpoint is preserved.
                 raise
@@ -412,6 +415,10 @@ class AggregationExecutor:
 
                 # Reset for next batch
                 self._reset_batch_state(node_id)
+
+                # Clear batch_token_ids before re-raise to prevent stale IDs
+                # leaking to subsequent calls (PluginContext is reused).
+                ctx.batch_token_ids = None
                 raise
 
         # Step 4: Populate audit fields on result
@@ -500,6 +507,9 @@ class AggregationExecutor:
         # Direct access since buffer_row validates node_id is in aggregation_settings,
         # which guarantees a trigger evaluator exists
         self._trigger_evaluators[node_id].reset()
+
+        # Clear batch_token_ids to prevent stale data leaking to next batch
+        ctx.batch_token_ids = None
 
         return result, buffered_tokens, flushed_batch_id
 
@@ -651,8 +661,7 @@ class AggregationExecutor:
                 f"Buffer contains {total_rows} total rows across {len(state)} nodes. "
                 f"Solutions: (1) Reduce aggregation count trigger to <5000 rows, "
                 f"(2) Reduce row_data payload size, or (3) Implement checkpoint retention "
-                f"policy (see P3-2026-01-21). See capacity planning in "
-                f"docs/plans/2026-01-24-fix-aggregation-checkpoint-restore.md"
+                f"policy"
             )
 
         return state

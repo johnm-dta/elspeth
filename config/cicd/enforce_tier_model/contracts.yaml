@@ -106,17 +106,22 @@ allow_hits:
   reason: Config parsing - config value from YAML is Tier 3 external data; isinstance() distinguishes string from dict
   safety: ValueError raised for invalid config - explicit validation failure
   expires: null
-- key: contracts/contract_propagation.py:R6:propagate_contract:fp=fbcdf96127213894
+- key: contracts/contract_propagation.py:R6:propagate_contract:fp=99175b7151ceac32
   owner: architecture
-  reason: Type narrowing failure is silently skipped - non-primitive types aren't included in contract
-  safety: Field continues in data without contract tracking - intentional behavior
+  reason: TypeError infers python_type=object for complex fields (dict/list); ValueError skips NaN/Infinity
+  safety: Complex fields preserved in contract as object type; non-finite values excluded with debug log
   expires: null
-- key: contracts/contract_propagation.py:R6:narrow_contract_to_output:fp=b2e116f9ad91bb8f
+- key: contracts/contract_propagation.py:R6:narrow_contract_to_output:fp=5b154d1481f39116
   owner: architecture
-  reason: Type resolution errors are logged and field is excluded from narrowed contract
-  safety: Contract narrowing continues without failed field - explicit logging
+  reason: TypeError infers python_type=object for complex fields (dict/list) during narrowing
+  safety: Complex fields preserved in narrowed contract; no data loss
   expires: null
-- key: contracts/contract_propagation.py:R1:merge_contract_with_output:fp=b77bb8f4e1cd3d1d
+- key: contracts/contract_propagation.py:R6:narrow_contract_to_output:fp=c44a2a3ac4d47e65
+  owner: architecture
+  reason: ValueError skips NaN/Infinity values during contract narrowing
+  safety: Non-finite values excluded with debug log; consistent with canonical JSON rejection
+  expires: null
+- key: contracts/contract_propagation.py:R1:merge_contract_with_output:fp=368e4bbac0c4fcec
   owner: architecture
   reason: Optional lookup for original name - new fields from transforms may not have input mapping
   safety: Fallback to output field's original_name is correct behavior for transform-added fields
@@ -126,26 +131,22 @@ allow_hits:
   reason: AST/type checking - required for safe parsing or discriminated unions
   safety: Code reviewed - legitimate pattern
   expires: '2026-05-02'
-- key: contracts/schema_contract.py:R1:SchemaContract:get_field:fp=7df7fefcb2213125
-  owner: architecture
-  reason: 'Optional lookup API: get_field() intentionally returns None for missing fields - callers use resolve_name() for
-    strict lookup'
-- key: contracts/plugin_context.py:R5:PluginContext:get:fp=76de86ac35dafae4
+- key: contracts/plugin_context.py:R5:PluginContext:get:fp=1ba9331f7213c9c0
   owner: architecture
   reason: AST/type checking - required for safe parsing or discriminated unions
-- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=5ec999dfff114a20
+- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=03ac36437fc77924
   owner: architecture
   reason: Optional field access at trust boundary
-- key: contracts/plugin_context.py:R5:PluginContext:record_call:fp=94971df001b1532e
+- key: contracts/plugin_context.py:R5:PluginContext:record_call:fp=cf15783cae827033
   owner: architecture
   reason: AST/type checking - required for safe parsing or discriminated unions
-- key: contracts/plugin_context.py:R4:PluginContext:record_call:fp=4e105a1207a19d87
+- key: contracts/plugin_context.py:R4:PluginContext:record_call:fp=eff3c261c6ecf430
   owner: architecture
   reason: Broad exception handling at external boundary with logging
-- key: contracts/plugin_context.py:R5:PluginContext:record_validation_error:fp=27fe368832b3e2a9
+- key: contracts/plugin_context.py:R5:PluginContext:record_validation_error:fp=8a007856aa7c655f
   owner: architecture
   reason: AST/type checking - required for safe parsing or discriminated unions
-- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=d20c868c67b376ce
+- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=004c532fa0483dba
   owner: architecture
   reason: Silent recovery with explicit error handling path
 - key: contracts/routing.py:R5:RoutingAction:__post_init__:fp=4d9b80b717bc7551

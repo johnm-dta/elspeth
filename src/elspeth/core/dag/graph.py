@@ -32,6 +32,7 @@ from elspeth.contracts.types import (
 )
 from elspeth.core.dag.models import (
     GraphValidationError,
+    GraphValidationWarning,
     NodeConfig,
     NodeInfo,
     _suggest_similar,
@@ -67,7 +68,7 @@ class ExecutionGraph:
         self._branch_to_coalesce: dict[BranchName, CoalesceName] = {}  # branch_name -> coalesce_name
         self._route_label_map: dict[tuple[NodeID, str], str] = {}  # (gate_node, sink_name) -> route_label
         self._route_resolution_map: dict[tuple[NodeID, str], RouteDestination] = {}
-        self._coalesce_gate_index: dict[CoalesceName, int] = {}  # coalesce_name -> gate pipeline index
+        self._branch_gate_map: dict[BranchName, NodeID] = {}  # branch_name -> producing gate node ID
         self._pipeline_nodes: list[NodeID] | None = None  # Ordered processing nodes (no source/sinks); None = not yet populated
         self._node_step_map: dict[NodeID, int] = {}  # node_id -> audit step (source=0)
 
@@ -522,6 +523,62 @@ class ExecutionGraph:
             coalesce_settings=coalesce_settings,
         )
 
+    # ===== PUBLIC SETTERS (construction-time) =====
+
+    def set_sink_id_map(self, mapping: dict[SinkName, NodeID]) -> None:
+        """Set the sink_name -> node_id mapping."""
+        self._sink_id_map = dict(mapping)
+
+    def set_transform_id_map(self, mapping: dict[int, NodeID]) -> None:
+        """Set the transform sequence -> node_id mapping."""
+        self._transform_id_map = dict(mapping)
+
+    def set_config_gate_id_map(self, mapping: dict[GateName, NodeID]) -> None:
+        """Set the gate_name -> node_id mapping."""
+        self._config_gate_id_map = dict(mapping)
+
+    def set_route_resolution_map(self, mapping: dict[tuple[NodeID, str], RouteDestination]) -> None:
+        """Set the (gate_node_id, route_label) -> destination mapping."""
+        self._route_resolution_map = dict(mapping)
+
+    def set_aggregation_id_map(self, mapping: dict[AggregationName, NodeID]) -> None:
+        """Set the agg_name -> node_id mapping."""
+        self._aggregation_id_map = dict(mapping)
+
+    def set_coalesce_id_map(self, mapping: dict[CoalesceName, NodeID]) -> None:
+        """Set the coalesce_name -> node_id mapping."""
+        self._coalesce_id_map = dict(mapping)
+
+    def set_branch_to_coalesce(self, mapping: dict[BranchName, CoalesceName]) -> None:
+        """Set the branch_name -> coalesce_name mapping."""
+        self._branch_to_coalesce = dict(mapping)
+
+    def set_route_label_map(self, mapping: dict[tuple[NodeID, str], str]) -> None:
+        """Set the (gate_node, sink_name) -> route_label mapping."""
+        self._route_label_map = dict(mapping)
+
+    def set_branch_gate_map(self, mapping: dict[BranchName, NodeID]) -> None:
+        """Set the branch_name -> producing gate node ID mapping."""
+        self._branch_gate_map = dict(mapping)
+
+    def set_pipeline_nodes(self, nodes: list[NodeID]) -> None:
+        """Set the ordered processing node sequence."""
+        self._pipeline_nodes = list(nodes)
+
+    def set_node_step_map(self, mapping: dict[NodeID, int]) -> None:
+        """Set the node_id -> audit step mapping."""
+        self._node_step_map = dict(mapping)
+
+    def add_route_resolution_entry(self, gate_id: NodeID, label: str, dest: RouteDestination) -> None:
+        """Add a single entry to the route resolution map."""
+        self._route_resolution_map[(gate_id, label)] = dest
+
+    def add_route_label_entry(self, gate_id: NodeID, sink_name: str, label: str) -> None:
+        """Add a single entry to the route label map."""
+        self._route_label_map[(gate_id, sink_name)] = label
+
+    # ===== PUBLIC GETTERS =====
+
     def get_sink_id_map(self) -> dict[SinkName, NodeID]:
         """Get explicit sink_name -> node_id mapping.
 
@@ -572,6 +629,126 @@ class ExecutionGraph:
         """
         return dict(self._branch_to_coalesce)
 
+    def get_branch_first_nodes(self) -> dict[str, NodeID]:
+        """Get mapping of branch names to their first processing node.
+
+        For every branch that routes to a coalesce node, returns the first
+        node the token should visit:
+        - Identity branches (COPY edge gate→coalesce): maps to coalesce node ID
+        - Transform branches (MOVE edge chain→coalesce): maps to the first
+          transform's node ID in the branch chain
+
+        The mapping covers ALL coalesce branches, eliminating the need for
+        defensive .get() at runtime.
+
+        Returns:
+            Dict mapping branch name (str) to the first processing NodeID.
+            Empty dict if no coalesce branches exist.
+        """
+        result: dict[str, NodeID] = {}
+
+        for branch_name, coalesce_name in self._branch_to_coalesce.items():
+            coalesce_nid = self._coalesce_id_map[coalesce_name]
+
+            # Check if this is an identity branch (direct COPY edge from gate to coalesce).
+            # Identity branches have a COPY edge labelled with the branch name pointing
+            # at the coalesce node — the token goes straight to coalesce.
+            is_identity = False
+            for _from_id, _to_id, _key, data in self._graph.in_edges(coalesce_nid, keys=True, data=True):
+                if data["mode"] == RoutingMode.COPY and data["label"] == branch_name:
+                    is_identity = True
+                    break
+
+            if is_identity:
+                result[branch_name] = coalesce_nid
+            else:
+                # Transform branch: trace backwards from coalesce through MOVE edges
+                # to find the first node in this branch's transform chain.
+                # The chain is: gate -[branch_name MOVE]-> T1 -[... MOVE]-> Tn -[... MOVE]-> coalesce
+                # We need T1 (the first transform after the gate).
+                first_node, _last_node = self._trace_branch_endpoints(coalesce_nid, branch_name)
+                result[branch_name] = first_node
+
+        return result
+
+    def _trace_branch_endpoints(self, coalesce_nid: NodeID, branch_name: str) -> tuple[NodeID, NodeID]:
+        """Trace backwards from coalesce to find the first AND last transforms in a branch chain.
+
+        Walks backwards through MOVE edges from the coalesce node to find both
+        endpoints of the transform chain for a given branch. The chain terminates
+        at the fork gate node (which produces the branch via a MOVE edge labelled
+        with the branch name).
+
+        The backward walk follows ANY MOVE edge, not just ``"continue"`` edges,
+        because branch chains may include intermediate routing gates whose
+        outgoing edges carry route-specific labels (e.g., ``"approved"``).
+
+        Branch entry identification requires matching BOTH the edge label AND the
+        edge origin (the fork gate), because intermediate gates within the branch
+        may produce MOVE edges whose labels collide with the branch name.
+
+        Args:
+            coalesce_nid: The coalesce node to trace back from
+            branch_name: The branch name to trace
+
+        Returns:
+            ``(first_node, last_node)`` — first_node is the first transform
+            after the gate (receives the branch_name MOVE edge); last_node is
+            the immediate MOVE predecessor of the coalesce.
+
+        Raises:
+            GraphValidationError: If the branch chain cannot be traced
+        """
+        # Resolve the fork gate that originates this specific branch.
+        fork_gate_nid = self._branch_gate_map[BranchName(branch_name)]
+
+        visited: set[NodeID] = set()
+        candidates: list[NodeID] = []
+
+        # Collect MOVE-edge predecessors of coalesce (these are the last transforms in branch chains)
+        for from_id, _to_id, _key, data in self._graph.in_edges(coalesce_nid, keys=True, data=True):
+            if data["mode"] == RoutingMode.MOVE:
+                candidates.append(NodeID(from_id))
+
+        # For each candidate, walk backwards through MOVE edges
+        # until we find the node whose incoming edge has label == branch_name
+        # AND originates from the fork gate (not an intermediate gate).
+        for candidate in candidates:
+            current = candidate
+            visited.clear()
+
+            while current not in visited:
+                visited.add(current)
+                # Look for incoming MOVE edge with label == branch_name FROM the fork gate
+                found_branch_entry = False
+                for from_id, _to_id, _key, data in self._graph.in_edges(current, keys=True, data=True):
+                    if data["mode"] == RoutingMode.MOVE and data["label"] == branch_name and NodeID(from_id) == fork_gate_nid:
+                        found_branch_entry = True
+                        break
+
+                if found_branch_entry:
+                    # current = first node; candidate = last node before coalesce
+                    return current, candidate
+
+                # Walk backwards through any MOVE edge to find predecessor.
+                # Not restricted to "continue" because intermediate routing gates
+                # produce edges with route-specific labels (e.g., "approved").
+                predecessor: NodeID | None = None
+                for from_id, _to_id, _key, data in self._graph.in_edges(current, keys=True, data=True):
+                    if data["mode"] == RoutingMode.MOVE:
+                        predecessor = NodeID(from_id)
+                        break
+
+                if predecessor is None:
+                    break  # No MOVE predecessor — try next candidate
+                current = predecessor
+
+        raise GraphValidationError(
+            f"Cannot trace first transform for branch '{branch_name}' leading to "
+            f"coalesce node '{coalesce_nid}'. This indicates a graph construction bug — "
+            f"transform branches must have MOVE edge chains from gate to coalesce."
+        )
+
     def get_branch_to_sink_map(self) -> dict[BranchName, SinkName]:
         """Get fork branches that route directly to sinks (not to coalesce).
 
@@ -590,17 +767,17 @@ class ExecutionGraph:
                 result[BranchName(data["label"])] = sink_node_to_name[NodeID(to_id)]
         return result
 
-    def get_coalesce_gate_index(self) -> dict[CoalesceName, int]:
-        """Get coalesce_name -> producing gate pipeline index mapping.
+    def get_branch_gate_map(self) -> dict[BranchName, NodeID]:
+        """Get branch_name -> producing gate node ID mapping.
 
-        Returns the pipeline index of the gate that produces each coalesce's
-        branches.
+        Returns the node ID of the gate that produces each coalesce branch.
+        Each branch has exactly one producing gate (validated at build time).
 
         Returns:
-            Dict mapping coalesce name to the pipeline index of its producing
-            fork gate. Empty dict if no coalesce configured.
+            Dict mapping branch name to the node ID of its producing fork gate.
+            Empty dict if no coalesce configured.
         """
-        return dict(self._coalesce_gate_index)  # Return copy to prevent mutation
+        return dict(self._branch_gate_map)  # Return copy to prevent mutation
 
     def get_terminal_sink_map(self) -> dict[NodeID, SinkName]:
         """Get mapping of terminal node IDs to their on_success sink names.
@@ -673,6 +850,112 @@ class ExecutionGraph:
         for coalesce_id in coalesce_nodes:
             self._validate_coalesce_compatibility(coalesce_id)
 
+    def warn_divert_coalesce_interactions(
+        self,
+        coalesce_configs: dict[NodeID, CoalesceSettings],
+    ) -> list[GraphValidationWarning]:
+        """Detect transforms with DIVERT edges that feed require_all coalesces.
+
+        When a branch transform has ``on_error`` routing (DIVERT edge), rows that
+        hit the error path are diverted to an error sink and never reach the
+        coalesce. If the coalesce uses ``require_all`` policy, it will wait
+        indefinitely for the missing branch, holding the other branches' tokens
+        in memory until end-of-source flush.
+
+        This is a build-time warning, not an error — the configuration is valid
+        but likely to cause operational surprises.
+
+        Algorithm:
+          1. Pre-compute set of transform node IDs that have outgoing DIVERT edges.
+          2. For each ``require_all`` coalesce, walk backwards from each incoming
+             MOVE edge (transform branch) to check if any transform in the chain
+             has a DIVERT edge.
+
+        Args:
+            coalesce_configs: Mapping of coalesce node IDs to their settings.
+
+        Returns:
+            List of warnings (also logged via structlog).
+        """
+        import structlog
+
+        log = structlog.get_logger()
+
+        # Step 1: pre-compute transforms with DIVERT edges (exit early if none)
+        divert_transforms: set[NodeID] = set()
+        for edge in self.get_edges():
+            if edge.mode == RoutingMode.DIVERT:
+                from_info = self.get_node_info(edge.from_node)
+                if from_info.node_type == NodeType.TRANSFORM:
+                    divert_transforms.add(edge.from_node)
+
+        if not divert_transforms:
+            return []
+
+        warnings: list[GraphValidationWarning] = []
+
+        # Step 2: check each require_all coalesce
+        for coalesce_nid, coal_config in coalesce_configs.items():
+            if coal_config.policy != "require_all":
+                continue
+
+            for from_id, _to_id, _key, data in self._graph.in_edges(coalesce_nid, keys=True, data=True):
+                edge_mode = data["mode"]
+
+                # Identity branches (COPY from gate) have no transforms — skip
+                if edge_mode == RoutingMode.COPY:
+                    continue
+
+                # Transform branch (MOVE edge from last transform in chain).
+                # Walk backwards through predecessor transforms.
+                if edge_mode != RoutingMode.MOVE:
+                    continue
+
+                current = NodeID(from_id)
+                visited: set[NodeID] = set()
+
+                while current not in visited:
+                    visited.add(current)
+                    current_info = self.get_node_info(current)
+                    if current_info.node_type != NodeType.TRANSFORM:
+                        break  # Hit gate/source — stop walking
+
+                    if current in divert_transforms:
+                        warning = GraphValidationWarning(
+                            code="DIVERT_COALESCE_REQUIRE_ALL",
+                            message=(
+                                f"Transform '{current}' has on_error routing (DIVERT edge) "
+                                f"and feeds require_all coalesce '{coalesce_nid}'. "
+                                f"Rows diverted on error will never reach the coalesce, "
+                                f"causing other branches to wait until end-of-source flush."
+                            ),
+                            node_ids=(str(current), str(coalesce_nid)),
+                        )
+                        warnings.append(warning)
+                        log.warning(
+                            "divert_coalesce_interaction",
+                            code=warning.code,
+                            transform=str(current),
+                            coalesce=str(coalesce_nid),
+                            message=warning.message,
+                        )
+                        break  # One warning per branch is enough
+
+                    # Walk backwards: find incoming MOVE edge (stay on main chain)
+                    predecessor: NodeID | None = None
+                    for pred_from, _pred_to, _pred_key, pred_data in self._graph.in_edges(current, keys=True, data=True):
+                        if pred_data["mode"] == RoutingMode.DIVERT:
+                            continue  # Skip DIVERT edges — stay on main chain
+                        if pred_data["mode"] == RoutingMode.MOVE:
+                            predecessor = NodeID(pred_from)
+                            break
+
+                    if predecessor is None:
+                        break
+                    current = predecessor
+
+        return warnings
+
     def _validate_single_edge(self, from_node_id: str, to_node_id: str) -> None:
         """Validate schema compatibility for a single edge.
 
@@ -713,11 +996,11 @@ class ExecutionGraph:
 
         # ===== PHASE 1: CONTRACT VALIDATION (field name requirements) =====
         # This catches missing fields even for dynamic schemas
-        consumer_required = self._get_required_fields(to_node_id)
+        consumer_required = self.get_required_fields(to_node_id)
 
         if consumer_required:
             # Get effective guaranteed fields (walks through pass-through nodes)
-            producer_guaranteed = self._get_effective_guaranteed_fields(from_node_id)
+            producer_guaranteed = self.get_effective_guaranteed_fields(from_node_id)
 
             missing = consumer_required - producer_guaranteed
             if missing:
@@ -737,7 +1020,7 @@ class ExecutionGraph:
 
         # ===== PHASE 2: TYPE VALIDATION (schema compatibility) =====
         # Get EFFECTIVE producer schema (walks through gates if needed)
-        producer_schema = self._get_effective_producer_schema(from_node_id)
+        producer_schema = self.get_effective_producer_schema(from_node_id)
         consumer_schema = to_info.input_schema
 
         # Rule 1: Dynamic schemas (None) bypass type validation
@@ -762,7 +1045,7 @@ class ExecutionGraph:
                 f"consumer schema '{consumer_schema.__name__}': {result.error_message}"
             )
 
-    def _get_effective_producer_schema(self, node_id: str) -> type[PluginSchema] | None:
+    def get_effective_producer_schema(self, node_id: str) -> type[PluginSchema] | None:
         """Get effective output schema, walking through pass-through nodes (gates, coalesce).
 
         Gates and coalesce nodes don't transform data - they inherit schema from their
@@ -784,9 +1067,33 @@ class ExecutionGraph:
         if node_info.output_schema is not None:
             return node_info.output_schema
 
-        # Node has no schema - check if it's a pass-through type (gate or coalesce)
-        if node_info.node_type in (NodeType.GATE, NodeType.COALESCE):
-            # Pass-through nodes inherit schema from upstream producers
+        # Coalesce nodes are NOT pass-throughs — they transform data via merge
+        # strategy (nested wraps in {branch: data}, union merges fields, select
+        # picks a branch).  Strategy-aware handling:
+        #   - select: passes through one branch unchanged → trace that branch's schema
+        #   - union/nested: output shape differs from any input → return None (dynamic)
+        if node_info.node_type == NodeType.COALESCE:
+            merge_strategy = node_info.config["merge"]
+            if merge_strategy == "select":
+                # Select merge passes through the selected branch's data unchanged.
+                # Trace back to that branch's producer schema for type validation.
+                select_branch = node_info.config.get("select_branch")
+                if select_branch is not None:
+                    # Identity branch: COPY edge from gate to coalesce with label == select_branch
+                    for from_id, _, edge_data in self._graph.in_edges(node_id, data=True):
+                        if edge_data.get("mode") == RoutingMode.COPY and edge_data.get("label") == select_branch:
+                            return self.get_effective_producer_schema(from_id)
+                    # Transform branch: last transform's edge has label "continue", not
+                    # the branch name. Trace backward to find the last transform node.
+                    try:
+                        _first, last = self._trace_branch_endpoints(NodeID(node_id), select_branch)
+                        return self.get_effective_producer_schema(last)
+                    except GraphValidationError:
+                        pass  # Fall through to None if trace fails
+            return None
+
+        # Gates are true pass-throughs — inherit schema from upstream producers
+        if node_info.node_type == NodeType.GATE:
             incoming = list(self._graph.in_edges(node_id, data=True))
 
             if not incoming:
@@ -799,7 +1106,7 @@ class ExecutionGraph:
             # Gather all input schemas for validation
             all_schemas: list[tuple[str, type[PluginSchema] | None]] = []
             for from_id, _, _ in incoming:
-                schema = self._get_effective_producer_schema(from_id)
+                schema = self.get_effective_producer_schema(from_id)
                 all_schemas.append((from_id, schema))
 
             # For multi-input nodes, check for mixed observed/explicit schemas first
@@ -916,6 +1223,10 @@ class ExecutionGraph:
     def _validate_coalesce_compatibility(self, coalesce_id: str) -> None:
         """Validate all inputs to coalesce node have compatible schemas.
 
+        Strategy-aware: only ``union`` requires cross-branch schema compatibility.
+        ``nested`` and ``select`` strategies have no cross-branch constraint because
+        branches are keyed separately (nested) or only one branch is used (select).
+
         Args:
             coalesce_id: Coalesce node ID
 
@@ -927,27 +1238,54 @@ class ExecutionGraph:
         if len(incoming) < 2:
             return  # Degenerate case (1 branch) - always compatible
 
-        # Get effective schema from first branch
-        first_edge_source = incoming[0][0]
-        first_schema = self._get_effective_producer_schema(first_edge_source)
+        # Determine merge strategy from node config.
+        # Config is populated by the builder — direct access is correct (Tier 1).
+        node_info = self.get_node_info(coalesce_id)
+        merge_strategy = node_info.config["merge"]
 
-        # Verify all other branches have structurally compatible schemas
-        # Note: Uses structural comparison, not class identity (P2-2026-01-30 fix)
-        for from_id, _, _ in incoming[1:]:
-            other_schema = self._get_effective_producer_schema(from_id)
-            compatible, error_msg = self._schemas_structurally_compatible(first_schema, other_schema)
-            if not compatible:
-                first_name = first_schema.__name__ if first_schema else "observed"
-                other_name = other_schema.__name__ if other_schema else "observed"
-                raise GraphValidationError(
-                    f"Coalesce '{coalesce_id}' receives incompatible schemas from "
-                    f"multiple branches: first branch has {first_name}, "
-                    f"branch from '{from_id}' has {other_name}. {error_msg}"
-                )
+        # nested/select strategies have no cross-branch schema constraint
+        if merge_strategy in ("nested", "select"):
+            return
+
+        # union strategy: gather all branch schemas and validate
+        all_schemas: list[tuple[str, type[PluginSchema] | None]] = []
+        for from_id, _, _ in incoming:
+            schema = self.get_effective_producer_schema(from_id)
+            all_schemas.append((from_id, schema))
+
+        # Reject mixed observed/explicit schemas (P2-2026-02-01 fix)
+        observed_branches = [(nid, s) for nid, s in all_schemas if self._is_observed_schema(s)]
+        explicit_branches = [(nid, s) for nid, s in all_schemas if not self._is_observed_schema(s)]
+
+        if observed_branches and explicit_branches:
+            observed_names = [nid for nid, _ in observed_branches]
+            explicit_names = [f"{nid} ({s.__name__})" for nid, s in explicit_branches if s is not None]
+            raise GraphValidationError(
+                f"Coalesce '{coalesce_id}' has mixed observed/explicit schemas - "
+                f"this is not allowed because observed branches may produce rows missing fields "
+                f"expected by downstream consumers. "
+                f"Observed branches: {observed_names}, explicit branches: {explicit_names}. "
+                f"Fix: ensure all branches produce explicit schemas with compatible fields, "
+                f"or all branches produce observed schemas."
+            )
+
+        # All explicit: verify structural compatibility across branches
+        if len(explicit_branches) > 1:
+            _first_id, first_schema = explicit_branches[0]
+            for other_id, other_schema in explicit_branches[1:]:
+                compatible, error_msg = self._schemas_structurally_compatible(first_schema, other_schema)
+                if not compatible:
+                    first_name = first_schema.__name__ if first_schema else "observed"
+                    other_name = other_schema.__name__ if other_schema else "observed"
+                    raise GraphValidationError(
+                        f"Coalesce '{coalesce_id}' receives incompatible schemas from "
+                        f"multiple branches: first branch has {first_name}, "
+                        f"branch from '{other_id}' has {other_name}. {error_msg}"
+                    )
 
     # ===== CONTRACT VALIDATION HELPERS =====
 
-    def _get_schema_config_from_node(self, node_id: str) -> SchemaConfig | None:
+    def get_schema_config_from_node(self, node_id: str) -> SchemaConfig | None:
         """Extract SchemaConfig from node.
 
         Priority:
@@ -984,7 +1322,7 @@ class ExecutionGraph:
 
         return None
 
-    def _get_guaranteed_fields(self, node_id: str) -> frozenset[str]:
+    def get_guaranteed_fields(self, node_id: str) -> frozenset[str]:
         """Get fields that a node guarantees in its output.
 
         Priority:
@@ -998,14 +1336,14 @@ class ExecutionGraph:
         Returns:
             Frozenset of field names the node guarantees to output
         """
-        schema_config = self._get_schema_config_from_node(node_id)
+        schema_config = self.get_schema_config_from_node(node_id)
 
         if schema_config is None:
             return frozenset()
 
         return schema_config.get_effective_guaranteed_fields()
 
-    def _get_required_fields(self, node_id: str) -> frozenset[str]:
+    def get_required_fields(self, node_id: str) -> frozenset[str]:
         """Get fields that a node EXPLICITLY requires in its input.
 
         This returns only explicit contract declarations, not implicit
@@ -1045,7 +1383,7 @@ class ExecutionGraph:
                     return frozenset(required_input)
 
         # Check for explicit required_fields in schema config
-        schema_config = self._get_schema_config_from_node(node_id)
+        schema_config = self.get_schema_config_from_node(node_id)
 
         if schema_config is None:
             return frozenset()
@@ -1056,15 +1394,13 @@ class ExecutionGraph:
 
         return frozenset()
 
-    def _get_effective_guaranteed_fields(self, node_id: str) -> frozenset[str]:
+    def get_effective_guaranteed_fields(self, node_id: str) -> frozenset[str]:
         """Get effective output guarantees, walking through pass-through nodes.
 
-        Gates and coalesce nodes don't transform data - they inherit guarantees
-        from their upstream producers. This method walks backwards through the
-        graph to find actual guarantees.
-
-        For coalesce nodes, returns the intersection of all branch guarantees
-        (only fields guaranteed by ALL branches are guaranteed after merge).
+        Gates inherit guarantees from upstream. Coalesce nodes are strategy-aware:
+        - **union**: intersection of branch guarantees (only fields in ALL branches)
+        - **nested**: the node's own guarantees (branch names, not inner fields)
+        - **select**: the node's own guarantees (selected branch's schema)
 
         IMPORTANT: Gates ALWAYS inherit from upstream, even if they have raw schema
         guarantees. This is because gates copy raw config["schema"] from upstream,
@@ -1088,22 +1424,32 @@ class ExecutionGraph:
             if not incoming:
                 return frozenset()
             # Gates pass through - inherit from single upstream
-            return self._get_effective_guaranteed_fields(incoming[0][0])
+            return self.get_effective_guaranteed_fields(incoming[0][0])
 
-        # Coalesce nodes return intersection of branch guarantees
+        # Coalesce nodes: strategy-aware guaranteed fields
         if node_info.node_type == NodeType.COALESCE:
+            merge_strategy = node_info.config["merge"]
+
+            # nested/select: use the node's own config schema (set by builder).
+            # - Nested output is {branch_a: data, branch_b: data} — guarantees
+            #   are the branch names, NOT the inner field names.
+            # - Select output is the selected branch's data — its schema was
+            #   copied by the builder into this node's config.
+            if merge_strategy in ("nested", "select"):
+                return self.get_guaranteed_fields(node_id)
+
+            # union: intersection of branch guarantees. Only fields present in
+            # ALL branches are guaranteed in the flat merged output.
             incoming = list(self._graph.in_edges(node_id, data=True))
             if not incoming:
                 return frozenset()
-            # Coalesce guarantees the INTERSECTION of branch guarantees
-            branch_guarantees = [self._get_effective_guaranteed_fields(from_id) for from_id, _, _ in incoming]
+            branch_guarantees = [self.get_effective_guaranteed_fields(from_id) for from_id, _, _ in incoming]
             if not branch_guarantees:
                 return frozenset()
-            # Start with first, intersect with rest
             result = branch_guarantees[0]
             for guarantees in branch_guarantees[1:]:
                 result = result & guarantees
             return result
 
         # Non-pass-through nodes return their own guarantees
-        return self._get_guaranteed_fields(node_id)
+        return self.get_guaranteed_fields(node_id)

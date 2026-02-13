@@ -207,3 +207,38 @@ class TestDatabaseSinkResumeEndToEnd:
         rows = self._get_all_rows(db_url, "output")
         assert len(rows) == 2
         assert {r["id"] for r in rows} == {1, 2}
+
+    def test_validate_output_target_then_write_in_resume_mode(self, db_url: str, ctx) -> None:
+        """validate_output_target() should not break first write initialization."""
+        # Initial run creates the table.
+        sink1 = DatabaseSink(
+            {
+                "url": db_url,
+                "table": "output",
+                "schema": STRICT_SCHEMA,
+                "if_exists": "append",
+            }
+        )
+        sink1.write([{"id": 1}], ctx)
+        sink1.close()
+
+        # Resume sink validates first, then writes.
+        sink2 = DatabaseSink(
+            {
+                "url": db_url,
+                "table": "output",
+                "schema": STRICT_SCHEMA,
+                "if_exists": "replace",
+            }
+        )
+        sink2.configure_for_resume()
+        validation = sink2.validate_output_target()
+        assert validation.valid is True
+
+        # Regression check: this write used to raise RuntimeError.
+        sink2.write([{"id": 2}], ctx)
+        sink2.close()
+
+        rows = self._get_all_rows(db_url, "output")
+        assert len(rows) == 2
+        assert {r["id"] for r in rows} == {1, 2}

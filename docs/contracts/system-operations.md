@@ -1,7 +1,7 @@
 # ELSPETH System Operations Contract
 
-> **Status:** FINAL (v1.1)
-> **Last Updated:** 2026-02-08
+> **Status:** FINAL (v1.2)
+> **Last Updated:** 2026-02-13
 > **Authority:** This document is the master reference for all engine-level system operations.
 > **Companion:** [Plugin Protocol Contract](plugin-protocol.md) covers Source, Transform, and Sink plugins.
 
@@ -96,14 +96,6 @@ class ConfigGateReason(TypedDict):
     condition: str      # The expression evaluated
     result: str         # The route label produced
 
-# Plugin gate
-class PluginGateReason(TypedDict):
-    rule: str           # Description of the gate's logic
-    matched_value: Any  # Value that triggered routing
-    threshold: NotRequired[float]
-    field: NotRequired[str]        # Field name that was compared
-    comparison: NotRequired[str]   # Comparison operator used
-
 # Transform error routing
 class TransformErrorReason(TypedDict):
     reason: str         # Error category string
@@ -113,23 +105,16 @@ class SourceQuarantineReason(TypedDict):
     quarantine_error: str   # Description of the validation failure
 
 # Discriminated union — field presence distinguishes variants
-RoutingReason = ConfigGateReason | PluginGateReason | TransformErrorReason | SourceQuarantineReason
+RoutingReason = ConfigGateReason | TransformErrorReason | SourceQuarantineReason
 ```
 
 ---
 
 ## Gates
 
-Gates make **routing decisions**. They evaluate a condition on a token's row data and decide where the token goes next. Two approaches are supported:
-
-| Approach | Use When | Implementation |
-|----------|----------|----------------|
-| **Config Expression** | Simple field comparisons (`score > 0.8`) | YAML `condition` string |
-| **Plugin Gate** | Complex logic (ML models, multi-field analysis, external lookups) | `BaseGate` subclass |
+Gates make **routing decisions**. They evaluate a condition on a token's row data and decide where the token goes next. All gates are **config-driven** using a restricted expression parser built on Python's AST — never `eval()`.
 
 ### Config Expression Gates
-
-Config expressions are the preferred approach for simple, declarative routing. They use a **restricted expression parser** built on Python's AST — never `eval()`.
 
 #### Configuration
 
@@ -217,110 +202,10 @@ An expression like `"__import__('os').system('rm -rf /')"` is rejected at config
 | `ExpressionSecurityError` | Forbidden construct in expression | Pipeline fails at config validation (before any rows) |
 | `ExpressionEvaluationError` | Runtime error (KeyError, ZeroDivisionError, TypeError) | Node state recorded as FAILED, exception propagates to orchestrator which fails the run (row data caused the error in OUR expression — this is a config bug) |
 
-### Plugin Gates
-
-Plugin gates are system code for complex routing logic that does not fit in config expressions. They implement `GateProtocol` and are registered via `pluggy`.
-
-#### GateProtocol
-
-```python
-@runtime_checkable
-class GateProtocol(Protocol):
-    name: str
-    input_schema: type[PluginSchema]
-    output_schema: type[PluginSchema]
-    node_id: str | None               # Set by orchestrator after registration
-    config: dict[str, Any]
-    routes: dict[str, str]            # Maps route labels → destinations
-    fork_to: list[str] | None         # Branch names for fork operations
-    determinism: Determinism
-    plugin_version: str
-
-    def evaluate(self, row: PipelineRow, ctx: PluginContext) -> GateResult: ...
-    def close(self) -> None: ...
-    def on_start(self, ctx: PluginContext) -> None: ...
-    def on_complete(self, ctx: PluginContext) -> None: ...
-```
-
-#### GateResult
-
-```python
-@dataclass
-class GateResult:
-    row: dict[str, Any]                # Row data (may be modified by gate)
-    action: RoutingAction              # Routing decision
-    contract: SchemaContract | None = None  # Output schema contract
-
-    # Audit fields (set by executor, NOT by plugin)
-    input_hash: str | None = None
-    output_hash: str | None = None
-    duration_ms: float | None = None
-
-    def to_pipeline_row(self) -> PipelineRow: ...
-```
-
-**Invariants:**
-- `action` must be a valid `RoutingAction` (see invariants above)
-- `row` must be a dict (not PipelineRow — the executor wraps it)
-- If gate modifies the row, `output_hash` will differ from `input_hash` in the audit trail
-
-#### GateOutcome (Internal)
-
-```python
-@dataclass
-class GateOutcome:
-    """Engine-internal result of gate execution."""
-    result: GateResult
-    updated_token: TokenInfo
-    child_tokens: list[TokenInfo] = field(default_factory=list)  # For forks
-    sink_name: str | None = None  # For routes
-```
-
-#### Plugin Gate Lifecycle
-
-```
-__init__(config)
-    │
-    ▼
-on_start(ctx)
-    │
-    ▼
-┌──────────────────────────────────┐
-│ evaluate(row, ctx) × N tokens    │
-│     │                            │
-│     ▼                            │
-│ GateResult(row, action)          │
-│     │                            │
-│     ├── CONTINUE → next node     │
-│     ├── ROUTE → named sink       │
-│     └── FORK → child tokens      │
-└──────────────────────────────────┘
-    │
-    ▼
-on_complete(ctx)
-    │
-    ▼
-close()
-```
-
-#### When to Use Plugin Gates vs Config Expressions
-
-| Scenario | Use |
-|----------|-----|
-| `row['score'] > threshold` | Config expression |
-| Simple field existence check | Config expression |
-| Multi-field weighted scoring | Plugin gate |
-| External API call for validation | Plugin gate |
-| ML model inference | Plugin gate |
-| Stateful routing (rate limiting, quotas) | Plugin gate |
-| Complex business rules | Plugin gate |
-
 ### Gate Execution Contract
 
-Both gate types share the same execution contract at the engine level:
-
 1. **Record node state start** — input hash computed, `begin_node_state()` called
-2. **Execute gate** — expression evaluation or `gate.evaluate()`
+2. **Execute gate** — expression evaluation
 3. **Populate audit fields** — output hash, duration
 4. **Process routing** — based on `RoutingAction.kind`
 5. **Complete node state** — always `COMPLETED` for successful execution
@@ -344,7 +229,7 @@ Fork creates **child tokens** from a parent token for parallel processing across
 
 ### How Forks Are Triggered
 
-Forks are triggered by gates — either config expression gates or plugin gates. A gate returns `RoutingAction.fork_to_paths(["path_a", "path_b", ...])` and the engine creates child tokens.
+Forks are triggered by gates. A gate returns `RoutingAction.fork_to_paths(["path_a", "path_b", ...])` and the engine creates child tokens.
 
 ```yaml
 gates:
@@ -880,5 +765,6 @@ class TokenInfo:
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 1.1 | 2026-02-08 | Accuracy pass — Fixed RoutingReason union type (added TransformErrorReason, SourceQuarantineReason), corrected terminal states diagram (QUARANTINED/COALESCED/EXPANDED as independent states), fixed FORK_TO_PATHS minimum, added ExpressionSyntaxError, expanded fork_token() signature, added MANUAL trigger type, expanded expression language/forbidden constructs, added PluginGateReason optional fields |
+| 1.2 | 2026-02-13 | RC-3 alignment — Removed plugin gate references (GateProtocol, BaseGate, PluginGateReason, GateResult, GateOutcome). Gate plugins were removed from the codebase on 2026-02-11. All gates are config-driven via GateSettings + ExpressionParser. |
+| 1.1 | 2026-02-08 | Accuracy pass — Fixed RoutingReason union type (added TransformErrorReason, SourceQuarantineReason), corrected terminal states diagram (QUARANTINED/COALESCED/EXPANDED as independent states), fixed FORK_TO_PATHS minimum, added ExpressionSyntaxError, expanded fork_token() signature, added MANUAL trigger type, expanded expression language/forbidden constructs |
 | 1.0 | 2026-02-08 | Initial contract — Gates (config + plugin), Forks, Coalesces, Aggregation, Token identity, Routing primitives |

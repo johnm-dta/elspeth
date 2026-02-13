@@ -360,3 +360,13 @@ class TestAzureAuthConfigCreateClient:
             )
             mock_blob_service_client.assert_called_once_with(config.account_url, credential=mock_credential)
             assert client is mock_client
+
+    def test_connection_string_with_partial_service_principal_raises(self) -> None:
+        """Partial service principal fields are invalid even with connection string."""
+        with pytest.raises(ValidationError) as exc_info:
+            AzureAuthConfig(
+                connection_string="DefaultEndpointsProtocol=https;AccountName=test;AccountKey=key;EndpointSuffix=core.windows.net",
+                tenant_id="00000000-0000-0000-0000-000000000000",
+            )
+
+        assert "Service Principal auth requires all fields" in str(exc_info.value)

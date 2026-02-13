@@ -246,3 +246,36 @@ class TestLLMTransformContract:
 
         # Original fields should still be present
         assert result.row.contract.get_field("product_name") is not None
+
+    def test_fixed_contract_includes_usage_metadata_field(
+        self,
+        mock_context: MagicMock,
+    ) -> None:
+        """LLM output contract includes guaranteed _usage even in FIXED mode."""
+        fixed_contract = SchemaContract(
+            mode="FIXED",
+            fields=(make_field("text", str, original_name="text", required=True, source="declared"),),
+            locked=True,
+        )
+        pipeline_row = make_row({"text": "hello"}, contract=fixed_contract)
+
+        transform = MockLLMTransform(
+            {
+                "model": "test-model",
+                "template": "{{ row.text }}",
+                "schema": {"mode": "fixed", "fields": ["text: str"]},
+                "required_input_fields": ["text"],
+            }
+        )
+
+        result = transform.process(pipeline_row, mock_context)
+
+        assert result.status == "success"
+        assert isinstance(result.row, PipelineRow)
+        usage_field = result.row.contract.get_field("llm_response_usage")
+        assert usage_field is not None
+        assert usage_field.python_type is object
+        assert result.row["llm_response_usage"] == {
+            "prompt_tokens": 10,
+            "completion_tokens": 20,
+        }

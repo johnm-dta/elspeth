@@ -442,8 +442,8 @@ class TestPromptShieldBatchProcessing:
         finally:
             transform.close()
 
-    def test_skips_missing_configured_field(self, mock_httpx_client: MagicMock) -> None:
-        """Transform skips fields not present in the row."""
+    def test_missing_configured_field_fails_closed(self, mock_httpx_client: MagicMock) -> None:
+        """Missing value in explicitly-configured field fails CLOSED."""
         from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
 
         mock_response = _create_mock_http_response(
@@ -458,7 +458,7 @@ class TestPromptShieldBatchProcessing:
             {
                 "endpoint": "https://test.cognitiveservices.azure.com",
                 "api_key": "test-key",
-                "fields": ["prompt", "optional_field"],
+                "fields": ["optional_field", "prompt"],
                 "schema": {"mode": "observed"},
             }
         )
@@ -469,7 +469,7 @@ class TestPromptShieldBatchProcessing:
         transform.connect_output(collector, max_pending=10)
 
         try:
-            # Row is missing "optional_field"
+            # Row is missing explicitly-configured "optional_field"
             row_data = {"prompt": "safe prompt", "id": 1}
             row = make_pipeline_row(row_data)
             transform.accept(row, ctx)
@@ -478,7 +478,12 @@ class TestPromptShieldBatchProcessing:
             assert len(collector.results) == 1
             _, result, _ = collector.results[0]
             assert isinstance(result, TransformResult)
-            assert result.status == "success"
+            assert result.status == "error"
+            assert result.reason is not None
+            assert result.reason["reason"] == "missing_field"
+            assert result.reason["field"] == "optional_field"
+            assert result.retryable is False
+            assert mock_httpx_client.post.call_count == 0
         finally:
             transform.close()
 
@@ -1064,6 +1069,49 @@ class TestPromptShieldBatchProcessing:
 
             # Verify record_call was invoked
             assert ctx.landscape.record_call.call_count == 1
+        finally:
+            transform.close()
+
+    @pytest.mark.parametrize("status_code", [429, 503, 529])
+    def test_capacity_http_status_raises_capacity_error_in_batch_adapter(
+        self,
+        mock_httpx_client: MagicMock,
+        status_code: int,
+    ) -> None:
+        """Capacity HTTP statuses propagate as CapacityError through waiter.wait()."""
+        import httpx
+
+        from elspeth.engine.batch_adapter import SharedBatchAdapter
+        from elspeth.plugins.pooling import CapacityError
+        from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
+
+        mock_httpx_client.post.side_effect = httpx.HTTPStatusError(
+            f"Capacity limited ({status_code})",
+            request=Mock(),
+            response=Mock(status_code=status_code),
+        )
+
+        transform = AzurePromptShield(
+            {
+                "endpoint": "https://test.cognitiveservices.azure.com",
+                "api_key": "test-key",
+                "fields": ["prompt"],
+                "schema": {"mode": "observed"},
+            }
+        )
+
+        ctx = make_mock_context(state_id=f"state-{status_code}")
+        transform.on_start(ctx)
+
+        adapter = SharedBatchAdapter()
+        transform.connect_output(adapter, max_pending=10)
+
+        try:
+            waiter = adapter.register(ctx.token.token_id, ctx.state_id)
+            transform.accept(make_pipeline_row({"prompt": "test", "id": 1}), ctx)
+            with pytest.raises(CapacityError) as exc_info:
+                waiter.wait(timeout=10.0)
+            assert exc_info.value.status_code == status_code
         finally:
             transform.close()
 

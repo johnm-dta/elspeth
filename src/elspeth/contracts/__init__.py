@@ -129,6 +129,7 @@ from elspeth.contracts.errors import (
     ExecutionError,
     ExtraFieldViolation,
     FrameworkBugError,
+    GracefulShutdownError,
     MissingFieldViolation,
     PluginContractViolation,
     QueryFailureDetail,
@@ -230,6 +231,7 @@ __all__ = [  # Grouped by category for readability
     # errors
     "BatchPendingError",
     "FrameworkBugError",
+    "GracefulShutdownError",
     "PluginContractViolation",
     "CoalesceFailureReason",
     "ConfigGateReason",

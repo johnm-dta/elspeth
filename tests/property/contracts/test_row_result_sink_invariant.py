@@ -47,7 +47,7 @@ class TestSinkTargetingOutcomeRequiresSinkName:
         """Sink-targeting outcomes raise OrchestrationInvariantError without sink_name."""
         token = TokenInfo(row_id="r1", token_id="t1", row_data=make_pipeline_row({}))
         with pytest.raises(OrchestrationInvariantError):
-            RowResult(token=token, final_data={}, outcome=outcome, sink_name=None)
+            RowResult(token=token, final_data=make_pipeline_row({}), outcome=outcome, sink_name=None)
 
 
 # =============================================================================
@@ -66,7 +66,7 @@ class TestSinkTargetingOutcomeAcceptsSinkName:
     def test_sink_targeting_outcome_accepts_sink_name(self, outcome: RowOutcome, sink_name: str) -> None:
         """Sink-targeting outcomes successfully store the provided sink_name."""
         token = TokenInfo(row_id="r1", token_id="t1", row_data=make_pipeline_row({}))
-        result = RowResult(token=token, final_data={}, outcome=outcome, sink_name=sink_name)
+        result = RowResult(token=token, final_data=make_pipeline_row({}), outcome=outcome, sink_name=sink_name)
         assert result.sink_name == sink_name
 
 
@@ -83,5 +83,5 @@ class TestNonSinkOutcomeAcceptsNoneSinkName:
     def test_non_sink_outcome_accepts_none_sink_name(self, outcome: RowOutcome) -> None:
         """Non-sink outcomes can be created with sink_name=None."""
         token = TokenInfo(row_id="r1", token_id="t1", row_data=make_pipeline_row({}))
-        result = RowResult(token=token, final_data={}, outcome=outcome, sink_name=None)
+        result = RowResult(token=token, final_data=make_pipeline_row({}), outcome=outcome, sink_name=None)
         assert result.sink_name is None

@@ -29,6 +29,20 @@ class GraphValidationError(ValueError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class GraphValidationWarning:
+    """Non-fatal warning emitted during graph construction.
+
+    Unlike GraphValidationError, warnings don't prevent graph construction.
+    They alert the operator to configurations that are technically valid but
+    likely to cause runtime surprises (e.g., rows silently lost).
+    """
+
+    code: str
+    message: str
+    node_ids: tuple[str, ...]
+
+
 _NODE_ID_MAX_LENGTH = NODE_ID_COLUMN_LENGTH
 
 

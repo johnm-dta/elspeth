@@ -11,7 +11,7 @@ at parse time per canonical JSON policy. Use null for missing values.
 """
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any, Literal
 
 from pydantic import ValidationError
@@ -40,6 +40,24 @@ def _reject_nonfinite_constant(value: str) -> None:
         ValueError: Always - these constants are not allowed
     """
     raise ValueError(f"Non-standard JSON constant '{value}' not allowed. Use null for missing values, not NaN/Infinity.")
+
+
+def _contains_surrogateescape_chars(value: str) -> bool:
+    """Return True when value contains surrogateescape-decoded bytes."""
+    return any(0xDC80 <= ord(char) <= 0xDCFF for char in value)
+
+
+def _surrogateescape_line_to_bytes(value: str, encoding: str) -> bytes:
+    """Encode a surrogateescape-decoded line back to bytes for quarantine.
+
+    UTF-16/UTF-32 codecs reject low-surrogate code points on encode, even when
+    ``errors="surrogateescape"`` is requested. Fall back to UTF-8 with
+    surrogateescape to preserve raw undecodable byte values without crashing.
+    """
+    try:
+        return value.encode(encoding, errors="surrogateescape")
+    except UnicodeEncodeError:
+        return value.encode("utf-8", errors="surrogateescape")
 
 
 class JSONSourceConfig(SourceDataConfig):
@@ -114,8 +132,8 @@ class JSONSource(BaseSource):
 
         initial_contract = create_contract_from_config(self._schema_config)
 
-        # For FIXED/FLEXIBLE schemas, contract is locked immediately
-        # For OBSERVED schemas, ContractBuilder will lock after first valid row
+        # For FIXED schemas, contract is locked immediately.
+        # For FLEXIBLE/OBSERVED schemas, ContractBuilder locks after first valid row.
         if initial_contract.locked:
             self.set_schema_contract(initial_contract)
             self._contract_builder = None
@@ -130,7 +148,7 @@ class JSONSource(BaseSource):
         - Valid rows are yielded as SourceRow.valid()
         - Invalid rows are yielded as SourceRow.quarantined()
 
-        For OBSERVED schemas, the first valid row locks the contract with
+        For FLEXIBLE/OBSERVED schemas, the first valid row locks the contract with
         inferred types. Subsequent rows validate against the locked contract.
 
         Yields:
@@ -143,13 +161,18 @@ class JSONSource(BaseSource):
         if not self._path.exists():
             raise FileNotFoundError(f"JSON file not found: {self._path}")
 
-        # Track first valid row for OBSERVED mode type inference
+        # Track first valid row for FLEXIBLE/OBSERVED type inference
         self._first_valid_row_processed = False
 
         if self._format == "jsonl":
             yield from self._load_jsonl(ctx)
         else:
             yield from self._load_json_array(ctx)
+
+        # CRITICAL: keep contract state consistent when no valid rows were seen.
+        # Mirrors CSVSource behavior for all-invalid/empty inputs.
+        if not self._first_valid_row_processed and self._contract_builder is not None:
+            self.set_schema_contract(self._contract_builder.contract.with_locked())
 
     def _load_jsonl(self, ctx: PluginContext) -> Iterator[SourceRow]:
         """Load from JSONL format (one JSON object per line).
@@ -158,38 +181,61 @@ class JSONSource(BaseSource):
         fails to parse is quarantined, not crash the pipeline. This allows
         subsequent valid lines to still be processed.
         """
-        with open(self._path, encoding=self._encoding) as f:
-            for line_num, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:  # Skip empty lines
-                    continue
-
-                # Catch JSON parse errors at the trust boundary
-                # parse_constant rejects NaN/Infinity at parse time (canonical JSON policy)
-                try:
-                    row = json.loads(line, parse_constant=_reject_nonfinite_constant)
-                except (json.JSONDecodeError, ValueError) as e:
-                    # External data parse failure - quarantine, don't crash
-                    # Store raw line + metadata for audit traceability
-                    raw_row = {"__raw_line__": line, "__line_number__": line_num}
-                    error_msg = f"JSON parse error at line {line_num}: {e}"
-
-                    ctx.record_validation_error(
-                        row=raw_row,
-                        error=error_msg,
-                        schema_mode="parse",  # Distinct from schema validation
-                        destination=self._on_validation_failure,
-                    )
-
-                    if self._on_validation_failure != "discard":
-                        yield SourceRow.quarantined(
+        line_num = 0
+        try:
+            # Iterate in text mode so newline handling respects multibyte encodings
+            # (e.g., utf-16 / utf-32) instead of splitting on raw 0x0A bytes.
+            with open(self._path, encoding=self._encoding, errors="surrogateescape", newline="") as f:
+                for line_num, raw_line in enumerate(f, start=1):
+                    if _contains_surrogateescape_chars(raw_line):
+                        raw_bytes = _surrogateescape_line_to_bytes(raw_line, self._encoding)
+                        raw_row = {"__raw_bytes_hex__": raw_bytes.hex(), "__line_number__": line_num}
+                        error_msg = f"JSON parse error at line {line_num}: invalid {self._encoding} encoding"
+                        quarantined = self._record_parse_error(
+                            ctx=ctx,
                             row=raw_row,
-                            error=error_msg,
-                            destination=self._on_validation_failure,
+                            error_msg=error_msg,
                         )
-                    continue
+                        if quarantined is not None:
+                            yield quarantined
+                        continue
 
-                yield from self._validate_and_yield(row, ctx)
+                    line = raw_line.strip()
+                    if not line:  # Skip empty lines
+                        continue
+
+                    # Catch JSON parse errors at the trust boundary
+                    # parse_constant rejects NaN/Infinity at parse time (canonical JSON policy)
+                    try:
+                        row = json.loads(line, parse_constant=_reject_nonfinite_constant)
+                    except (json.JSONDecodeError, ValueError) as e:
+                        # External data parse failure - quarantine, don't crash
+                        # Store raw line + metadata for audit traceability
+                        raw_row = {"__raw_line__": line, "__line_number__": line_num}
+                        error_msg = f"JSON parse error at line {line_num}: {e}"
+                        quarantined = self._record_parse_error(
+                            ctx=ctx,
+                            row=raw_row,
+                            error_msg=error_msg,
+                        )
+                        if quarantined is not None:
+                            yield quarantined
+                        continue
+
+                    yield from self._validate_and_yield(row, ctx)
+        except UnicodeDecodeError as e:
+            # Some codecs (notably utf-16/utf-32) can still raise on truncated byte
+            # sequences while reading. Treat as an external parse failure.
+            error_line = line_num + 1
+            raw_row = {"file_path": str(self._path), "__line_number__": error_line}
+            error_msg = f"JSON parse error at line {error_line}: invalid {self._encoding} encoding ({e})"
+            quarantined = self._record_parse_error(
+                ctx=ctx,
+                row=raw_row,
+                error_msg=error_msg,
+            )
+            if quarantined is not None:
+                yield quarantined
 
     def _load_json_array(self, ctx: PluginContext) -> Iterator[SourceRow]:
         """Load from JSON array format."""
@@ -205,21 +251,13 @@ class JSONSource(BaseSource):
                 else:
                     # ValueError from _reject_nonfinite_constant (NaN/Infinity)
                     error_msg = f"JSON parse error: {e}"
-                ctx.record_validation_error(
+                quarantined = self._record_parse_error(
+                    ctx=ctx,
                     row={"file_path": str(self._path), "error": error_msg},
-                    error=error_msg,
-                    schema_mode="parse",  # File-level parse, not schema validation
-                    destination=self._on_validation_failure,
+                    error_msg=error_msg,
                 )
-
-                # Yield quarantined row if not discarding
-                # This allows audit trail to show the file-level failure
-                if self._on_validation_failure != "discard":
-                    yield SourceRow.quarantined(
-                        row={"file_path": str(self._path), "parse_error": str(e)},
-                        error=error_msg,
-                        destination=self._on_validation_failure,
-                    )
+                if quarantined is not None:
+                    yield quarantined
                 return  # Stop processing this file
 
         # Extract from nested key if specified
@@ -235,7 +273,7 @@ class JSONSource(BaseSource):
                 ctx.record_validation_error(
                     row={"file_path": str(self._path), "data_key": self._data_key},
                     error=error_msg,
-                    schema_mode="structure",
+                    schema_mode="parse",
                     destination=self._on_validation_failure,
                 )
                 if self._on_validation_failure != "discard":
@@ -252,7 +290,7 @@ class JSONSource(BaseSource):
                 ctx.record_validation_error(
                     row={"file_path": str(self._path), "data_key": self._data_key},
                     error=error_msg,
-                    schema_mode="structure",
+                    schema_mode="parse",
                     destination=self._on_validation_failure,
                 )
                 if self._on_validation_failure != "discard":
@@ -271,7 +309,7 @@ class JSONSource(BaseSource):
             ctx.record_validation_error(
                 row={"file_path": str(self._path)},
                 error=error_msg,
-                schema_mode="structure",
+                schema_mode="parse",
                 destination=self._on_validation_failure,
             )
             if self._on_validation_failure != "discard":
@@ -288,7 +326,7 @@ class JSONSource(BaseSource):
     def _validate_and_yield(self, row: dict[str, Any], ctx: PluginContext) -> Iterator[SourceRow]:
         """Validate a row and yield if valid, otherwise quarantine.
 
-        For OBSERVED schemas, the first valid row triggers type inference and
+        For FLEXIBLE/OBSERVED schemas, the first valid row triggers type inference and
         locks the contract. Subsequent rows validate against the locked contract.
 
         Args:
@@ -303,7 +341,7 @@ class JSONSource(BaseSource):
             validated = self._schema_class.model_validate(row)
             validated_row = validated.to_row()
 
-            # For OBSERVED schemas, process first valid row to lock contract
+            # For FLEXIBLE/OBSERVED schemas, process first valid row to lock contract
             if self._contract_builder is not None and not self._first_valid_row_processed:
                 # JSON sources don't normalize field names, so identity mapping
                 field_resolution = {k: k for k in validated_row}
@@ -311,7 +349,29 @@ class JSONSource(BaseSource):
                 self.set_schema_contract(self._contract_builder.contract)
                 self._first_valid_row_processed = True
 
-            yield SourceRow.valid(validated_row, contract=self.get_schema_contract())
+            # Validate against locked contract to catch type drift on inferred fields.
+            # Pydantic's extra="allow" accepts any type for extras — the contract
+            # knows the inferred types from the first row and enforces them here.
+            contract = self.get_schema_contract()
+            if contract is not None and contract.locked:
+                violations = contract.validate(validated_row)
+                if violations:
+                    error_msg = "; ".join(str(v) for v in violations)
+                    ctx.record_validation_error(
+                        row=validated_row,
+                        error=error_msg,
+                        schema_mode=self._schema_config.mode,
+                        destination=self._on_validation_failure,
+                    )
+                    if self._on_validation_failure != "discard":
+                        yield SourceRow.quarantined(
+                            row=validated_row,
+                            error=error_msg,
+                            destination=self._on_validation_failure,
+                        )
+                    return
+
+            yield SourceRow.valid(validated_row, contract=contract)
         except ValidationError as e:
             # Record validation failure in audit trail
             # This is a trust boundary: external data may be invalid
@@ -330,6 +390,28 @@ class JSONSource(BaseSource):
                     error=str(e),
                     destination=self._on_validation_failure,
                 )
+
+    def _record_parse_error(
+        self,
+        ctx: PluginContext,
+        row: Mapping[str, object],
+        error_msg: str,
+    ) -> SourceRow | None:
+        """Record a parse error and return quarantined row unless discard mode."""
+        row_payload = dict(row)
+        ctx.record_validation_error(
+            row=row_payload,
+            error=error_msg,
+            schema_mode="parse",
+            destination=self._on_validation_failure,
+        )
+        if self._on_validation_failure == "discard":
+            return None
+        return SourceRow.quarantined(
+            row=row_payload,
+            error=error_msg,
+            destination=self._on_validation_failure,
+        )
 
     def close(self) -> None:
         """Release resources (no-op for JSON source)."""

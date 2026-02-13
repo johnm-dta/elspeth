@@ -396,6 +396,7 @@ def make_token_info(
     row_id: str = "row-1",
     token_id: str | None = None,
     data: dict[str, Any] | None = None,
+    branch_name: str | None = None,
 ) -> TokenInfo:
     """Build a TokenInfo for plugin context."""
     from elspeth.engine.tokens import TokenInfo
@@ -404,6 +405,7 @@ def make_token_info(
         row_id=row_id,
         token_id=token_id or f"token-{row_id}",
         row_data=make_row(data or {}),
+        branch_name=branch_name,
     )
 
 
@@ -519,7 +521,7 @@ def make_row_result(
     token = make_token_info()
     return RowResult(
         token=token,
-        final_data=data if data is not None else {"_result": True},
+        final_data=make_pipeline_row(data) if data is not None else make_pipeline_row({"_result": True}),
         outcome=resolved_outcome,
         sink_name=resolved_sink_name,
         error=error,

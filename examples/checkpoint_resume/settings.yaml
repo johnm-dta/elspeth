@@ -1,0 +1,77 @@
+# Checkpoint/Resume Example — Crash Recovery
+#
+# Demonstrates checkpointing and graceful shutdown:
+#
+#   source ─(validated)─> passthrough ─(processed)─> [status_gate] ─┬─ active.csv
+#                                                                    └─ other.csv
+#
+# With checkpoint enabled, the pipeline can be interrupted (Ctrl-C) and
+# resumed later without reprocessing completed rows.
+
+source:
+  plugin: csv
+  on_success: validated
+  options:
+    path: examples/checkpoint_resume/input.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'customer: str'
+      - 'amount: int'
+      - 'status: str'
+    on_validation_failure: discard
+
+transforms:
+- name: process
+  plugin: passthrough
+  input: validated
+  on_success: processed
+  on_error: discard
+  options:
+    schema:
+      mode: observed
+
+gates:
+- name: status_gate
+  input: processed
+  condition: row['status'] == 'active'
+  routes:
+    'true': active
+    'false': other
+
+sinks:
+  active:
+    plugin: csv
+    options:
+      path: examples/checkpoint_resume/output/active_customers.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'customer: str'
+        - 'amount: int'
+        - 'status: str'
+  other:
+    plugin: csv
+    options:
+      path: examples/checkpoint_resume/output/other_customers.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'customer: str'
+        - 'amount: int'
+        - 'status: str'
+
+landscape:
+  url: sqlite:///examples/checkpoint_resume/runs/audit.db
+
+# Checkpoint every 5 rows for demonstration purposes.
+# In production, use every_row for critical pipelines or
+# every_n with a higher interval for performance.
+checkpoint:
+  enabled: true
+  frequency: every_n
+  checkpoint_interval: 5
+  aggregation_boundaries: true

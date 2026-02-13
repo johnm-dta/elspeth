@@ -235,6 +235,8 @@ class CoalesceExecutor:
         if key in self._completed_keys:
             # Late arrival after merge/failure already happened
             # Record failure audit trail for this late token
+            failure_reason = "late_arrival_after_merge"
+            error_hash = hashlib.sha256(failure_reason.encode()).hexdigest()[:16]
             state = self._recorder.begin_node_state(
                 token_id=token.token_id,
                 node_id=node_id,
@@ -245,20 +247,27 @@ class CoalesceExecutor:
             self._recorder.complete_node_state(
                 state_id=state.state_id,
                 status=NodeStateStatus.FAILED,
-                error={"failure_reason": "late_arrival_after_merge"},
+                error={"failure_reason": failure_reason},
                 duration_ms=0,
+            )
+            self._recorder.record_token_outcome(
+                run_id=self._run_id,
+                token_id=token.token_id,
+                outcome=RowOutcome.FAILED,
+                error_hash=error_hash,
             )
 
             # Return failure outcome
             return CoalesceOutcome(
                 held=False,
-                failure_reason="late_arrival_after_merge",
+                failure_reason=failure_reason,
                 consumed_tokens=[token],
                 coalesce_metadata={
                     "policy": settings.policy,
                     "reason": "Siblings already merged/failed, this token arrived too late",
                 },
                 coalesce_name=coalesce_name,
+                outcomes_recorded=True,
             )
 
         if key not in self._pending:

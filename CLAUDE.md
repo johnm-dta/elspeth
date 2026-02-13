@@ -4,7 +4,7 @@
 
 ELSPETH is a **domain-agnostic framework for auditable Sense/Decide/Act (SDA) pipelines**. It provides scaffolding for data processing workflows where every decision must be traceable to its source, regardless of whether the "decide" step is an LLM, ML model, rules engine, or threshold check.
 
-**Current Status:** RC-2. Core architecture, plugins, and audit trail are complete. Stabilization fixes have been integrated and the system is preparing for release.
+**Current Status:** RC-3. Core architecture, plugins, and audit trail are complete. Quality sprint in progress — stabilization fixes, documentation updates, and contract hardening.
 
 ## Auditability Standard
 
@@ -193,7 +193,7 @@ def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
 
 ## Plugin Ownership: System Code, Not User Code
 
-All plugins (Sources, Transforms, Gates, Aggregations, Sinks) are **system-owned code**, not user-provided extensions. ELSPETH uses `pluggy` for clean architecture, NOT to accept arbitrary user plugins. Plugins are developed, tested, and deployed as part of ELSPETH with the same rigor as engine code.
+All plugins (Sources, Transforms, Aggregations, Sinks) are **system-owned code**, not user-provided extensions. Gates are config-driven system operations, not plugins. ELSPETH uses `pluggy` for clean architecture, NOT to accept arbitrary user plugins. Plugins are developed, tested, and deployed as part of ELSPETH with the same rigor as engine code.
 
 ### Implications for Error Handling
 
@@ -633,36 +633,47 @@ src/elspeth/
 ├── core/
 │   ├── landscape/      # Audit trail storage (recorder, exporter, schema)
 │   ├── checkpoint/     # Crash recovery checkpoints
+│   ├── dag/            # DAG construction, validation, graph models (NetworkX)
 │   ├── rate_limit/     # Rate limiting for external calls
 │   ├── retention/      # Payload purge policies
-│   ├── security/       # Secret fingerprinting via HMAC
+│   ├── security/       # Secret fingerprinting via HMAC, URL/IP validation
 │   ├── config.py       # Configuration loading (Dynaconf + Pydantic)
 │   ├── canonical.py    # Deterministic JSON hashing (RFC 8785)
-│   ├── dag.py          # DAG construction and validation (NetworkX)
 │   ├── events.py       # Synchronous event bus for CLI observability
-│   └── payload_store.py # Content-addressable storage for large blobs
+│   ├── identifiers.py  # ID generation utilities
+│   ├── logging.py      # Structured logging setup
+│   ├── operations.py   # Operation type definitions
+│   ├── payload_store.py # Content-addressable storage for large blobs
+│   └── templates.py    # Jinja2 field extraction
 ├── contracts/          # Type contracts, schemas, and protocol definitions
 ├── engine/
-│   ├── orchestrator.py # Full run lifecycle management
+│   ├── orchestrator/   # Full run lifecycle management (core, aggregation, export, outcomes, validation)
+│   ├── executors/      # Transform, gate, sink, aggregation executors
 │   ├── processor.py    # DAG traversal with work queue
-│   ├── executors.py    # Transform, gate, sink, aggregation executors
+│   ├── dag_navigator.py # DAG path navigation
 │   ├── coalesce_executor.py # Fork/join barrier with merge policies
-│   ├── artifacts.py    # Artifact pipeline
+│   ├── batch_adapter.py # Batch windowing logic
 │   ├── retry.py        # Tenacity-based retry with backoff
 │   ├── tokens.py       # Token identity and lineage management
 │   ├── triggers.py     # Aggregation trigger evaluation
-│   └── expression_parser.py # AST-based expression parsing (no eval)
+│   ├── expression_parser.py # AST-based expression parsing (no eval)
+│   ├── clock.py        # Clock abstraction for testing
+│   └── spans.py        # Telemetry span management
 ├── plugins/
-│   ├── sources/        # CSVSource, JSONSource, NullSource
+│   ├── sources/        # CSVSource, JSONSource, NullSource, AzureBlobSource
 │   ├── transforms/     # FieldMapper, Passthrough, Truncate, etc.
-│   ├── sinks/          # CSVSink, JSONSink, DatabaseSink
+│   ├── sinks/          # CSVSink, JSONSink, DatabaseSink, BlobSink
 │   ├── llm/            # Azure OpenAI transforms (batch, multi-query)
 │   ├── clients/        # HTTP, LLM, Replayer, Verifier clients
 │   ├── batching/       # Batch-aware transform adapters
 │   └── pooling/        # Thread pool management for plugins
+├── telemetry/          # OpenTelemetry exporters and instrumentation
+├── testing/            # ChaosLLM, ChaosWeb, ChaosEngine test servers
+├── mcp/                # Landscape MCP analysis server
 ├── tui/                # Terminal UI (Textual) - explain screens and widgets
 ├── cli.py              # Typer CLI
-└── cli_helpers.py      # CLI utility functions
+├── cli_helpers.py      # CLI utility functions
+└── cli_formatters.py   # Event formatting for CLI output
 ```
 
 ## No Legacy Code Policy
@@ -726,48 +737,3 @@ Defensive handling IS appropriate at trust boundaries (see Three-Tier Trust Mode
 | Am I adding this because "something might be None"? | — | ❌ Fix the root cause |
 
 If you're wrapping to hide a bug that "shouldn't happen," remove the wrapper and fix the bug.
-
-<!-- keel:instructions -->
-## Keel Issue Tracker
-
-Use `keel` for all task tracking in this project. Data lives in `.keel/`.
-
-### Quick Reference
-
-```bash
-# Finding work
-keel ready                              # Show issues ready to work (no blockers)
-keel list --status=open                 # All open issues
-keel list --status=in_progress          # Active work
-keel show <id>                          # Detailed issue view
-
-# Creating & updating
-keel create --title="..." --type=task --priority=2   # New issue
-keel update <id> --status=in_progress                # Claim work
-keel close <id>                                      # Mark complete
-keel close <id> --reason="explanation"               # Close with reason
-
-# Dependencies
-keel dep-add <issue> <depends-on>       # Add dependency
-keel blocked                            # Show blocked issues
-
-# Project health
-keel stats                              # Project statistics
-keel search "query"                     # Search issues
-keel doctor                             # Health check
-```
-
-### Workflow
-1. `keel ready` to find available work
-2. `keel show <id>` to review details
-3. `keel update <id> --status=in_progress` to claim it
-4. Do the work, commit code
-5. `keel close <id>` when done
-
-### Priority Scale
-- P0: Critical (drop everything)
-- P1: High (do next)
-- P2: Medium (default)
-- P3: Low
-- P4: Backlog
-<!-- /keel:instructions -->

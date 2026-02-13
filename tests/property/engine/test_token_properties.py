@@ -631,3 +631,5 @@ class TestExpandParentPreservationProperties:
                 node_id=NodeID("node_expand"),
                 run_id="test_run_1",
             )
+
+        mock_recorder.expand_token.assert_not_called()

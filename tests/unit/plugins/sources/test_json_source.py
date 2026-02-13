@@ -1,5 +1,6 @@
 """Tests for JSON source plugin."""
 
+import io
 import json
 from pathlib import Path
 
@@ -219,6 +220,79 @@ class TestJSONSource:
         assert JSONSource.plugin_version == "1.0.0"
 
 
+class TestJSONSourceFlexibleContract:
+    """Regression tests for FLEXIBLE first-row infer-and-lock semantics."""
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        """Create a minimal plugin context."""
+        return PluginContext(run_id="test-run", config={})
+
+    def test_flexible_infers_extra_field_and_quarantines_type_drift(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """First valid row infers extras; subsequent rows with type drift are quarantined."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        data = [
+            {"id": 1, "extra": "alpha"},
+            {"id": 2, "extra": 42},  # type drift: int vs inferred str
+        ]
+        json_file.write_text(json.dumps(data))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {"mode": "flexible", "fields": ["id: int"]},
+                "on_validation_failure": "quarantine",
+            }
+        )
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        assert rows[0].is_quarantined is False
+        assert rows[1].is_quarantined is True
+        assert "extra" in rows[1].quarantine_error
+
+        contract = source.get_schema_contract()
+        assert contract is not None
+        assert contract.mode == "FLEXIBLE"
+        assert contract.locked is True
+        assert {field.normalized_name for field in contract.fields} == {"id", "extra"}
+
+    def test_flexible_all_invalid_rows_still_publish_locked_declared_contract(
+        self,
+        tmp_path: Path,
+        ctx: PluginContext,
+    ) -> None:
+        """All-invalid FLEXIBLE input keeps declared fields and locks contract."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        data = [
+            {"id": "bad"},
+            {"id": "still_bad"},
+        ]
+        json_file.write_text(json.dumps(data))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {"mode": "flexible", "fields": ["id: int"]},
+                "on_validation_failure": "quarantine",
+            }
+        )
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        assert all(row.is_quarantined for row in rows)
+
+        contract = source.get_schema_contract()
+        assert contract is not None
+        assert contract.mode == "FLEXIBLE"
+        assert contract.locked is True
+        assert [field.normalized_name for field in contract.fields] == ["id"]
+
+
 class TestJSONSourceConfigValidation:
     """Test JSONSource config validation."""
 
@@ -397,7 +471,7 @@ class TestJSONSourceQuarantineYielding:
 
 
 class TestJSONSourceParseErrors:
-    """Tests for JSON source handling of parse errors (JSONDecodeError).
+    """Tests for JSON source handling of parse/decode errors.
 
     Per CLAUDE.md Three-Tier Trust Model, external data (Tier 3) should be
     quarantined on parse errors, not crash the pipeline.
@@ -477,6 +551,136 @@ class TestJSONSourceParseErrors:
         assert all(not r.is_quarantined for r in results)
         assert results[0].row == {"id": 1}
         assert results[1].row == {"id": 3}
+
+    def test_jsonl_invalid_encoding_line_quarantined_not_crash(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Invalid-encoding JSONL line is quarantined, not crash the pipeline."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        jsonl_file = tmp_path / "data.jsonl"
+        jsonl_file.write_bytes(b'{"id": 1}\n\xff\xfe\n{"id": 3}\n')
+
+        source = JSONSource(
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "encoding": "utf-8",
+                "on_validation_failure": "quarantine",
+                "schema": {"mode": "observed"},
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        assert len(results) == 3
+        assert results[0].is_quarantined is False
+        assert results[0].row == {"id": 1}
+        assert results[2].is_quarantined is False
+        assert results[2].row == {"id": 3}
+
+        quarantined = results[1]
+        assert quarantined.is_quarantined is True
+        assert quarantined.quarantine_error is not None
+        assert "line 2" in quarantined.quarantine_error
+        assert "utf-8" in quarantined.quarantine_error.lower()
+        assert "__raw_bytes_hex__" in quarantined.row
+        assert quarantined.row["__line_number__"] == 2
+
+    def test_jsonl_utf16_surrogateescape_line_quarantined_not_crash(
+        self,
+        tmp_path: Path,
+        ctx: PluginContext,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """UTF-16 surrogateescape lines are quarantined without crashing."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        jsonl_file = tmp_path / "data.jsonl"
+        jsonl_file.write_text("{}", encoding="utf-8")
+
+        # Simulate text-decoder output containing surrogateescape bytes for a
+        # UTF-16 source line. Re-encoding with utf-16 used to crash here.
+        fake_file = io.StringIO('{"id": 1}\n\udcff\n{"id": 3}\n')
+        real_open = open
+
+        def fake_open(file: object, *args: object, **kwargs: object) -> object:
+            if Path(file) == jsonl_file and kwargs.get("encoding") == "utf-16":
+                fake_file.seek(0)
+                return fake_file
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", fake_open)
+
+        source = JSONSource(
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "encoding": "utf-16",
+                "on_validation_failure": "quarantine",
+                "schema": {"mode": "observed"},
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        assert len(results) == 3
+        assert results[0].is_quarantined is False
+        assert results[0].row == {"id": 1}
+        assert results[2].is_quarantined is False
+        assert results[2].row == {"id": 3}
+
+        quarantined = results[1]
+        assert quarantined.is_quarantined is True
+        assert quarantined.quarantine_error is not None
+        assert "line 2" in quarantined.quarantine_error
+        assert "utf-16" in quarantined.quarantine_error.lower()
+        assert "__raw_bytes_hex__" in quarantined.row
+        assert quarantined.row["__line_number__"] == 2
+
+    def test_jsonl_invalid_encoding_line_with_discard_mode(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Invalid-encoding JSONL line is dropped when discard mode is configured."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        jsonl_file = tmp_path / "data.jsonl"
+        jsonl_file.write_bytes(b'{"id": 1}\n\xff\xfe\n{"id": 3}\n')
+
+        source = JSONSource(
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "encoding": "utf-8",
+                "on_validation_failure": "discard",
+                "schema": {"mode": "observed"},
+            }
+        )
+
+        results = list(source.load(ctx))
+        assert len(results) == 2
+        assert all(not r.is_quarantined for r in results)
+        assert results[0].row == {"id": 1}
+        assert results[1].row == {"id": 3}
+
+    def test_jsonl_utf16_records_load_without_decode_quarantine(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """UTF-16 JSONL should parse as valid rows (no raw-byte line splitting)."""
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        jsonl_file = tmp_path / "utf16-data.jsonl"
+        jsonl_file.write_text('{"id": 1, "name": "alice"}\n{"id": 2, "name": "bob"}\n', encoding="utf-16")
+
+        source = JSONSource(
+            {
+                "path": str(jsonl_file),
+                "format": "jsonl",
+                "encoding": "utf-16",
+                "on_validation_failure": "quarantine",
+                "schema": {"mode": "observed"},
+            }
+        )
+
+        results = list(source.load(ctx))
+        assert len(results) == 2
+        assert all(not row.is_quarantined for row in results)
+        assert results[0].row == {"id": 1, "name": "alice"}
+        assert results[1].row == {"id": 2, "name": "bob"}
 
     def test_jsonl_quarantined_row_contains_raw_line_data(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Quarantined parse error should contain the raw line for audit."""
@@ -899,3 +1103,36 @@ class TestJSONSourceDataKeyStructuralErrors:
         assert len(caplog.records) == 1
         assert "Validation error not recorded" in caplog.records[0].message
         assert "results" in caplog.records[0].message  # The missing key
+
+    def test_data_key_structural_error_uses_parse_schema_mode(self, tmp_path: Path) -> None:
+        """Structural data_key errors record contract-valid schema_mode='parse'."""
+        from unittest.mock import MagicMock
+
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        json_file.write_text('{"wrong_key": [{"id": 1}]}')
+
+        mock_landscape = MagicMock()
+        mock_landscape.record_validation_error.return_value = "verr_test"
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            node_id="source_json",
+            landscape=mock_landscape,
+        )
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "format": "json",
+                "data_key": "results",
+                "on_validation_failure": "quarantine",
+                "schema": {"mode": "observed"},
+            }
+        )
+
+        list(source.load(ctx))
+
+        call_kwargs = mock_landscape.record_validation_error.call_args[1]
+        assert call_kwargs["schema_mode"] == "parse"

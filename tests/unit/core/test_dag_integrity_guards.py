@@ -14,7 +14,7 @@ class TestDAGEdgeDataIntegrity:
         graph = ExecutionGraph()
         graph.add_node("gate_1", node_type="gate", plugin_name="gate", config={"routes": {"branch_a": "out"}})
         graph.add_node("sink_1", node_type="sink", plugin_name="json")
-        graph._sink_id_map = {SinkName("out"): NodeID("sink_1")}
+        graph.set_sink_id_map({SinkName("out"): NodeID("sink_1")})
         graph.add_edge("gate_1", "sink_1", label="branch_a", mode=RoutingMode.COPY)
 
         # Mutate internal graph directly — get_nx_graph() returns a frozen copy
@@ -29,7 +29,7 @@ class TestDAGEdgeDataIntegrity:
         graph = ExecutionGraph()
         graph.add_node("transform_1", node_type="transform", plugin_name="passthrough")
         graph.add_node("sink_1", node_type="sink", plugin_name="json")
-        graph._sink_id_map = {SinkName("out"): NodeID("sink_1")}
+        graph.set_sink_id_map({SinkName("out"): NodeID("sink_1")})
         graph.add_edge("transform_1", "sink_1", label="on_success", mode=RoutingMode.MOVE)
 
         # Mutate internal graph directly — get_nx_graph() returns a frozen copy
@@ -59,7 +59,7 @@ class TestRouteResolutionIntegrity:
             plugin_name="config_gate:router",
             config={"routes": {"true": "output", "false": "output"}},
         )
-        graph._route_resolution_map[(NodeID("gate_1"), "true")] = RouteDestination.sink(SinkName("output"))
+        graph.add_route_resolution_entry(NodeID("gate_1"), "true", RouteDestination.sink(SinkName("output")))
 
         with pytest.raises(GraphValidationError, match="has no destination in route resolution map"):
             graph._validate_route_resolution_map_complete()

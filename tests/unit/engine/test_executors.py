@@ -69,7 +69,7 @@ from elspeth.contracts.enums import (
     RowOutcome,
     TriggerType,
 )
-from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.errors import ContractMergeError, OrchestrationInvariantError
 from elspeth.contracts.results import ArtifactDescriptor, GateResult
 from elspeth.contracts.routing import RouteDestination, RoutingAction
 from elspeth.contracts.schema_contract import SchemaContract
@@ -1272,6 +1272,56 @@ class TestAggregationExecutor:
         failed_calls = [c for c in recorder.complete_batch.call_args_list if c[1].get("status") == BatchStatus.FAILED]
         assert len(failed_calls) == 1
 
+    def test_execute_flush_exception_clears_batch_token_ids(self) -> None:
+        """Exception path clears ctx.batch_token_ids to prevent stale leakage.
+
+        Regression: PluginContext is reused across calls. If execute_flush()
+        raises without clearing batch_token_ids, subsequent transforms
+        (e.g. OpenRouterBatchLLMTransform) see stale IDs and misattribute
+        telemetry to tokens from the failed batch.
+        """
+        executor, _recorder, nid = self._make_agg_executor(count=2)
+        contract = _make_contract()
+
+        executor.buffer_row(nid, _make_token(data={"v": "a"}, token_id="t1", contract=contract))
+        executor.buffer_row(nid, _make_token(data={"v": "b"}, token_id="t2", contract=contract))
+
+        transform = MagicMock()
+        transform.name = "agg"
+        transform.process.side_effect = RuntimeError("boom")
+        ctx = _make_ctx()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        # batch_token_ids must be None after error, not stale ["t1", "t2"]
+        assert ctx.batch_token_ids is None
+
+    def test_execute_flush_batch_pending_clears_batch_token_ids(self) -> None:
+        """BatchPendingError path clears ctx.batch_token_ids.
+
+        Regression: Same stale-ID leakage as the exception path — the
+        BatchPendingError control flow signal re-raised before cleanup.
+        """
+        from elspeth.contracts.errors import BatchPendingError
+
+        executor, _recorder, nid = self._make_agg_executor(count=2)
+        contract = _make_contract()
+
+        executor.buffer_row(nid, _make_token(data={"v": "a"}, token_id="t1", contract=contract))
+        executor.buffer_row(nid, _make_token(data={"v": "b"}, token_id="t2", contract=contract))
+
+        transform = MagicMock()
+        transform.name = "agg"
+        transform.process.side_effect = BatchPendingError("batch-123", "submitted")
+        ctx = _make_ctx()
+
+        with pytest.raises(BatchPendingError):
+            executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        # batch_token_ids must be None after pending, not stale ["t1", "t2"]
+        assert ctx.batch_token_ids is None
+
     def test_execute_flush_resets_batch_state(self) -> None:
         """After flush, batch state is reset (new batch on next row)."""
         executor, _recorder, nid = self._make_agg_executor(count=1)
@@ -1472,6 +1522,52 @@ class TestSinkExecutor:
         assert all(isinstance(r, dict) for r in rows_passed)
 
     # --- Write exception ---
+
+    def test_contract_merge_exception_marks_all_states_failed_and_reraises(self) -> None:
+        """Contract merge failure marks opened sink states FAILED and re-raises."""
+        recorder = _make_recorder()
+        executor = SinkExecutor(recorder, _make_span_factory(), run_id="test-run")
+        contract_a = _make_contract()
+        contract_b = SchemaContract(
+            fields=(
+                make_field(
+                    "value",
+                    python_type=int,
+                    original_name="value",
+                    required=True,
+                    source="declared",
+                ),
+            ),
+            mode="FLEXIBLE",
+            locked=True,
+        )
+        tokens = [
+            _make_token(data={"value": "a"}, token_id="t1", contract=contract_a),
+            _make_token(data={"value": 1}, token_id="t2", contract=contract_b),
+        ]
+        sink = _make_sink()
+        ctx = _make_ctx()
+        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+
+        with pytest.raises(ContractMergeError):
+            executor.write(
+                sink,
+                tokens,
+                ctx,
+                step_in_pipeline=5,
+                sink_name="out",
+                pending_outcome=pending,
+            )
+
+        failed_calls = [c for c in recorder.complete_node_state.call_args_list if c[1].get("status") == NodeStateStatus.FAILED]
+        assert len(failed_calls) == 2
+        for call in failed_calls:
+            error = call[1]["error"]
+            assert error["phase"] == "contract_merge"
+
+        sink.write.assert_not_called()
+        sink.flush.assert_not_called()
+        recorder.record_token_outcome.assert_not_called()
 
     def test_write_exception_marks_all_states_failed_and_reraises(self) -> None:
         """Exception from sink.write() marks all states FAILED and re-raises."""

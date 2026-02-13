@@ -12,9 +12,9 @@ THREE-TIER TRUST MODEL:
 import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
-from elspeth.contracts.schema_contract import PipelineRow
+from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.plugins.config_base import PluginConfigError
-from elspeth.testing import make_pipeline_row
+from elspeth.testing import make_field, make_pipeline_row
 
 # Common schema config for dynamic field handling (accepts any fields)
 DYNAMIC_SCHEMA = {"mode": "observed"}
@@ -178,6 +178,33 @@ class TestJSONExplodeHappyPath:
 
         # Array field is NOT preserved (replaced by output_field)
         assert "items" not in output
+
+    def test_array_field_original_name_is_resolved(self, ctx: PluginContext) -> None:
+        """Configured original array_field names resolve through PipelineRow contract."""
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        transform = JSONExplode(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "array_field": "Line Items",
+            }
+        )
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                make_field("id", int, original_name="ID"),
+                make_field("line_items", object, original_name="Line Items"),
+            ),
+            locked=True,
+        )
+        row = PipelineRow({"id": 1, "line_items": ["a", "b"]}, contract)
+
+        result = transform.process(row, ctx)
+
+        assert result.status == "success"
+        assert result.rows is not None
+        assert result.rows[0].to_dict() == {"id": 1, "item": "a", "item_index": 0}
+        assert result.rows[1].to_dict() == {"id": 1, "item": "b", "item_index": 1}
 
 
 class TestJSONExplodeTypeViolations:
@@ -480,6 +507,38 @@ class TestJSONExplodeContractPropagation:
         # Original array field should not be accessible
         with pytest.raises(KeyError, match="not found in schema contract"):
             _ = output_row["tags"]
+
+    def test_fixed_mode_object_elements_keep_output_field_in_contract(self, ctx: PluginContext) -> None:
+        """FIXED mode keeps output_field contract when exploded elements are objects."""
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        transform = JSONExplode(
+            {
+                "schema": {"mode": "fixed", "fields": ["id: int", "items: any"]},
+                "array_field": "items",
+                "output_field": "item",
+            }
+        )
+
+        input_contract = SchemaContract(
+            mode="FIXED",
+            fields=(
+                make_field("id", int, required=True, source="declared"),
+                make_field("items", object, required=True, source="declared"),
+            ),
+            locked=True,
+        )
+        row = PipelineRow({"id": 1, "items": [{"sku": "A1"}]}, input_contract)
+
+        result = transform.process(row, ctx)
+
+        assert result.status == "success"
+        assert result.rows is not None
+        output_row = result.rows[0]
+        item_field = output_row.contract.get_field("item")
+        assert item_field is not None
+        assert item_field.python_type is object
+        assert output_row["item"] == {"sku": "A1"}
 
 
 class TestJSONExplodeCopyIsolation:

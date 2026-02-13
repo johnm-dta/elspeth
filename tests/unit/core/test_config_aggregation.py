@@ -53,11 +53,11 @@ class TestTriggerConfig:
         trigger = TriggerConfig(
             count=1000,
             timeout_seconds=3600.0,  # 1 hour
-            condition="row['type'] == 'flush_signal'",
+            condition="row['batch_count'] >= 1000 and row['batch_age_seconds'] < 30.0",
         )
         assert trigger.count == 1000
         assert trigger.timeout_seconds == 3600.0
-        assert trigger.condition == "row['type'] == 'flush_signal'"
+        assert trigger.condition == "row['batch_count'] >= 1000 and row['batch_age_seconds'] < 30.0"
 
     def test_at_least_one_trigger_required(self) -> None:
         """At least one trigger must be specified."""
@@ -131,6 +131,23 @@ class TestTriggerConfig:
         # Forbidden function call
         with pytest.raises(ValidationError, match="Forbidden"):
             TriggerConfig(condition="__import__('os')")
+
+    def test_condition_rejects_non_batch_row_keys(self) -> None:
+        """Condition trigger only allows batch-level keys."""
+        from elspeth.core.config import TriggerConfig
+
+        with pytest.raises(ValidationError, match="unsupported row keys"):
+            TriggerConfig(condition="row['type'] == 'flush_signal'")
+
+        with pytest.raises(ValidationError, match="unsupported row keys"):
+            TriggerConfig(condition="row.get('status') == 'ready'")
+
+    def test_condition_rejects_non_literal_row_key_access(self) -> None:
+        """Condition row key access must use string literals."""
+        from elspeth.core.config import TriggerConfig
+
+        with pytest.raises(ValidationError, match="must be string literals"):
+            TriggerConfig(condition="row.get(123) == 1")
 
 
 class TestAggregationSettings:

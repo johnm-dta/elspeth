@@ -569,6 +569,194 @@ class TestTokenField:
         assert ctx.token.row_id == "row-99"
 
 
+class TestRecordCallTelemetryPayloadSnapshot:
+    """Tests for telemetry payload snapshotting in record_call.
+
+    Regression tests for mutable payload drift: emitted telemetry payloads must
+    be immutable snapshots that stay aligned with call-time hashes.
+    """
+
+    def test_request_payload_snapshot_is_immutable_after_call(self) -> None:
+        """Mutating request_data after record_call must not change telemetry payload."""
+        from typing import Any
+        from unittest.mock import MagicMock
+
+        from elspeth.contracts.enums import CallStatus, CallType
+        from elspeth.contracts.plugin_context import PluginContext
+        from elspeth.core.canonical import stable_hash
+
+        emitted_events: list[Any] = []
+
+        def capture_telemetry(event):
+            emitted_events.append(event)
+
+        mock_landscape = MagicMock()
+        mock_landscape.record_call.return_value = MagicMock(call_id="call-001")
+
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_landscape,
+            state_id="state-001",
+            telemetry_emit=capture_telemetry,
+        )
+
+        request_data = {"a": 1, "nested": {"x": 2}}
+        expected_request = {"a": 1, "nested": {"x": 2}}
+
+        ctx.record_call(
+            call_type=CallType.HTTP,
+            provider="api.example.com",
+            request_data=request_data,
+            response_data={"ok": True},
+            latency_ms=5.0,
+            status=CallStatus.SUCCESS,
+        )
+
+        request_data["a"] = 999
+        request_data["nested"]["x"] = 777
+
+        assert len(emitted_events) == 1
+        event = emitted_events[0]
+        assert event.request_payload == expected_request
+        assert event.request_hash == stable_hash(expected_request)
+
+    def test_response_payload_snapshot_is_immutable_after_call(self) -> None:
+        """Mutating response_data after record_call must not change telemetry payload."""
+        from typing import Any
+        from unittest.mock import MagicMock
+
+        from elspeth.contracts.enums import CallStatus, CallType
+        from elspeth.contracts.plugin_context import PluginContext
+        from elspeth.core.canonical import stable_hash
+
+        emitted_events: list[Any] = []
+
+        def capture_telemetry(event):
+            emitted_events.append(event)
+
+        mock_landscape = MagicMock()
+        mock_landscape.record_call.return_value = MagicMock(call_id="call-001")
+
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_landscape,
+            state_id="state-001",
+            telemetry_emit=capture_telemetry,
+        )
+
+        response_data = {"usage": {"prompt_tokens": 1, "completion_tokens": 2}}
+        expected_response = {"usage": {"prompt_tokens": 1, "completion_tokens": 2}}
+
+        ctx.record_call(
+            call_type=CallType.LLM,
+            provider="openrouter",
+            request_data={"prompt": "hi"},
+            response_data=response_data,
+            latency_ms=12.0,
+            status=CallStatus.SUCCESS,
+        )
+
+        response_data["usage"]["prompt_tokens"] = 999
+
+        assert len(emitted_events) == 1
+        event = emitted_events[0]
+        assert event.response_payload == expected_response
+        assert event.response_hash == stable_hash(expected_response)
+        assert event.token_usage == expected_response["usage"]
+
+
+class TestRecordCallTelemetryTokenCorrelation:
+    """Tests for token_id correlation in ExternalCallCompleted telemetry."""
+
+    def test_state_context_emits_token_id_when_token_present(self) -> None:
+        """Transform-context calls should include token_id for correlation."""
+        from typing import Any
+        from unittest.mock import MagicMock
+
+        from elspeth.contracts.enums import CallStatus, CallType
+        from elspeth.contracts.identity import TokenInfo
+        from elspeth.contracts.plugin_context import PluginContext
+        from elspeth.contracts.schema_contract import SchemaContract
+        from elspeth.testing import make_field, make_row
+
+        emitted_events: list[Any] = []
+
+        def capture_telemetry(event):
+            emitted_events.append(event)
+
+        mock_landscape = MagicMock()
+        mock_landscape.record_call.return_value = MagicMock(call_id="call-001")
+
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(make_field("value", int, original_name="value", required=False, source="inferred"),),
+            locked=True,
+        )
+        token_row = make_row({"value": 1}, contract=contract)
+        token = TokenInfo(row_id="row-001", token_id="tok-001", row_data=token_row)
+
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_landscape,
+            state_id="state-001",
+            token=token,
+            telemetry_emit=capture_telemetry,
+        )
+
+        ctx.record_call(
+            call_type=CallType.HTTP,
+            provider="api.example.com",
+            request_data={"method": "GET"},
+            response_data={"status_code": 200},
+            latency_ms=10.0,
+            status=CallStatus.SUCCESS,
+        )
+
+        assert len(emitted_events) == 1
+        assert emitted_events[0].token_id == "tok-001"
+
+    def test_operation_context_allows_missing_token_id(self) -> None:
+        """Operation-context calls should be valid with token_id=None."""
+        from typing import Any
+        from unittest.mock import MagicMock
+
+        from elspeth.contracts.enums import CallStatus, CallType
+        from elspeth.contracts.plugin_context import PluginContext
+
+        emitted_events: list[Any] = []
+
+        def capture_telemetry(event):
+            emitted_events.append(event)
+
+        mock_landscape = MagicMock()
+        mock_landscape.record_operation_call.return_value = MagicMock(call_id="op-call-001")
+
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_landscape,
+            operation_id="operation-001",
+            telemetry_emit=capture_telemetry,
+        )
+
+        ctx.record_call(
+            call_type=CallType.HTTP,
+            provider="api.example.com",
+            request_data={"method": "POST"},
+            response_data={"status_code": 202},
+            latency_ms=15.0,
+            status=CallStatus.SUCCESS,
+        )
+
+        assert len(emitted_events) == 1
+        event = emitted_events[0]
+        assert event.operation_id == "operation-001"
+        assert event.token_id is None
+
+
 class TestRecordCallTelemetryResponseHash:
     """Tests for response hash handling in record_call telemetry.
 

@@ -12,6 +12,8 @@ Example:
     llm_client = AuditedLLMClient(
         recorder=recorder,
         state_id=state_id,
+        run_id=run_id,
+        telemetry_emit=telemetry_emit,
         underlying_client=openai.OpenAI(),
         provider="openai",
     )

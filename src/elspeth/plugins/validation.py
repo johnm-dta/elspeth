@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError as PydanticValidationError
 
+from elspeth.plugins.config_base import PluginConfigError
+
 if TYPE_CHECKING:
     from elspeth.plugins.config_base import PluginConfig
 
@@ -75,12 +77,8 @@ class PluginConfigValidator:
             return []  # Valid
         except PydanticValidationError as e:
             return self._extract_errors(e)
-        except Exception as e:
-            # from_dict wraps ValidationError in PluginConfigError
-            # Extract the original Pydantic error from the exception chain
-            if e.__cause__ and isinstance(e.__cause__, PydanticValidationError):
-                return self._extract_errors(e.__cause__)
-            raise  # Re-raise if not a wrapped validation error
+        except PluginConfigError as e:
+            return self._extract_wrapped_plugin_config_error(e, config)
 
     def _get_source_config_model(self, source_type: str) -> type["PluginConfig"] | None:
         """Get Pydantic config model for source type.
@@ -131,12 +129,8 @@ class PluginConfigValidator:
             return []  # Valid
         except PydanticValidationError as e:
             return self._extract_errors(e)
-        except Exception as e:
-            # from_dict wraps ValidationError in PluginConfigError
-            # Extract the original Pydantic error from the exception chain
-            if e.__cause__ and isinstance(e.__cause__, PydanticValidationError):
-                return self._extract_errors(e.__cause__)
-            raise  # Re-raise if not a wrapped validation error
+        except PluginConfigError as e:
+            return self._extract_wrapped_plugin_config_error(e, config)
 
     def validate_sink_config(
         self,
@@ -161,12 +155,31 @@ class PluginConfigValidator:
             return []  # Valid
         except PydanticValidationError as e:
             return self._extract_errors(e)
-        except Exception as e:
-            # from_dict wraps ValidationError in PluginConfigError
-            # Extract the original Pydantic error from the exception chain
-            if e.__cause__ and isinstance(e.__cause__, PydanticValidationError):
-                return self._extract_errors(e.__cause__)
-            raise  # Re-raise if not a wrapped validation error
+        except PluginConfigError as e:
+            return self._extract_wrapped_plugin_config_error(e, config)
+
+    def _extract_wrapped_plugin_config_error(
+        self,
+        error: PluginConfigError,
+        config: dict[str, object],
+    ) -> list[ValidationError]:
+        """Convert wrapped PluginConfigError causes into structured errors.
+
+        PluginConfig.from_dict() wraps:
+        - PydanticValidationError for model-level validation failures
+        - ValueError for schema parsing failures before model validation
+        """
+        cause = error.__cause__
+
+        if type(cause) is PydanticValidationError:
+            return self._extract_errors(cause)
+
+        if type(cause) is ValueError:
+            if "schema" in config:
+                return [ValidationError(field="schema", message=str(cause), value=config["schema"])]
+            return [ValidationError(field="config", message=str(cause), value=config)]
+
+        raise error
 
     def validate_schema_config(
         self,
@@ -314,8 +327,8 @@ class PluginConfigValidator:
             field_path = ".".join(str(loc) for loc in err["loc"])
             message = err["msg"]
 
-            # Try to extract the invalid value from input
-            value = err.get("input", "<unknown>")
+            # Pydantic error dict includes failing input value.
+            value = err["input"]
 
             errors.append(
                 ValidationError(

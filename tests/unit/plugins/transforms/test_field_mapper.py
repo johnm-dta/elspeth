@@ -1,10 +1,12 @@
 """Tests for FieldMapper transform."""
 
+from pathlib import Path
+
 import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
-from elspeth.contracts.schema_contract import PipelineRow
-from elspeth.testing import make_pipeline_row
+from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+from elspeth.testing import make_field, make_pipeline_row
 
 # Common schema config for dynamic field handling (accepts any fields)
 DYNAMIC_SCHEMA = {"mode": "observed"}
@@ -41,7 +43,9 @@ class TestFieldMapper:
         assert result.status == "success"
         assert result.row is not None
         assert result.row.to_dict() == {"new_name": "value", "other": 123}
-        assert "old_name" not in result.row
+        # Original name remains accessible via contract metadata lineage.
+        assert "old_name" in result.row
+        assert result.row["old_name"] == "value"
 
     def test_rename_multiple_fields(self, ctx: PluginContext) -> None:
         """Rename multiple fields at once."""
@@ -63,6 +67,29 @@ class TestFieldMapper:
         assert result.status == "success"
         assert result.row is not None
         assert result.row.to_dict() == {"firstName": "Alice", "lastName": "Smith", "id": 1}
+
+    def test_mapping_source_can_use_original_field_name(self, ctx: PluginContext) -> None:
+        """Mapping sources resolve original names through the input contract."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "mapping": {"Amount USD": "price"},
+            }
+        )
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(make_field("amount_usd", float, original_name="Amount USD", required=False, source="inferred"),),
+            locked=True,
+        )
+        row = PipelineRow({"amount_usd": 12.5}, contract)
+
+        result = transform.process(row, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row.to_dict() == {"price": 12.5}
 
     def test_select_fields_only(self, ctx: PluginContext) -> None:
         """Only include specified fields (drop others)."""
@@ -157,6 +184,36 @@ class TestFieldMapper:
         assert result.row is not None
         assert result.row["origin"] == "api"
         assert "meta" in result.row  # Original nested structure preserved
+
+    def test_nested_field_type_mismatch_raises_in_non_strict_mode(self, ctx: PluginContext) -> None:
+        """Non-dict intermediate on dotted path raises type error (upstream bug)."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "mapping": {"user.name": "origin"},
+                "strict": False,
+            }
+        )
+
+        with pytest.raises(TypeError, match="expected dict"):
+            transform.process(make_pipeline_row({"user": "string_not_dict"}), ctx)
+
+    def test_nested_field_type_mismatch_raises_in_strict_mode(self, ctx: PluginContext) -> None:
+        """Strict mode should not mask type mismatches as missing fields."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "mapping": {"user.name": "origin"},
+                "strict": True,
+            }
+        )
+
+        with pytest.raises(TypeError, match="expected dict"):
+            transform.process(make_pipeline_row({"user": "string_not_dict"}), ctx)
 
     def test_empty_mapping_passthrough(self, ctx: PluginContext) -> None:
         """Empty mapping acts as passthrough."""
@@ -362,6 +419,77 @@ class TestFieldMapperContractPropagation:
         assert output_row["target"] == "value"
         assert output_row["other"] == 42
 
-        # Original field name should not be accessible
-        with pytest.raises(KeyError, match="not found in schema contract"):
-            _ = output_row["source"]
+        # Original field name remains accessible via contract lineage.
+        assert output_row["source"] == "value"
+
+    def test_renamed_field_preserves_original_name_metadata(self, ctx: PluginContext) -> None:
+        """Renamed fields preserve source original_name lineage in contract."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "mapping": {"amount_usd": "price"},
+            }
+        )
+
+        input_contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                make_field("amount_usd", float, original_name="Amount USD", required=True, source="declared"),
+                make_field("other", int, original_name="Other", required=False, source="inferred"),
+            ),
+            locked=True,
+        )
+        row = PipelineRow({"amount_usd": 12.5, "other": 1}, input_contract)
+
+        result = transform.process(row, ctx)
+        assert result.status == "success"
+        assert isinstance(result.row, PipelineRow)
+
+        renamed = result.row.contract.get_field("price")
+        assert renamed is not None
+        assert renamed.original_name == "Amount USD"
+        assert renamed.python_type is float
+        assert renamed.required is True
+        assert renamed.source == "declared"
+
+    def test_headers_original_uses_preserved_source_name_after_rename(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Sink headers: original emits source header after FieldMapper rename."""
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "mapping": {"amount_usd": "price"},
+            }
+        )
+
+        input_contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(make_field("amount_usd", float, original_name="Amount USD", required=True, source="declared"),),
+            locked=True,
+        )
+        result = transform.process(PipelineRow({"amount_usd": 12.5}, input_contract), ctx)
+        assert result.status == "success"
+        assert isinstance(result.row, PipelineRow)
+
+        output_path = tmp_path / "output.csv"
+        sink = CSVSink(
+            {
+                "path": str(output_path),
+                "schema": {"mode": "observed"},
+                "headers": "original",
+            }
+        )
+        sink_ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            contract=result.row.contract,
+        )
+        sink.write([result.row.to_dict()], sink_ctx)
+        sink.close()
+
+        header = output_path.read_text().splitlines()[0]
+        assert header == "Amount USD"

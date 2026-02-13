@@ -618,3 +618,31 @@ class TestTracingMetadata:
         metadata_update = next((u for u in captured_updates if "metadata" in u), None)
         assert metadata_update is not None
         assert metadata_update["metadata"]["latency_ms"] == 1234.5
+
+
+class TestTracingProviderValidation:
+    """Tests for explicit tracing provider validation behavior."""
+
+    def test_unknown_provider_logs_validation_error(self) -> None:
+        """Unknown providers emit a visible validation warning and disable tracing."""
+        config = _make_openrouter_config(
+            tracing={
+                "provider": "langfusee",
+                "public_key": "pk-test",
+                "secret_key": "sk-test",
+            }
+        )
+        transform = OpenRouterLLMTransform(config)
+
+        with patch("structlog.get_logger") as mock_get_logger:
+            mock_logger = MagicMock()
+            mock_get_logger.return_value = mock_logger
+
+            ctx = _make_mock_ctx()
+            transform.on_start(ctx)
+
+            mock_logger.warning.assert_called_once()
+            warning_call = mock_logger.warning.call_args
+            assert warning_call.args[0] == "Tracing configuration error"
+            assert "Unknown tracing provider" in warning_call.kwargs["error"]
+            assert transform._tracing_active is False

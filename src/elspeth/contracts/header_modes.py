@@ -93,8 +93,11 @@ def resolve_headers(
 
         elif mode == HeaderMode.ORIGINAL:
             if contract is not None:
-                field = contract.get_field(name)
-                result[name] = field.original_name if field else name
+                try:
+                    field = contract.get_field(name)
+                except KeyError as e:
+                    raise KeyError(f"Contract corruption detected: missing field '{name}' during ORIGINAL header resolution.") from e
+                result[name] = field.original_name
             else:
                 result[name] = name
 

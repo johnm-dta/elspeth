@@ -12,7 +12,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import IO, TYPE_CHECKING, Any, Literal
 
 from elspeth.contracts import ArtifactDescriptor, PluginSchema
@@ -234,6 +234,10 @@ class CSVSink(BaseSink):
                 size_bytes=0,
             )
 
+        # Required fields must exist even when validate_input=False.
+        # Missing required fields are upstream bugs and must fail fast.
+        self._validate_required_fields_present(rows)
+
         # Optional input validation - crash on failure (upstream bug!)
         if self._validate_input and not self._schema_config.is_observed:
             for row in rows:
@@ -284,6 +288,20 @@ class CSVSink(BaseSink):
             content_hash=content_hash,
             size_bytes=size_bytes,
         )
+
+    def _validate_required_fields_present(self, rows: Sequence[Mapping[str, object]]) -> None:
+        """Fail fast when any required schema field is missing from a row."""
+        required_fields = self._schema_config.get_effective_required_fields()
+        if not required_fields:
+            return
+
+        ordered_required = sorted(required_fields)
+        for row_index, row in enumerate(rows):
+            missing = [name for name in ordered_required if name not in row]
+            if missing:
+                raise ValueError(
+                    f"CSVSink row {row_index} is missing required fields: {missing}. This indicates an upstream schema/transform bug."
+                )
 
     def _open_file(self, rows: list[dict[str, Any]]) -> None:
         """Open file for writing, handling append mode and display headers.

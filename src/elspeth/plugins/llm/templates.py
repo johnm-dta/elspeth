@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -103,9 +104,10 @@ class PromptTemplate:
         # Lookup data for two-dimensional lookups
         # Note: We distinguish None (no lookup configured) from {} (empty lookup).
         # Both are valid, but they're semantically different for audit purposes.
-        self._lookup_data = lookup_data if lookup_data is not None else {}
+        lookup_snapshot = deepcopy(lookup_data) if lookup_data is not None else None
+        self._lookup_data = lookup_snapshot if lookup_snapshot is not None else {}
         self._lookup_source = lookup_source
-        self._lookup_hash = _sha256(canonical_json(lookup_data)) if lookup_data is not None else None
+        self._lookup_hash = _sha256(canonical_json(lookup_snapshot)) if lookup_snapshot is not None else None
 
         # Use sandboxed environment for security
         self._env = SandboxedEnvironment(
@@ -140,14 +142,14 @@ class PromptTemplate:
 
     def render(
         self,
-        row: dict[str, Any],
+        row: dict[str, Any] | PipelineRow,
         *,
         contract: SchemaContract | None = None,
     ) -> str:
         """Render template with row data.
 
         Args:
-            row: Row data (accessed as row.* in template)
+            row: Row data (dict or PipelineRow, accessed as row.* in template)
             contract: Optional schema contract for dual-name resolution.
                 If provided, templates can use original names like
                 {{ row["'Amount USD'"] }} in addition to normalized names.
@@ -158,9 +160,13 @@ class PromptTemplate:
         Raises:
             TemplateError: If rendering fails (undefined variable, sandbox violation, etc.)
         """
-        # Wrap row for dual-name access if contract provided
-        if contract is not None:
-            row_context: Any = PipelineRow(row, contract)
+        # Use PipelineRow directly when provided; otherwise wrap dict for
+        # dual-name access only when contract is explicitly supplied.
+        row_context: Any
+        if isinstance(row, PipelineRow):
+            row_context = row
+        elif contract is not None:
+            row_context = PipelineRow(row, contract)
         else:
             row_context = row
 
@@ -181,14 +187,14 @@ class PromptTemplate:
 
     def render_with_metadata(
         self,
-        row: dict[str, Any],
+        row: dict[str, Any] | PipelineRow,
         *,
         contract: SchemaContract | None = None,
     ) -> RenderedPrompt:
         """Render template and return with audit metadata.
 
         Args:
-            row: Row data (accessed as row.* in template)
+            row: Row data (dict or PipelineRow, accessed as row.* in template)
             contract: Optional schema contract for dual-name resolution.
                 If provided, templates can use original names and the
                 contract hash will be included in the returned metadata.
@@ -204,10 +210,11 @@ class PromptTemplate:
 
         # Compute variables hash using canonical JSON (row data only)
         # Always hash the raw row data (normalized keys) for determinism
+        row_for_hash = row.to_dict() if isinstance(row, PipelineRow) else row
         # Wrap ValueError/TypeError from canonical_json (NaN/Infinity rejection, non-serializable types)
         # This ensures row-scoped failures don't crash the entire run (Tier 2 trust model)
         try:
-            variables_hash = _sha256(canonical_json(row))
+            variables_hash = _sha256(canonical_json(row_for_hash))
         except (ValueError, TypeError) as e:
             raise TemplateError(f"Cannot compute variables hash: {e}") from e
 

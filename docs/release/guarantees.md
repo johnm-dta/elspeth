@@ -1,6 +1,6 @@
 # What ELSPETH Guarantees
 
-**Version:** RC-2
+**Version:** RC-3
 **Date:** February 2026
 
 This document defines the promises ELSPETH makes to its users. These are not aspirational features - they are contractual guarantees that the system must uphold.
@@ -50,6 +50,7 @@ This is not optional. This is not best-effort. This is the reason ELSPETH exists
 | COALESCED | Merged in join operation |
 | QUARANTINED | Failed validation, stored for investigation |
 | FAILED | Processing failed, not recoverable |
+| EXPANDED | Parent token for deaggregation (1→N expansion) |
 
 **What this means:** You will never ask "what happened to row 42?" and get silence. The system recorded what happened.
 
@@ -239,16 +240,19 @@ LLM plugins include built-in rate limiting:
 ELSPETH prioritizes correctness and auditability over throughput. It is not designed for:
 - High-throughput streaming (use Kafka/Flink)
 - Sub-millisecond latency (audit recording has overhead)
-- Concurrent processing (single-threaded in RC-2)
+- Concurrent processing (single-threaded in RC-3)
 
 ### 7.2 Access Control
 
-RC-2 does not include:
+**ELSPETH is not multi-user.** It assumes single-user execution or a fully trusted network environment. There is no built-in authentication, authorization, or access control.
+
+Specifically, RC-3 does not include:
 - User authentication
 - Role-based access control
 - Data redaction profiles
+- Network-level access restrictions
 
-**Assumption:** ELSPETH runs in a trusted environment.
+If ELSPETH is exposed on a network, the deployer is responsible for providing access control at the infrastructure level (e.g., VPN, firewall rules, reverse proxy authentication).
 
 ### 7.3 External System Behavior
 
@@ -286,6 +290,7 @@ This contract is versioned with the software.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| RC-3 | Feb 2026 | Declarative DAG wiring, graceful shutdown, DROP-mode handling, gate plugin removal, telemetry hardening, test suite v2 migration |
 | RC-2 | Feb 2026 | Initial contract, bug fixes, checkpoint compatibility |
 
 Future versions may:
@@ -320,7 +325,7 @@ def test_attributability(run_id: str, token_id: str):
     assert lineage.outcome in [
         "COMPLETED", "ROUTED", "FORKED",
         "CONSUMED_IN_BATCH", "COALESCED",
-        "QUARANTINED", "FAILED"
+        "QUARANTINED", "FAILED", "EXPANDED"
     ]
 
     # Call linkage valid

@@ -154,7 +154,7 @@ class RowReorderBuffer[T]:
             ShutdownError: If buffer is shut down
             TimeoutError: If timeout exceeded waiting for space
         """
-        deadline = time.monotonic() + timeout if timeout else None
+        deadline = time.monotonic() + timeout if timeout is not None else None
 
         with self._submit_condition:
             # Wait for space (backpressure)
@@ -237,7 +237,7 @@ class RowReorderBuffer[T]:
             ShutdownError: If buffer is shut down
             TimeoutError: If timeout exceeded
         """
-        deadline = time.monotonic() + timeout if timeout else None
+        deadline = time.monotonic() + timeout if timeout is not None else None
 
         with self._release_condition:
             while True:

@@ -241,6 +241,10 @@ class AzureMonitorExporter:
         externally via flush().
         """
         if not self._buffer:
+            logger.debug(
+                "Azure Monitor flush requested with empty buffer",
+                exporter=self._name,
+            )
             return
 
         if not self._azure_exporter:

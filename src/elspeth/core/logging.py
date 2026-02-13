@@ -135,10 +135,11 @@ def configure_logging(
     root.setLevel(log_level)
 
     # Silence noisy third-party loggers that spam DEBUG output.
-    # These inherit from root logger, so we must explicitly set them to WARNING
-    # AFTER root level is set.
+    # Never make noisy loggers less restrictive than the configured root level.
+    # This prevents WARNING output when root is ERROR/CRITICAL.
+    noisy_level = max(log_level, logging.WARNING)
     for logger_name in _NOISY_LOGGERS:
-        logging.getLogger(logger_name).setLevel(logging.WARNING)
+        logging.getLogger(logger_name).setLevel(noisy_level)
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:

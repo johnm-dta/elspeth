@@ -207,6 +207,32 @@ class TestMissingPluginRaises:
             manager.get_sink_by_name("nonexistent")
 
 
+class TestHookValidation:
+    """Validate plugin hook implementations at registration time."""
+
+    def test_unknown_hook_raises_and_does_not_pollute_caches(self) -> None:
+        """Misspelled hook names must crash immediately and leave caches unchanged."""
+        import pluggy
+        import pytest
+
+        from elspeth.plugins.hookspecs import hookimpl
+        from elspeth.plugins.manager import PluginManager
+
+        class TypoPlugin:
+            @hookimpl
+            def elspeth_get_tranforms(self) -> list[type]:  # pragma: no cover - typo under test
+                return []
+
+        manager = PluginManager()
+
+        with pytest.raises(pluggy.PluginValidationError, match="unknown hook 'elspeth_get_tranforms'"):
+            manager.register(TypoPlugin())
+
+        assert manager.get_sources() == []
+        assert manager.get_transforms() == []
+        assert manager.get_sinks() == []
+
+
 class TestDiscoveryBasedRegistration:
     """Test PluginManager with automatic discovery."""
 

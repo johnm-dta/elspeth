@@ -454,6 +454,31 @@ class TestMultiQueryConfig:
             )
         assert "reserved" in str(exc_info.value).lower() or "usage" in str(exc_info.value).lower()
 
+    def test_duplicate_output_mapping_suffixes_rejected(self) -> None:
+        """Duplicate output_mapping suffixes are rejected to prevent key overwrites."""
+        from elspeth.plugins.llm.multi_query import MultiQueryConfig
+
+        with pytest.raises(PluginConfigError) as exc_info:
+            MultiQueryConfig.from_dict(
+                {
+                    "deployment_name": "gpt-4o",
+                    "endpoint": "https://test.openai.azure.com",
+                    "api_key": "key",
+                    "template": "{{ row.input_1 }}",
+                    "case_studies": [{"name": "cs1", "input_fields": ["a"]}],
+                    "criteria": [{"name": "diagnosis"}],
+                    "response_format": "standard",
+                    "output_mapping": {
+                        "score": {"suffix": "value", "type": "integer"},
+                        "rationale": {"suffix": "value", "type": "string"},
+                    },
+                    "schema": {"mode": "observed"},
+                    "required_input_fields": [],
+                }
+            )
+        assert "duplicate" in str(exc_info.value).lower()
+        assert "suffix" in str(exc_info.value).lower()
+
 
 class TestOutputFieldConfig:
     """Tests for OutputFieldConfig and JSON schema generation."""

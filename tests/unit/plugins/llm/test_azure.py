@@ -510,6 +510,19 @@ class TestAzureLLMTransformPipelining:
         assert isinstance(result.exception, RuntimeError)
         assert "state_id" in str(result.exception)
 
+    def test_process_row_missing_token_raises_runtime_error(self, mock_recorder: Mock, transform: AzureLLMTransform) -> None:
+        """Direct _process_row call with missing token must crash explicitly."""
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            landscape=mock_recorder,
+            state_id="test-state-id",
+            token=None,
+        )
+
+        with pytest.raises(RuntimeError, match=r"ctx\.token"):
+            transform._process_row(make_pipeline_row({"text": "hello"}), ctx)
+
     def test_system_prompt_included_in_messages(
         self,
         mock_recorder: Mock,

@@ -64,6 +64,9 @@ class TestCreateContractFromConfig:
         contract = create_contract_from_config(config)
 
         assert contract.mode == "FLEXIBLE"
+        assert contract.locked is False
+        assert len(contract.fields) == 1
+        assert contract.fields[0].normalized_name == "id"
 
     def test_optional_field_not_required(self) -> None:
         """Optional field (?) has required=False."""
@@ -102,8 +105,8 @@ class TestCreateContractFromConfig:
         # 'any' type maps to object (base type)
         assert type_map["e"] is object
 
-    def test_explicit_contract_is_locked(self) -> None:
-        """Explicit schemas (strict/free) start locked."""
+    def test_fixed_contract_is_locked(self) -> None:
+        """FIXED schemas start locked (types fully declared)."""
         config = SchemaConfig.from_dict(
             {
                 "mode": "fixed",
@@ -112,8 +115,19 @@ class TestCreateContractFromConfig:
         )
         contract = create_contract_from_config(config)
 
-        # Explicit schemas have complete type info - locked immediately
         assert contract.locked is True
+
+    def test_flexible_contract_starts_unlocked(self) -> None:
+        """FLEXIBLE schemas start unlocked for first-row extra-field inference."""
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "flexible",
+                "fields": ["id: int"],
+            }
+        )
+        contract = create_contract_from_config(config)
+
+        assert contract.locked is False
 
     def test_dynamic_contract_is_unlocked(self) -> None:
         """Dynamic schemas start unlocked (types inferred from first row)."""

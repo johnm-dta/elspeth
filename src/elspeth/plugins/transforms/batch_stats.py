@@ -115,7 +115,13 @@ class BatchStats(BaseTransform):
         """
         if not rows:
             # Empty batch - should not happen in normal operation
-            result_data = {"count": 0, "sum": 0, "mean": None, "batch_empty": True}
+            result_data: dict[str, Any] = {"count": 0, "sum": 0}
+            fields_added = ["count", "sum"]
+            if self._compute_mean:
+                result_data["mean"] = None
+                fields_added.append("mean")
+            result_data["batch_empty"] = True
+            fields_added.append("batch_empty")
 
             # Create OBSERVED contract for transform mode (processor.py:712 requires it)
             fields = tuple(
@@ -134,11 +140,10 @@ class BatchStats(BaseTransform):
                 PipelineRow(result_data, output_contract),
                 success_reason={
                     "action": "processed",
-                    "fields_added": ["count", "sum", "mean", "batch_empty"],
+                    "fields_added": fields_added,
                     "metadata": {"empty_batch": True},
                 },
             )
-
         # Extract numeric values - enforce type contract
         # Tier 2 pipeline data should already be validated; wrong types = upstream bug
         values: list[int | float] = []
@@ -192,25 +197,20 @@ class BatchStats(BaseTransform):
         if skipped_non_finite > 0:
             result["skipped_non_finite"] = skipped_non_finite
 
-        # Include group_by field — validate homogeneity across batch
+        # Include group_by field — validate homogeneity across batch.
+        # group_by is configured contract, so missing field is an upstream bug.
         if self._group_by and rows:
-            group_value = None
-            group_present = False
-            for row in rows:
-                if self._group_by in row:
-                    val = row[self._group_by]
-                    if not group_present:
-                        group_value = val
-                        group_present = True
-                    elif val != group_value:
-                        raise ValueError(
-                            f"Heterogeneous '{self._group_by}' values in batch: "
-                            f"first row has {group_value!r}, found {val!r}. "
-                            f"Configure the aggregation trigger to group by "
-                            f"'{self._group_by}' or remove group_by config."
-                        )
-            if group_present:
-                result[self._group_by] = group_value
+            group_value = rows[0][self._group_by]
+            for row in rows[1:]:
+                val = row[self._group_by]
+                if val != group_value:
+                    raise ValueError(
+                        f"Heterogeneous '{self._group_by}' values in batch: "
+                        f"first row has {group_value!r}, found {val!r}. "
+                        f"Configure the aggregation trigger to group by "
+                        f"'{self._group_by}' or remove group_by config."
+                    )
+            result[self._group_by] = group_value
 
         # Determine which fields were added
         fields_added = ["count", "sum", "batch_size"]
@@ -218,7 +218,7 @@ class BatchStats(BaseTransform):
             fields_added.append("mean")
         if skipped_non_finite > 0:
             fields_added.append("skipped_non_finite")
-        if self._group_by and self._group_by in result:
+        if self._group_by and rows:
             fields_added.append(self._group_by)
 
         # Create OBSERVED contract from output fields for transform mode

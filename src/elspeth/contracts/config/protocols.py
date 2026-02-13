@@ -78,15 +78,26 @@ class RuntimeRetryProtocol(Protocol):
 
 
 @runtime_checkable
+class ServiceRateLimitProtocol(Protocol):
+    """Minimal service-level rate limit interface used by RateLimitRegistry."""
+
+    @property
+    def requests_per_minute(self) -> int:
+        """Service-specific requests-per-minute limit."""
+        ...
+
+
+@runtime_checkable
 class RuntimeRateLimitProtocol(Protocol):
     """What RateLimitRegistry expects from rate limit configuration.
 
     These fields come from RateLimitSettings:
     - enabled: Whether rate limiting is active
     - default_requests_per_minute: Per-minute rate limit for services
+    - persistence_path: Optional SQLite path for cross-process persistence
 
-    Note: services and persistence_path are handled separately
-    (services is a nested dict, persistence_path is optional infrastructure).
+    Plus one method needed by RateLimitRegistry:
+    - get_service_config(service_name): resolve per-service override or default
     """
 
     @property
@@ -97,6 +108,15 @@ class RuntimeRateLimitProtocol(Protocol):
     @property
     def default_requests_per_minute(self) -> int:
         """Default requests per minute for unconfigured services."""
+        ...
+
+    @property
+    def persistence_path(self) -> str | None:
+        """Optional SQLite path for cross-process rate limit persistence."""
+        ...
+
+    def get_service_config(self, service_name: str) -> ServiceRateLimitProtocol:
+        """Get service-specific rate limit config, with fallback to defaults."""
         ...
 
 

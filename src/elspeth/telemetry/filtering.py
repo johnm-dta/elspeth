@@ -13,6 +13,7 @@ used by TelemetryManager to decide which events to emit.
 from elspeth.contracts.enums import TelemetryGranularity
 from elspeth.contracts.events import (
     ExternalCallCompleted,
+    FieldResolutionApplied,
     GateEvaluated,
     PhaseChanged,
     RowCreated,
@@ -29,8 +30,9 @@ def should_emit(event: TelemetryEvent, granularity: TelemetryGranularity) -> boo
 
     Filter logic:
     - Lifecycle events (RunStarted, RunFinished, PhaseChanged): Always emit
-    - Row events (RowCreated, TransformCompleted, GateEvaluated, TokenCompleted):
-      Emit at ROWS or FULL granularity
+    - Row events (
+      RowCreated, TransformCompleted, GateEvaluated, TokenCompleted, FieldResolutionApplied
+      ): Emit at ROWS or FULL granularity
     - External call events (ExternalCallCompleted): Emit only at FULL granularity
     - Unknown event types: Always emit (fail-open for forward compatibility)
 
@@ -59,7 +61,7 @@ def should_emit(event: TelemetryEvent, granularity: TelemetryGranularity) -> boo
             return True
 
         # Row-level events: emit at ROWS or FULL
-        case RowCreated() | TransformCompleted() | GateEvaluated() | TokenCompleted():
+        case RowCreated() | TransformCompleted() | GateEvaluated() | TokenCompleted() | FieldResolutionApplied():
             return granularity in (TelemetryGranularity.ROWS, TelemetryGranularity.FULL)
 
         # External call events: emit only at FULL

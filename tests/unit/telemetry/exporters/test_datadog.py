@@ -2,7 +2,7 @@
 """Tests for Datadog telemetry exporter.
 
 Tests cover:
-- Configuration validation (port range, optional api_key)
+- Configuration validation (port range, unsupported api_key)
 - Span creation for telemetry events
 - Tag serialization (datetime, enum, dict, tuple handling)
 - Flush and close lifecycle
@@ -196,14 +196,15 @@ class TestDatadogExporterConfiguration:
             exporter.configure({"version": "1.2.3"})
             assert exporter._version == "1.2.3"
 
-    def test_api_key_is_optional(self) -> None:
-        """api_key is optional (local agent handles auth)."""
+    def test_api_key_is_rejected(self) -> None:
+        """api_key option is rejected with a clear configuration error."""
         mock_module, _, _ = create_mock_ddtrace_module()
 
         with patch.dict(sys.modules, {"ddtrace": mock_module}):
             exporter = DatadogExporter()
-            # Should not raise without api_key
-            exporter.configure({})
+            with pytest.raises(TelemetryExporterError) as exc_info:
+                exporter.configure({"api_key": "dd-api-key"})
+            assert "does not support 'api_key'" in str(exc_info.value)
 
     def test_ddtrace_not_installed_raises(self) -> None:
         """Missing ddtrace raises TelemetryExporterError."""

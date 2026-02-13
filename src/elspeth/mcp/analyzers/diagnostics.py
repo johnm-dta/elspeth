@@ -9,7 +9,7 @@ All functions accept (db, recorder) as their first two parameters.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from elspeth.core.landscape.database import LandscapeDB
@@ -46,6 +46,7 @@ def diagnose(db: LandscapeDB, recorder: LandscapeRecorder) -> DiagnosticReport:
 
     problems: list[dict[str, Any]] = []
     recommendations: list[str] = []
+    stuck_cutoff = datetime.now(UTC) - timedelta(hours=1)
 
     with db.connection() as conn:
         # Find failed runs (most critical)
@@ -73,6 +74,7 @@ def diagnose(db: LandscapeDB, recorder: LandscapeRecorder) -> DiagnosticReport:
             select(runs_table.c.run_id, runs_table.c.started_at)
             .where(runs_table.c.status == "running")
             .where(runs_table.c.completed_at.is_(None))
+            .where(runs_table.c.started_at < stuck_cutoff)
             .order_by(runs_table.c.started_at)
             .limit(5)
         ).fetchall()
@@ -99,7 +101,7 @@ def diagnose(db: LandscapeDB, recorder: LandscapeRecorder) -> DiagnosticReport:
                 operations_table.c.started_at,
             )
             .where(operations_table.c.status == "open")
-            .where(operations_table.c.started_at < (datetime.now(UTC) - __import__("datetime").timedelta(hours=1)))
+            .where(operations_table.c.started_at < stuck_cutoff)
             .order_by(operations_table.c.started_at)
             .limit(5)
         ).fetchall()

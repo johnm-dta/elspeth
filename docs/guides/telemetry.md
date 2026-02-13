@@ -56,8 +56,8 @@ Granularity controls which events are emitted:
 
 | Level | Events Emitted | Typical Volume | Use Case |
 |-------|----------------|----------------|----------|
-| `lifecycle` | `RunStarted`, `RunCompleted`, `PhaseChanged` | ~10-20 per run | Production (minimal overhead) |
-| `rows` | Above + `RowCreated`, `TransformCompleted`, `GateEvaluated`, `TokenCompleted` | N x M (rows x transforms) | Production (standard) |
+| `lifecycle` | `RunStarted`, `RunFinished`, `PhaseChanged` | ~10-20 per run | Production (minimal overhead) |
+| `rows` | Above + `RowCreated`, `TransformCompleted`, `GateEvaluated`, `TokenCompleted`, `FieldResolutionApplied` | N x M (rows x transforms) | Production (standard) |
 | `full` | Above + `ExternalCallCompleted` with all details | High | Debugging, development |
 
 **Performance guidance:**
@@ -185,7 +185,6 @@ telemetry:
   exporters:
     - name: datadog
       options:
-        api_key: ${DD_API_KEY}       # Optional if using local agent
         service_name: elspeth-pipeline  # Default: "elspeth"
         env: production             # Default: "production"
         agent_host: localhost       # Default: "localhost"
@@ -201,7 +200,7 @@ uv pip install ddtrace
 **Datadog-specific features:**
 - All event fields available as `elspeth.*` tags
 - Native Datadog APM integration
-- Works with local Datadog Agent or direct API
+- Works with local Datadog Agent
 
 **Using with Datadog Agent (recommended):**
 ```bash
@@ -212,9 +211,6 @@ docker run -d --name dd-agent \
   -p 8126:8126 \
   datadog/agent:latest
 ```
-
-**Using without Agent:**
-The `api_key` configuration sends traces directly to Datadog API (higher latency, requires network access).
 
 ## Secrets Handling
 
@@ -244,7 +240,7 @@ OTEL_TOKEN=my-secret-token
 |-------------|---------------------|
 | OTLP auth token | `OTEL_TOKEN` |
 | Azure Monitor | `APPLICATIONINSIGHTS_CONNECTION_STRING` |
-| Datadog API key | `DD_API_KEY` |
+| Datadog Agent API key | `DD_API_KEY` (for the Datadog Agent process, not ELSPETH exporter options) |
 
 ## Correlation Workflow
 
@@ -257,7 +253,7 @@ When an alert fires in your observability platform, follow this workflow to inve
    Datadog example:
    ```
    Alert: ELSPETH pipeline failed
-   Tags: elspeth.run_id:run-abc123, elspeth.event_type:RunCompleted, status:failed
+   Tags: elspeth.run_id:run-abc123, elspeth.event_type:RunFinished, status:failed
    ```
 
 2. **Get failure context with Landscape MCP**
@@ -416,7 +412,7 @@ These metrics are logged at pipeline shutdown and can be monitored via structure
 | Event | When Emitted | Key Fields |
 |-------|--------------|------------|
 | `RunStarted` | Pipeline begins | `config_hash`, `source_plugin` |
-| `RunCompleted` | Pipeline finishes | `status`, `row_count`, `duration_ms` |
+| `RunFinished` | Pipeline finishes | `status`, `row_count`, `duration_ms` |
 | `PhaseChanged` | Phase transition | `phase`, `action` |
 
 ### Row-Level Events

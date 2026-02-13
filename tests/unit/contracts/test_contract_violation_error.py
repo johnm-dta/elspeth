@@ -2,7 +2,7 @@
 
 Tests for:
 - ContractViolation.to_error_reason(): base conversion with reason, violation_type, field, original_field
-- TypeMismatchViolation.to_error_reason(): adds expected_type, actual_type, actual_value
+- TypeMismatchViolation.to_error_reason(): adds expected, actual, value
 - MissingFieldViolation.to_error_reason(): uses base implementation
 - ExtraFieldViolation.to_error_reason(): uses base implementation
 - violations_to_error_reason(): single violation returns direct dict, multiple wraps with count
@@ -126,8 +126,8 @@ class TestTypeMismatchViolationToErrorReason:
         result = exc.to_error_reason()
         assert result["violation_type"] == "TypeMismatchViolation"
 
-    def test_type_mismatch_to_error_reason_has_expected_type(self) -> None:
-        """TypeMismatchViolation.to_error_reason() includes expected_type as string."""
+    def test_type_mismatch_to_error_reason_has_expected(self) -> None:
+        """TypeMismatchViolation.to_error_reason() includes expected as string."""
         from elspeth.contracts.errors import TypeMismatchViolation
 
         exc = TypeMismatchViolation(
@@ -138,10 +138,10 @@ class TestTypeMismatchViolationToErrorReason:
             actual_value="not_a_number",
         )
         result = exc.to_error_reason()
-        assert result["expected_type"] == "int"
+        assert result["expected"] == "int"
 
-    def test_type_mismatch_to_error_reason_has_actual_type(self) -> None:
-        """TypeMismatchViolation.to_error_reason() includes actual_type as string."""
+    def test_type_mismatch_to_error_reason_has_actual(self) -> None:
+        """TypeMismatchViolation.to_error_reason() includes actual as string."""
         from elspeth.contracts.errors import TypeMismatchViolation
 
         exc = TypeMismatchViolation(
@@ -152,10 +152,10 @@ class TestTypeMismatchViolationToErrorReason:
             actual_value="not_a_number",
         )
         result = exc.to_error_reason()
-        assert result["actual_type"] == "str"
+        assert result["actual"] == "str"
 
-    def test_type_mismatch_to_error_reason_has_actual_value_as_repr(self) -> None:
-        """TypeMismatchViolation.to_error_reason() includes actual_value as repr."""
+    def test_type_mismatch_to_error_reason_has_value_as_repr(self) -> None:
+        """TypeMismatchViolation.to_error_reason() includes value as repr."""
         from elspeth.contracts.errors import TypeMismatchViolation
 
         exc = TypeMismatchViolation(
@@ -166,7 +166,7 @@ class TestTypeMismatchViolationToErrorReason:
             actual_value="not_a_number",
         )
         result = exc.to_error_reason()
-        assert result["actual_value"] == "'not_a_number'"
+        assert result["value"] == "'not_a_number'"
 
     def test_type_mismatch_to_error_reason_repr_handles_complex_values(self) -> None:
         """TypeMismatchViolation.to_error_reason() uses repr for complex values."""
@@ -180,7 +180,7 @@ class TestTypeMismatchViolationToErrorReason:
             actual_value=[1, 2, 3],
         )
         result = exc.to_error_reason()
-        assert result["actual_value"] == "[1, 2, 3]"
+        assert result["value"] == "[1, 2, 3]"
 
 
 class TestExtraFieldViolationToErrorReason:
@@ -323,3 +323,50 @@ class TestViolationsToErrorReason:
         result = violations_to_error_reason(violations)
         assert result["count"] == 3
         assert len(result["violations"]) == 3
+
+
+class TestTransformErrorReasonAlignment:
+    """Ensure helper-emitted keys are declared in TransformErrorReason."""
+
+    def test_contract_violation_helper_keys_are_declared(self) -> None:
+        """All keys emitted by violation helpers must exist in TransformErrorReason."""
+        from elspeth.contracts.errors import (
+            ContractViolation,
+            MissingFieldViolation,
+            TransformErrorReason,
+            TypeMismatchViolation,
+            violations_to_error_reason,
+        )
+
+        declared_keys = set(TransformErrorReason.__annotations__)
+
+        reasons = [
+            ContractViolation(normalized_name="id", original_name="ID").to_error_reason(),
+            TypeMismatchViolation(
+                normalized_name="amount",
+                original_name="Amount",
+                expected_type=int,
+                actual_type=str,
+                actual_value="bad",
+            ).to_error_reason(),
+            violations_to_error_reason(
+                [
+                    MissingFieldViolation(normalized_name="id", original_name="ID"),
+                    TypeMismatchViolation(
+                        normalized_name="amount",
+                        original_name="Amount",
+                        expected_type=int,
+                        actual_type=str,
+                        actual_value="bad",
+                    ),
+                ]
+            ),
+        ]
+
+        emitted_keys = set().union(*(set(reason) for reason in reasons))
+        # multiple_contract_violations embeds per-violation reasons under "violations"
+        nested_reasons = reasons[-1]["violations"]
+        emitted_keys.update(set().union(*(set(reason) for reason in nested_reasons)))
+
+        missing_keys = emitted_keys - declared_keys
+        assert missing_keys == set(), f"Undeclared TransformErrorReason keys: {sorted(missing_keys)}"

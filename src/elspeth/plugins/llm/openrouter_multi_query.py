@@ -161,12 +161,17 @@ class OpenRouterMultiQueryLLMTransform(BaseMultiQueryTransform):
                 )
             case "langfuse":
                 self._setup_langfuse_tracing(logger)
-            case "none" | _:
+            case "none":
                 pass
+            case _:
+                logger.warning(
+                    "Unknown tracing provider encountered after validation - tracing disabled",
+                    provider=tracing_config.provider,
+                )
 
     def _process_single_query(
         self,
-        row: dict[str, Any],
+        row: PipelineRow | dict[str, Any],
         spec: QuerySpec,
         state_id: str,
         token_id: str,
@@ -223,7 +228,7 @@ class OpenRouterMultiQueryLLMTransform(BaseMultiQueryTransform):
             request_body["max_tokens"] = effective_max_tokens
 
         # 5. Get HTTP client
-        http_client = self._get_http_client(state_id)
+        http_client = self._get_http_client(state_id, token_id=token_id)
 
         # 6. Call OpenRouter API (EXTERNAL - wrap, raise CapacityError for retry)
         try:
@@ -420,7 +425,7 @@ class OpenRouterMultiQueryLLMTransform(BaseMultiQueryTransform):
     # OpenRouter-specific client management
     # ------------------------------------------------------------------
 
-    def _get_http_client(self, state_id: str) -> AuditedHTTPClient:
+    def _get_http_client(self, state_id: str, *, token_id: str | None = None) -> AuditedHTTPClient:
         """Get or create HTTP client for a state_id.
 
         Clients are cached to preserve call_index across retries.
@@ -442,6 +447,7 @@ class OpenRouterMultiQueryLLMTransform(BaseMultiQueryTransform):
                     base_url=self._base_url,
                     headers=self._request_headers,
                     limiter=self._limiter,
+                    token_id=token_id,
                 )
             return self._http_clients[state_id]
 

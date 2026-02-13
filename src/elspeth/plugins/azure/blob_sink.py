@@ -311,6 +311,14 @@ class AzureBlobSink(BaseSink):
 
         # Lazy-loaded clients
         self._container_client: ContainerClient | None = None
+        # Buffer rows across write() calls so each upload represents full run output.
+        self._buffered_rows: list[dict[str, Any]] = []
+        # Freeze rendered path on first write; subsequent writes target same blob.
+        self._resolved_blob_path: str | None = None
+        # Track whether this sink instance has successfully uploaded at least once.
+        # Needed to preserve overwrite=False first-write protection while allowing
+        # in-run rewrites of the same blob for accumulation.
+        self._has_uploaded: bool = False
 
     def _get_container_client(self) -> ContainerClient:
         """Get or create the Azure container client.
@@ -355,6 +363,16 @@ class AzureBlobSink(BaseSink):
             timestamp=datetime.now(tz=UTC).isoformat(),
         )
 
+    def _get_or_init_blob_path(self, ctx: PluginContext) -> str:
+        """Get stable blob path for this sink instance.
+
+        The path is rendered once on first write and reused thereafter so
+        repeated write() calls in the same run update the same blob.
+        """
+        if self._resolved_blob_path is None:
+            self._resolved_blob_path = self._render_blob_path(ctx)
+        return self._resolved_blob_path
+
     def _serialize_rows(self, rows: list[dict[str, Any]]) -> bytes:
         """Serialize rows to bytes based on format.
 
@@ -376,36 +394,44 @@ class AzureBlobSink(BaseSink):
             # Unreachable due to Pydantic Literal validation, but satisfies static analysis
             raise AssertionError(f"Unsupported format: {self._format}")
 
-    def _get_fieldnames_from_schema_or_row(self, row: dict[str, Any]) -> list[str]:
-        """Get fieldnames from schema or row keys.
+    def _get_fieldnames_from_schema_or_rows(self, rows: list[dict[str, Any]]) -> list[str]:
+        """Get fieldnames from schema or cumulative row keys.
 
         Field selection depends on schema mode:
         - fixed: Only declared fields (extras rejected)
-        - flexible: Declared fields first, then extras from row
-        - observed: All fields from row (infer and lock)
+        - flexible: Declared fields first, then extras seen across rows
+        - observed: All fields seen across rows
         """
+        ordered_keys: list[str] = []
+        seen_keys: set[str] = set()
+        for row in rows:
+            for key in row:
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    ordered_keys.append(key)
+
         if self._schema_config.is_observed:
-            # Observed mode: infer all fields from row keys
-            return list(row.keys())
+            # Observed mode: infer all fields from all row keys in first-seen order.
+            return ordered_keys
         elif self._schema_config.fields:
             # Explicit schema: start with declared field names in schema order
             declared_fields = [field_def.name for field_def in self._schema_config.fields]
             declared_set = set(declared_fields)
 
             if self._schema_config.mode == "flexible":
-                # Flexible mode: declared fields first, then extras from row
-                extras = [key for key in row if key not in declared_set]
+                # Flexible mode: declared fields first, then extras from all rows.
+                extras = [key for key in ordered_keys if key not in declared_set]
                 return declared_fields + extras
             else:
                 # Fixed mode: only declared fields
                 return declared_fields
         else:
-            # Fallback (shouldn't happen with valid config): use row keys
-            return list(row.keys())
+            # Fallback (shouldn't happen with valid config): use all seen keys.
+            return ordered_keys
 
-    def _get_field_names_and_display(self, row: dict[str, Any]) -> tuple[list[str], list[str]]:
+    def _get_field_names_and_display(self, rows: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
         """Get data field names and display names for CSV output."""
-        data_fields = self._get_fieldnames_from_schema_or_row(row)
+        data_fields = self._get_fieldnames_from_schema_or_rows(rows)
 
         display_map = self._get_effective_display_headers()
         if display_map is None:
@@ -418,7 +444,7 @@ class AzureBlobSink(BaseSink):
         """Serialize rows to CSV bytes."""
         output = io.StringIO()
 
-        data_fields, display_fields = self._get_field_names_and_display(rows[0])
+        data_fields, display_fields = self._get_field_names_and_display(rows)
         writer = csv.DictWriter(
             output,
             fieldnames=data_fields,
@@ -514,7 +540,7 @@ class AzureBlobSink(BaseSink):
         """
         if not rows:
             # Still render the path for consistent audit trail
-            rendered_path = self._render_blob_path(ctx)
+            rendered_path = self._get_or_init_blob_path(ctx)
             return ArtifactDescriptor(
                 artifact_type="file",
                 path_or_uri=f"azure://{self._container}/{rendered_path}",
@@ -528,12 +554,15 @@ class AzureBlobSink(BaseSink):
         if self._format in {"json", "jsonl"}:
             output_rows = self._apply_display_headers(rows)
 
-        # Render the blob path with context variables
-        rendered_path = self._render_blob_path(ctx)
+        # Render the blob path once per instance and reuse it across writes.
+        rendered_path = self._get_or_init_blob_path(ctx)
+
+        # Build candidate cumulative rows for this upload, but only commit them
+        # to sink state after external upload succeeds (retry-idempotent).
+        candidate_rows = [*self._buffered_rows, *(row.copy() for row in output_rows)]
 
         # Serialize rows to bytes (OUR CODE - let it crash on bugs)
-        content = self._serialize_rows(output_rows)
-
+        content = self._serialize_rows(candidate_rows)
         # Compute content hash before upload
         content_hash = hashlib.sha256(content).hexdigest()
         size_bytes = len(content)
@@ -544,12 +573,18 @@ class AzureBlobSink(BaseSink):
         try:
             container_client = self._get_container_client()
             blob_client = container_client.get_blob_client(rendered_path)
+            # Keep overwrite=False protection for first write against pre-existing
+            # blobs, then permit in-run rewrites to update cumulative content.
+            upload_overwrite = self._overwrite or self._has_uploaded
 
             # Upload with overwrite policy enforced atomically by Azure SDK.
             # When overwrite=False, upload_blob raises ResourceExistsError server-side,
             # avoiding the TOCTOU race of a separate exists() check.
-            blob_client.upload_blob(content, overwrite=self._overwrite)
+            blob_client.upload_blob(content, overwrite=upload_overwrite)
             latency_ms = (time.perf_counter() - start_time) * 1000
+            # Mark external blob existence immediately after upload so retries
+            # can safely overwrite the same blob if post-upload steps fail.
+            self._has_uploaded = True
 
             # Record successful blob upload in audit trail
             ctx.record_call(
@@ -559,7 +594,7 @@ class AzureBlobSink(BaseSink):
                     "operation": "upload_blob",
                     "container": self._container,
                     "blob_path": rendered_path,
-                    "overwrite": self._overwrite,
+                    "overwrite": upload_overwrite,
                 },
                 response_data={
                     "size_bytes": size_bytes,
@@ -568,16 +603,19 @@ class AzureBlobSink(BaseSink):
                 latency_ms=latency_ms,
                 provider="azure_blob_storage",
             )
+            # Commit cumulative in-memory buffer only after full success path
+            # (upload + audit recording) to keep write retries idempotent.
+            self._buffered_rows = candidate_rows
 
         except ImportError:
             # Re-raise ImportError as-is for clear dependency messaging
             raise
         except Exception as e:
-            # Convert ResourceExistsError (overwrite=False) to ValueError
-            # for consistent API. Check class name to avoid importing azure SDK at top level.
-            if type(e).__name__ == "ResourceExistsError":
-                raise ValueError(f"Blob '{rendered_path}' already exists and overwrite=False") from e
             latency_ms = (time.perf_counter() - start_time) * 1000
+            error_data: dict[str, Any] = {"type": type(e).__name__, "message": str(e)}
+            if type(e).__name__ == "ResourceExistsError":
+                # Preserve explicit reason for overwrite=False conflicts.
+                error_data["reason"] = "blob_exists"
 
             # Record failed blob upload in audit trail
             ctx.record_call(
@@ -587,12 +625,17 @@ class AzureBlobSink(BaseSink):
                     "operation": "upload_blob",
                     "container": self._container,
                     "blob_path": rendered_path,
-                    "overwrite": self._overwrite,
+                    "overwrite": self._overwrite or self._has_uploaded,
                 },
-                error={"type": type(e).__name__, "message": str(e)},
+                error=error_data,
                 latency_ms=latency_ms,
                 provider="azure_blob_storage",
             )
+
+            # Convert ResourceExistsError (overwrite=False) to ValueError
+            # for consistent API. Check class name to avoid importing azure SDK at top level.
+            if type(e).__name__ == "ResourceExistsError":
+                raise ValueError(f"Blob '{rendered_path}' already exists and overwrite=False") from e
 
             # Azure SDK errors are external system errors - propagate with context.
             # Use RuntimeError wrapper instead of type(e)(...) because Azure SDK
@@ -628,6 +671,9 @@ class AzureBlobSink(BaseSink):
     def close(self) -> None:
         """Release resources."""
         self._container_client = None
+        self._buffered_rows = []
+        self._resolved_blob_path = None
+        self._has_uploaded = False
 
     # === Lifecycle Hooks ===
 

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from elspeth.core.rate_limit.limiter import RateLimiter
 
 if TYPE_CHECKING:
-    from elspeth.contracts.config.runtime import RuntimeRateLimitConfig
+    from elspeth.contracts.config.protocols import RuntimeRateLimitProtocol
 
 
 class NoOpLimiter:
@@ -70,11 +70,11 @@ class RateLimitRegistry:
         registry.close()
     """
 
-    def __init__(self, config: RuntimeRateLimitConfig) -> None:
+    def __init__(self, config: RuntimeRateLimitProtocol) -> None:
         """Initialize registry with rate limit configuration.
 
         Args:
-            config: Runtime rate limit configuration (from RuntimeRateLimitConfig.from_settings())
+            config: Runtime rate limit configuration
         """
         self._config = config
         self._limiters: dict[str, RateLimiter] = {}

@@ -316,13 +316,15 @@ class TestOrchestratorCheckpointing:
         graph.add_edge("config_gate_split", "sink_good", label="true", mode=RoutingMode.MOVE)
         graph.add_edge("config_gate_split", "sink_bad", label="false", mode=RoutingMode.MOVE)
 
-        graph._sink_id_map = {SinkName("good"): NodeID("sink_good"), SinkName("bad"): NodeID("sink_bad")}
-        graph._transform_id_map = {0: NodeID("transform_0")}
-        graph._config_gate_id_map = {GateName("split"): NodeID("config_gate_split")}
-        graph._route_resolution_map = {
-            (NodeID("config_gate_split"), "true"): RouteDestination.sink(SinkName("good")),
-            (NodeID("config_gate_split"), "false"): RouteDestination.sink(SinkName("bad")),
-        }
+        graph.set_sink_id_map({SinkName("good"): NodeID("sink_good"), SinkName("bad"): NodeID("sink_bad")})
+        graph.set_transform_id_map({0: NodeID("transform_0")})
+        graph.set_config_gate_id_map({GateName("split"): NodeID("config_gate_split")})
+        graph.set_route_resolution_map(
+            {
+                (NodeID("config_gate_split"), "true"): RouteDestination.sink(SinkName("good")),
+                (NodeID("config_gate_split"), "false"): RouteDestination.sink(SinkName("bad")),
+            }
+        )
         orchestrator = Orchestrator(
             db=landscape_db,
             checkpoint_manager=checkpoint_mgr,

@@ -2,7 +2,7 @@
 """Tests for COMPLETED outcome timing relative to sink durability.
 
 BUG UNDER TEST: COMPLETED token outcomes are recorded BEFORE sink writes happen.
-This violates the token outcome contract (docs/audit/tokens/00-token-outcome-contract.md):
+This violates the token outcome contract (docs/contracts/token-outcomes/00-token-outcome-contract.md):
 
 - Invariant 3: "COMPLETED implies the token has a completed sink node_state"
 - Invariant 4: "Completed sink node_state implies a COMPLETED token_outcome with sink_name"
@@ -90,10 +90,10 @@ def _build_graph(config: PipelineConfig) -> ExecutionGraph:
     graph.add_edge(prev, sink_node_id, label="continue", mode=RoutingMode.MOVE)
 
     # Set internal mappings
-    graph._sink_id_map = {SinkName("default"): sink_node_id}
-    graph._transform_id_map = {i: NodeID(f"transform_{i}") for i in range(len(config.transforms))}
-    graph._config_gate_id_map = {}
-    graph._route_resolution_map = {}
+    graph.set_sink_id_map({SinkName("default"): sink_node_id})
+    graph.set_transform_id_map({i: NodeID(f"transform_{i}") for i in range(len(config.transforms))})
+    graph.set_config_gate_id_map({})
+    graph.set_route_resolution_map({})
 
     return graph
 
@@ -101,7 +101,7 @@ def _build_graph(config: PipelineConfig) -> ExecutionGraph:
 class TestCompletedOutcomeTimingContract:
     """Tests for COMPLETED outcome timing contract.
 
-    Per the token outcome contract (docs/audit/tokens/00-token-outcome-contract.md):
+    Per the token outcome contract (docs/contracts/token-outcomes/00-token-outcome-contract.md):
     - Invariant 3: "COMPLETED implies the token has a completed sink node_state"
     - Invariant 4: "Completed sink node_state implies a COMPLETED token_outcome"
 

@@ -20,7 +20,7 @@ class TestContractHelpers:
             config={"schema": {"mode": "observed", "guaranteed_fields": ["id", "name"]}},
         )
 
-        result = graph._get_guaranteed_fields("source_1")
+        result = graph.get_guaranteed_fields("source_1")
         assert result == frozenset({"id", "name"})
 
     def test_get_guaranteed_fields_from_explicit_schema(self) -> None:
@@ -33,7 +33,7 @@ class TestContractHelpers:
             config={"schema": {"mode": "flexible", "fields": ["a: int", "b: str"]}},
         )
 
-        result = graph._get_guaranteed_fields("source_1")
+        result = graph.get_guaranteed_fields("source_1")
         assert result == frozenset({"a", "b"})
 
     def test_get_guaranteed_fields_empty_for_pure_dynamic(self) -> None:
@@ -46,7 +46,7 @@ class TestContractHelpers:
             config={"schema": {"mode": "observed"}},
         )
 
-        result = graph._get_guaranteed_fields("source_1")
+        result = graph.get_guaranteed_fields("source_1")
         assert result == frozenset()
 
     def test_get_required_fields_from_required_input_fields(self) -> None:
@@ -62,7 +62,7 @@ class TestContractHelpers:
             },
         )
 
-        result = graph._get_required_fields("transform_1")
+        result = graph.get_required_fields("transform_1")
         assert result == frozenset({"customer_id", "amount"})
 
     def test_get_required_fields_from_schema_required_fields(self) -> None:
@@ -77,7 +77,7 @@ class TestContractHelpers:
             },
         )
 
-        result = graph._get_required_fields("transform_1")
+        result = graph.get_required_fields("transform_1")
         assert result == frozenset({"x", "y"})
 
     def test_get_required_fields_from_explicit_schema(self) -> None:
@@ -96,7 +96,7 @@ class TestContractHelpers:
         )
 
         # Implicit requirements are NOT returned - type validation handles these
-        result = graph._get_required_fields("sink_1")
+        result = graph.get_required_fields("sink_1")
         assert result == frozenset()
 
     def test_get_required_fields_from_explicit_required_fields(self) -> None:
@@ -114,7 +114,7 @@ class TestContractHelpers:
             },
         )
 
-        result = graph._get_required_fields("sink_1")
+        result = graph.get_required_fields("sink_1")
         assert result == frozenset({"customer_id", "amount"})
 
     def test_required_input_fields_takes_priority(self) -> None:
@@ -130,7 +130,7 @@ class TestContractHelpers:
             },
         )
 
-        result = graph._get_required_fields("transform_1")
+        result = graph.get_required_fields("transform_1")
         assert result == frozenset({"config_req"})
 
 
@@ -147,7 +147,7 @@ class TestEffectiveGuaranteedFields:
             config={"schema": {"mode": "observed", "guaranteed_fields": ["a", "b"]}},
         )
 
-        result = graph._get_effective_guaranteed_fields("source_1")
+        result = graph.get_effective_guaranteed_fields("source_1")
         assert result == frozenset({"a", "b"})
 
     def test_gate_inherits_from_upstream(self) -> None:
@@ -167,7 +167,7 @@ class TestEffectiveGuaranteedFields:
         )
         graph.add_edge("source_1", "gate_1", label="continue")
 
-        result = graph._get_effective_guaranteed_fields("gate_1")
+        result = graph.get_effective_guaranteed_fields("gate_1")
         assert result == frozenset({"x", "y"})
 
     def test_coalesce_returns_intersection(self) -> None:
@@ -203,14 +203,14 @@ class TestEffectiveGuaranteedFields:
             "coalesce_1",
             node_type=NodeType.COALESCE,
             plugin_name="coalesce",
-            config={"schema": {"mode": "observed"}},
+            config={"schema": {"mode": "observed"}, "merge": "union", "branches": {}, "policy": "require_all"},
         )
 
         graph.add_edge("branch_a", "coalesce_1", label="path_a")
         graph.add_edge("branch_b", "coalesce_1", label="path_b")
 
         # Coalesce guarantees only the intersection
-        result = graph._get_effective_guaranteed_fields("coalesce_1")
+        result = graph.get_effective_guaranteed_fields("coalesce_1")
         assert result == frozenset({"common"})
 
 
@@ -665,7 +665,7 @@ class TestForkCoalesceContracts:
             "coalesce_1",
             node_type=NodeType.COALESCE,
             plugin_name="coalesce",
-            config={"schema": {"mode": "observed"}},
+            config={"schema": {"mode": "observed"}, "merge": "union", "branches": {}, "policy": "require_all"},
         )
 
         # Sink requires only 'id' (which is in intersection)
@@ -720,7 +720,7 @@ class TestForkCoalesceContracts:
             "coalesce_1",
             node_type=NodeType.COALESCE,
             plugin_name="coalesce",
-            config={"schema": {"mode": "observed"}},
+            config={"schema": {"mode": "observed"}, "merge": "union", "branches": {}, "policy": "require_all"},
         )
 
         # Sink requires 'a_only' - NOT guaranteed by coalesce (only 'common' is)
@@ -782,7 +782,7 @@ class TestForkCoalesceContracts:
             "coalesce_1",
             node_type=NodeType.COALESCE,
             plugin_name="coalesce",
-            config={"schema": {"mode": "observed"}},
+            config={"schema": {"mode": "observed"}, "merge": "union", "branches": {}, "policy": "require_all"},
         )
 
         # Sink requires only 'id' (the only field guaranteed by ALL branches)
@@ -837,7 +837,7 @@ class TestForkCoalesceContracts:
             "coalesce_1",
             node_type=NodeType.COALESCE,
             plugin_name="coalesce",
-            config={"schema": {"mode": "observed"}},
+            config={"schema": {"mode": "observed"}, "merge": "union", "branches": {}, "policy": "require_all"},
         )
 
         # Sink requires any field - will fail since intersection is empty

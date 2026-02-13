@@ -137,6 +137,21 @@ class TestContractBuilderInference:
         field = updated.fields[0]
         assert field.python_type is type(None)
 
+    def test_infer_pandas_na_type(self) -> None:
+        """pd.NA values infer as type(None) (missing sentinel)."""
+        from elspeth.contracts.contract_builder import ContractBuilder
+
+        contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        builder = ContractBuilder(contract)
+
+        first_row = {"nullable": pd.NA}
+        field_resolution = {"nullable": "nullable"}
+
+        updated = builder.process_first_row(first_row, field_resolution)
+
+        field = updated.fields[0]
+        assert field.python_type is type(None)
+
 
 class TestContractBuilderValidation:
     """Test validation after locking."""
@@ -174,6 +189,26 @@ class TestContractBuilderValidation:
         assert isinstance(violations[0], TypeMismatchViolation)
         assert violations[0].expected_type is int
         assert violations[0].actual_type is str
+
+    def test_flexible_inferred_extra_type_mismatch_after_lock(self) -> None:
+        """FLEXIBLE inferred extras are type-validated after first-row lock."""
+        from elspeth.contracts.contract_builder import ContractBuilder
+
+        declared = make_field("id", int, original_name="id", required=True, source="declared")
+        contract = SchemaContract(mode="FLEXIBLE", fields=(declared,), locked=False)
+        builder = ContractBuilder(contract)
+
+        first_row = {"id": 1, "extra": "alpha"}
+        field_resolution = {"id": "id", "extra": "extra"}
+        locked_contract = builder.process_first_row(first_row, field_resolution)
+
+        violations = locked_contract.validate({"id": 2, "extra": 42})
+
+        assert len(violations) == 1
+        assert isinstance(violations[0], TypeMismatchViolation)
+        assert violations[0].normalized_name == "extra"
+        assert violations[0].expected_type is str
+        assert violations[0].actual_type is int
 
     def test_any_type_field_accepts_different_types(self) -> None:
         """Fields declared as 'any' (python_type=object) accept any type."""

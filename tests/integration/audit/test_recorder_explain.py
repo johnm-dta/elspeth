@@ -293,6 +293,43 @@ class TestExplainGracefulDegradation:
                 row_id=row.row_id,
             )
 
+    def test_explain_row_with_non_object_payload(self, tmp_path: Path, payload_store) -> None:
+        """explain_row() rejects non-object JSON payloads as corruption."""
+        import json
+
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.recorder import LandscapeRecorder
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        db = LandscapeDB.in_memory()
+        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+        recorder = LandscapeRecorder(db, payload_store=payload_store)
+
+        run = recorder.begin_run(config={}, canonical_version="v1")
+        source = recorder.register_node(
+            run_id=run.run_id,
+            plugin_name="csv_source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=DYNAMIC_SCHEMA,
+        )
+
+        payload_ref = payload_store.store(json.dumps([1, 2, 3]).encode())
+        row = recorder.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={"name": "test"},
+            payload_ref=payload_ref,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="expected JSON object"):
+            recorder.explain_row(
+                run_id=run.run_id,
+                row_id=row.row_id,
+            )
+
     def test_explain_row_rejects_run_id_mismatch(self, tmp_path: Path, payload_store) -> None:
         """explain_row() returns None when row belongs to different run."""
         import json

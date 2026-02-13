@@ -272,7 +272,7 @@ class BaseMultiQueryTransform(BaseTransform, BatchTransformMixin, ABC):
         start_time = time.monotonic()
 
         try:
-            result = self._process_single_row_internal(row_data, ctx.state_id, token_id, input_contract)
+            result = self._process_single_row_internal(row, row_data, ctx.state_id, token_id, input_contract)
 
             # Row-level Langfuse trace (overridable hook)
             latency_ms = (time.monotonic() - start_time) * 1000
@@ -298,7 +298,8 @@ class BaseMultiQueryTransform(BaseTransform, BatchTransformMixin, ABC):
 
     def _process_single_row_internal(
         self,
-        row: dict[str, Any],
+        row_for_queries: PipelineRow | dict[str, Any],
+        row_data: dict[str, Any],
         state_id: str,
         token_id: str,
         input_contract: SchemaContract | None,
@@ -306,7 +307,8 @@ class BaseMultiQueryTransform(BaseTransform, BatchTransformMixin, ABC):
         """Internal row processing: execute all queries and merge results.
 
         Args:
-            row: Input row dict with all case study fields
+            row_for_queries: Input row preserving PipelineRow semantics for query field access
+            row_data: Raw normalized row data used for output row assembly
             state_id: State ID for audit trail
             token_id: Token ID for tracing correlation
             input_contract: Schema contract for template dual-name access
@@ -316,9 +318,9 @@ class BaseMultiQueryTransform(BaseTransform, BatchTransformMixin, ABC):
         """
         pool_context: dict[str, Any] | None = None
         if self._executor is not None:
-            results, pool_context = self._execute_queries_parallel(row, state_id, token_id, input_contract)
+            results, pool_context = self._execute_queries_parallel(row_for_queries, state_id, token_id, input_contract)
         else:
-            results = self._execute_queries_sequential(row, state_id, token_id, input_contract)
+            results = self._execute_queries_sequential(row_for_queries, state_id, token_id, input_contract)
 
         # Check for failures (all-or-nothing for this row)
         failed = [(spec, r) for spec, r in zip(self._query_specs, results, strict=True) if r.status != "success"]
@@ -343,7 +345,7 @@ class BaseMultiQueryTransform(BaseTransform, BatchTransformMixin, ABC):
             )
 
         # Merge all results into output row
-        output = row.copy()
+        output = row_data.copy()
         for result in results:
             if result.row is not None:
                 output.update(result.row)
@@ -373,7 +375,7 @@ class BaseMultiQueryTransform(BaseTransform, BatchTransformMixin, ABC):
 
     def _execute_queries_parallel(
         self,
-        row: dict[str, Any],
+        row: PipelineRow | dict[str, Any],
         state_id: str,
         token_id: str,
         input_contract: SchemaContract | None,
@@ -433,7 +435,7 @@ class BaseMultiQueryTransform(BaseTransform, BatchTransformMixin, ABC):
 
     def _execute_queries_sequential(
         self,
-        row: dict[str, Any],
+        row: PipelineRow | dict[str, Any],
         state_id: str,
         token_id: str,
         input_contract: SchemaContract | None,
@@ -650,7 +652,7 @@ class BaseMultiQueryTransform(BaseTransform, BatchTransformMixin, ABC):
     @abstractmethod
     def _process_single_query(
         self,
-        row: dict[str, Any],
+        row: PipelineRow | dict[str, Any],
         spec: QuerySpec,
         state_id: str,
         token_id: str,

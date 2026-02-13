@@ -1,5 +1,6 @@
 """Tests for CSV source plugin."""
 
+import csv
 from pathlib import Path
 
 import pytest
@@ -428,6 +429,140 @@ class TestCSVSourceQuarantineYielding:
         # Third row valid (line 5 in file)
         assert not results[2].is_quarantined
 
+    def test_skip_rows_respects_multiline_csv_record_boundaries(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """skip_rows should skip full CSV records, not raw lines."""
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "multiline_skip.csv"
+        # Record 1 spans two physical lines due to quoted newline and should be skipped atomically.
+        csv_file.write_text('comment,"line1\nline2"\nheader1,header2\n1,2\n')
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "skip_rows": 1,
+                "on_validation_failure": "quarantine",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        # Header remains aligned after record-based skip; only one valid data row is produced.
+        assert len(results) == 1
+        assert results[0].is_quarantined is False
+        assert results[0].row == {"header1": "1", "header2": "2"}
+
+    def test_skip_rows_tolerates_csv_error_in_preamble(self, tmp_path: Path, ctx: PluginContext, monkeypatch: pytest.MonkeyPatch) -> None:
+        """skip_rows should not abort on csv.Error from malformed preamble rows.
+
+        Regression test: skip_rows is designed for non-CSV metadata (comments,
+        version headers) that may contain unmatched quotes or other RFC 4180
+        violations.  A csv.Error during the skip loop must not crash the run.
+
+        Python 3.13's csv module in non-strict mode is extremely lenient and
+        rarely raises csv.Error, so we inject the error via monkeypatch to
+        exercise the defensive code path.
+        """
+        from unittest.mock import patch
+
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "preamble.csv"
+        csv_file.write_text("preamble\nid,name\n1,alice\n2,bob\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "skip_rows": 1,
+                "on_validation_failure": "quarantine",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        # Wrap csv.reader to inject csv.Error on the first __next__ call (the skip)
+        original_csv_reader = csv.reader
+
+        def patched_reader(*args, **kwargs):
+            real_reader = original_csv_reader(*args, **kwargs)
+            calls = {"count": 0}
+            original_next = real_reader.__next__
+
+            class ErrorInjectingReader:
+                """Proxy that raises csv.Error on the first next() call."""
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    calls["count"] += 1
+                    if calls["count"] == 1:
+                        # Consume the real row to keep file position in sync
+                        original_next()
+                        raise csv.Error("injected: unmatched quote in preamble")
+                    return original_next()
+
+                @property
+                def line_num(self):
+                    return real_reader.line_num
+
+            return ErrorInjectingReader()
+
+        with patch("elspeth.plugins.sources.csv_source.csv.reader", side_effect=patched_reader):
+            results = list(source.load(ctx))
+
+        assert len(results) == 2
+        assert results[0].row == {"id": "1", "name": "alice"}
+        assert results[1].row == {"id": "2", "name": "bob"}
+
+    def test_skip_rows_tolerates_csv_error_on_all_skipped_rows(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Multiple csv.Error exceptions during skip_rows should all be handled."""
+        from unittest.mock import patch
+
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "multi_preamble.csv"
+        csv_file.write_text("preamble1\npreamble2\nid,value\n10,hello\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "skip_rows": 2,
+                "on_validation_failure": "quarantine",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        original_csv_reader = csv.reader
+
+        def patched_reader(*args, **kwargs):
+            real_reader = original_csv_reader(*args, **kwargs)
+            calls = {"count": 0}
+            original_next = real_reader.__next__
+
+            class ErrorInjectingReader:
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    calls["count"] += 1
+                    if calls["count"] <= 2:
+                        original_next()
+                        raise csv.Error(f"injected: preamble row {calls['count']}")
+                    return original_next()
+
+                @property
+                def line_num(self):
+                    return real_reader.line_num
+
+            return ErrorInjectingReader()
+
+        with patch("elspeth.plugins.sources.csv_source.csv.reader", side_effect=patched_reader):
+            results = list(source.load(ctx))
+
+        assert len(results) == 1
+        assert results[0].row == {"id": "10", "value": "hello"}
+
     def test_empty_rows_are_skipped(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Empty rows (blank lines) should be skipped without generating errors.
 
@@ -462,6 +597,62 @@ class TestCSVSourceQuarantineYielding:
 
         assert not results[2].is_quarantined
         assert results[2].row == {"id": "3", "name": "carol"}
+
+    def test_malformed_header_csv_error_quarantined_not_crash(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Header parse csv.Error is quarantined (Tier-3 boundary), not raised."""
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "bad_header.csv"
+        csv_file.write_text("id,verylongheadername\n1,alice\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "on_validation_failure": "quarantine",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        old_limit = csv.field_size_limit()
+        try:
+            csv.field_size_limit(10)
+            results = list(source.load(ctx))
+        finally:
+            csv.field_size_limit(old_limit)
+
+        assert len(results) == 1
+        quarantined = results[0]
+        assert quarantined.is_quarantined is True
+        assert quarantined.quarantine_destination == "quarantine"
+        assert quarantined.quarantine_error is not None
+        assert "CSV parse error" in quarantined.quarantine_error
+        assert "field larger than field limit" in quarantined.quarantine_error
+        assert "file_path" in quarantined.row
+        assert quarantined.row["__line_number__"] == 1
+
+    def test_malformed_header_csv_error_discard_mode(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Header parse csv.Error respects discard mode (no yielded quarantine row)."""
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "bad_header_discard.csv"
+        csv_file.write_text("id,verylongheadername\n1,alice\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "on_validation_failure": "discard",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        old_limit = csv.field_size_limit()
+        try:
+            csv.field_size_limit(10)
+            results = list(source.load(ctx))
+        finally:
+            csv.field_size_limit(old_limit)
+
+        assert results == []
 
 
 class TestCSVSourceFieldNormalization:
@@ -552,6 +743,25 @@ class TestCSVSourceFieldNormalization:
         )
 
         with pytest.raises(ValueError, match="collision"):
+            list(source.load(ctx))
+
+    def test_duplicate_raw_headers_raise_at_load(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Duplicate raw headers fail fast even when normalize_fields is disabled."""
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "duplicate_raw_headers.csv"
+        csv_file.write_text("id,id,name\n1,2,alice\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+                # normalize_fields defaults to False
+            }
+        )
+
+        with pytest.raises(ValueError, match="Duplicate raw header names"):
             list(source.load(ctx))
 
     def test_field_resolution_stored_for_audit(self, tmp_path: Path, ctx: PluginContext) -> None:

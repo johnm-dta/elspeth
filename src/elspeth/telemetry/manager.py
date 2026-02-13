@@ -282,9 +282,7 @@ class TelemetryManager:
             try:
                 self._queue.put_nowait(event)
             except queue.Full:
-                with self._dropped_lock:
-                    self._events_dropped += 1
-                    self._log_drops_if_needed()
+                self._drop_oldest_and_enqueue_newest(event)
         else:  # BLOCK (default)
             # Timeout prevents permanent deadlock if export thread dies
             try:
@@ -294,6 +292,86 @@ class TelemetryManager:
                 logger.error("BLOCK mode put() timed out - export thread may be stuck")
                 with self._dropped_lock:
                     self._events_dropped += 1
+
+    def _drop_oldest_and_enqueue_newest(self, event: TelemetryEvent) -> None:
+        """DROP mode overflow strategy: evict oldest queued event, keep newest.
+
+        Must maintain queue unfinished-task accounting when evicting an item.
+        """
+        with self._dropped_lock:
+            try:
+                evicted = self._queue.get_nowait()
+                had_evicted = True
+            except queue.Empty:
+                evicted = None
+                had_evicted = False
+
+            try:
+                if had_evicted and evicted is None:
+                    # Preserve shutdown sentinel if we raced with close().
+                    try:
+                        TelemetryManager._requeue_shutdown_sentinel_or_raise(self)
+                    except RuntimeError:
+                        # Sentinel could not be restored after bounded retries.
+                        # This is recoverable: close() will retry sentinel insertion
+                        # independently, and the export thread join has a timeout.
+                        # Log and drop the incoming event — never propagate to callers.
+                        logger.warning("Could not restore shutdown sentinel during DROP overflow; close() will retry independently")
+                        self._events_dropped += 1
+                        self._log_drops_if_needed()
+                        return
+                elif had_evicted:
+                    self._events_dropped += 1
+                    self._log_drops_if_needed()
+
+                try:
+                    self._queue.put_nowait(event)
+                except queue.Full:
+                    # Race: queue refilled before we could enqueue the newest.
+                    # Count the incoming event as dropped.
+                    self._events_dropped += 1
+                    self._log_drops_if_needed()
+                    return
+            finally:
+                if had_evicted:
+                    # Decrement evicted unfinished task AFTER enqueue attempt.
+                    # This prevents queue.join() from observing a transient zero
+                    # while the replacement event is being queued.
+                    self._queue.task_done()
+
+    def _requeue_shutdown_sentinel_or_raise(self) -> None:
+        """Reinsert shutdown sentinel evicted during DROP-mode overflow.
+
+        Must be called while holding _dropped_lock.
+        Raises RuntimeError if sentinel cannot be restored after bounded retries.
+        Callers must catch RuntimeError and degrade gracefully — telemetry
+        must never propagate exceptions to pipeline code.
+        """
+        pending_task_done = 0
+        max_attempts = self._queue.maxsize + 10  # Safety margin for close races
+
+        try:
+            for _ in range(max_attempts):
+                try:
+                    self._queue.put_nowait(None)
+                    return
+                except queue.Full:
+                    # Queue refilled by in-flight producer. Evict one item and retry.
+                    try:
+                        displaced = self._queue.get_nowait()
+                        pending_task_done += 1
+                    except queue.Empty:
+                        continue
+
+                    if displaced is not None:
+                        self._events_dropped += 1
+                        self._log_drops_if_needed()
+        finally:
+            # Keep unfinished-task accounting balanced for any displaced items.
+            for _ in range(pending_task_done):
+                self._queue.task_done()
+
+        raise RuntimeError("Failed to re-enqueue shutdown sentinel during DROP overflow")
 
     def _log_drops_if_needed(self) -> None:
         """Log aggregate drop message if threshold reached.

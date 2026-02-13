@@ -1,0 +1,21 @@
+id,customer,amount,status
+1,Acme Corp,5200,active
+2,Globex Inc,3100,active
+3,Initech,890,pending
+4,Umbrella Corp,12000,active
+5,Soylent Corp,4500,suspended
+6,Cyberdyne,7800,active
+7,Tyrell Corp,15000,active
+8,Weyland-Yutani,2200,pending
+9,Oscorp,6300,active
+10,LexCorp,9100,suspended
+11,Wayne Enterprises,18000,active
+12,Stark Industries,22000,active
+13,Aperture Science,1100,pending
+14,Black Mesa,3400,active
+15,Massive Dynamic,8700,active
+16,Abstergo,4200,suspended
+17,Hanso Foundation,6600,active
+18,Dharma Initiative,2800,pending
+19,Vault-Tec,11000,active
+20,MomCorp,7200,active

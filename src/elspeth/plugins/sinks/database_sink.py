@@ -133,6 +133,17 @@ class DatabaseSink(BaseSink):
         self._metadata: MetaData | None = None
         self._table_replaced: bool = False  # Track if we've done the replace for this instance
 
+    def _ensure_engine_and_metadata_initialized(self) -> None:
+        """Initialize engine/metadata pair together.
+
+        Invariant: if self._engine is set, self._metadata must also be set.
+        This keeps validate_output_target() and write() lifecycle paths consistent.
+        """
+        if self._engine is None:
+            self._engine = create_engine(self._url)
+        if self._metadata is None:
+            self._metadata = MetaData()
+
     def validate_output_target(self) -> "OutputValidationResult":
         """Validate existing database table columns against configured schema.
 
@@ -150,9 +161,10 @@ class DatabaseSink(BaseSink):
 
         from elspeth.contracts.sink import OutputValidationResult
 
-        # Ensure engine exists for inspection
+        # Ensure engine/metadata are initialized consistently before inspection.
+        self._ensure_engine_and_metadata_initialized()
         if self._engine is None:
-            self._engine = create_engine(self._url)
+            raise RuntimeError("Database sink validation called before initialization")
 
         inspector = inspect(self._engine)
         if not inspector.has_table(self._table_name):
@@ -209,9 +221,9 @@ class DatabaseSink(BaseSink):
 
         When schema is dynamic, columns are inferred from the first row's keys.
         """
+        self._ensure_engine_and_metadata_initialized()
         if self._engine is None:
-            self._engine = create_engine(self._url)
-            self._metadata = MetaData()
+            raise RuntimeError("Database sink write() called before initialization")
 
         if self._table is None:
             # Handle if_exists="replace": drop table on first write

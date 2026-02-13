@@ -310,3 +310,49 @@ def test_validator_rejects_malformed_field_spec():
 
     errors = validator.validate_schema_config(schema_config)
     assert len(errors) > 0
+
+
+@pytest.mark.parametrize(
+    ("validator_method", "plugin_type", "config"),
+    [
+        (
+            "validate_source_config",
+            "csv",
+            {
+                "path": "/tmp/test.csv",
+                "schema": {"mode": "bad"},
+                "on_validation_failure": "quarantine",
+            },
+        ),
+        (
+            "validate_transform_config",
+            "passthrough",
+            {
+                "schema": {"mode": "bad"},
+            },
+        ),
+        (
+            "validate_sink_config",
+            "csv",
+            {
+                "path": "/tmp/out.csv",
+                "schema": {"mode": "bad"},
+            },
+        ),
+    ],
+)
+def test_validator_returns_structured_error_for_invalid_plugin_schema(
+    validator_method: str,
+    plugin_type: str,
+    config: dict[str, object],
+) -> None:
+    """Invalid embedded schema config should return ValidationError list, not raise."""
+    validator = PluginConfigValidator()
+    validate = getattr(validator, validator_method)
+
+    errors = validate(plugin_type, config)
+
+    assert len(errors) > 0
+    assert errors[0].field == "schema"
+    assert errors[0].value == {"mode": "bad"}
+    assert "mode" in errors[0].message.lower()

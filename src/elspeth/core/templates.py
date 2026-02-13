@@ -33,7 +33,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from jinja2 import Environment
-from jinja2.nodes import Const, Getattr, Getitem, Name, Node
+from jinja2.nodes import Call, Const, Getattr, Getitem, Name, Node
 
 if TYPE_CHECKING:
     from elspeth.contracts.schema_contract import SchemaContract
@@ -96,8 +96,22 @@ def _walk_ast(node: Node, namespace: str, fields: set[str]) -> None:
         namespace: Variable name to search for
         fields: Set to accumulate found field names (mutated)
     """
+    # Handle row.get("field") syntax (Call node with string literal key)
+    if (
+        isinstance(node, Call)
+        and isinstance(node.node, Getattr)
+        and isinstance(node.node.node, Name)
+        and node.node.node.name == namespace
+        and node.node.attr == "get"
+        and len(node.args) >= 1
+        and isinstance(node.args[0], Const)
+        and isinstance(node.args[0].value, str)
+    ):
+        fields.add(node.args[0].value)
+
     # Handle row.field_name syntax (Getattr node)
-    if isinstance(node, Getattr) and isinstance(node.node, Name) and node.node.name == namespace:
+    # Exclude the mapping method row.get itself (handled via Call above).
+    if isinstance(node, Getattr) and isinstance(node.node, Name) and node.node.name == namespace and node.attr != "get":
         fields.add(node.attr)
 
     # Handle row["field_name"] syntax (Getitem node with string constant)
@@ -139,9 +153,27 @@ def extract_jinja2_fields_with_details(
     ast = env.parse(template_string)
     fields: dict[str, list[str]] = {}
 
+    def append_access(field_name: str, access_type: str) -> None:
+        if field_name in fields:
+            fields[field_name].append(access_type)
+            return
+        fields[field_name] = [access_type]
+
     def walk(node: Node) -> None:
-        if isinstance(node, Getattr) and isinstance(node.node, Name) and node.node.name == namespace:
-            fields.setdefault(node.attr, []).append("attr")
+        if (
+            isinstance(node, Call)
+            and isinstance(node.node, Getattr)
+            and isinstance(node.node.node, Name)
+            and node.node.node.name == namespace
+            and node.node.attr == "get"
+            and len(node.args) >= 1
+            and isinstance(node.args[0], Const)
+            and isinstance(node.args[0].value, str)
+        ):
+            append_access(node.args[0].value, "item")
+
+        if isinstance(node, Getattr) and isinstance(node.node, Name) and node.node.name == namespace and node.attr != "get":
+            append_access(node.attr, "attr")
 
         if (
             isinstance(node, Getitem)
@@ -150,7 +182,7 @@ def extract_jinja2_fields_with_details(
             and isinstance(node.arg, Const)
             and isinstance(node.arg.value, str)
         ):
-            fields.setdefault(node.arg.value, []).append("item")
+            append_access(node.arg.value, "item")
 
         for child in node.iter_child_nodes():
             walk(child)
@@ -205,23 +237,22 @@ def extract_jinja2_fields_with_names(
 
     for field_as_written in raw_fields:
         if contract is not None:
-            # Try to resolve via contract
-            try:
-                normalized = contract.resolve_name(field_as_written)
-                fc = contract.get_field(normalized)
-                original = fc.original_name if fc else field_as_written
-                result[normalized] = {
-                    "normalized": normalized,
-                    "original": original,
-                    "resolved": True,
-                }
-            except KeyError:
+            normalized = contract.find_name(field_as_written)
+            if normalized is None:
                 # Not in contract - report as-is
                 result[field_as_written] = {
                     "normalized": field_as_written,
                     "original": field_as_written,
                     "resolved": False,
                 }
+                continue
+
+            fc = contract.get_field(normalized)
+            result[normalized] = {
+                "normalized": normalized,
+                "original": fc.original_name,
+                "resolved": True,
+            }
         else:
             # No contract - report as-is
             result[field_as_written] = {

@@ -38,6 +38,7 @@ from elspeth.contracts.events import (
 )
 from elspeth.telemetry import (
     ExternalCallCompleted,
+    FieldResolutionApplied,
     PhaseChanged,
     RowCreated,
     RunFinished,
@@ -226,6 +227,18 @@ def make_external_call_completed(run_id: str, state_id: str, timestamp: datetime
     )
 
 
+def make_field_resolution_applied(run_id: str, timestamp: datetime | None = None) -> FieldResolutionApplied:
+    """Create a FieldResolutionApplied event for testing."""
+    return FieldResolutionApplied(
+        timestamp=timestamp or datetime.now(tz=UTC),
+        run_id=run_id,
+        source_plugin="csv",
+        field_count=2,
+        normalization_version="v1",
+        resolution_mapping={"Customer ID": "customer_id", "Order Amount": "order_amount"},
+    )
+
+
 # =============================================================================
 # Hypothesis Strategies
 # =============================================================================
@@ -282,7 +295,9 @@ def row_event_strategy(draw: st.DrawFn) -> TelemetryEvent:
     run_id = draw(run_id_strategy)
     row_id = draw(row_id_strategy)
     timestamp = draw(timestamp_strategy)
-    event_type = draw(st.sampled_from(["row_created", "transform_completed", "gate_evaluated", "token_completed"]))
+    event_type = draw(
+        st.sampled_from(["row_created", "transform_completed", "gate_evaluated", "token_completed", "field_resolution_applied"])
+    )
 
     if event_type == "row_created":
         return make_row_created(run_id, row_id, timestamp)
@@ -290,6 +305,8 @@ def row_event_strategy(draw: st.DrawFn) -> TelemetryEvent:
         return make_transform_completed(run_id, row_id, timestamp)
     elif event_type == "gate_evaluated":
         return make_gate_evaluated(run_id, row_id, timestamp)
+    elif event_type == "field_resolution_applied":
+        return make_field_resolution_applied(run_id, timestamp)
     else:
         return make_token_completed(run_id, row_id, timestamp)
 
@@ -559,6 +576,11 @@ class TestGranularityFilteringMatrix:
             TelemetryGranularity.ROWS: True,
             TelemetryGranularity.FULL: True,
         },
+        FieldResolutionApplied: {
+            TelemetryGranularity.LIFECYCLE: False,
+            TelemetryGranularity.ROWS: True,
+            TelemetryGranularity.FULL: True,
+        },
         # External call events: emit only at FULL
         ExternalCallCompleted: {
             TelemetryGranularity.LIFECYCLE: False,
@@ -607,6 +629,7 @@ class TestGranularityFilteringMatrix:
             TransformCompleted: make_transform_completed(run_id, row_id, base_ts),
             GateEvaluated: make_gate_evaluated(run_id, row_id, base_ts),
             TokenCompleted: make_token_completed(run_id, row_id, base_ts),
+            FieldResolutionApplied: make_field_resolution_applied(run_id, base_ts),
             ExternalCallCompleted: make_external_call_completed(run_id, state_id, base_ts),
         }
 

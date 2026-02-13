@@ -152,6 +152,35 @@ def check_mapping_collisions(
             raise ValueError("field_mapping creates collision:\n" + "\n".join(details))
 
 
+def check_duplicate_raw_headers(raw_headers: list[str]) -> None:
+    """Reject duplicate raw headers before passthrough mapping.
+
+    Duplicate names are ambiguous for both audit mapping and row dict construction:
+    dict(zip(...)) would silently overwrite earlier columns.
+
+    Args:
+        raw_headers: Original header names from source input.
+
+    Raises:
+        ValueError: If duplicate raw headers are present, with all duplicate
+            names and column positions listed.
+    """
+    positions_by_name: dict[str, list[int]] = {}
+    for index, header in enumerate(raw_headers):
+        if header in positions_by_name:
+            positions_by_name[header].append(index)
+        else:
+            positions_by_name[header] = [index]
+
+    duplicates = {header: positions for header, positions in positions_by_name.items() if len(positions) > 1}
+    if duplicates:
+        details = []
+        for header, positions in sorted(duplicates.items()):
+            source_desc = ", ".join(f"column {index} ('{raw_headers[index]}')" for index in positions)
+            details.append(f"  '{header}' <- {source_desc}")
+        raise ValueError("Duplicate raw header names:\n" + "\n".join(details))
+
+
 @dataclass(frozen=True)
 class FieldResolution:
     """Result of field name resolution.
@@ -219,6 +248,7 @@ def resolve_field_names(
             check_normalization_collisions(raw_headers, effective_headers)
             used_normalization = True
         else:
+            check_duplicate_raw_headers(raw_headers)
             effective_headers = list(raw_headers)
     else:
         raise ValueError("Either raw_headers or columns must be provided")

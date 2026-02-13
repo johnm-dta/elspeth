@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -129,6 +130,59 @@ class ContextLengthError(LLMClientError):
         super().__init__(message, retryable=False)
 
 
+_RATE_LIMIT_PATTERNS = (
+    re.compile(r"\brate[\s_-]*limit(?:ed|ing)?\b"),
+    re.compile(r"\brate(?:\s+has\s+been)?\s+exceeded\b"),
+    re.compile(r"\btoo many requests\b"),
+    re.compile(r"\bthrottl(?:e|ed|ing)\b"),
+)
+_SERVER_ERROR_CODE_PATTERN = re.compile(r"\b(?:500|502|503|504|529)\b")
+_CLIENT_ERROR_CODE_PATTERN = re.compile(r"\b(?:400|401|403|404|422)\b")
+_NETWORK_ERROR_PATTERNS = (
+    "timeout",
+    "timed out",
+    "connection refused",
+    "connection reset",
+    "connection aborted",
+    "network unreachable",
+    "host unreachable",
+    "dns",
+    "getaddrinfo failed",
+)
+_CONTENT_POLICY_PATTERNS = (
+    "content_policy_violation",
+    "content policy",
+    "safety system",
+)
+_CONTEXT_LENGTH_PATTERNS = (
+    "context_length_exceeded",
+    "context length",
+    "maximum context",
+)
+
+
+def _classify_llm_error(exception: Exception) -> str:
+    """Classify an LLM error into a canonical category."""
+    error_str = str(exception).lower()
+
+    if any(pattern in error_str for pattern in _CONTENT_POLICY_PATTERNS):
+        return "content_policy"
+    if any(pattern in error_str for pattern in _CONTEXT_LENGTH_PATTERNS):
+        return "context_length"
+
+    # Match explicit rate-limit indicators only; do not match arbitrary "rate" substrings.
+    if re.search(r"\b429\b", error_str) or any(pattern.search(error_str) for pattern in _RATE_LIMIT_PATTERNS):
+        return "rate_limit"
+
+    if _SERVER_ERROR_CODE_PATTERN.search(error_str):
+        return "server"
+    if any(pattern in error_str for pattern in _NETWORK_ERROR_PATTERNS):
+        return "network"
+    if _CLIENT_ERROR_CODE_PATTERN.search(error_str):
+        return "client"
+    return "unknown"
+
+
 def _is_retryable_error(exception: Exception) -> bool:
     """Determine if an LLM error is retryable.
 
@@ -145,53 +199,7 @@ def _is_retryable_error(exception: Exception) -> bool:
     Returns:
         True if error is likely transient and should be retried
     """
-    error_str = str(exception).lower()
-
-    # Rate limits - always retryable
-    if "rate" in error_str or "429" in error_str:
-        return True
-
-    # Server errors (5xx) - usually transient
-    # Include Microsoft Azure-specific codes (529 = model overloaded)
-    server_error_codes = ["500", "502", "503", "504", "529"]
-    if any(code in error_str for code in server_error_codes):
-        return True
-
-    # Network/connection errors - transient
-    network_error_patterns = [
-        "timeout",
-        "timed out",
-        "connection refused",
-        "connection reset",
-        "connection aborted",
-        "network unreachable",
-        "host unreachable",
-        "dns",
-        "getaddrinfo failed",
-    ]
-    if any(pattern in error_str for pattern in network_error_patterns):
-        return True
-
-    # Client errors (4xx except 429) - permanent
-    client_error_codes = ["400", "401", "403", "404", "422"]
-    if any(code in error_str for code in client_error_codes):
-        return False
-
-    # LLM-specific permanent errors
-    permanent_error_patterns = [
-        "content_policy_violation",
-        "content policy",
-        "safety system",
-        "context_length_exceeded",
-        "context length",
-        "maximum context",
-    ]
-    if any(pattern in error_str for pattern in permanent_error_patterns):
-        return False
-
-    # Unknown error - be conservative, do NOT retry
-    # This prevents infinite retries on unexpected errors
-    return False
+    return _classify_llm_error(exception) in {"rate_limit", "server", "network"}
 
 
 class AuditedLLMClient(AuditedClientBase):
@@ -234,6 +242,7 @@ class AuditedLLMClient(AuditedClientBase):
         *,
         provider: str = "openai",
         limiter: Any = None,  # RateLimiter | NoOpLimiter | None
+        token_id: str | None = None,
     ) -> None:
         """Initialize audited LLM client.
 
@@ -245,8 +254,9 @@ class AuditedLLMClient(AuditedClientBase):
             underlying_client: OpenAI-compatible client instance
             provider: Provider name for audit trail (default: "openai")
             limiter: Optional rate limiter for throttling requests
+            token_id: Optional token identity for telemetry correlation
         """
-        super().__init__(recorder, state_id, run_id, telemetry_emit, limiter=limiter)
+        super().__init__(recorder, state_id, run_id, telemetry_emit, limiter=limiter, token_id=token_id)
         self._client = underlying_client
         self._provider = provider
 
@@ -356,6 +366,7 @@ class AuditedLLMClient(AuditedClientBase):
                         latency_ms=latency_ms,
                         state_id=self._state_id,  # Transform context
                         operation_id=None,  # Not in source/sink context
+                        token_id=self._telemetry_token_id(),
                         request_hash=stable_hash(request_data),
                         response_hash=stable_hash(response_data),
                         request_payload=request_data,  # Full request for observability
@@ -386,10 +397,10 @@ class AuditedLLMClient(AuditedClientBase):
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
             error_type = type(e).__name__
-            error_str = str(e).lower()
+            error_class = _classify_llm_error(e)
 
             # Classify error for retry decision
-            is_retryable = _is_retryable_error(e)
+            is_retryable = error_class in {"rate_limit", "server", "network"}
 
             self._recorder.record_call(
                 state_id=self._state_id,
@@ -418,6 +429,7 @@ class AuditedLLMClient(AuditedClientBase):
                         latency_ms=latency_ms,
                         state_id=self._state_id,  # Transform context
                         operation_id=None,  # Not in source/sink context
+                        token_id=self._telemetry_token_id(),
                         request_hash=stable_hash(request_data),
                         response_hash=None,  # No response on error
                         request_payload=request_data,  # Full request for observability
@@ -437,20 +449,16 @@ class AuditedLLMClient(AuditedClientBase):
                 )
 
             # Raise specific exception type based on error classification
-            if "rate" in error_str or "429" in error_str:
+            if error_class == "rate_limit":
                 raise RateLimitError(str(e)) from e
-            elif "content_policy" in error_str or "safety system" in error_str:
+            elif error_class == "content_policy":
                 raise ContentPolicyError(str(e)) from e
-            elif "context_length" in error_str or "maximum context" in error_str:
+            elif error_class == "context_length":
                 raise ContextLengthError(str(e)) from e
-            elif is_retryable:
-                # Server error or network error - determine which
-                server_error_codes = ["500", "502", "503", "504", "529"]
-                if any(code in error_str for code in server_error_codes):
-                    raise ServerError(str(e)) from e
-                else:
-                    # Must be network error (timeout, connection refused, etc.)
-                    raise NetworkError(str(e)) from e
+            elif error_class == "server":
+                raise ServerError(str(e)) from e
+            elif error_class == "network":
+                raise NetworkError(str(e)) from e
             else:
                 # Client error or unknown - not retryable
                 raise LLMClientError(str(e), retryable=False) from e

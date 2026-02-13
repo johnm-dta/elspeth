@@ -1,0 +1,63 @@
+# Database Sink Example — Write Pipeline Output to SQLite
+#
+# Demonstrates writing pipeline results to a relational database:
+#
+#   source ─(validated)─> [value_gate] ─┬─ database (high-value deals)
+#                                        └─ standard.csv (everything else)
+#
+# The database sink creates the table automatically on first write.
+# Uses SQLite so no external database server is needed.
+
+source:
+  plugin: csv
+  on_success: validated
+  options:
+    path: examples/database_sink/input.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'customer: str'
+      - 'amount: int'
+      - 'category: str'
+      - 'region: str'
+    on_validation_failure: discard
+
+gates:
+- name: value_gate
+  input: validated
+  condition: row['amount'] >= 5000
+  routes:
+    'true': high_value_db
+    'false': standard
+
+sinks:
+  high_value_db:
+    plugin: database
+    options:
+      url: sqlite:///examples/database_sink/output/deals.db
+      table: high_value_deals
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'customer: str'
+        - 'amount: int'
+        - 'category: str'
+        - 'region: str'
+      if_exists: replace
+  standard:
+    plugin: csv
+    options:
+      path: examples/database_sink/output/standard_deals.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'customer: str'
+        - 'amount: int'
+        - 'category: str'
+        - 'region: str'
+
+landscape:
+  url: sqlite:///examples/database_sink/runs/audit.db

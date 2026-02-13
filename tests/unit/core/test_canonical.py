@@ -138,6 +138,18 @@ class TestNumpyTypeConversion:
         assert type(result) is list
         assert all(type(x) is int for x in result)
 
+    def test_numpy_zero_dim_array_converts_to_primitive(self) -> None:
+        """BUG-CANON-02: Scalar arrays should normalize as scalar primitives."""
+        from elspeth.core.canonical import _normalize_value
+
+        int_result = _normalize_value(np.array(5))
+        assert int_result == 5
+        assert type(int_result) is int
+
+        float_result = _normalize_value(np.array(3.5))
+        assert float_result == 3.5
+        assert type(float_result) is float
+
 
 class TestPandasTypeConversion:
     """Pandas types must be converted to JSON-safe primitives."""
@@ -340,6 +352,12 @@ class TestCanonicalJsonSerialization:
         result = canonical_json(data)
         assert result == '{"count":42}'
 
+    def test_canonical_json_handles_zero_dim_numpy_array(self) -> None:
+        from elspeth.core.canonical import canonical_json
+
+        result = canonical_json({"value": np.array(5)})
+        assert result == '{"value":5}'
+
 
 class TestStableHash:
     """Stable hashing with versioned algorithm."""
@@ -376,6 +394,13 @@ class TestStableHash:
         canonical = canonical_json(data)
         expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         assert hash_result == expected
+
+    def test_stable_hash_handles_zero_dim_numpy_array(self) -> None:
+        from elspeth.core.canonical import stable_hash
+
+        value_hash = stable_hash({"value": np.array(5)})
+        expected_hash = stable_hash({"value": 5})
+        assert value_hash == expected_hash
 
 
 class TestCrossProcessStability:

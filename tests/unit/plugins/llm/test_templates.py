@@ -3,7 +3,9 @@
 
 import pytest
 
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.plugins.llm.templates import PromptTemplate, TemplateError
+from elspeth.testing import make_field, make_row
 
 
 class TestPromptTemplate:
@@ -63,6 +65,21 @@ Analyze these entries:
         assert result.template_hash is not None
         assert result.variables_hash is not None
         assert result.rendered_hash is not None
+
+    def test_render_with_metadata_accepts_pipeline_row(self) -> None:
+        """render_with_metadata() accepts PipelineRow inputs directly."""
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(make_field("prompt_text", str, original_name="Prompt Text"),),
+            locked=True,
+        )
+        row = make_row({"prompt_text": "sample"}, contract=contract)
+        template = PromptTemplate("Analyze: {{ row['Prompt Text'] }}")
+
+        result = template.render_with_metadata(row, contract=contract)
+
+        assert result.prompt == "Analyze: sample"
+        assert result.variables_hash is not None
 
     def test_undefined_variable_raises_error(self) -> None:
         """Missing required variable raises TemplateError."""
@@ -143,6 +160,30 @@ Analyze these entries:
         t1 = PromptTemplate("{{ lookup.categories }}", lookup_data=data)
         t2 = PromptTemplate("{{ lookup.categories }}", lookup_data=data)
         assert t1.lookup_hash == t2.lookup_hash
+
+    def test_lookup_top_level_mutation_after_init_does_not_change_render_or_hash(self) -> None:
+        """Lookup is snapshotted at init so external mutation cannot desync audit hashes."""
+        lookup = {"k": "v1"}
+        template = PromptTemplate("Value: {{ lookup.k }}", lookup_data=lookup)
+        initial_hash = template.lookup_hash
+
+        lookup["k"] = "v2"
+        result = template.render_with_metadata({"row_id": "r1"})
+
+        assert result.prompt == "Value: v1"
+        assert result.lookup_hash == initial_hash
+
+    def test_lookup_nested_mutation_after_init_does_not_change_render_or_hash(self) -> None:
+        """Nested lookup structures are snapshotted at init for audit consistency."""
+        lookup = {"meta": {"tone": "formal"}}
+        template = PromptTemplate("Tone: {{ lookup.meta.tone }}", lookup_data=lookup)
+        initial_hash = template.lookup_hash
+
+        lookup["meta"]["tone"] = "casual"
+        result = template.render_with_metadata({"row_id": "r1"})
+
+        assert result.prompt == "Tone: formal"
+        assert result.lookup_hash == initial_hash
 
     def test_no_lookup_has_none_hash(self) -> None:
         """Template without lookup data has None lookup_hash."""

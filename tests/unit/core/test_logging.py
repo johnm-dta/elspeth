@@ -103,6 +103,26 @@ class TestLoggingConfig:
                 f"Logger '{name}' should be WARNING or higher, got level {logger.getEffectiveLevel()}"
             )
 
+    def test_noisy_loggers_respect_higher_root_threshold(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Noisy loggers must not bypass stricter root thresholds."""
+        from elspeth.core.logging import configure_logging
+
+        configure_logging(level="ERROR")
+        capsys.readouterr()  # Clear prior output from earlier tests
+
+        # Root logger should be at ERROR
+        assert logging.getLogger().level == logging.ERROR
+
+        noisy_logger = logging.getLogger("azure")
+        assert noisy_logger.getEffectiveLevel() >= logging.ERROR
+
+        noisy_logger.warning("this warning should be suppressed")
+        captured = capsys.readouterr()
+        assert "this warning should be suppressed" not in captured.out
+
     def test_stdlib_loggers_emit_json_when_json_output_enabled(self, capsys: pytest.CaptureFixture[str]) -> None:
         """stdlib loggers emit JSON when json_output=True.
 

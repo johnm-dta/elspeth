@@ -1,0 +1,80 @@
+# Rate-Limited LLM Example — Throttled API Calls with ChaosLLM
+#
+# Demonstrates rate limiting on external API calls:
+#
+#   source ─(source_out)─> openrouter_llm (rate-limited) ─┬─ output
+#                                                          └─ quarantine
+#
+# The rate_limit section caps API calls to 30 requests per minute.
+# Uses ChaosLLM so no real API key is needed.
+#
+# Prerequisites: Start ChaosLLM server first:
+#   chaosllm serve --port 8199 --preset=realistic
+
+source:
+  plugin: csv
+  on_success: source_out
+  options:
+    path: examples/rate_limited_llm/input.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'text: str'
+    on_validation_failure: discard
+
+transforms:
+- name: sentiment
+  plugin: openrouter_llm
+  input: source_out
+  on_success: output
+  on_error: quarantine
+  options:
+    api_key: fake-key-chaosllm-does-not-check
+    base_url: http://127.0.0.1:8199/v1
+    model: chaosllm/fake-gpt-4
+    timeout_seconds: 10
+    template: |
+      Analyze the sentiment of the following text and respond with ONLY a JSON object.
+
+      Text: {{ row.text }}
+
+      Respond with exactly this format (no other text):
+      {"sentiment": "positive" or "negative" or "neutral", "confidence": 0.0-1.0}
+    temperature: 0.0
+    response_field: analysis
+    required_input_fields:
+    - text
+    schema:
+      mode: observed
+
+sinks:
+  output:
+    plugin: json
+    options:
+      path: examples/rate_limited_llm/output/results.json
+      schema:
+        mode: observed
+      format: jsonl
+  quarantine:
+    plugin: json
+    options:
+      path: examples/rate_limited_llm/output/quarantined.json
+      schema:
+        mode: observed
+      format: jsonl
+
+landscape:
+  url: sqlite:///examples/rate_limited_llm/runs/audit.db
+
+# Rate limiting: cap external API calls to 30 per minute.
+# Without this, a pipeline with pool_size=30 could flood the API.
+rate_limit:
+  enabled: true
+  default_requests_per_minute: 30
+
+retry:
+  max_attempts: 3
+  initial_delay_seconds: 0.5
+  max_delay_seconds: 5.0
+  exponential_base: 2.0

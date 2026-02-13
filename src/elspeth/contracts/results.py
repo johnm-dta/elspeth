@@ -326,14 +326,14 @@ class RowResult:
 
     Fields:
         token: Token identity for this row instance
-        final_data: Final row data after processing (may be original if failed early)
+        final_data: Final row data as PipelineRow (may be original if failed early)
         outcome: Terminal state (COMPLETED, FAILED, QUARANTINED, etc.)
         sink_name: For ROUTED outcomes, the destination sink name
         error: For FAILED outcomes, type-safe error details for audit
     """
 
     token: TokenInfo
-    final_data: dict[str, Any] | PipelineRow
+    final_data: PipelineRow
     outcome: RowOutcome
     sink_name: str | None = None
     error: FailureInfo | None = None

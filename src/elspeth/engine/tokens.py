@@ -351,6 +351,15 @@ class TokenManager:
             Expanded rows are dicts from transform output; we wrap them in PipelineRow
             with the output_contract (post-transform schema), not parent's contract.
         """
+        # Guard - contract must be locked before any expansion side effects.
+        # Expansion writes child tokens and may record parent EXPANDED outcome
+        # atomically in the recorder; validate preconditions first.
+        if not output_contract.locked:
+            raise ValueError(
+                f"Output contract must be locked before token expansion. "
+                f"Contract mode={output_contract.mode}, locked={output_contract.locked}"
+            )
+
         # Delegate to recorder which handles DB operations and parent linking
         step = self._step_resolver(node_id)
         db_children, expand_group_id = self._recorder.expand_token(
@@ -361,13 +370,6 @@ class TokenManager:
             step_in_pipeline=step,
             record_parent_outcome=record_parent_outcome,
         )
-
-        # W3: Guard - contract must be locked before expansion
-        if not output_contract.locked:
-            raise ValueError(
-                f"Output contract must be locked before token expansion. "
-                f"Contract mode={output_contract.mode}, locked={output_contract.locked}"
-            )
 
         # Use output_contract (post-transform schema) for all expanded children
         # This ensures downstream transforms can access newly added/renamed fields

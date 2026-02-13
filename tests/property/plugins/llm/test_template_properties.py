@@ -185,6 +185,18 @@ class TestMetadataCompletenessProperties:
         t2 = PromptTemplate("Hello", lookup_data=data)
         assert t1.lookup_hash == t2.lookup_hash
 
+    def test_lookup_external_mutation_after_init_does_not_change_render(self) -> None:
+        """Property: external lookup mutations cannot change rendered output post-init."""
+        lookup = {"k": "v1"}
+        t = PromptTemplate("Value: {{ lookup.k }}", lookup_data=lookup)
+        first = t.render_with_metadata({"row_id": "r1"})
+
+        lookup["k"] = "v2"
+        second = t.render_with_metadata({"row_id": "r1"})
+
+        assert first.prompt == second.prompt == "Value: v1"
+        assert first.lookup_hash == second.lookup_hash
+
     def test_template_source_preserved(self) -> None:
         """Property: template_source is passed through to metadata."""
         t = PromptTemplate("Hello", template_source="/path/to/template.j2")

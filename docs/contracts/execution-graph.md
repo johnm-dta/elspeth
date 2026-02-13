@@ -474,8 +474,8 @@ While work queue is not empty:
     │   │         If held (waiting): break inner loop
     │   │         If merged: continue with merged token
     │   │
-    │   ├── Is this step a gate (config or plugin)?
-    │   │   YES → GateExecutor.execute_gate() or execute_config_gate()
+    │   ├── Is this step a config gate?
+    │   │   YES → GateExecutor.execute_config_gate()
     │   │         │
     │   │         ├── CONTINUE → continue to next step
     │   │         ├── ROUTE → record sink_name, break inner loop
@@ -503,15 +503,16 @@ Gate at step S returns FORK_TO_PATHS(["path_a", "path_b"])
     │
     ├── Create child tokens (T2 for path_a, T3 for path_b)
     │
-    ├── For each child, look up coalesce destination:
-    │   If branch maps to a coalesce → start_step = coalesce_step (skip to merge)
-    │   If no coalesce mapping → start_step = S + 1 (continue from next pipeline step)
+    ├── For each child, look up coalesce destination and branch routing:
+    │   If identity branch (no transforms) → start_node = coalesce_node (skip to merge)
+    │   If transform branch → start_node = first transform in branch chain
+    │   If no coalesce mapping → start_node = next pipeline node (continue normally)
     │
-    ├── Push _WorkItem(T2, start_step=coalesce_step, coalesce_at_step=coalesce_step, coalesce_name=...)
-    └── Push _WorkItem(T3, start_step=coalesce_step, coalesce_at_step=coalesce_step, coalesce_name=...)
+    ├── Push _WorkItem(T2, start_node=first_node_a, coalesce_node=coalesce_node, coalesce_name=...)
+    └── Push _WorkItem(T3, start_node=first_node_b, coalesce_node=coalesce_node, coalesce_name=...)
 ```
 
-> **Note:** Fork branches do not have per-branch intermediate transforms. Children skip directly from the fork gate to the coalesce node (or continue to the next pipeline step if no coalesce is configured for that branch).
+> **Per-branch transforms (ARCH-15):** Fork branches can have intermediate transforms before reaching coalesce. When `CoalesceSettings.branches` uses dict format (`{branch_name: input_connection}`), the branch routes through the transform chain whose output matches the input connection. Identity branches (`branches: [a, b]`, normalized to `{a: a, b: b}`) skip directly to the coalesce node. See `ExecutionGraph.get_branch_first_nodes()` for the routing lookup.
 
 ### Coalesce Handling in the Work Queue
 

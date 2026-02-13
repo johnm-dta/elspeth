@@ -10,6 +10,7 @@ import pytest
 
 from elspeth.contracts import Determinism, TransformResult
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.batching.ports import CollectorOutputPort
 from elspeth.plugins.config_base import PluginConfigError
 from elspeth.plugins.llm.azure_multi_query import AzureMultiQueryLLMTransform
@@ -332,6 +333,64 @@ class TestRowProcessingWithPipelining:
         assert result.row["original_field"] == "preserved"
         assert result.row["cs1_bg"] == "bg1"
 
+    def test_row_accept_supports_original_header_names_in_input_fields(
+        self,
+        ctx: PluginContext,
+        collector: CollectorOutputPort,
+        mock_recorder: Mock,
+        chaosllm_server,
+    ) -> None:
+        """Original source headers in input_fields resolve via PipelineRow contract."""
+        config = make_config(
+            case_studies=[
+                {"name": "cs1", "input_fields": ["Patient Name", "Symptoms", "History"]},
+            ],
+            criteria=[{"name": "diagnosis", "code": "DIAG"}],
+            pool_size=1,
+        )
+        transform = AzureMultiQueryLLMTransform(config)
+        init_ctx = PluginContext(run_id="test", config={}, landscape=mock_recorder)
+        transform.on_start(init_ctx)
+        transform.connect_output(collector, max_pending=10)
+
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                FieldContract("patient_name", "Patient Name", str, False, "inferred"),
+                FieldContract("symptoms", "Symptoms", str, False, "inferred"),
+                FieldContract("history", "History", str, False, "inferred"),
+            ),
+            locked=True,
+        )
+        row = PipelineRow(
+            {
+                "patient_name": "Alice Smith",
+                "symptoms": "chest pain",
+                "history": "family history",
+            },
+            contract,
+        )
+
+        try:
+            with chaosllm_azure_openai_responses(chaosllm_server, [{"score": 85, "rationale": "Looks consistent"}]) as mock_client:
+                transform.accept(row, ctx)
+                transform.flush_batch_processing(timeout=10.0)
+
+            assert len(collector.results) == 1
+            _, result, _state_id = collector.results[0]
+            assert isinstance(result, TransformResult)
+            assert result.status == "success"
+            assert result.row is not None
+            assert result.row["cs1_diagnosis_score"] == 85
+            assert result.row["patient_name"] == "Alice Smith"
+
+            call_args = mock_client.chat.completions.create.call_args
+            user_message = call_args.kwargs["messages"][-1]["content"]
+            assert "Alice Smith" in user_message
+            assert "diagnosis" in user_message.lower()
+        finally:
+            transform.close()
+
     def test_row_fails_if_any_query_fails(
         self,
         ctx: PluginContext,
@@ -497,9 +556,9 @@ class TestMultiRowPipelining:
         # Patch _get_llm_client to track state_ids
         original_get_client = transform._get_llm_client
 
-        def tracking_get_client(state_id: str) -> Any:
+        def tracking_get_client(state_id: str, *, token_id: str | None = None) -> Any:
             created_state_ids.append(state_id)
-            return original_get_client(state_id)
+            return original_get_client(state_id, token_id=token_id)
 
         transform._get_llm_client = tracking_get_client  # type: ignore[method-assign]
 

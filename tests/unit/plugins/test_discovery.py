@@ -65,6 +65,39 @@ class TestDiscoverPlugins:
         class_names = [cls.__name__ for cls in discovered]
         assert "BaseSource" not in class_names
 
+    def test_missing_name_attribute_raises(self, tmp_path: Path) -> None:
+        """Concrete plugin without name must fail discovery."""
+        plugin_file = tmp_path / "missing_name.py"
+        plugin_file.write_text("""
+from elspeth.plugins.base import BaseSource
+
+class MissingNameSource(BaseSource):
+    output_schema = None
+    node_id = None
+    determinism = "deterministic"
+    plugin_version = "1.0.0"
+
+    def __init__(self, config):
+        self.config = config
+        self.on_success = "continue"
+        self._on_validation_failure = "discard"
+
+    def load(self, ctx):
+        return iter([])
+
+    def close(self):
+        pass
+
+    def on_start(self, ctx):
+        pass
+
+    def on_complete(self, ctx):
+        pass
+""")
+
+        with pytest.raises(ValueError, match="missing required class attribute 'name'"):
+            discover_plugins_in_directory(tmp_path, BaseSource)
+
 
 class TestDiscoverAllPlugins:
     """Test discovery across all plugin directories."""

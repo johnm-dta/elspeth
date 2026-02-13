@@ -284,8 +284,13 @@ class AzureLLMTransform(BaseTransform, BatchTransformMixin):
                 self._setup_azure_ai_tracing(logger, tracing_config)
             case "langfuse":
                 self._setup_langfuse_tracing(logger, tracing_config)
-            case "none" | _:
+            case "none":
                 pass  # No tracing
+            case _:
+                logger.warning(
+                    "Unknown tracing provider encountered after validation - tracing disabled",
+                    provider=tracing_config.provider,
+                )
 
     def _setup_azure_ai_tracing(self, logger: Any, tracing_config: TracingConfig) -> None:
         """Initialize Azure AI / Application Insights tracing.
@@ -410,13 +415,9 @@ class AzureLLMTransform(BaseTransform, BatchTransformMixin):
         Returns:
             TransformResult with processed row or error
         """
-        # Extract dict from PipelineRow for template rendering (which hashes the data)
-        # PipelineRow itself cannot be serialized by canonical_json
-        row_data = row.to_dict()
-
         # 1. Render template with row data (THEIR DATA - wrap)
         try:
-            rendered = self._template.render_with_metadata(row_data)
+            rendered = self._template.render_with_metadata(row, contract=row.contract)
         except TemplateError as e:
             error_reason: TransformErrorReason = {
                 "reason": "template_rendering_failed",
@@ -440,13 +441,15 @@ class AzureLLMTransform(BaseTransform, BatchTransformMixin):
         try:
             import time
 
-            llm_client = self._get_llm_client(ctx.state_id)
+            if ctx.token is None:
+                raise RuntimeError("Azure LLM transform requires ctx.token. Ensure transform is executed through the engine.")
+            token_id = ctx.token.token_id
+            llm_client = self._get_llm_client(ctx.state_id, token_id=token_id)
 
             # 4. Call LLM (EXTERNAL - wrap)
             # Retryable errors (RateLimitError, NetworkError, ServerError) are re-raised
             # to let the engine's RetryManager handle them. Non-retryable errors
             # (ContentPolicyError, ContextLengthError) return TransformResult.error().
-            token_id = ctx.token.token_id if ctx.token else "unknown"
             start_time = time.monotonic()
 
             try:
@@ -488,7 +491,7 @@ class AzureLLMTransform(BaseTransform, BatchTransformMixin):
             )
 
             # 5. Build output row (OUR CODE - let exceptions crash)
-            output = row_data.copy()
+            output = row.to_dict()
             output[self._response_field] = response.content
             output[f"{self._response_field}_usage"] = response.usage
             output[f"{self._response_field}_template_hash"] = rendered.template_hash
@@ -535,7 +538,7 @@ class AzureLLMTransform(BaseTransform, BatchTransformMixin):
                 self._azure_api_key = None
             return self._underlying_client
 
-    def _get_llm_client(self, state_id: str) -> AuditedLLMClient:
+    def _get_llm_client(self, state_id: str, *, token_id: str | None = None) -> AuditedLLMClient:
         """Get or create LLM client for a state_id.
 
         Clients are cached to preserve call_index across retries.
@@ -556,6 +559,7 @@ class AzureLLMTransform(BaseTransform, BatchTransformMixin):
                     underlying_client=self._get_underlying_client(),
                     provider="azure",
                     limiter=self._limiter,
+                    token_id=token_id,
                 )
             return self._llm_clients[state_id]
 

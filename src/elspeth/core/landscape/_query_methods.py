@@ -142,7 +142,15 @@ class QueryMethodsMixin:
 
         try:
             payload_bytes = self._payload_store.retrieve(row.source_data_ref)
-            data = json.loads(payload_bytes.decode("utf-8"))
+            decoded_data = json.loads(payload_bytes.decode("utf-8"))
+            match decoded_data:
+                case dict() as data:
+                    pass
+                case _:
+                    actual_type = type(decoded_data).__name__
+                    raise AuditIntegrityError(
+                        f"Corrupt payload for row {row_id} (ref={row.source_data_ref}): expected JSON object, got {actual_type}"
+                    )
             return RowDataResult(state=RowDataState.AVAILABLE, data=data)
         except KeyError:
             return RowDataResult(state=RowDataState.PURGED, data=None)
@@ -413,7 +421,15 @@ class QueryMethodsMixin:
         if row.source_data_ref and self._payload_store:
             try:
                 payload_bytes = self._payload_store.retrieve(row.source_data_ref)
-                source_data = json.loads(payload_bytes.decode("utf-8"))
+                decoded_source_data = json.loads(payload_bytes.decode("utf-8"))
+                match decoded_source_data:
+                    case dict() as source_data_dict:
+                        source_data = source_data_dict
+                    case _:
+                        actual_type = type(decoded_source_data).__name__
+                        raise AuditIntegrityError(
+                            f"Corrupt payload for row {row_id} (ref={row.source_data_ref}): expected JSON object, got {actual_type}"
+                        )
                 payload_available = True
             except KeyError:
                 # Payload purged by retention policy — expected, continue without data

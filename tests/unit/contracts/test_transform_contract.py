@@ -171,3 +171,33 @@ class TestBoolField:
 
         field_map = {f.normalized_name: f for f in contract.fields}
         assert field_map["active"].python_type is bool
+
+
+class TestSchemaFactoryOptionalFloat:
+    """Regression tests for optional float extraction from schema_factory output."""
+
+    def test_optional_float_preserves_float_type_and_enforces_validation(self) -> None:
+        """Optional float should map to float type (None still allowed)."""
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.plugins.schema_factory import create_schema_from_config
+
+        cfg = SchemaConfig.from_dict(
+            {
+                "mode": "fixed",
+                "fields": ["score: float?"],
+            }
+        )
+        schema_class = create_schema_from_config(cfg, "OptionalFloatOutputSchema")
+        contract = create_output_contract_from_schema(schema_class)
+
+        field_map = {f.normalized_name: f for f in contract.fields}
+        score = field_map["score"]
+
+        assert score.required is False
+        assert score.python_type is float
+        assert validate_output_against_contract({"score": None}, contract) == []
+
+        violations = validate_output_against_contract({"score": "not-a-float"}, contract)
+        assert len(violations) == 1
+        assert isinstance(violations[0], TypeMismatchViolation)
+        assert violations[0].normalized_name == "score"

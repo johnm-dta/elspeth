@@ -1,5 +1,6 @@
-# ELSPETH Feature Inventory - January 29, 2026
+# ELSPETH Feature Inventory - February 13, 2026
 
+**Version:** RC-3
 **Purpose:** Complete inventory of what ELSPETH actually does today, reconciled against the original architecture.md (Jan 12) and requirements.md (Jan 22).
 
 **This document is the truth.** If code exists, it's listed. If it's listed but doesn't exist, that's a bug in this document.
@@ -8,15 +9,19 @@
 
 ## EVOLUTION SUMMARY
 
-| Aspect | Original Vision (Jan 12) | Current Reality (Jan 29) |
+| Aspect | Original Vision (Jan 12) | Current Reality (Feb 13, RC-3) |
 |--------|-------------------------|-------------------------|
-| Execution Model | Linear pipeline with gates | Full DAG with fork/coalesce |
-| Routing | continue, route_to_sink | continue, route_to_sink, fork_to_paths |
+| Execution Model | Linear pipeline with gates | Full DAG with fork/coalesce, declarative wiring |
+| Routing | continue, route_to_sink | Declarative `on_success`/`input` routing (ADR-004, ADR-005) |
+| Gates | Plugin-based gate system | Config-driven only (GateSettings + ExpressionParser) |
 | Aggregation | "accumulate state until trigger" | Count, timeout, condition triggers with flush |
 | Token Identity | row_id sufficient | row_id + token_id + parent_token_id |
 | LLM Integration | "Phase 6 future work" | 6 LLM transforms, structured outputs, batch API |
 | Analysis Tools | "elspeth explain" | MCP server with 20+ analysis tools |
 | Field Handling | Assumed clean input | Full normalization pipeline with collision detection |
+| Shutdown | Not addressed | Cooperative graceful shutdown with checkpoint + resume |
+| Telemetry | Not addressed | OpenTelemetry with OTLP, Azure Monitor, Datadog exporters |
+| Testing | Manual | 8,138 automated tests (unit, integration, e2e, property, performance) |
 
 ---
 
@@ -92,9 +97,9 @@
 - Artifact recording with content hash
 - Resume-aware (skip already-written rows)
 
-### 1.4 Gates
+### 1.4 Gates (Config-Driven)
 
-Gates are configured in YAML, not as separate plugins. The engine provides:
+Gates are **config-driven system operations**, not plugins. Gate plugins were deliberately removed in RC-3 (2026-02-11). All routing is handled by `GateSettings` + `ExpressionParser`.
 
 | Gate Type | Configuration | Routing Options |
 |-----------|--------------|-----------------|
@@ -122,6 +127,11 @@ Gates are configured in YAML, not as separate plugins. The engine provides:
 | Coalesce (join) | ✅ Working | Merges tokens by row_id |
 | Topological execution | ✅ Working | NetworkX provides ordering |
 | Cycle detection | ✅ Working | Rejects cyclic configurations |
+| Declarative DAG wiring | ✅ Working | Explicit `on_success`/`input` routing (ADR-004, ADR-005) |
+| Explicit sink routing | ✅ Working | No implicit sink connections; all routes declared in YAML |
+| DIVERT routing edges | ✅ Working | Quarantine/error sinks wired as `RoutingMode.DIVERT` edges |
+| Quarantine sink DAG exclusion | ✅ Working | Prevents unreachable node errors for quarantine sinks |
+| Structural node allowlists | ✅ Working | `NodeType` enum for type-safe node identification |
 
 ### 2.2 Token Management
 
@@ -171,6 +181,27 @@ Gates are configured in YAML, not as separate plugins. The engine provides:
 | nested | ✅ | Nest by branch name |
 | select | ✅ | Pick specific branch |
 
+### 2.6 Graceful Shutdown (FEAT-05, FEAT-05b)
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Signal handling (SIGTERM/SIGINT) | ✅ | Cooperative shutdown via `threading.Event` |
+| Processing loop shutdown | ✅ | Checks shutdown flag between rows and on quarantine path |
+| Resume path shutdown | ✅ | Graceful shutdown during `elspeth resume` |
+| Aggregation buffer flush | ✅ | Flushes pending aggregation buffers on shutdown |
+| Checkpoint on interrupt | ✅ | Creates checkpoint for `elspeth resume` |
+| Run status INTERRUPTED | ✅ | Clean status marking, resumable |
+| Second Ctrl-C force kill | ✅ | Immediate exit on repeated signal |
+| CLI exit code 3 | ✅ | Distinct exit code for interrupted runs |
+
+### 2.7 DROP-Mode Sentinel Handling
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Sentinel requeue failure isolation | ✅ | DROP-mode sentinel requeue failures do not raise to callers |
+| Flush join guarantee | ✅ | Preserved during DROP queue replacement |
+| Shutdown sentinel race fix | ✅ | Race condition between shutdown and DROP-mode sentinel requeue resolved |
+
 ---
 
 ## 3. AUDIT TRAIL (LANDSCAPE)
@@ -196,6 +227,8 @@ Gates are configured in YAML, not as separate plugins. The engine provides:
 | transform_errors | Transform failures | state_id, error_type, error_message, retryable |
 | token_outcomes | Terminal states | token_id, outcome, recorded_at |
 | checkpoints | Crash recovery | checkpoint_id, run_id, state_json |
+| operations | Source/sink audit trail | operation_id, run_id, node_id, operation_type, input_hash, output_hash |
+| secret_resolutions | Secret loading audit | run_id, secret_name, vault_source, fingerprint, latency_ms |
 
 ### 3.2 Recording Points
 
@@ -210,6 +243,9 @@ Gates are configured in YAML, not as separate plugins. The engine provides:
 | Coalesce | Children→merged | `record_coalesce()` |
 | Aggregation | Batch membership | `record_batch_member()` |
 | Sink write | Artifact descriptor | `record_artifact()` |
+| Source/sink operation | I/O hashes for source and sink operations | `create_operation()` / `complete_operation()` |
+| Secret resolution | Vault source, HMAC fingerprint, latency | `record_secret_resolution()` |
+| DIVERT routing | Quarantine/error routing events | `record_routing_event()` with DIVERT mode |
 | Terminal state | Outcome | `record_token_outcome()` |
 
 ### 3.3 Export
@@ -251,6 +287,9 @@ Gates are configured in YAML, not as separate plugins. The engine provides:
 | Secret fingerprinting | ✅ |
 | Template file expansion | ✅ |
 | Lookup file expansion | ✅ |
+| Settings→Runtime*Config contracts | ✅ |
+| Protocol-based config verification | ✅ |
+| AST field-mapping checker | ✅ |
 
 ### 5.2 Canonical JSON
 
@@ -280,7 +319,7 @@ Gates are configured in YAML, not as separate plugins. The engine provides:
 | pyrate-limiter integration | ✅ |
 | Per-plugin limits | ✅ |
 | Registry for multiple limiters | ✅ |
-| Engine wiring | ❌ Not wired |
+| Engine wiring | ✅ (CRIT-01) |
 
 ### 5.5 Checkpoint & Recovery
 
@@ -297,6 +336,8 @@ Gates are configured in YAML, not as separate plugins. The engine provides:
 |---------|--------|
 | HMAC secret fingerprinting | ✅ |
 | Azure Key Vault integration | ✅ |
+| Secret resolution audit trail | ✅ |
+| SQLCipher encrypted databases | ✅ |
 | Redaction profiles | ❌ Not implemented |
 | Access control | ❌ Not implemented |
 
@@ -331,9 +372,29 @@ Entry point: `elspeth-mcp`
 
 ---
 
-## 7. RECENT ADDITIONS (Post-Jan 22)
+## 7. TELEMETRY
 
-### 7.1 Field Normalization
+**Entry point:** Configured via `telemetry:` section in `settings.yaml`
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| OpenTelemetry integration | ✅ | Structured event emission with trace/span correlation |
+| OTLP exporter | ✅ | gRPC/HTTP export to any OTLP-compatible backend |
+| Azure Monitor exporter | ✅ | Direct export to Azure Application Insights |
+| Datadog exporter | ✅ | Export via `ddtrace` |
+| Granularity filtering | ✅ | Row-level vs run-level event classification |
+| FieldResolutionApplied events | ✅ | Classified as row-level telemetry |
+| ExternalCallCompleted token-id | ✅ | Token-id correlation on external call events |
+| DROP-mode backpressure | ✅ | Evicts oldest queued events under pressure |
+| Queue accounting | ✅ | Hardened queue size tracking and hook validation |
+| Empty flush acknowledgement | ✅ | OTLP and Azure Monitor explicitly handle empty flushes |
+| No-silent-failures policy | ✅ | Every emission point sends or acknowledges absence |
+
+---
+
+## 8. RECENT ADDITIONS (Post-Jan 22)
+
+### 8.1 Field Normalization
 
 **Files:** `plugins/sources/field_normalization.py`
 
@@ -342,28 +403,155 @@ Entry point: `elspeth-mcp`
 - `resolve_field_names()` - Complete resolution pipeline
 - Algorithm versioning: `NORMALIZATION_ALGORITHM_VERSION = "1.0.0"`
 
-### 7.2 Identifier Validation
+### 8.2 Identifier Validation
 
 **Files:** `core/identifiers.py`
 
 - `validate_field_names()` - Validate Python identifiers, keywords, duplicates
 
-### 7.3 Structured Outputs
+### 8.3 Structured Outputs
 
 **Config:** `ResponseFormat.STRUCTURED` in LLM plugins
 
 - JSON schema-based output validation
 - Automatic parsing and field extraction
 
-### 7.4 MCP Database Auto-Discovery
+### 8.4 MCP Database Auto-Discovery
 
 - Auto-discovers `.db` files in current directory
 - Prioritizes `audit.db` in `runs/` directories
 - Sorts by most recently modified
 
+### 8.5 Declarative DAG Wiring (ADR-004, ADR-005) — RC-3
+
+**Commits:** Routing Trilogy (`d213fca3`, `00d3c6ba`, `5080ff1c`, et al.)
+
+Three-phase routing overhaul replacing implicit sink connections with fully declarative wiring:
+
+- **Phase 1 (Explicit Sink Routing):** All sink routes declared via `on_success` in YAML; no implicit connections
+- **Phase 2 (Processor Node-ID Refactoring):** `NodeType` enum for structural node identification; `MappingProxyType` for frozen config
+- **Phase 3 (Declarative DAG Wiring):** `on_success` and `input` routing on all transforms/gates; `WiredTransform` connection matching; connection namespace reservation
+- Gate-to-gate route resolution
+- Fail-closed routing (missing edge = error, not silent drop)
+
+### 8.6 Gate Plugin Removal — RC-3
+
+**Commits:** `7b61f3bb`, `ea0e208d`, et al.
+
+All gate plugin infrastructure deliberately removed (~3,000 lines deleted):
+
+- `GateProtocol`, `BaseGate`, `execute_gate()`, `PluginGateReason` deleted
+- Gate plugin registration, discovery, and factory code removed
+- Routing is config-driven only via `GateSettings` + `ExpressionParser`
+- Dead plugin protocols (`CoalesceProtocol`, `PluginProtocol`, `CoalescePolicy`) also removed
+
+### 8.7 Graceful Shutdown (FEAT-05, FEAT-05b) — RC-3
+
+**Commits:** `6286367f` (processing loop), `d2a6cbef` (resume path), `9a9fd8ca` (quarantine path)
+
+- Cooperative shutdown via `threading.Event` and SIGTERM/SIGINT handlers
+- Processing loop, resume path, and quarantine path all check shutdown flag
+- On shutdown: flush aggregation buffers, write pending sinks, create checkpoint, mark run INTERRUPTED
+- Second Ctrl-C force-kills; CLI exits with code 3
+- 16 tests (9 unit + 7 integration)
+
+### 8.8 DROP-Mode Sentinel Handling — RC-3
+
+**Commits:** `bbc2f515`, `3af35d0d`, `1acec271`
+
+- DROP-mode sentinel requeue failures isolated from callers
+- Flush join guarantee preserved during DROP queue replacement
+- Shutdown sentinel requeue race condition resolved
+
+### 8.9 DIVERT Routing for Audit Completeness — RC-3
+
+**Commits:** `7126d457`, `8d2b7bb7`, `73d40fd7`, `d5d8e4df`, et al.
+
+- `RoutingMode.DIVERT` edges for quarantine/error sinks in DAG
+- Transform error paths emit DIVERT routing events
+- Source quarantine paths emit routing events with `SourceQuarantineReason`
+- MCP `explain_token` annotates DIVERT routing in lineage response
+- Mermaid diagrams render DIVERT edges as dashed arrows
+- DAG validation warns on DIVERT + `require_all` coalesce
+
+### 8.10 Contract Propagation for Complex Fields — RC-3
+
+**Commits:** `c21cdb27`, `7e6285b3`, `16cb0726`
+
+- `dict` and `list` fields preserved in propagated contracts
+- Schema contract factory for consistent contract creation
+- Contract propagation utilities for transform pipeline
+- JSONExplode contract handles complex `output_field` values
+
+### 8.11 ExternalCallCompleted Token-ID Correlation — RC-3
+
+**Commit:** `f38cfa2c`
+
+- External call telemetry events now include `token_id` for correlation with Landscape audit trail
+
+### 8.12 FieldResolution Telemetry Granularity — RC-3
+
+**Commit:** `047d8975`
+
+- `FieldResolutionApplied` events classified as row-level telemetry for granularity filtering
+
+### 8.13 Test Suite v2 Migration — RC-3
+
+**Commits:** 7-phase migration (`f62aa1a3` through `9c657fb7`)
+
+- 8,138 tests (8,037 passed, 16 skipped, 3 xfailed)
+- Phase 0+1: Scaffolding + factories
+- Phase 2A: Contracts (1,142 tests)
+- Phase 2B+2C+2D: Core + engine + plugins (3,823 tests)
+- Phase 3: Property tests (1,057 tests)
+- Phase 4: Integration tests (482 tests)
+- Phase 5: E2E tests (48 tests)
+- Phase 6: Performance tests (67 tests)
+- Phase 7: Cutover — deleted v1 suite (7,487 tests, 507 files, 222K lines), renamed `tests_v2/` to `tests/`
+
+### 8.14 ExecutionGraph Public API — RC-3
+
+**Commit:** `1c31869b` (TEST-01)
+
+- 13 public setters + 5 method renames on `ExecutionGraph`
+- 60+ private attribute accesses eliminated from tests
+- Clean public API boundary between engine internals and test code
+
+### 8.15 Landscape Recorder Decomposition — RC-3
+
+**Commit:** `85f94895`
+
+- `LandscapeRecorder` god class decomposed into 8 focused mixins
+- Cleaner separation of recording responsibilities
+
+### 8.16 Operation I/O Hashes — RC-3
+
+**Commit:** `264ab2cf`
+
+- Operation I/O hashes survive payload purge
+- Integrity verification possible even after retention policies delete payloads
+
+### 8.17 SQLCipher Support — RC-3
+
+**Commits:** `186b7507`, `5e338057`, `a428da13`, `bdb99c33`, `d4d7a85c`
+
+- SQLCipher encrypted audit databases
+- Backend validation and key escaping
+- CLI passphrase support
+- MCP server passphrase forwarding
+- Empty passphrase rejection
+
+### 8.18 Secret Resolution Audit Trail — RC-3
+
+**Commit:** `b758b299`, `16cb0726`
+
+- `secret_resolutions` Landscape table
+- Records vault source, HMAC fingerprint, latency for every secret loaded
+- Azure Key Vault and environment variable sources audited
+
 ---
 
-## 8. NOT IMPLEMENTED (Deferred)
+## 9. NOT IMPLEMENTED (Deferred)
 
 | Feature | Original Phase | Status |
 |---------|---------------|--------|
@@ -378,10 +566,14 @@ Entry point: `elspeth-mcp`
 | S3/blob payload backend | Phase 7 | Not started |
 | Multi-destination copy routing | Phase 7 | Not started |
 | Concurrent processing integration | Phase 5 | Config exists, not wired |
+| Circuit breaker for retry logic | RC-3+ | FEAT-06 deferred |
+| CLI `status`/`export`/`db migrate` | RC-3+ | FEAT-04 deferred |
+| Per-branch transforms between fork/coalesce | RC-3+ | ARCH-15 — fork branches wire directly to coalesce |
+| Prometheus/pull metrics | RC-3+ | OBS-04 deferred |
 
 ---
 
-## 9. DIVERGENCES FROM ORIGINAL SPEC
+## 10. DIVERGENCES FROM ORIGINAL SPEC
 
 | Original Spec | Actual Implementation | Assessment |
 |--------------|----------------------|------------|
@@ -392,15 +584,16 @@ Entry point: `elspeth-mcp`
 | LiteLLM for LLM access | Direct OpenAI SDK + custom clients | ⚠️ Different (works) |
 | `elspeth explain --full` | `--json` and `--no-tui` | 🔀 Changed |
 | Terminal states derived | Explicit `token_outcomes` table | ✅ Better for queries |
+| Plugin-based gates | Config-driven gates (GateSettings) | ✅ Simpler, no plugin overhead |
+| Implicit sink routing | Declarative `on_success`/`input` routing | ✅ Explicit, auditable |
 
 ---
 
-## 10. REQUIREMENTS.MD GAPS
+## 11. REQUIREMENTS.MD GAPS
 
-### In requirements.md but not fully working:
+### In requirements.md but not fully implemented:
 - CLI-016: `elspeth run` PayloadStore wiring
-- CRIT-03: Coalesce timeout calling in processor
-- FAI-009: Every token reaches terminal state (some gaps)
+- FAI-009: Every token reaches terminal state (edge case gaps remain)
 
 ### Working but not in requirements.md:
 - Field normalization with collision detection
@@ -409,8 +602,16 @@ Entry point: `elspeth-mcp`
 - MCP server with 20+ tools
 - Aggregation trigger type in metadata
 - `validate_field_names()` core utility
+- Graceful shutdown with checkpoint + resume
+- Declarative DAG wiring (ADR-004, ADR-005)
+- DIVERT routing for audit completeness
+- Telemetry subsystem (OTLP, Azure Monitor, Datadog)
+- SQLCipher encrypted audit databases
+- Secret resolution audit trail
+- Contract propagation for complex fields
 
 ---
 
 *Inventory completed: January 29, 2026*
-*Next update: After RC-2 release*
+*Updated: February 13, 2026 (RC-3 quality sprint)*
+*Next update: After RC-3 release*

@@ -16,9 +16,20 @@ The protocol definitions (SourceProtocol, TransformProtocol, SinkProtocol) exist
 for type-checking purposes only - they define the interface contract but cannot
 be used for runtime discovery.
 
-Phase 3 Integration:
-- Lifecycle hooks (on_start, on_complete) are called by engine
-- PluginContext is provided by engine with landscape/tracer/payload_store
+Lifecycle Contract (all hooks called on main thread by orchestrator):
+    on_start(ctx) -> [process/load/write] -> on_complete(ctx) -> close()
+
+- on_start: Per-run initialization (acquire resources, capture context).
+  If on_start raises, neither on_complete nor close is called.
+- on_complete: Processing finished (success or error). Receives PluginContext
+  for landscape/telemetry interaction. Called even on pipeline crash.
+- close: Pure resource teardown (no PluginContext). Called even on pipeline
+  crash. Each plugin's cleanup is individually protected.
+- Call order across plugin types (normal run):
+  source.on_start -> transforms.on_start -> sinks.on_start -> [processing]
+  -> transforms.on_complete -> sinks.on_complete -> source.on_complete
+  -> source.close -> transforms.close -> sinks.close
+- Resume runs skip source lifecycle entirely (NullSource is used).
 """
 
 from abc import ABC, abstractmethod
@@ -38,15 +49,20 @@ from elspeth.plugins.results import (
 
 
 class BaseTransform(ABC):
-    """Base class for stateless row transforms.
+    """Base class for all row transforms.
 
-    Subclass and implement process() to create a transform.
+    Execution Models
+    ----------------
+    Transforms use one of three execution models depending on concurrency needs.
+    The TransformExecutor in engine/executors/transform.py dispatches automatically
+    based on isinstance checks (BatchTransformMixin) and the is_batch_aware flag.
 
-    For batch-aware transforms (used in aggregation nodes):
-    - Set is_batch_aware = True
-    - process() will receive list[dict] when used in aggregation
+    **1. Synchronous (process) -- standard row-by-row processing**
 
-    Example:
+        The engine calls process() once per row and receives a TransformResult
+        synchronously. Use this for CPU-bound, fast, or deterministic transforms
+        (field mapping, truncation, validation, etc.).
+
         class MyTransform(BaseTransform):
             name = "my_transform"
             input_schema = InputSchema
@@ -57,6 +73,57 @@ class BaseTransform(ABC):
                     {**row.to_dict(), "new_field": "value"},
                     success_reason={"action": "processed"},
                 )
+
+    **2. Streaming (accept) -- row-level pipelining via BatchTransformMixin**
+
+        The engine calls accept() per row. Processing happens asynchronously in a
+        worker pool; results are emitted in FIFO order through an OutputPort. The
+        engine blocks until each row's result arrives (sequential across rows,
+        concurrent within each row). Use this for I/O-bound transforms that benefit
+        from concurrency (LLM calls, HTTP APIs, multi-query evaluation).
+
+        Requires inheriting both BaseTransform and BatchTransformMixin:
+
+        class MyLLMTransform(BaseTransform, BatchTransformMixin):
+            name = "my_llm"
+
+            def accept(self, row: PipelineRow, ctx: PluginContext) -> None:
+                self.accept_row(row, ctx, self._do_work)
+
+            def connect_output(self, output: OutputPort, max_pending: int = 30) -> None:
+                self.init_batch_processing(max_pending=max_pending, output=output)
+
+            def _do_work(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
+                # Runs in worker thread
+                return TransformResult.success(...)
+
+        Streaming transforms override process() to raise NotImplementedError,
+        directing callers to use accept(). The TransformExecutor detects the mixin
+        via isinstance(transform, BatchTransformMixin) and routes to accept()
+        automatically -- plugin authors never need to worry about dispatch.
+
+    **3. Batch-aware (process with is_batch_aware=True) -- aggregation batches**
+
+        The engine buffers rows until an aggregation trigger fires, then calls
+        process() with list[PipelineRow]. Use this for transforms inside
+        aggregation nodes (batch LLM calls, statistical aggregations).
+
+        class MyBatchTransform(BaseTransform):
+            name = "my_batch"
+            is_batch_aware = True
+
+            def process(self, row, ctx):  # row is list[PipelineRow] in batch mode
+                if isinstance(row, list):
+                    return self._process_batch(row, ctx)
+                return self._process_single(row, ctx)
+
+    When to Use Which
+    -----------------
+    - process() alone: Simple, fast transforms (field mapping, filtering, etc.)
+    - accept() + BatchTransformMixin: I/O-bound per-row work needing concurrency
+      (LLM API calls, HTTP requests, multi-query evaluation)
+    - process() + is_batch_aware: Aggregation-stage transforms that receive
+      pre-buffered batches from the engine's trigger system
     """
 
     name: str
@@ -133,27 +200,56 @@ class BaseTransform(ABC):
         )
 
     def close(self) -> None:  # noqa: B027 - optional override, not abstract
-        """Clean up resources after pipeline completion.
+        """Release resources (connections, file handles, thread pools).
 
-        Called once after all rows have been processed. Override for closing
-        connections, flushing buffers, or releasing external resources.
+        Called once per run after on_complete(), inside a finally block.
+        No PluginContext is available -- this is pure resource teardown.
+
+        Guaranteed to be called if on_start() succeeded, even when the
+        pipeline crashes mid-processing. NOT called if on_start() itself
+        raises. Each plugin's close() is individually protected: one
+        plugin's failure does not prevent others from closing.
+
+        Called on the main thread.
         """
         pass
 
-    # === Lifecycle Hooks (Phase 3) ===
-    # These are intentionally empty - optional hooks for subclasses to override
+    # === Lifecycle Hooks ===
+    # These are intentionally empty - optional hooks for subclasses to override.
+    #
+    # Call ordering (orchestrator, main thread):
+    #   1. on_start(ctx)    -- before any rows are processed
+    #   2. process(row, ctx) -- per row (or per batch)
+    #   3. on_complete(ctx)  -- after all rows, or after pipeline error
+    #   4. close()           -- resource teardown (always after on_complete)
+    #
+    # on_complete() and close() run inside a finally block, so they execute
+    # even when the pipeline crashes. However, if on_start() raises, neither
+    # on_complete() nor close() is called for ANY plugin.
+    #
+    # Resume path: on_start/on_complete/close are called normally for
+    # transforms during resume runs.
 
     def on_start(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
-        """Called at the start of each run.
+        """Called once before any rows are processed.
 
-        Override for per-run initialization.
+        Override for per-run initialization: capturing the recorder,
+        acquiring rate limiters, initializing tracing, etc.
+
+        Called on the main thread. If this raises, the pipeline aborts
+        and neither on_complete() nor close() will be called.
         """
         pass
 
     def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
-        """Called at the end of each run.
+        """Called after all rows are processed (or after pipeline error).
 
-        Override for cleanup.
+        Override for recording final metrics, flushing application-level
+        buffers, or updating audit state. Always called before close().
+
+        Called on the main thread. Receives PluginContext so it can
+        interact with the landscape and telemetry. Individually protected:
+        if this raises, other plugins still get their on_complete/close calls.
         """
         pass
 
@@ -170,6 +266,32 @@ class BaseSink(ABC):
     """Base class for sink plugins.
 
     Subclass and implement write(), flush(), close().
+
+    Lifecycle (called by the orchestrator on the main thread):
+
+        1. on_start(ctx)     -- per-run initialization (before any writes)
+        2. write(rows, ctx)  -- called in batches as rows reach this sink
+        3. flush()           -- called before checkpoints to guarantee durability
+        4. on_complete(ctx)  -- all rows written (or pipeline errored)
+        5. close()           -- release resources (file handles, connections)
+
+    Guarantees:
+        - on_start() is called once before any write() call.
+        - on_complete() and close() run inside a finally block, so they
+          execute even when the pipeline crashes mid-processing. However,
+          if on_start() raises, neither on_complete() nor close() is called.
+        - on_complete() is called before close(). Both are called regardless
+          of whether processing succeeded or failed.
+        - Each plugin's on_complete()/close() is individually protected: one
+          plugin's cleanup failure does not prevent other plugins from
+          cleaning up.
+
+    on_complete vs close:
+        - on_complete(ctx): "Processing is done." Use for finalizing output
+          format (e.g., writing JSON array closing bracket), recording metrics,
+          or updating audit state. Receives PluginContext.
+        - close(): "Release all resources." Use for closing file handles or
+          network connections. No PluginContext -- pure resource teardown.
 
     Example:
         class CSVSink(BaseSink):
@@ -288,7 +410,13 @@ class BaseSink(ABC):
 
     @abstractmethod
     def close(self) -> None:
-        """Close and release resources."""
+        """Release resources (file handles, connections).
+
+        Called once per run after on_complete(), inside a finally block.
+        Guaranteed to be called if on_start() succeeded, even on pipeline
+        crash. NOT called if on_start() itself raises. Each plugin's
+        close() is individually protected. Called on the main thread.
+        """
         ...
 
     # === Output Contract Support (Phase 3) ===
@@ -312,14 +440,26 @@ class BaseSink(ABC):
         """
         self._output_contract = contract
 
-    # === Lifecycle Hooks (Phase 3) ===
+    # === Lifecycle Hooks ===
+    # Call ordering: on_start -> write/flush -> on_complete -> close
+    # See class docstring for full lifecycle contract and guarantees.
 
     def on_start(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
-        """Called at start of run."""
+        """Called once before any write() call.
+
+        Override for per-run initialization. Called on the main thread.
+        If this raises, the pipeline aborts and neither on_complete()
+        nor close() will be called.
+        """
         pass
 
     def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
-        """Called at end of run (before close)."""
+        """Called after all rows are written (or after pipeline error), before close().
+
+        Override for finalizing output format, recording metrics, or
+        updating audit state. Called on the main thread. Individually
+        protected: if this raises, other plugins still get their calls.
+        """
         pass
 
 
@@ -327,6 +467,30 @@ class BaseSource(ABC):
     """Base class for source plugins.
 
     Subclass and implement load() and close().
+
+    Lifecycle (called by the orchestrator on the main thread):
+
+        1. on_start(ctx)  -- per-run initialization (before load)
+        2. load(ctx)      -- yields SourceRow instances
+        3. on_complete(ctx) -- source exhausted (or pipeline errored)
+        4. close()        -- release resources (file handles, connections)
+
+    Guarantees:
+        - on_start() is called once before load().
+        - on_complete() and close() run inside a finally block, so they
+          execute even when the pipeline crashes mid-processing. However,
+          if on_start() raises, neither on_complete() nor close() is called.
+        - on_complete() is called before close(). Both are called regardless
+          of whether processing succeeded or failed.
+        - Each plugin's on_complete()/close() is individually protected.
+
+    Resume path: Source lifecycle hooks (on_start, on_complete, close) are
+    skipped during resume runs because NullSource is used and row data comes
+    from stored payloads, not from the original source.
+
+    on_complete vs close:
+        - on_complete(ctx): "Loading is done." Receives PluginContext.
+        - close(): "Release all resources." No PluginContext -- pure teardown.
 
     Example:
         class CSVSource(BaseSource):
@@ -386,7 +550,15 @@ class BaseSource(ABC):
 
     @abstractmethod
     def close(self) -> None:
-        """Clean up resources."""
+        """Release resources (file handles, connections).
+
+        Called once per run after on_complete(), inside a finally block.
+        Guaranteed to be called if on_start() succeeded, even on pipeline
+        crash. NOT called if on_start() itself raises. Each plugin's
+        close() is individually protected. Called on the main thread.
+
+        Skipped during resume runs (source is not opened).
+        """
         ...
 
     # === Schema Contract Support (Phase 2) ===
@@ -410,14 +582,31 @@ class BaseSource(ABC):
         """
         self._schema_contract = contract
 
-    # === Lifecycle Hooks (Phase 3) ===
+    # === Lifecycle Hooks ===
+    # Call ordering: on_start -> load -> on_complete -> close
+    # See class docstring for full lifecycle contract and guarantees.
+    # Skipped entirely during resume runs (NullSource is used instead).
 
     def on_start(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
-        """Called before load()."""
+        """Called once before load().
+
+        Override for per-run initialization. Called on the main thread.
+        If this raises, the pipeline aborts and neither on_complete()
+        nor close() will be called.
+
+        Skipped during resume runs.
+        """
         pass
 
     def on_complete(self, ctx: PluginContext) -> None:  # noqa: B027 - optional hook
-        """Called after load() completes (before close)."""
+        """Called after load() completes (or after pipeline error), before close().
+
+        Override for recording final metrics or updating audit state.
+        Called on the main thread. Individually protected: if this raises,
+        other plugins still get their on_complete/close calls.
+
+        Skipped during resume runs.
+        """
         pass
 
     # === Audit Trail Metadata ===

@@ -1,0 +1,73 @@
+# Retention/Purge Example — Payload Lifecycle Management
+#
+# Demonstrates the payload store and retention purge workflow:
+#
+#   source ─(validated)─> passthrough ─(processed)─> [classification_gate] ─┬─ public.csv
+#                                                                            └─ restricted.csv
+#
+# The payload_store section configures where large blobs are stored.
+# After a run, `elspeth purge` removes old payloads while preserving
+# the audit trail (hashes and metadata survive deletion).
+
+source:
+  plugin: csv
+  on_success: validated
+  options:
+    path: examples/retention_purge/input.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'document: str'
+      - 'classification: str'
+    on_validation_failure: discard
+
+transforms:
+- name: process
+  plugin: passthrough
+  input: validated
+  on_success: processed
+  on_error: discard
+  options:
+    schema:
+      mode: observed
+
+gates:
+- name: classification_gate
+  input: processed
+  condition: row['classification'] == 'public'
+  routes:
+    'true': public
+    'false': restricted
+
+sinks:
+  public:
+    plugin: csv
+    options:
+      path: examples/retention_purge/output/public_docs.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'document: str'
+        - 'classification: str'
+  restricted:
+    plugin: csv
+    options:
+      path: examples/retention_purge/output/restricted_docs.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'document: str'
+        - 'classification: str'
+
+landscape:
+  url: sqlite:///examples/retention_purge/runs/audit.db
+
+# Payload store configuration.
+# Payloads older than retention_days are eligible for purge.
+payload_store:
+  backend: filesystem
+  base_path: examples/retention_purge/payloads
+  retention_days: 7

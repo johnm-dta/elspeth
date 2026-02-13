@@ -126,7 +126,7 @@ class AzureAuthConfig(BaseModel):
 
         sp_fields = [self.tenant_id, self.client_id, self.client_secret]
         sp_field_count = sum(1 for f in sp_fields if f is not None)
-        if 0 < sp_field_count < 3 and not has_conn_string and not has_sas_token and not has_managed_identity:
+        if 0 < sp_field_count < 3:
             missing = []
             if self.tenant_id is None:
                 missing.append("tenant_id")

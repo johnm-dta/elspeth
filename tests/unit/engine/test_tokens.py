@@ -990,7 +990,7 @@ class TestTokenManagerBoundaryPaths:
         assert recorder.get_token(resumed.token_id) is not None
 
     def test_expand_token_requires_locked_output_contract(self) -> None:
-        manager, _recorder, run_id, source_node_id = _make_manager_context()
+        manager, recorder, run_id, source_node_id = _make_manager_context()
 
         parent = manager.create_initial_token(
             run_id=run_id,
@@ -1000,6 +1000,10 @@ class TestTokenManagerBoundaryPaths:
         )
         unlocked_contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
 
+        tokens_before = recorder.get_all_tokens_for_run(run_id)
+        parents_before = recorder.get_all_token_parents_for_run(run_id)
+        outcome_before = recorder.get_token_outcome(parent.token_id)
+
         with pytest.raises(ValueError, match="must be locked"):
             manager.expand_token(
                 parent_token=parent,
@@ -1008,3 +1012,11 @@ class TestTokenManagerBoundaryPaths:
                 node_id=NodeID("expand_node"),
                 run_id=run_id,
             )
+
+        tokens_after = recorder.get_all_tokens_for_run(run_id)
+        parents_after = recorder.get_all_token_parents_for_run(run_id)
+        outcome_after = recorder.get_token_outcome(parent.token_id)
+
+        assert len(tokens_after) == len(tokens_before), "Unlocked contract must not create child tokens"
+        assert len(parents_after) == len(parents_before), "Unlocked contract must not create token parent links"
+        assert outcome_before is outcome_after is None, "Unlocked contract must not record parent EXPANDED outcome"

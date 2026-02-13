@@ -48,9 +48,9 @@ def create_contract_from_config(
 ) -> SchemaContract:
     """Create SchemaContract from SchemaConfig.
 
-    For explicit schemas (fixed/flexible), creates a locked contract with
-    declared fields. For observed schemas, creates an unlocked contract
-    that will infer types from the first row.
+    For fixed schemas, creates a locked contract with declared fields.
+    For flexible/observed schemas, creates an unlocked contract that will
+    infer additional fields from the first valid row.
 
     Args:
         config: Schema configuration from YAML
@@ -88,9 +88,9 @@ def create_contract_from_config(
             field_contracts.append(fc)
         fields = tuple(field_contracts)
 
-    # Explicit schemas start locked (types are known)
-    # Observed schemas start unlocked (types inferred from first row)
-    locked = not config.is_observed
+    # FIXED schemas start locked (types are fully declared).
+    # FLEXIBLE/OBSERVED start unlocked and lock after first valid row.
+    locked = config.mode == "fixed"
 
     return SchemaContract(
         mode=mode,

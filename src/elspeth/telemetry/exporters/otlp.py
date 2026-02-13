@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from elspeth import __version__ as _elspeth_version
 from elspeth.telemetry.errors import TelemetryExporterError
 
 if TYPE_CHECKING:
@@ -122,16 +123,51 @@ class OTLPExporter:
                 "OTLP exporter requires 'endpoint' in config",
             )
 
-        self._endpoint = config["endpoint"]
-        self._headers = config.get("headers", {})
-        self._batch_size = config.get("batch_size", 100)
-
-        # Validate batch_size is positive
-        if self._batch_size < 1:
+        endpoint = config["endpoint"]
+        if not isinstance(endpoint, str):
             raise TelemetryExporterError(
                 self._name,
-                f"batch_size must be >= 1, got {self._batch_size}",
+                f"'endpoint' must be a string, got {type(endpoint).__name__}",
             )
+
+        raw_headers = config.get("headers", {})
+        if raw_headers is None:
+            headers: dict[str, str] = {}
+        elif not isinstance(raw_headers, dict):
+            raise TelemetryExporterError(
+                self._name,
+                f"'headers' must be a dictionary or null, got {type(raw_headers).__name__}",
+            )
+        else:
+            headers = {}
+            for key, value in raw_headers.items():
+                if not isinstance(key, str):
+                    raise TelemetryExporterError(
+                        self._name,
+                        f"'headers' keys must be strings, got {type(key).__name__}",
+                    )
+                if not isinstance(value, str):
+                    raise TelemetryExporterError(
+                        self._name,
+                        f"'headers[{key}]' must be a string, got {type(value).__name__}",
+                    )
+                headers[key] = value
+
+        batch_size = config.get("batch_size", 100)
+        if not isinstance(batch_size, int):
+            raise TelemetryExporterError(
+                self._name,
+                f"'batch_size' must be an integer, got {type(batch_size).__name__}",
+            )
+        if batch_size < 1:
+            raise TelemetryExporterError(
+                self._name,
+                f"batch_size must be >= 1, got {batch_size}",
+            )
+
+        self._endpoint = endpoint
+        self._headers = headers
+        self._batch_size = batch_size
 
         # Import and initialize the OTLP exporter
         try:
@@ -194,6 +230,10 @@ class OTLPExporter:
         externally via flush().
         """
         if not self._buffer:
+            logger.debug(
+                "OTLP flush requested with empty buffer",
+                exporter=self._name,
+            )
             return
 
         if not self._span_exporter:
@@ -393,7 +433,7 @@ class _SyntheticReadableSpan(_ReadableSpanBase):
             kind=kind,
             instrumentation_scope=InstrumentationScope(
                 name="elspeth.telemetry",
-                version="0.1.0",
+                version=_elspeth_version,
             ),
             status=Status(StatusCode.OK),
             start_time=start_time,

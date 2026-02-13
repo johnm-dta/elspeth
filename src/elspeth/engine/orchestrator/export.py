@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import csv
 import os
+import re
+from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from elspeth.core.config import ElspethSettings
@@ -170,7 +172,7 @@ def _export_csv_multifile(
                 writer.writerow(rec)
 
 
-def reconstruct_schema_from_json(schema_dict: dict[str, Any]) -> type:
+def reconstruct_schema_from_json(schema_dict: Mapping[str, object]) -> type:
     """Reconstruct Pydantic schema class from JSON schema dict.
 
     Handles complete Pydantic JSON schema including:
@@ -199,13 +201,13 @@ def reconstruct_schema_from_json(schema_dict: dict[str, Any]) -> type:
         raise ValueError(
             "Resume failed: Schema JSON has no 'properties' field. This indicates a malformed schema. Cannot reconstruct types."
         )
-    properties = schema_dict["properties"]
+    properties = cast(Mapping[str, object], schema_dict["properties"])
 
     # Handle observed/dynamic schemas: empty properties with additionalProperties=true
     # This is the normal JSON schema output for schema.mode=observed (dynamic schemas)
     # See schema_factory._create_dynamic_schema for the creation side
     if not properties:
-        if schema_dict.get("additionalProperties") is True:
+        if "additionalProperties" in schema_dict and schema_dict["additionalProperties"] is True:
             # Dynamic schema - accepts any fields, no fixed properties
             return create_model(
                 "RestoredDynamicSchema",
@@ -220,29 +222,65 @@ def reconstruct_schema_from_json(schema_dict: dict[str, Any]) -> type:
         )
 
     # "required" is optional in JSON Schema spec - empty list is valid default
-    if "required" in schema_dict:
-        required_fields = set(schema_dict["required"])
-    else:
-        required_fields = set()
+    required_fields = set(cast(list[str], schema_dict["required"])) if "required" in schema_dict else set()
 
-    # Build field definitions for create_model
+    # Resolve top-level fields recursively, preserving array item types and
+    # nested object property schemas.
+    return _create_schema_model(
+        model_name="RestoredSourceSchema",
+        properties=properties,
+        required_fields=required_fields,
+        schema_defs=cast(Mapping[str, object], schema_dict["$defs"]) if "$defs" in schema_dict else None,
+        create_model=create_model,
+        schema_base=PluginSchema,
+    )
+
+
+def _create_schema_model(
+    model_name: str,
+    properties: Mapping[str, object],
+    required_fields: set[str],
+    *,
+    schema_defs: Mapping[str, object] | None,
+    create_model: Any,
+    schema_base: Any,
+) -> type:
+    """Create a Pydantic model from JSON schema properties."""
     field_definitions: dict[str, Any] = {}
 
-    for field_name, field_info in properties.items():
-        # Determine Python type from JSON schema
-        field_type = _json_schema_to_python_type(field_name, field_info)
+    for field_name, raw_field_info in properties.items():
+        field_info = cast(Mapping[str, object], raw_field_info)
+        field_type = _json_schema_to_python_type(
+            field_name,
+            field_info,
+            schema_defs=schema_defs,
+            create_model=create_model,
+            schema_base=schema_base,
+        )
+        field_definitions[field_name] = (field_type, ... if field_name in required_fields else None)
 
-        # Handle optional vs required fields
-        if field_name in required_fields:
-            field_definitions[field_name] = (field_type, ...)  # Required field
-        else:
-            field_definitions[field_name] = (field_type, None)  # Optional field
-
-    # Recreate the schema class dynamically
-    return create_model("RestoredSourceSchema", __base__=PluginSchema, **field_definitions)
+    return cast(type, create_model(model_name, __base__=schema_base, **field_definitions))
 
 
-def _json_schema_to_python_type(field_name: str, field_info: dict[str, Any]) -> type:
+def _model_name_for_field(field_name: str) -> str:
+    """Build a deterministic nested model name from a field name."""
+    tokens = re.findall(r"[A-Za-z0-9]+", field_name)
+    if not tokens:
+        return "RestoredNestedSchema"
+    title_cased = "".join(token[:1].upper() + token[1:] for token in tokens)
+    if title_cased[0].isdigit():
+        title_cased = f"Field{title_cased}"
+    return f"Restored{title_cased}Schema"
+
+
+def _json_schema_to_python_type(
+    field_name: str,
+    field_info: Mapping[str, object],
+    *,
+    schema_defs: Mapping[str, object] | None = None,
+    create_model: Any | None = None,
+    schema_base: Any | None = None,
+) -> Any:
     """Map Pydantic JSON schema field to Python type.
 
     Handles Pydantic's type mapping including special cases:
@@ -253,6 +291,7 @@ def _json_schema_to_python_type(field_name: str, field_info: dict[str, Any]) -> 
     - UUID: {"type": "string", "format": "uuid"}
     - Decimal: {"anyOf": [{"type": "number"}, {"type": "string"}]}
     - Nullable: {"anyOf": [{"type": "T"}, {"type": "null"}]} -> T
+    - Nullable ref: {"anyOf": [{"$ref": "#/$defs/M"}, {"type": "null"}]} -> M
     - list[T]: {"type": "array", "items": {...}}
     - dict: {"type": "object"} without properties
 
@@ -273,21 +312,31 @@ def _json_schema_to_python_type(field_name: str, field_info: dict[str, Any]) -> 
     # Handle anyOf patterns FIRST (before checking for "type" key)
     # anyOf is used for: Decimal, nullable types (T | None)
     if "anyOf" in field_info:
-        any_of_items = field_info["anyOf"]
+        any_of_items = cast(list[Mapping[str, object]], field_info["anyOf"])
 
         # Pattern 1: Decimal - {"anyOf": [{"type": "number"}, {"type": "string", ...}]}
-        type_strs = {item.get("type") for item in any_of_items if "type" in item}
+        type_strs = {cast(str, item["type"]) for item in any_of_items if "type" in item}
         if {"number", "string"}.issubset(type_strs) and "null" not in type_strs:
             return Decimal
 
         # Pattern 2: Nullable - {"anyOf": [{"type": "T", ...}, {"type": "null"}]}
+        #   or with $ref:  {"anyOf": [{"$ref": "#/$defs/M"}, {"type": "null"}]}
         # Extract the non-null type and recursively resolve it
         if "null" in type_strs:
+            # Items without "type" key (e.g. $ref entries) are non-null by definition
             non_null_items = [item for item in any_of_items if item.get("type") != "null"]
             if len(non_null_items) == 1:
-                # Recursively resolve the non-null type
-                # This handles cases like: date | None where the non-null part has format
-                return _json_schema_to_python_type(field_name, non_null_items[0])
+                # Recursively resolve the non-null type, then wrap as Optional.
+                # Returning T | None (not bare T) is critical: Pydantic model types
+                # reject None unless the type annotation explicitly includes it.
+                inner_type = _json_schema_to_python_type(
+                    field_name,
+                    non_null_items[0],
+                    schema_defs=schema_defs,
+                    create_model=create_model,
+                    schema_base=schema_base,
+                )
+                return inner_type | None
 
         # Unsupported anyOf pattern (e.g., Union[str, int] without null)
         raise ValueError(
@@ -297,6 +346,27 @@ def _json_schema_to_python_type(field_name: str, field_info: dict[str, Any]) -> 
             f"This is a bug in schema reconstruction - please report this."
         )
 
+    # Resolve local references in Pydantic schemas (e.g., "#/$defs/NestedModel")
+    if "$ref" in field_info:
+        ref = cast(str, field_info["$ref"])
+        ref_prefix = "#/$defs/"
+        if not ref.startswith(ref_prefix):
+            raise ValueError(
+                f"Resume failed: Field '{field_name}' has unsupported $ref '{ref}'. Only local refs under '#/$defs/' are supported."
+            )
+        if schema_defs is None:
+            raise ValueError(f"Resume failed: Field '{field_name}' references '{ref}' but schema has no $defs section.")
+        def_name = ref[len(ref_prefix) :]
+        if def_name not in schema_defs:
+            raise ValueError(f"Resume failed: Field '{field_name}' references missing schema def '{def_name}'.")
+        return _json_schema_to_python_type(
+            field_name,
+            cast(Mapping[str, object], schema_defs[def_name]),
+            schema_defs=schema_defs,
+            create_model=create_model,
+            schema_base=schema_base,
+        )
+
     # Get basic type - required for all non-anyOf fields
     if "type" not in field_info:
         raise ValueError(
@@ -304,11 +374,13 @@ def _json_schema_to_python_type(field_name: str, field_info: dict[str, Any]) -> 
             f"Schema definition: {field_info}. "
             f"Cannot determine Python type for field."
         )
-    field_type_str = field_info["type"]
+    field_type_str = cast(str, field_info["type"])
 
     # Handle string types with format specifiers
     if field_type_str == "string":
-        fmt = field_info.get("format")
+        fmt = None
+        if "format" in field_info:
+            fmt = field_info["format"]
         if fmt == "date-time":
             return datetime
         if fmt == "date":
@@ -324,12 +396,57 @@ def _json_schema_to_python_type(field_name: str, field_info: dict[str, Any]) -> 
 
     # Handle array types
     if field_type_str == "array":
-        # "items" is optional in JSON Schema arrays
-        # For now, return list (Pydantic will validate items at parse time)
+        # "items" is optional in JSON Schema arrays. When present, recursively
+        # restore item type fidelity (e.g., list[int], list[NestedSchema]).
+        if "items" in field_info:
+            item_info = cast(Mapping[str, object], field_info["items"])
+            item_type = _json_schema_to_python_type(
+                f"{field_name}_item",
+                item_info,
+                schema_defs=schema_defs,
+                create_model=create_model,
+                schema_base=schema_base,
+            )
+            return list.__class_getitem__(item_type)
         return list
 
     # Handle nested object types
     if field_type_str == "object":
+        # Typed nested object: recursively create a nested schema model.
+        if "properties" in field_info:
+            properties = cast(Mapping[str, object], field_info["properties"])
+        else:
+            properties = None
+        if properties:
+            nested_required = set(cast(list[str], field_info["required"])) if "required" in field_info else set()
+            nested_name = _model_name_for_field(field_name)
+            return _create_schema_model(
+                model_name=nested_name,
+                properties=properties,
+                required_fields=nested_required,
+                schema_defs=schema_defs,
+                create_model=create_model,
+                schema_base=schema_base,
+            )
+
+        # Map additionalProperties schemas when present (e.g., dict[str, int]).
+        if "additionalProperties" in field_info:
+            additional = field_info["additionalProperties"]
+            if additional is True:
+                return dict[str, Any]
+            if type(additional) is dict:
+                value_type = _json_schema_to_python_type(
+                    f"{field_name}_value",
+                    cast(Mapping[str, object], additional),
+                    schema_defs=schema_defs,
+                    create_model=create_model,
+                    schema_base=schema_base,
+                )
+                return dict.__class_getitem__((str, value_type))
+            if additional is False:
+                return dict
+            raise ValueError(f"Resume failed: Field '{field_name}' has invalid additionalProperties value: {additional!r}.")
+
         # Generic dict (no specific structure)
         return dict
 

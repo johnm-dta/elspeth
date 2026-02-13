@@ -143,15 +143,6 @@ FRAMEWORK_INTEROP_LOCATIONS: tuple[WhitelistEntry, ...] = (
         ),
     ),
     WhitelistEntry(
-        location="core/landscape/repositories.py:*Repository.__init__(session)",
-        type_used="session: Any",
-        justification=(
-            "SQLAlchemy Connection/Session objects have complex generic types that "
-            "change between sync/async and between SA 1.x/2.x. Using Any avoids "
-            "coupling the repository layer to a specific SA session type."
-        ),
-    ),
-    WhitelistEntry(
         location="mcp/server.py, testing/chaosllm_mcp/server.py",
         type_used="type: ignore[misc, untyped-decorator]",
         justification=(

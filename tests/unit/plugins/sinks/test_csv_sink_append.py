@@ -112,7 +112,7 @@ class TestCSVSinkAppendMode:
                 "mode": "append",
             }
         )
-        sink.write([{"id": 1}], ctx)
+        sink.write([{"id": 1, "value": "created"}], ctx)
         sink.flush()
         sink.close()
 
@@ -133,7 +133,7 @@ class TestCSVSinkAppendMode:
                 "schema": STRICT_SCHEMA,
             }
         )
-        sink1.write([{"id": 1}], ctx)
+        sink1.write([{"id": 1, "value": "first"}], ctx)
         sink1.flush()
         sink1.close()
 
@@ -144,7 +144,7 @@ class TestCSVSinkAppendMode:
                 "schema": STRICT_SCHEMA,
             }
         )
-        sink2.write([{"id": 2}], ctx)
+        sink2.write([{"id": 2, "value": "second"}], ctx)
         sink2.flush()
         sink2.close()
 
@@ -188,7 +188,7 @@ class TestCSVSinkAppendMode:
                 "schema": STRICT_SCHEMA,
             }
         )
-        sink1.write([{"id": 1}], ctx)
+        sink1.write([{"id": 1, "value": "first"}], ctx)
         sink1.flush()
         sink1.close()
 
@@ -200,7 +200,7 @@ class TestCSVSinkAppendMode:
                 "mode": "append",
             }
         )
-        sink2.write([{"id": 2}], ctx)
+        sink2.write([{"id": 2, "value": "second"}], ctx)
         sink2.flush()
         sink2.close()
 
@@ -212,7 +212,7 @@ class TestCSVSinkAppendMode:
                 "mode": "append",
             }
         )
-        sink3.write([{"id": 3}], ctx)
+        sink3.write([{"id": 3, "value": "third"}], ctx)
         sink3.flush()
         sink3.close()
 
@@ -220,6 +220,34 @@ class TestCSVSinkAppendMode:
         content = output_path.read_text()
         lines = content.strip().split("\n")
         assert len(lines) == 4  # header + 3 rows
+
+    def test_append_mode_missing_required_field_preserves_existing_file(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Append with missing required field fails before mutating existing output."""
+        output_path = tmp_path / "output.csv"
+
+        sink1 = CSVSink(
+            {
+                "path": str(output_path),
+                "schema": STRICT_SCHEMA,
+            }
+        )
+        sink1.write([{"id": 1, "value": "a"}], ctx)
+        sink1.flush()
+        sink1.close()
+        original_content = output_path.read_text()
+
+        sink2 = CSVSink(
+            {
+                "path": str(output_path),
+                "schema": STRICT_SCHEMA,
+                "mode": "append",
+            }
+        )
+        with pytest.raises(ValueError, match="missing required fields"):
+            sink2.write([{"id": 2}], ctx)  # Missing required "value"
+        sink2.close()
+
+        assert output_path.read_text() == original_content
 
 
 class TestCSVSinkAppendExplicitSchema:

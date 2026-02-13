@@ -273,8 +273,13 @@ class OpenRouterLLMTransform(BaseTransform, BatchTransformMixin):
                 return
             case "langfuse":
                 self._setup_langfuse_tracing(logger)
-            case "none" | _:
+            case "none":
                 pass  # No tracing
+            case _:
+                logger.warning(
+                    "Unknown tracing provider encountered after validation - tracing disabled",
+                    provider=self._tracing_config.provider,
+                )
 
     def _setup_langfuse_tracing(self, logger: Any) -> None:
         """Initialize Langfuse tracing (v3 API).
@@ -499,12 +504,9 @@ class OpenRouterLLMTransform(BaseTransform, BatchTransformMixin):
         Returns:
             TransformResult with processed row or error
         """
-        # Extract dict from PipelineRow for template rendering (which hashes the data)
-        row_data = row.to_dict()
-
         # 1. Render template with row data (THEIR DATA - wrap)
         try:
-            rendered = self._template.render_with_metadata(row_data)
+            rendered = self._template.render_with_metadata(row, contract=row.contract)
         except TemplateError as e:
             error_reason: TransformErrorReason = {
                 "reason": "template_rendering_failed",
@@ -536,7 +538,8 @@ class OpenRouterLLMTransform(BaseTransform, BatchTransformMixin):
         try:
             import time
 
-            http_client = self._get_http_client(ctx.state_id)
+            token_id_for_client = ctx.token.token_id if ctx.token is not None else None
+            http_client = self._get_http_client(ctx.state_id, token_id=token_id_for_client)
 
             # 4. Call OpenRouter API (EXTERNAL - wrap)
             token_id = ctx.token.token_id if ctx.token else "unknown"
@@ -644,7 +647,7 @@ class OpenRouterLLMTransform(BaseTransform, BatchTransformMixin):
             )
 
             # 7. Build output row (OUR CODE - let exceptions crash)
-            output = row_data.copy()
+            output = row.to_dict()
             output[self._response_field] = content
             output[f"{self._response_field}_usage"] = usage
             output[f"{self._response_field}_template_hash"] = rendered.template_hash
@@ -673,7 +676,7 @@ class OpenRouterLLMTransform(BaseTransform, BatchTransformMixin):
             if client is not None:
                 client.close()
 
-    def _get_http_client(self, state_id: str) -> AuditedHTTPClient:
+    def _get_http_client(self, state_id: str, *, token_id: str | None = None) -> AuditedHTTPClient:
         """Get or create HTTP client for a state_id.
 
         Clients are cached to preserve call_index across retries.
@@ -695,6 +698,7 @@ class OpenRouterLLMTransform(BaseTransform, BatchTransformMixin):
                     base_url=self._base_url,
                     headers=self._request_headers,
                     limiter=self._limiter,
+                    token_id=token_id,
                 )
             return self._http_clients[state_id]
 

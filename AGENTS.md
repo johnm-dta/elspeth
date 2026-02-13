@@ -12,21 +12,32 @@ Rule 0. Read CLAUDE.md.
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
+
    ```bash
    git pull --rebase
    bd sync
    git push
    git status  # MUST show "up to date with origin"
    ```
+
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
+
 - Work is NOT complete until `git push` succeeds
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
+
+## Tier-Model Rule Intent (R5 / Type Checks)
+
+- The goal is not a mechanical rewrite from `isinstance(...)` to `type(...) is ...`.
+- The required reasoning step is: "Can this value ever be a different type during normal operation?"
+- If the answer is "no," remove defensive runtime type checks and trust contracts.
+- If the answer is "yes" at a real trust boundary, validate explicitly and fail clearly (do not silently coerce or skip).
+- PR/commit notes should briefly state this reasoning when changing R5-related code.
 
 <!-- bv-agent-instructions-v1 -->
 
@@ -90,48 +101,3 @@ git push                # Push to remote
 - Always `bd sync` before ending session
 
 <!-- end-bv-agent-instructions -->
-
-<!-- keel:instructions -->
-## Keel Issue Tracker
-
-Use `keel` for all task tracking in this project. Data lives in `.keel/`.
-
-### Quick Reference
-
-```bash
-# Finding work
-keel ready                              # Show issues ready to work (no blockers)
-keel list --status=open                 # All open issues
-keel list --status=in_progress          # Active work
-keel show <id>                          # Detailed issue view
-
-# Creating & updating
-keel create --title="..." --type=task --priority=2   # New issue
-keel update <id> --status=in_progress                # Claim work
-keel close <id>                                      # Mark complete
-keel close <id> --reason="explanation"               # Close with reason
-
-# Dependencies
-keel dep-add <issue> <depends-on>       # Add dependency
-keel blocked                            # Show blocked issues
-
-# Project health
-keel stats                              # Project statistics
-keel search "query"                     # Search issues
-keel doctor                             # Health check
-```
-
-### Workflow
-1. `keel ready` to find available work
-2. `keel show <id>` to review details
-3. `keel update <id> --status=in_progress` to claim it
-4. Do the work, commit code
-5. `keel close <id>` when done
-
-### Priority Scale
-- P0: Critical (drop everything)
-- P1: High (do next)
-- P2: Medium (default)
-- P3: Low
-- P4: Backlog
-<!-- /keel:instructions -->

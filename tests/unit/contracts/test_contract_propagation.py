@@ -355,6 +355,32 @@ class TestPropagateContractEdgeCases:
         customer_field = next(f for f in output_contract.fields if f.normalized_name == "customer")
         assert customer_field.original_name == "customer"  # Lost "Customer ID" metadata
 
+    def test_field_rename_preserves_metadata_when_mapping_uses_original_name(self) -> None:
+        """Rename metadata is preserved when renamed_fields uses original source names."""
+        from elspeth.contracts.contract_propagation import narrow_contract_to_output
+
+        field_amount = make_field("amount_usd", float, original_name="Amount USD", required=True, source="declared")
+        field_id = make_field("id", int, original_name="ID", required=True, source="declared")
+        input_contract = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(field_amount, field_id),
+            locked=True,
+        )
+
+        output_row = {"price": 12.5, "id": 1}
+        output_contract = narrow_contract_to_output(
+            input_contract=input_contract,
+            output_row=output_row,
+            renamed_fields={"Amount USD": "price"},
+        )
+
+        price_field = output_contract.get_field("price")
+        assert price_field is not None
+        assert price_field.original_name == "Amount USD"
+        assert price_field.python_type is float
+        assert price_field.required is True
+        assert price_field.source == "declared"
+
     def test_type_conflict_between_contract_and_actual_data(self) -> None:
         """Input contract declares int, but output has string - documents mismatch behavior.
 
@@ -446,11 +472,14 @@ class TestPropagateContractNonPrimitiveTypes:
             transform_adds_fields=True,
         )
 
-        # Contract should be returned without the non-primitive field
-        # (skipped rather than crashing)
+        # Dict field should be preserved as object in the inferred contract
         field_names = {f.normalized_name for f in output_contract.fields}
-        assert "id" in field_names  # Primitive field preserved
-        assert "response_usage" not in field_names  # Non-primitive field skipped
+        assert "id" in field_names
+        assert "response_usage" in field_names
+        usage_field = output_contract.get_field("response_usage")
+        assert usage_field.python_type is object
+        assert usage_field.source == "inferred"
+        assert usage_field.required is False
 
     def test_list_field_does_not_crash_propagation(self, input_contract: SchemaContract) -> None:
         """List fields should not crash propagation."""
@@ -467,16 +496,20 @@ class TestPropagateContractNonPrimitiveTypes:
         )
 
         field_names = {f.normalized_name for f in output_contract.fields}
-        assert "id" in field_names  # Primitive field preserved
-        assert "tags" not in field_names  # Non-primitive field skipped
+        assert "id" in field_names
+        assert "tags" in field_names
+        tags_field = output_contract.get_field("tags")
+        assert tags_field.python_type is object
+        assert tags_field.source == "inferred"
+        assert tags_field.required is False
 
     def test_mixed_primitive_and_nonprimitive_fields(self, input_contract: SchemaContract) -> None:
-        """Primitive fields are added, non-primitive fields are skipped."""
+        """Primitive and non-primitive fields are all represented in contract."""
         output_row = {
             "id": 1,
-            "score": 95.5,  # Primitive - should be added
-            "metadata": {"key": "value"},  # Non-primitive - should be skipped
-            "active": True,  # Primitive - should be added
+            "score": 95.5,
+            "metadata": {"key": "value"},
+            "active": True,
         }
 
         output_contract = propagate_contract(
@@ -485,10 +518,42 @@ class TestPropagateContractNonPrimitiveTypes:
             transform_adds_fields=True,
         )
 
-        # Should have id, score, active (3 fields)
-        # metadata should be skipped
         field_names = {f.normalized_name for f in output_contract.fields}
         assert "id" in field_names
         assert "score" in field_names
         assert "active" in field_names
-        assert "metadata" not in field_names  # Skipped
+        assert "metadata" in field_names
+        metadata_field = output_contract.get_field("metadata")
+        assert metadata_field.python_type is object
+
+    def test_unsupported_non_dict_list_type_is_still_skipped(self, input_contract: SchemaContract) -> None:
+        """Unsupported non-dict/list values preserve existing skip behavior."""
+
+        class _CustomUnsupported:
+            pass
+
+        output_row = {
+            "id": 1,
+            "custom": _CustomUnsupported(),
+        }
+
+        output_contract = propagate_contract(
+            input_contract=input_contract,
+            output_row=output_row,
+            transform_adds_fields=True,
+        )
+
+        field_names = {f.normalized_name for f in output_contract.fields}
+        assert "id" in field_names
+        assert "custom" not in field_names
+
+    def test_non_finite_float_still_raises_value_error(self, input_contract: SchemaContract) -> None:
+        """Non-finite floats remain invalid for contract inference."""
+        output_row = {"id": 1, "bad": float("nan")}
+
+        with pytest.raises(ValueError, match="non-finite float"):
+            propagate_contract(
+                input_contract=input_contract,
+                output_row=output_row,
+                transform_adds_fields=True,
+            )

@@ -77,6 +77,12 @@ class PluginManager:
             plugin: Plugin instance implementing hook methods
         """
         self._pm.register(plugin)
+        try:
+            self._pm.check_pending()
+        except pluggy.PluginValidationError:
+            # Roll back partial registration on hook validation failure.
+            self._pm.unregister(plugin=plugin)
+            raise
         self._refresh_caches()
 
     def _refresh_caches(self) -> None:

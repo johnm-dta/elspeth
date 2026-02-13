@@ -3,7 +3,7 @@
 
 These tests verify that transforms with computed _output_schema_config attributes
 have their schema configs correctly propagated through from_plugin_instances()
-to NodeInfo, and that _get_schema_config_from_node() prioritizes these computed
+to NodeInfo, and that get_schema_config_from_node() prioritizes these computed
 configs over raw config dict parsing.
 
 Also tests that pass-through nodes (gates, coalesce) inherit computed schema
@@ -156,7 +156,7 @@ class TestOutputSchemaConfigPropagation:
 
 
 class TestGetSchemaConfigFromNodePriority:
-    """Tests for _get_schema_config_from_node() prioritization."""
+    """Tests for get_schema_config_from_node() prioritization."""
 
     def test_prioritizes_nodeinfo_schema_config_over_config_dict(self) -> None:
         """NodeInfo.output_schema_config takes precedence over config dict parsing."""
@@ -181,7 +181,7 @@ class TestGetSchemaConfigFromNodePriority:
         )
 
         # Get schema config from node
-        result = graph._get_schema_config_from_node("test_node")
+        result = graph.get_schema_config_from_node("test_node")
 
         # Should return the NodeInfo schema config, not parse from config dict
         assert result is not None
@@ -202,7 +202,7 @@ class TestGetSchemaConfigFromNodePriority:
         )
 
         # Get schema config from node
-        result = graph._get_schema_config_from_node("test_node")
+        result = graph.get_schema_config_from_node("test_node")
 
         # Should parse from config dict
         assert result is not None
@@ -223,17 +223,17 @@ class TestGetSchemaConfigFromNodePriority:
         )
 
         # Get schema config from node
-        result = graph._get_schema_config_from_node("test_node")
+        result = graph.get_schema_config_from_node("test_node")
 
         # Should return None
         assert result is None
 
 
 class TestGuaranteedFieldsWithSchemaConfig:
-    """Tests for _get_guaranteed_fields() using output_schema_config."""
+    """Tests for get_guaranteed_fields() using output_schema_config."""
 
     def test_guaranteed_fields_from_nodeinfo_schema_config(self) -> None:
-        """_get_guaranteed_fields returns fields from NodeInfo.output_schema_config."""
+        """get_guaranteed_fields returns fields from NodeInfo.output_schema_config."""
         graph = ExecutionGraph()
 
         nodeinfo_schema = SchemaConfig(
@@ -251,7 +251,7 @@ class TestGuaranteedFieldsWithSchemaConfig:
             output_schema_config=nodeinfo_schema,
         )
 
-        result = graph._get_guaranteed_fields("llm_node")
+        result = graph.get_guaranteed_fields("llm_node")
 
         # Should include guaranteed_fields from schema config
         assert "response" in result
@@ -460,11 +460,11 @@ class TestGateSchemaConfigInheritance:
         graph.add_edge("llm_transform", "gate", label="continue")
 
         # Verify transform has computed guarantees
-        transform_guarantees = graph._get_effective_guaranteed_fields("llm_transform")
+        transform_guarantees = graph.get_effective_guaranteed_fields("llm_transform")
         assert "result_usage" in transform_guarantees
 
         # Gate should inherit computed guarantees from upstream
-        gate_guarantees = graph._get_effective_guaranteed_fields("gate")
+        gate_guarantees = graph.get_effective_guaranteed_fields("gate")
         assert "result_usage" in gate_guarantees, f"Gate should inherit result_usage from upstream transform, has: {gate_guarantees}"
         assert "result_model" in gate_guarantees
         assert "result" in gate_guarantees
@@ -513,8 +513,8 @@ class TestGateSchemaConfigInheritance:
         graph.add_edge("gate1", "gate2", label="continue")
 
         # Both gates should inherit computed guarantees
-        gate1_guarantees = graph._get_effective_guaranteed_fields("gate1")
-        gate2_guarantees = graph._get_effective_guaranteed_fields("gate2")
+        gate1_guarantees = graph.get_effective_guaranteed_fields("gate1")
+        gate2_guarantees = graph.get_effective_guaranteed_fields("gate2")
 
         assert gate1_guarantees == frozenset({"computed_a", "computed_b"})
         assert gate2_guarantees == frozenset({"computed_a", "computed_b"})

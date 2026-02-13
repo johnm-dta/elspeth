@@ -35,6 +35,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+SUPPORTED_TRACING_PROVIDERS = frozenset({"none", "azure_ai", "langfuse"})
+
 
 @dataclass(frozen=True, slots=True)
 class TracingConfig:
@@ -154,6 +156,10 @@ def validate_tracing_config(config: TracingConfig) -> list[str]:
         List of validation error messages (empty if valid)
     """
     errors: list[str] = []
+
+    if config.provider not in SUPPORTED_TRACING_PROVIDERS:
+        errors.append(f"Unknown tracing provider '{config.provider}'. Supported providers: azure_ai, langfuse, none.")
+        return errors
 
     if isinstance(config, AzureAITracingConfig):
         if config.connection_string is None:

@@ -75,6 +75,24 @@ class TestPluginConfig:
 
         assert "Invalid configuration for MyConfig" in str(exc_info.value)
 
+    @pytest.mark.parametrize(
+        ("payload", "type_name"),
+        [
+            (None, "NoneType"),
+            (123, "int"),
+            ("not a dict", "str"),
+            (["not", "a", "dict"], "list"),
+        ],
+    )
+    def test_from_dict_rejects_non_dict_inputs(self, payload: object, type_name: str) -> None:
+        """from_dict should raise PluginConfigError for non-dict input types."""
+
+        class MyConfig(PluginConfig):
+            name: str
+
+        with pytest.raises(PluginConfigError, match=rf"config must be a dict, got {type_name}"):
+            MyConfig.from_dict(payload)  # type: ignore[arg-type]
+
 
 class TestPathConfig:
     """Tests for PathConfig base class."""

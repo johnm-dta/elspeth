@@ -1,0 +1,9 @@
+id,customer,amount,category,region
+1,Acme Corp,5200,enterprise,north
+2,Globex Inc,3100,commercial,south
+3,Initech,890,startup,east
+4,Umbrella Corp,12000,enterprise,west
+5,Soylent Corp,4500,commercial,north
+6,Cyberdyne,7800,enterprise,east
+7,Tyrell Corp,15000,enterprise,south
+8,Weyland-Yutani,2200,startup,west

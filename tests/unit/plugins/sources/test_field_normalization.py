@@ -348,6 +348,22 @@ class TestResolveFieldNames:
             "Amount $": "Amount $",
         }
 
+    def test_no_normalization_duplicate_raw_headers_raises(self) -> None:
+        """Duplicate raw headers must fail fast in passthrough mode."""
+        from elspeth.plugins.sources.field_normalization import resolve_field_names
+
+        with pytest.raises(ValueError, match="Duplicate raw header names") as exc_info:
+            resolve_field_names(
+                raw_headers=["id", "id", "name"],
+                normalize_fields=False,
+                field_mapping=None,
+                columns=None,
+            )
+
+        error = str(exc_info.value)
+        assert "column 0 ('id')" in error
+        assert "column 1 ('id')" in error
+
     def test_mapping_key_not_found_raises(self) -> None:
         """Mapping key not in headers raises helpful error."""
         from elspeth.plugins.sources.field_normalization import resolve_field_names

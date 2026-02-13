@@ -29,6 +29,7 @@ from elspeth.contracts import (
     NodeStateStatus,
     NodeType,
     NonCanonicalMetadata,
+    Operation,
     RoutingEvent,
     RoutingMode,
     Row,
@@ -1498,7 +1499,7 @@ class TestEnumExhaustiveness:
 
     def test_run_status_all_values_known(self) -> None:
         """RunStatus enum has exactly the expected values."""
-        expected_values = {"RUNNING", "COMPLETED", "FAILED"}
+        expected_values = {"RUNNING", "COMPLETED", "FAILED", "INTERRUPTED"}
         actual_values = {e.name for e in RunStatus}
         assert actual_values == expected_values
 
@@ -2000,3 +2001,45 @@ class TestPropertyBasedHashInvariants:
         # Even if they happen to be equal, comparison works
         result = hash1 == hash2
         assert isinstance(result, bool)
+
+
+class TestOperation:
+    """Tests for Operation audit model validation."""
+
+    def test_create_operation_with_valid_values(self) -> None:
+        """Operation accepts valid operation_type and status literals."""
+        operation = Operation(
+            operation_id="op-123",
+            run_id="run-123",
+            node_id="node-123",
+            operation_type="source_load",
+            started_at=datetime.now(UTC),
+            status="open",
+        )
+
+        assert operation.operation_type == "source_load"
+        assert operation.status == "open"
+
+    def test_rejects_invalid_operation_type(self) -> None:
+        """Operation crashes on invalid operation_type values."""
+        with pytest.raises(ValueError, match="operation_type"):
+            Operation(
+                operation_id="op-123",
+                run_id="run-123",
+                node_id="node-123",
+                operation_type="bad_type",  # type: ignore[arg-type]
+                started_at=datetime.now(UTC),
+                status="open",
+            )
+
+    def test_rejects_invalid_status(self) -> None:
+        """Operation crashes on invalid status values."""
+        with pytest.raises(ValueError, match="status"):
+            Operation(
+                operation_id="op-123",
+                run_id="run-123",
+                node_id="node-123",
+                operation_type="sink_write",
+                started_at=datetime.now(UTC),
+                status="oops",  # type: ignore[arg-type]
+            )

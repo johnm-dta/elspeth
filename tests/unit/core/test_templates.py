@@ -95,6 +95,27 @@ class TestExtractJinja2Fields:
         result = extract_jinja2_fields("{{ row.value | default('N/A') }}")
         assert result == frozenset({"value"})
 
+    def test_row_get_extracts_static_key(self) -> None:
+        """row.get('field') extracts the string-literal key."""
+        from elspeth.core.templates import extract_jinja2_fields
+
+        result = extract_jinja2_fields("{{ row.get('status') }}")
+        assert result == frozenset({"status"})
+
+    def test_row_get_with_default_extracts_static_key(self) -> None:
+        """row.get('field', default) extracts the string-literal key."""
+        from elspeth.core.templates import extract_jinja2_fields
+
+        result = extract_jinja2_fields("{{ row.get('status', 'N/A') }}")
+        assert result == frozenset({"status"})
+
+    def test_row_get_with_dynamic_key_ignored(self) -> None:
+        """row.get(dynamic_key, default) is ignored (dynamic dependency)."""
+        from elspeth.core.templates import extract_jinja2_fields
+
+        result = extract_jinja2_fields("{{ row.get(key, 'N/A') }}")
+        assert result == frozenset()
+
     def test_for_loop(self) -> None:
         """Field used in for loop is extracted."""
         from elspeth.core.templates import extract_jinja2_fields
@@ -197,3 +218,17 @@ class TestExtractJinja2FieldsWithDetails:
 
         result = extract_jinja2_fields_with_details("{{ row.x }} {{ row.x }}")
         assert result == {"x": ["attr", "attr"]}
+
+    def test_row_get_details_recorded_as_item(self) -> None:
+        """row.get('field') is treated like item access for extraction details."""
+        from elspeth.core.templates import extract_jinja2_fields_with_details
+
+        result = extract_jinja2_fields_with_details("{{ row.get('status') }}")
+        assert result == {"status": ["item"]}
+
+    def test_row_get_dynamic_key_details_ignored(self) -> None:
+        """row.get(dynamic_key) does not create a synthetic 'get' field detail."""
+        from elspeth.core.templates import extract_jinja2_fields_with_details
+
+        result = extract_jinja2_fields_with_details("{{ row.get(key, 'N/A') }}")
+        assert result == {}

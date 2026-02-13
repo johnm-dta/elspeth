@@ -325,13 +325,13 @@ class TestRowResult:
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
         result = RowResult(
             token=token,
-            final_data={"x": 1, "processed": True},
+            final_data=_wrap_dict_as_pipeline_row({"x": 1, "processed": True}),
             outcome=RowOutcome.COMPLETED,
             sink_name="processed",
         )
 
         assert result.token == token
-        assert result.final_data == {"x": 1, "processed": True}
+        assert result.final_data.to_dict() == {"x": 1, "processed": True}
         assert result.outcome == RowOutcome.COMPLETED
         assert result.sink_name == "processed"
 
@@ -341,7 +341,7 @@ class TestRowResult:
         with pytest.raises(OrchestrationInvariantError, match="COMPLETED outcome requires sink_name"):
             RowResult(
                 token=token,
-                final_data={"x": 1},
+                final_data=_wrap_dict_as_pipeline_row({"x": 1}),
                 outcome=RowOutcome.COMPLETED,
             )
 
@@ -350,7 +350,7 @@ class TestRowResult:
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
         result = RowResult(
             token=token,
-            final_data={"x": 1},
+            final_data=_wrap_dict_as_pipeline_row({"x": 1}),
             outcome=RowOutcome.ROUTED,
             sink_name="flagged",
         )
@@ -364,7 +364,7 @@ class TestRowResult:
         with pytest.raises(OrchestrationInvariantError, match="ROUTED outcome requires sink_name"):
             RowResult(
                 token=token,
-                final_data={"x": 1},
+                final_data=_wrap_dict_as_pipeline_row({"x": 1}),
                 outcome=RowOutcome.ROUTED,
             )
 
@@ -374,7 +374,7 @@ class TestRowResult:
         with pytest.raises(OrchestrationInvariantError, match="COALESCED outcome requires sink_name"):
             RowResult(
                 token=token,
-                final_data={"x": 1},
+                final_data=_wrap_dict_as_pipeline_row({"x": 1}),
                 outcome=RowOutcome.COALESCED,
             )
 
@@ -383,7 +383,7 @@ class TestRowResult:
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
         result = RowResult(
             token=token,
-            final_data={"x": 1},
+            final_data=_wrap_dict_as_pipeline_row({"x": 1}),
             outcome=RowOutcome.COALESCED,
             sink_name="output",
         )
@@ -396,7 +396,7 @@ class TestRowResult:
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
         result = RowResult(
             token=token,
-            final_data={"x": 1},
+            final_data=_wrap_dict_as_pipeline_row({"x": 1}),
             outcome=RowOutcome.COMPLETED,
             sink_name="output",
         )
@@ -768,7 +768,7 @@ class TestRowResultWithFailureInfo:
 
         result = RowResult(
             token=token,
-            final_data={"x": 1},
+            final_data=_wrap_dict_as_pipeline_row({"x": 1}),
             outcome=RowOutcome.FAILED,
             error=error,
         )

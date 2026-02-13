@@ -289,7 +289,14 @@ class TransformErrorReason(TypedDict):
     Type validation context:
         expected: Expected type or value
         actual: Actual type or value received
+        actual_type: Actual Python type name for type checks
         value: The actual value (truncated for audit)
+
+    Contract violation context:
+        violation_type: Specific ContractViolation subclass name
+        original_field: Original field name before normalization
+        count: Number of violations (multiple_contract_violations only)
+        violations: Per-violation reason entries (multiple_contract_violations only)
 
     Rate limiting/timeout context:
         elapsed_seconds: Time elapsed before timeout
@@ -367,6 +374,12 @@ class TransformErrorReason(TypedDict):
     actual: NotRequired[str]
     actual_type: NotRequired[str]
     value: NotRequired[str]
+
+    # Contract violation context
+    violation_type: NotRequired[str]
+    original_field: NotRequired[str]
+    count: NotRequired[int]
+    violations: NotRequired[list[dict[str, Any]]]
 
     # Rate limiting/timeout context
     elapsed_seconds: NotRequired[float]
@@ -486,6 +499,39 @@ class BatchPendingError(Exception):
         self.checkpoint = checkpoint
         self.node_id = node_id
         super().__init__(f"Batch {batch_id} is {status}, check after {check_after_seconds}s")
+
+
+class GracefulShutdownError(Exception):
+    """Raised when a pipeline run is interrupted by a shutdown signal.
+
+    This is a CONTROL-FLOW SIGNAL, like BatchPendingError. It indicates the
+    orchestrator stopped processing new rows due to SIGINT/SIGTERM but
+    completed all in-flight work (aggregation flush, sink writes, checkpoints).
+
+    The run is marked INTERRUPTED and is resumable via ``elspeth resume``.
+    """
+
+    def __init__(
+        self,
+        rows_processed: int,
+        run_id: str,
+        *,
+        rows_succeeded: int = 0,
+        rows_failed: int = 0,
+        rows_quarantined: int = 0,
+        rows_routed: int = 0,
+        routed_destinations: dict[str, int] | None = None,
+    ) -> None:
+        self.rows_processed = rows_processed
+        self.run_id = run_id
+        self.rows_succeeded = rows_succeeded
+        self.rows_failed = rows_failed
+        self.rows_quarantined = rows_quarantined
+        self.rows_routed = rows_routed
+        self.routed_destinations: dict[str, int] = routed_destinations if routed_destinations is not None else {}
+        super().__init__(
+            f"Pipeline interrupted after {rows_processed} rows (run_id={run_id}). Resume with: elspeth resume {run_id} --execute"
+        )
 
 
 class AuditIntegrityError(Exception):
@@ -696,15 +742,15 @@ class TypeMismatchViolation(ContractViolation):
 
         Returns:
             Dict with 'reason' key and type-specific fields suitable for
-            TransformResult.error(). Includes expected_type, actual_type,
-            and actual_value (as repr for safe string representation).
+            TransformResult.error(). Includes expected, actual, and value
+            (as repr for safe string representation).
         """
         base = super().to_error_reason()
         base.update(
             {
-                "expected_type": self.expected_type.__name__,
-                "actual_type": self.actual_type.__name__,
-                "actual_value": repr(self.actual_value),
+                "expected": self.expected_type.__name__,
+                "actual": self.actual_type.__name__,
+                "value": repr(self.actual_value),
             }
         )
         return base

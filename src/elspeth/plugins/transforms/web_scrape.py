@@ -290,6 +290,7 @@ class WebScrapeTransform(BaseTransform):
             telemetry_emit=ctx.telemetry_emit,
             timeout=self._timeout,
             limiter=limiter,
+            token_id=ctx.token.token_id if ctx.token is not None else None,
         )
 
         # Add responsible scraping headers

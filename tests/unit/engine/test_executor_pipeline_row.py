@@ -635,6 +635,166 @@ class TestSinkExecutorPipelineRow:
         assert len(rows) == 1
         assert rows[0] == {"value": "test", "extra_field": "extra_value", "another": 123}
 
+    def test_execute_sink_updates_ctx_contract_from_tokens(self) -> None:
+        """SinkExecutor should synchronize ctx.contract to sink token contracts."""
+        from elspeth.contracts import ArtifactDescriptor, PendingOutcome, RowOutcome
+        from elspeth.contracts.plugin_context import PluginContext
+        from elspeth.engine.executors import SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        stale_contract = _make_contract()
+        sink_contract = SchemaContract(
+            fields=(
+                make_field(
+                    "value",
+                    python_type=str,
+                    original_name="Value Renamed",
+                    required=True,
+                    source="declared",
+                ),
+            ),
+            mode="FLEXIBLE",
+            locked=True,
+        )
+        token = TokenInfo(row_id="r1", token_id="t1", row_data=make_row({"value": "test"}, contract=sink_contract))
+
+        mock_sink = MagicMock()
+        mock_sink.name = "test_sink"
+        mock_sink.node_id = "sink_001"
+
+        captured_contract = None
+
+        def capture_write(_rows, call_ctx):
+            nonlocal captured_contract
+            captured_contract = call_ctx.contract
+            return ArtifactDescriptor(
+                artifact_type="file",
+                path_or_uri="/output/test.csv",
+                content_hash="abc123",
+                size_bytes=100,
+            )
+
+        mock_sink.write.side_effect = capture_write
+
+        mock_recorder = MagicMock()
+        mock_state = MagicMock()
+        mock_state.state_id = "state_001"
+        mock_recorder.begin_node_state.return_value = mock_state
+        mock_recorder.register_artifact.return_value = MagicMock()
+
+        mock_span_factory = MagicMock(spec=SpanFactory)
+        mock_span_factory.sink_span.return_value = nullcontext()
+
+        executor = SinkExecutor(mock_recorder, mock_span_factory, run_id="run_001")
+
+        ctx = PluginContext(run_id="run_001", config={})
+        ctx.contract = stale_contract
+
+        executor.write(
+            sink=mock_sink,
+            tokens=[token],
+            ctx=ctx,
+            step_in_pipeline=5,
+            sink_name="test_sink",
+            pending_outcome=PendingOutcome(outcome=RowOutcome.COMPLETED),
+        )
+
+        assert captured_contract is sink_contract
+        assert ctx.contract is sink_contract
+
+    def test_execute_sink_merges_mixed_token_contracts_for_context(self) -> None:
+        """SinkExecutor should merge mixed token contracts before sink.write()."""
+        from elspeth.contracts import ArtifactDescriptor, PendingOutcome, RowOutcome
+        from elspeth.contracts.plugin_context import PluginContext
+        from elspeth.engine.executors import SinkExecutor
+        from elspeth.engine.spans import SpanFactory
+
+        contract_a = SchemaContract(
+            fields=(
+                make_field(
+                    "value",
+                    python_type=str,
+                    original_name="Value",
+                    required=True,
+                    source="declared",
+                ),
+            ),
+            mode="FLEXIBLE",
+            locked=True,
+        )
+        contract_b = SchemaContract(
+            fields=(
+                make_field(
+                    "value",
+                    python_type=str,
+                    original_name="Value",
+                    required=True,
+                    source="declared",
+                ),
+                make_field(
+                    "extra",
+                    python_type=str,
+                    original_name="Extra Field",
+                    required=False,
+                    source="inferred",
+                ),
+            ),
+            mode="FLEXIBLE",
+            locked=True,
+        )
+        expected_merged = contract_a.merge(contract_b)
+
+        tokens = [
+            TokenInfo(row_id="r1", token_id="t1", row_data=make_row({"value": "a"}, contract=contract_a)),
+            TokenInfo(row_id="r2", token_id="t2", row_data=make_row({"value": "b", "extra": "x"}, contract=contract_b)),
+        ]
+
+        mock_sink = MagicMock()
+        mock_sink.name = "test_sink"
+        mock_sink.node_id = "sink_001"
+
+        captured_contract = None
+
+        def capture_write(_rows, call_ctx):
+            nonlocal captured_contract
+            captured_contract = call_ctx.contract
+            return ArtifactDescriptor(
+                artifact_type="file",
+                path_or_uri="/output/test.csv",
+                content_hash="abc123",
+                size_bytes=100,
+            )
+
+        mock_sink.write.side_effect = capture_write
+
+        mock_recorder = MagicMock()
+        mock_state = MagicMock()
+        mock_state.state_id = "state_001"
+        mock_recorder.begin_node_state.return_value = mock_state
+        mock_recorder.register_artifact.return_value = MagicMock()
+
+        mock_span_factory = MagicMock(spec=SpanFactory)
+        mock_span_factory.sink_span.return_value = nullcontext()
+
+        executor = SinkExecutor(mock_recorder, mock_span_factory, run_id="run_001")
+
+        ctx = PluginContext(run_id="run_001", config={})
+        ctx.contract = _make_contract()
+
+        executor.write(
+            sink=mock_sink,
+            tokens=tokens,
+            ctx=ctx,
+            step_in_pipeline=5,
+            sink_name="test_sink",
+            pending_outcome=PendingOutcome(outcome=RowOutcome.COMPLETED),
+        )
+
+        assert captured_contract is not None
+        assert captured_contract == expected_merged
+        assert captured_contract.get_field("extra") is not None
+        assert ctx.contract == expected_merged
+
 
 class TestAggregationExecutorPipelineRow:
     """Tests for AggregationExecutor with PipelineRow.

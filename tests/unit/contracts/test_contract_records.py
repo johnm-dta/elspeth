@@ -161,6 +161,51 @@ class TestContractAuditRecord:
         json_str2 = record.to_json()
         assert json_str == json_str2
 
+    def test_from_contract_canonicalizes_field_order(self) -> None:
+        """from_contract() stores fields in deterministic normalized-name order."""
+        from elspeth.contracts.contract_records import ContractAuditRecord
+
+        contract = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                make_field("zeta", int, original_name="Zeta", required=True, source="declared"),
+                make_field("alpha", str, original_name="Alpha", required=True, source="declared"),
+                make_field("mu", float, original_name="Mu", required=False, source="inferred"),
+            ),
+            locked=True,
+        )
+
+        record = ContractAuditRecord.from_contract(contract)
+        assert [field.normalized_name for field in record.fields] == ["alpha", "mu", "zeta"]
+
+    def test_to_json_stable_for_semantically_identical_contracts(self) -> None:
+        """Semantically identical contracts serialize to identical audit JSON."""
+        from elspeth.contracts.contract_records import ContractAuditRecord
+
+        contract_a = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                make_field("alpha", int, original_name="Alpha", required=True, source="declared"),
+                make_field("bravo", str, original_name="Bravo", required=False, source="inferred"),
+                make_field("charlie", float, original_name="Charlie", required=True, source="declared"),
+            ),
+            locked=True,
+        )
+        contract_b = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                make_field("charlie", float, original_name="Charlie", required=True, source="declared"),
+                make_field("alpha", int, original_name="Alpha", required=True, source="declared"),
+                make_field("bravo", str, original_name="Bravo", required=False, source="inferred"),
+            ),
+            locked=True,
+        )
+
+        json_a = ContractAuditRecord.from_contract(contract_a).to_json()
+        json_b = ContractAuditRecord.from_contract(contract_b).to_json()
+
+        assert json_a == json_b
+
     def test_from_json_round_trip(self, sample_schema_contract: SchemaContract) -> None:
         """ContractAuditRecord survives JSON round-trip."""
         from elspeth.contracts.contract_records import ContractAuditRecord

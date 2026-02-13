@@ -69,7 +69,12 @@ class LineageTree:
         )
         root.children.append(source_node)
 
-        # Build transform chain
+        # Build transform chain (linear rendering).
+        # KNOWN LIMITATION: DAG pipelines with fork/coalesce are rendered as a
+        # linear chain — parallel branches and merge points are not shown.
+        # All data for DAG display is available (branch_name, fork_group_id,
+        # token_parents) but not yet consumed here. For full DAG exploration,
+        # use the Landscape MCP server: elspeth-mcp → explain_token().
         transforms = self._data["transforms"]
         current_parent = source_node
 

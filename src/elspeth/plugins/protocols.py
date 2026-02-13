@@ -35,11 +35,18 @@ class SourceProtocol(Protocol):
 
     Sources load data into the system. There is exactly one source per run.
 
-    Lifecycle:
-    1. __init__(config) - Plugin instantiation
-    2. on_start(ctx) - Called before loading (optional)
-    3. load(ctx) - Yields rows
-    4. close() - Cleanup
+    Lifecycle (main thread, called by orchestrator):
+        1. __init__(config)   -- plugin instantiation
+        2. on_start(ctx)      -- per-run init (optional). If raises, pipeline
+                                 aborts; on_complete/close are NOT called.
+        3. load(ctx)          -- yields SourceRow instances
+        4. on_complete(ctx)   -- source exhausted or pipeline errored (optional).
+                                 Called even on crash. Runs before close().
+        5. close()            -- release resources. Called even on crash.
+
+    on_complete/close run inside a finally block and are individually
+    protected (one plugin's failure does not prevent others from cleaning up).
+    During resume runs, source lifecycle is skipped entirely (NullSource used).
 
     Example:
         class CSVSource:
@@ -87,20 +94,21 @@ class SourceProtocol(Protocol):
         ...
 
     def close(self) -> None:
-        """Clean up resources.
+        """Release resources (file handles, connections).
 
-        Called after all rows are loaded or on error.
+        Called after on_complete(), inside a finally block. Guaranteed if
+        on_start() succeeded, even on pipeline crash. Skipped during resume.
         """
         ...
 
-    # === Optional Lifecycle Hooks ===
+    # === Lifecycle Hooks ===
 
     def on_start(self, ctx: "PluginContext") -> None:
-        """Called before load(). Override for setup."""
+        """Called once before load(). If raises, pipeline aborts; on_complete/close skipped."""
         ...
 
     def on_complete(self, ctx: "PluginContext") -> None:
-        """Called after load() completes. Override for cleanup before close()."""
+        """Called after load() completes or on error, before close(). Individually protected."""
         ...
 
     # === Audit Trail Metadata ===
@@ -142,10 +150,17 @@ class TransformProtocol(Protocol):
     For batch-aware transforms (is_batch_aware=True), use BatchTransformProtocol instead.
     The engine uses is_batch_aware to decide whether to buffer rows and call the batch protocol.
 
-    Lifecycle:
-        - __init__(config): Called once at pipeline construction
-        - process(row, ctx): Called for each row
-        - close(): Called at pipeline completion for cleanup
+    Lifecycle (main thread, called by orchestrator):
+        1. __init__(config)   -- plugin instantiation
+        2. on_start(ctx)      -- per-run init (optional). If raises, pipeline
+                                 aborts; on_complete/close are NOT called.
+        3. process(row, ctx)  -- called once per row
+        4. on_complete(ctx)   -- all rows processed or pipeline errored (optional).
+                                 Called even on crash. Runs before close().
+        5. close()            -- release resources. Called even on crash.
+
+    on_complete/close run inside a finally block and are individually
+    protected (one plugin's failure does not prevent others from cleaning up).
 
     Error Routing (WP-11.99b):
         All transforms must have on_error set (required by TransformSettings).
@@ -225,21 +240,21 @@ class TransformProtocol(Protocol):
         ...
 
     def close(self) -> None:
-        """Clean up resources after pipeline completion.
+        """Release resources (connections, file handles, thread pools).
 
-        Called once after all rows have been processed. Use for closing
-        connections, flushing buffers, or releasing external resources.
+        Called after on_complete(), inside a finally block. Guaranteed if
+        on_start() succeeded, even on pipeline crash. Individually protected.
         """
         ...
 
-    # === Optional Lifecycle Hooks ===
+    # === Lifecycle Hooks ===
 
     def on_start(self, ctx: "PluginContext") -> None:
-        """Called at start of run."""
+        """Called once before any process() call. If raises, pipeline aborts; on_complete/close skipped."""
         ...
 
     def on_complete(self, ctx: "PluginContext") -> None:
-        """Called at end of run."""
+        """Called after all rows processed or on error, before close(). Individually protected."""
         ...
 
 
@@ -254,10 +269,17 @@ class BatchTransformProtocol(Protocol):
     instance with its schema contract. Transforms should use row.to_dict() to get
     mutable dicts when constructing output.
 
-    Lifecycle:
-        - __init__(config): Called once at pipeline construction
-        - process(rows, ctx): Called when trigger fires with buffered rows
-        - close(): Called at pipeline completion for cleanup
+    Lifecycle (main thread, called by orchestrator):
+        1. __init__(config)    -- plugin instantiation
+        2. on_start(ctx)       -- per-run init (optional). If raises, pipeline
+                                  aborts; on_complete/close are NOT called.
+        3. process(rows, ctx)  -- called when aggregation trigger fires
+        4. on_complete(ctx)    -- all rows processed or pipeline errored (optional).
+                                  Called even on crash. Runs before close().
+        5. close()             -- release resources. Called even on crash.
+
+    on_complete/close run inside a finally block and are individually
+    protected (one plugin's failure does not prevent others from cleaning up).
 
     Error Routing (WP-11.99b):
         Batch transforms that can return TransformResult.error() must set on_error
@@ -329,17 +351,17 @@ class BatchTransformProtocol(Protocol):
         ...
 
     def close(self) -> None:
-        """Clean up resources after pipeline completion."""
+        """Release resources. Called after on_complete(), inside a finally block. Individually protected."""
         ...
 
-    # === Optional Lifecycle Hooks ===
+    # === Lifecycle Hooks ===
 
     def on_start(self, ctx: "PluginContext") -> None:
-        """Called at start of run."""
+        """Called once before any process() call. If raises, pipeline aborts; on_complete/close skipped."""
         ...
 
     def on_complete(self, ctx: "PluginContext") -> None:
-        """Called at end of run."""
+        """Called after all rows processed or on error, before close(). Individually protected."""
         ...
 
 
@@ -366,6 +388,19 @@ class SinkProtocol(Protocol):
 
     Sinks output data to external destinations.
     There can be multiple sinks per run.
+
+    Lifecycle (main thread, called by orchestrator):
+        1. __init__(config)   -- plugin instantiation
+        2. on_start(ctx)      -- per-run init (optional). If raises, pipeline
+                                 aborts; on_complete/close are NOT called.
+        3. write(rows, ctx)   -- called in batches as rows reach this sink
+        4. flush()            -- called before checkpoints for durability
+        5. on_complete(ctx)   -- all rows written or pipeline errored (optional).
+                                 Called even on crash. Runs before close().
+        6. close()            -- release resources. Called even on crash.
+
+    on_complete/close run inside a finally block and are individually
+    protected (one plugin's failure does not prevent others from cleaning up).
 
     Idempotency:
     - Sinks receive idempotency keys: {run_id}:{row_id}:{sink_name}
@@ -444,20 +479,21 @@ class SinkProtocol(Protocol):
         ...
 
     def close(self) -> None:
-        """Close the sink and release resources.
+        """Release resources (file handles, connections).
 
-        Called at end of run or on error.
+        Called after on_complete(), inside a finally block. Guaranteed if
+        on_start() succeeded, even on pipeline crash. Individually protected.
         """
         ...
 
-    # === Optional Lifecycle Hooks ===
+    # === Lifecycle Hooks ===
 
     def on_start(self, ctx: "PluginContext") -> None:
-        """Called at start of run."""
+        """Called once before any write() call. If raises, pipeline aborts; on_complete/close skipped."""
         ...
 
     def on_complete(self, ctx: "PluginContext") -> None:
-        """Called at end of run (before close)."""
+        """Called after all rows written or on error, before close(). Individually protected."""
         ...
 
     def configure_for_resume(self) -> None:

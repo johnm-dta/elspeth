@@ -21,6 +21,7 @@ from pydantic import ValidationError
 
 from elspeth import __version__
 from elspeth.contracts import ExecutionResult
+from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.core.config import ElspethSettings, SourceSettings, load_settings, resolve_config
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
 from elspeth.core.security.config_secrets import SecretLoadError, load_secrets_from_config
@@ -238,15 +239,71 @@ def _ensure_output_directories(config: ElspethSettings) -> list[str]:
     return errors
 
 
+def _validate_existing_sqlite_db_url(db_url: str, *, source: str) -> None:
+    """Fail fast when a file-backed SQLite URL points to a missing file."""
+    from urllib.parse import unquote, urlsplit
+
+    from sqlalchemy.engine.url import make_url
+
+    parsed_url = make_url(db_url)
+    if not parsed_url.drivername.startswith("sqlite"):
+        return
+
+    db_path = parsed_url.database
+    if db_path is None:
+        return
+
+    query = parsed_url.query
+    raw_uri = query.get("uri")
+    uri_enabled = False
+    if raw_uri is not None:
+        uri_value = raw_uri if isinstance(raw_uri, str) else raw_uri[0]
+        uri_enabled = uri_value.lower() in ("1", "true", "yes", "on")
+
+    raw_mode = query.get("mode")
+    if raw_mode is not None:
+        mode_value = raw_mode if isinstance(raw_mode, str) else raw_mode[0]
+        if mode_value == "memory":
+            return
+
+    if db_path == ":memory:" or db_path.startswith("file::memory:"):
+        return
+
+    if uri_enabled and db_path.startswith("file:"):
+        split = urlsplit(db_path)
+        path_part = unquote(split.path)
+        if split.netloc and split.netloc != "localhost":
+            path_part = f"//{split.netloc}{path_part}"
+        if not path_part:
+            return
+        resolved = Path(path_part).expanduser().resolve()
+    else:
+        resolved = Path(db_path).expanduser().resolve()
+
+    if not resolved.exists():
+        typer.echo(f"Error: Database file not found ({source}): {resolved}", err=True)
+        raise typer.Exit(1) from None
+
+
 def _load_raw_yaml(config_path: Path) -> dict[str, Any]:
     """Load YAML without environment variable resolution.
 
     This is used to extract the secrets config before loading secrets.
     The secrets config MUST use literal values (no ${VAR}) because
     secrets are loaded before environment variable resolution.
+
+    Raises:
+        ValueError: Parsed YAML root is not a mapping/object.
     """
     with open(config_path) as f:
-        return yaml.safe_load(f) or {}
+        raw_config = yaml.safe_load(f)
+
+    if raw_config is None:
+        return {}
+    if not isinstance(raw_config, dict):
+        actual_type = type(raw_config).__name__
+        raise ValueError(f"Settings YAML root must be a mapping/object, got {actual_type} (in {config_path}).")
+    return raw_config
 
 
 def _load_settings_with_secrets(
@@ -274,6 +331,7 @@ def _load_settings_with_secrets(
     Raises:
         FileNotFoundError: Settings file not found
         yaml.YAMLError: YAML syntax error
+        ValueError: Settings YAML root is not a mapping/object
         ValidationError: Pydantic validation error (secrets config or full config)
         SecretLoadError: Key Vault secret loading failed
     """
@@ -357,6 +415,9 @@ def run(
         for error in e.errors():
             loc = ".".join(str(x) for x in error["loc"])
             typer.echo(f"  - {loc}: {error['msg']}", err=True)
+        raise typer.Exit(1) from None
+    except ValueError as e:
+        typer.echo(f"Configuration error: {e}", err=True)
         raise typer.Exit(1) from None
     except SecretLoadError as e:
         typer.echo(f"Error loading secrets: {e}", err=True)
@@ -451,6 +512,24 @@ def run(
             secret_resolutions=secret_resolutions,
             passphrase=passphrase,
         )
+    except GracefulShutdownError as e:
+        if output_format == "json":
+            import json as json_mod
+
+            typer.echo(
+                json_mod.dumps(
+                    {
+                        "event": "interrupted",
+                        "run_id": e.run_id,
+                        "rows_processed": e.rows_processed,
+                        "message": str(e),
+                    }
+                )
+            )
+        else:
+            typer.echo(f"\nPipeline interrupted after {e.rows_processed} rows.")
+            typer.echo(f"Resume with: elspeth resume {e.run_id} --execute")
+        raise typer.Exit(3)  # noqa: B904 -- distinct exit code: 0=success, 1=error, 3=interrupted
     except Exception as e:
         # Emit structured error for JSON mode, human-readable for console
         if output_format == "json":
@@ -1231,6 +1310,12 @@ def purge(
                 typer.echo("Specify --database to provide path directly.", err=True)
                 raise typer.Exit(1) from None
             typer.echo("Warning: Configuration errors in settings.yaml (continuing with --database)", err=True)
+        except ValueError as e:
+            if not database:
+                typer.echo(f"Configuration error in settings.yaml: {e}", err=True)
+                typer.echo("Specify --database to provide path directly.", err=True)
+                raise typer.Exit(1) from None
+            typer.echo(f"Warning: Configuration error in settings.yaml: {e}", err=True)
         except SecretLoadError as e:
             if not database:
                 typer.echo(f"Error loading secrets: {e}", err=True)
@@ -1248,6 +1333,7 @@ def purge(
         db_url = f"sqlite:///{db_path}"
     elif config:
         db_url = config.landscape.url
+        _validate_existing_sqlite_db_url(db_url, source="settings.yaml")
         typer.echo(f"Using database from settings.yaml: {db_url}")
     else:
         typer.echo("Error: No settings.yaml found and --database not provided.", err=True)
@@ -1508,6 +1594,9 @@ def resume(
             loc = ".".join(str(x) for x in error["loc"])
             typer.echo(f"  - {loc}: {error['msg']}", err=True)
         raise typer.Exit(1) from None
+    except ValueError as e:
+        typer.echo(f"Configuration error: {e}", err=True)
+        raise typer.Exit(1) from None
     except SecretLoadError as e:
         typer.echo(f"Error loading secrets: {e}", err=True)
         raise typer.Exit(1) from None
@@ -1721,6 +1810,24 @@ def resume(
                 db=db,
                 output_format=output_format,
             )
+        except GracefulShutdownError as e:
+            if output_format == "json":
+                import json as json_mod
+
+                typer.echo(
+                    json_mod.dumps(
+                        {
+                            "event": "interrupted",
+                            "run_id": e.run_id,
+                            "rows_processed": e.rows_processed,
+                            "message": str(e),
+                        }
+                    )
+                )
+            else:
+                typer.echo(f"\nResume interrupted after {e.rows_processed} rows.")
+                typer.echo(f"Resume with: elspeth resume {e.run_id} --execute")
+            raise typer.Exit(3)  # noqa: B904 -- distinct exit code: 0=success, 1=error, 3=interrupted
         except Exception as e:
             typer.echo(f"Error during resume: {e}", err=True)
             raise typer.Exit(1) from None

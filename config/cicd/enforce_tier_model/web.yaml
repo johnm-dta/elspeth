@@ -358,7 +358,7 @@ allow_hits:
   reason: Tier 3 boundary — JWT claims dict .get() for optional iat claim
   safety: Missing iat returns None; no fabrication
   expires: null
-- key: web/composer/state.py:R5:_declared_input_fields_option:fp=3b81988b405ac7b0
+- key: web/composer/state.py:R5:_declared_input_fields_option:fp=0b37e494d9341006
   owner: web-composer
   reason: Composer state options are Tier 3 LLM/user-supplied plugin config; wrapper-shaped
     aggregation options may carry an optional nested options mapping that must be
@@ -367,7 +367,7 @@ allow_hits:
     validation reports malformed aggregation wrapper options as blocking ValidationEntry
     results, while top-level required_input_fields is still rejected
   expires: null
-- key: web/composer/state.py:R5:_check_schema_contracts:_is_config_probe_exception:fp=392eb7ac8346848d
+- key: web/composer/state.py:R5:_check_schema_contracts:_is_config_probe_exception:fp=5a230a0da5a4022c
   owner: web-composer
   reason: Composer preview classifies only known plugin config/probe exception types
     while probing plugin-computed output contracts for shape-changing transforms.
@@ -397,35 +397,35 @@ allow_hits:
     translates to SemanticOutcome.UNKNOWN; FAIL-policy consumers then emit a structured
     error naming only the requirement_code and plugin names, never the exception text.
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=c9553ec19974f8bb
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=8aa047c887b1708b
   owner: web-composer
   reason: Contract helper ValueError is intentionally converted into a blocking ValidationEntry
     on the consumer node instead of raising immediately
   safety: The pipeline remains invalid; no contract telemetry is fabricated for that
     consumer edge
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=be6716b7244eab96
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=3cfcf6ff90894108
   owner: web-composer
   reason: Producer contract parse failures are intentionally converted into blocking
     ValidationEntry results and the producer is marked uncheckable
   safety: The invalid producer blocks validation and suppresses downstream edge contracts
     instead of silently continuing
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=6b38000cc28451a9
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=1494444ed48b9eca
   owner: web-composer
   reason: Sink contract parse failures are intentionally converted into blocking ValidationEntry
     results on the output
   safety: The pipeline remains invalid and the sink edge contract is skipped rather
     than fabricated
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=68a7fbbf6670f83c
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=414c8f92c2bd2cda
   owner: web-composer
   reason: Sink-side producer parse failures are intentionally converted into blocking
     ValidationEntry results and the producer is marked uncheckable
   safety: The pipeline remains invalid and downstream sink contract evidence is suppressed
     for the bad producer
   expires: null
-- key: web/composer/state.py:R6:CompositionState:validate:fp=dede8aff4f04ddfb
+- key: web/composer/state.py:R6:CompositionState:validate:fp=dc255c63a84477a2
   owner: web-composer
   reason: Aggregation trigger PydanticValidationError is intentionally converted into
     a blocking ValidationEntry so composer rejects malformed trigger.condition values

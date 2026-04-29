@@ -137,6 +137,44 @@ class TestPluginNameDrift:
         assert not missing, f"Sink plugins missing from Claude Code skill: {missing}"
 
 
+class TestStateValidatorPluginDrift:
+    """Verify static plugin sets in composer state validators match the runtime registry.
+
+    The composer's ``validate()`` uses static sets (e.g. ``_FILE_SINK_PLUGINS``) to
+    decide which plugin names trigger which warnings. If a static set drifts from
+    the runtime sink registry, the composer either (a) skips warnings for plugins
+    that *do* exist (false negative) or (b) implies plugins exist that don't, so
+    a pipeline passes composer pre-validation only to crash at runtime when the
+    sink registry rejects the unknown plugin name.
+
+    These tests enforce: static sets must be subsets of the runtime registry.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _discover(self) -> None:
+        """Discover all sink plugin names once for the test class."""
+        discovered = discover_all_plugins()
+        self.sink_names = {cls.name for cls in discovered["sinks"]}  # type: ignore[attr-defined]
+
+    def test_file_sinks_subset_of_registered_sinks(self) -> None:
+        """``_FILE_SINK_PLUGINS`` ⊆ runtime sink registry.
+
+        Tracks elspeth-f7c63d7346: the prior set ``{csv, json, jsonl, text,
+        parquet, xml}`` advertised four phantom sinks (``jsonl``, ``text``,
+        ``parquet``, ``xml``) that the runtime sink registry has never
+        registered, deferring a guaranteed runtime crash past composer
+        pre-validation.
+        """
+        from elspeth.web.composer.state import _FILE_SINK_PLUGINS
+
+        phantom = _FILE_SINK_PLUGINS - self.sink_names
+        assert not phantom, (
+            f"_FILE_SINK_PLUGINS contains plugin names not in the runtime sink "
+            f"registry: {sorted(phantom)}. Either register those sink plugins or "
+            f"remove them from _FILE_SINK_PLUGINS in src/elspeth/web/composer/state.py."
+        )
+
+
 class TestTwoFileDivergence:
     """Verify the web skill and Claude Code skill list the same plugins."""
 

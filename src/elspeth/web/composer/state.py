@@ -40,6 +40,13 @@ EdgeType = Literal["on_success", "on_error", "route_true", "route_false", "fork"
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
 _MISSING_DECLARED_INPUT_FIELDS = object()
 
+# Sink plugin names whose configuration requires a `path` option (W6 warning).
+# MUST be a subset of the runtime sink registry — drift here means composer
+# pre-validation either misses required-path warnings (false negative) or
+# advertises plugins that don't exist (false positive). Enforced by
+# tests/unit/web/composer/test_skill_drift.py::test_file_sinks_subset_of_registered_sinks.
+_FILE_SINK_PLUGINS: frozenset[str] = frozenset({"csv", "json"})
+
 
 @dataclass(frozen=True, slots=True)
 class PipelineMetadata:
@@ -1573,9 +1580,8 @@ class CompositionState:
                     )
 
         # W6: File sink missing required path
-        _file_sinks = {"csv", "json", "jsonl", "text", "parquet", "xml"}
         for output in self.outputs:
-            if output.plugin in _file_sinks:
+            if output.plugin in _FILE_SINK_PLUGINS:
                 if not output.options or "path" not in output.options:
                     warnings.append(
                         _warn(

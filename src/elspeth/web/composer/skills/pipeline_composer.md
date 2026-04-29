@@ -375,7 +375,7 @@ For `mode: "write"`, choose either `fail_if_exists` or `auto_increment`. For `mo
 - Must have `on_write_failure: "discard"` (no chains)
 - Cannot reference itself
 
-(The composer's failsink validator currently also accepts `jsonl`, `parquet`, `text`, and `xml` because of historical drift; those plugins are not registered in the runtime sink registry. Do not use them — the pipeline will pass composer pre-validation and fail at runtime. See engine issue tracking the registry/validator alignment.)
+(The composer's failsink validator currently also accepts `xml` because of historical drift; the `xml` sink is not registered in the runtime sink registry. Do not use it — the pipeline will pass composer pre-validation and fail at runtime. See engine issue tracking the registry/validator alignment.)
 
 **When `discard` is acceptable:** For file sinks (`csv`, `json`) as the main output, `discard` is often fine — file writes rarely fail. But for any sink that touches external systems, always create a failsink.
 

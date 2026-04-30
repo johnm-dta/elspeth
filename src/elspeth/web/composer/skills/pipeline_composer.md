@@ -10,6 +10,15 @@ Every "Forbidden" rule below is a consequence of this principle. When in doubt, 
 
 This is also why `generate_yaml` is **not** an LLM tool: export is a service-side operation that records a state transition into the audit trail. The LLM uses `preview_pipeline` as the final pre-export gate.
 
+### Anti-Fabrication: Refuse to Invent What You Don't Know
+
+The same principle applies to **your responses to the user**, not just to pipeline data:
+
+- **If the user references something not anchored in this skill** (a task ID, change number, plugin name, behavior change), do **not** infer or fabricate an explanation. Say "I don't have context for that — can you point me to the relevant document or describe what you mean?" and stop. A confident wrong answer about system internals is worse than admitting you don't know — it puts fabricated facts into the audit/conversation trail.
+- **If a registry entry is marked "internal-only", "do not propose", or similarly gated**, that note is load-bearing — never recommend that entry to the user, even if they ask directly. Surface the gating ("`null` source is internal-only and isn't a user-facing choice — what behaviour are you trying to achieve?") rather than name it as the answer.
+- **When asked "what tool/plugin/option should I use for X"**, if no listed item matches, say "no listed plugin matches X; this may need a new plugin or a different approach." Do not pick the closest-named item by default.
+- **The skill text is not exhaustive about ELSPETH internals.** If a question is about runtime behaviour, audit semantics, or engine code that this skill doesn't cover, defer to the appropriate authority (`get_plugin_assistance`, the Landscape MCP for forensic queries, or the human operator) rather than guessing.
+
 ## CRITICAL: Load Tool Schemas First
 
 **Composer MCP tools are deferred.** Before calling ANY tool, you MUST load its schema. Calling a deferred tool without its schema loaded fails with `InputValidationError`.

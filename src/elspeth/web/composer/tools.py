@@ -347,7 +347,14 @@ def get_expression_grammar() -> str:
 def get_tool_definitions() -> list[dict[str, Any]]:
     """Return JSON Schema tool definitions for the LLM.
 
-    Returns 33 tools: 10 discovery + 13 mutation + 7 blob tools + 3 secret tools.
+    Returns 34 tools: 11 discovery + 13 mutation + 7 blob tools + 3 secret tools.
+
+    The skill at ``src/elspeth/web/composer/skills/pipeline_composer.md``
+    enumerates the same tool set in its Step-0 section. The drift gate
+    ``TestComposerToolNameDrift::test_skill_step0_matches_get_tool_definitions``
+    in ``tests/unit/web/composer/test_skill_drift.py`` enforces equality
+    between the runtime list returned here and the skill's bulleted
+    categories — adding a tool without updating both sides fails CI.
     """
     return [
         # Discovery tools

@@ -217,6 +217,110 @@ class TestEngineValidatorPluginDrift:
         )
 
 
+class TestComposerToolNameDrift:
+    """Verify the skill's Step-0 tool enumeration matches get_tool_definitions().
+
+    The skill at ``src/elspeth/web/composer/skills/pipeline_composer.md``
+    instructs the LLM to load schemas for every composer tool before
+    calling any of them. The Step-0 list is hand-maintained as bulleted
+    categories (Discovery / State-preview / Build-edit / Diagnostics /
+    Blobs / Secrets). If ``get_tool_definitions()`` in
+    ``src/elspeth/web/composer/tools.py`` adds, removes, or renames a
+    tool without a matching skill update, the LLM either fails to load
+    a tool it needs (InputValidationError on first call) or wastes a
+    budget turn loading a tool that isn't registered. This drift gate
+    catches both directions and is the Scope-A deliverable from
+    Followup D (docs/skill-rgr/followup-D-tool-inventory-bootstrap.md).
+
+    Scope-B (a single ``composer_bootstrap`` tool that returns the
+    manifest) is tracked separately as ``elspeth-4f85bd6652`` and is
+    deferred until the ``batch3_bootstrap`` harness scenario produces
+    RED on production for at least one model.
+    """
+
+    @staticmethod
+    def _extract_skill_step0_tool_names(skill_text: str) -> set[str]:
+        """Extract tool names from the Step-0 bullet categories.
+
+        The Step-0 section is bounded by two stable anchors:
+
+        - start: ``**Step 0 (mandatory before any pipeline work):**``
+        - end:   ``If any tool you intend to call still shows a placeholder``
+
+        Within that range, only lines starting with ``- **`` (category
+        bullets) are scanned. This deliberately excludes the section's
+        explanatory text, which mentions ``get_tool_definitions()`` and
+        would otherwise pollute the result. Each category bullet's
+        backtick-quoted ``snake_case`` identifiers are tool names.
+
+        Adding a new bullet category (e.g. ``- **Audit:** ...``) just
+        works. Reformatting that drops the bullet prefix or renames the
+        anchors will surface as an explicit AssertionError below rather
+        than as a silent test passing on an empty set.
+        """
+        start_anchor = "**Step 0 (mandatory before any pipeline work):**"
+        end_anchor = "If any tool you intend to call still shows a placeholder"
+        start = skill_text.find(start_anchor)
+        end = skill_text.find(end_anchor, start)
+        if start == -1 or end == -1:
+            raise AssertionError(
+                "Could not locate Step-0 section anchors in pipeline_composer.md. "
+                "If the section was renamed, update _extract_skill_step0_tool_names "
+                "(start_anchor / end_anchor) so the drift gate keeps enforcing the "
+                "skill ↔ get_tool_definitions() invariant."
+            )
+        section = skill_text[start:end]
+        names: set[str] = set()
+        for line in section.splitlines():
+            if line.startswith("- **"):
+                names.update(re.findall(r"`([a-z_][a-z0-9_]*)`", line))
+        return names
+
+    def test_skill_step0_matches_get_tool_definitions(self) -> None:
+        """Skill Step-0 enumeration == ``get_tool_definitions()`` name set.
+
+        Bidirectional check: any tool in the runtime that's missing from
+        the skill is a 'silent gap' (the LLM won't know to load it); any
+        tool in the skill that's not in the runtime is a 'phantom' (the
+        LLM will waste a budget turn on a tool that doesn't exist).
+        Both are caught by the same set-equality assertion.
+        """
+        from elspeth.web.composer.tools import get_tool_definitions
+
+        runtime_names = {defn["name"] for defn in get_tool_definitions()}
+        skill_names = self._extract_skill_step0_tool_names(_WEB_SKILL_CONTENT)
+
+        # Sanity: anchors matched but the regex returned nothing — the
+        # bullet format probably changed and the gate would silently
+        # pass. Fail loudly instead.
+        assert skill_names, (
+            "Step-0 anchors matched but no tool names were extracted from the "
+            "bulleted categories. The bullet format probably changed (the "
+            "extractor expects lines starting with '- **'). Adjust "
+            "_extract_skill_step0_tool_names or the bullet format must be "
+            "restored — the drift gate would silently pass otherwise."
+        )
+
+        missing_from_skill = runtime_names - skill_names
+        phantom_in_skill = skill_names - runtime_names
+
+        assert not missing_from_skill, (
+            f"Tools registered in get_tool_definitions() but not enumerated in "
+            f"the skill's Step-0 list: {sorted(missing_from_skill)}. Add them to "
+            f"src/elspeth/web/composer/skills/pipeline_composer.md (Step-0 "
+            f"section) under the appropriate category, or the LLM will hit "
+            f"InputValidationError when it tries to call the tool without "
+            f"having loaded its deferred schema."
+        )
+        assert not phantom_in_skill, (
+            f"Tools enumerated in the skill's Step-0 list but not registered in "
+            f"get_tool_definitions(): {sorted(phantom_in_skill)}. Either "
+            f"register them in src/elspeth/web/composer/tools.py or remove them "
+            f"from the skill — the LLM cannot call a tool that isn't in "
+            f"get_tool_definitions(), and the bullet sets a false expectation."
+        )
+
+
 class TestTwoFileDivergence:
     """Verify the web skill and Claude Code skill list the same plugins."""
 

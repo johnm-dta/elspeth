@@ -1635,7 +1635,7 @@ class CompositionState:
                 warnings.append(
                     _warn(
                         f"output:{output.name}",
-                        f"Output '{output.name}' on_write_failure references '{dest}' (plugin='{target.plugin}'), but failsinks must use csv, json, or xml.",
+                        f"Output '{output.name}' on_write_failure references '{dest}' (plugin='{target.plugin}'), but failsinks must use csv or json.",
                         "medium",
                     )
                 )
@@ -1677,11 +1677,15 @@ class CompositionState:
             )
 
         # S2: Single output to external sink — suggest a local fallback
-        # Local file sinks (csv, json, text, parquet) don't benefit from a backup:
+        # Local file sinks (csv, json) don't benefit from a backup:
         # if the filesystem is failing, a second file will fail too.
         # External sinks (database, azure_blob, dataverse, http) benefit from a
         # local recovery file when the external system is unavailable.
-        _local_file_sinks = {"csv", "json", "jsonl", "text", "parquet"}
+        # MUST be a subset of the runtime sink registry — phantoms are
+        # behaviour-neutral here (the check fires for non-members, so a phantom
+        # plugin name can never appear in a valid pipeline anyway), but kept
+        # consistent with _FILE_SINK_PLUGINS / _ALLOWED_FAILSINK_PLUGINS.
+        _local_file_sinks = {"csv", "json"}
         if len(self.outputs) == 1:
             output = self.outputs[0]
             if output.plugin not in _local_file_sinks:

@@ -175,6 +175,48 @@ class TestStateValidatorPluginDrift:
         )
 
 
+class TestEngineValidatorPluginDrift:
+    """Verify static plugin sets in engine-side validators match the runtime registry.
+
+    The engine's ``validate_sink_failsink_destinations`` uses a static set
+    (``_ALLOWED_FAILSINK_PLUGINS``) to decide which target plugins are
+    eligible failsinks. If the set drifts from the runtime sink registry,
+    a pipeline can pass engine validation only to crash at runtime when
+    ``get_sink_by_name`` raises ``PluginNotFoundError`` for the phantom
+    plugin name. This is the engine-layer counterpart to
+    ``TestStateValidatorPluginDrift`` — same anti-pattern, same fix recipe.
+
+    These tests enforce: static sets must be subsets of the runtime registry.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _discover(self) -> None:
+        """Discover all sink plugin names once for the test class."""
+        discovered = discover_all_plugins()
+        self.sink_names = {cls.name for cls in discovered["sinks"]}  # type: ignore[attr-defined]
+
+    def test_allowed_failsink_plugins_subset_of_registered_sinks(self) -> None:
+        """``_ALLOWED_FAILSINK_PLUGINS`` ⊆ runtime sink registry.
+
+        Tracks elspeth-3ef528e3e3: the prior set ``{csv, json, xml}``
+        advertised one phantom sink (``xml``) that the runtime sink
+        registry has never registered, deferring a guaranteed runtime
+        crash past engine pre-validation
+        (``validate_sink_failsink_destinations`` accepts the failsink, then
+        ``get_sink_by_name("xml")`` raises ``PluginNotFoundError`` at run
+        time). Co-drift cluster with elspeth-f7c63d7346 (state.py side).
+        """
+        from elspeth.engine.orchestrator.validation import _ALLOWED_FAILSINK_PLUGINS
+
+        phantom = _ALLOWED_FAILSINK_PLUGINS - self.sink_names
+        assert not phantom, (
+            f"_ALLOWED_FAILSINK_PLUGINS contains plugin names not in the runtime "
+            f"sink registry: {sorted(phantom)}. Either register those sink plugins "
+            f"or remove them from _ALLOWED_FAILSINK_PLUGINS in "
+            f"src/elspeth/engine/orchestrator/validation.py."
+        )
+
+
 class TestTwoFileDivergence:
     """Verify the web skill and Claude Code skill list the same plugins."""
 

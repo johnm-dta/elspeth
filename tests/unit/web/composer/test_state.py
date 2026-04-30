@@ -1534,7 +1534,7 @@ class TestStage1Validation:
         state = state.with_edge(self._make_edge("e1", "source", "t1"))
         state = state.with_edge(self._make_edge("e2", "t1", "main"))
         result = state.validate()
-        assert any("must use csv, json, or xml" in w.message for w in result.warnings)
+        assert any("must use csv or json" in w.message for w in result.warnings)
 
     def test_validate_on_write_failure_chain_warns(self) -> None:
         """W7: failsink target has its own non-discard on_write_failure (chain)."""

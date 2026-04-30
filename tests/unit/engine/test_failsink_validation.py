@@ -45,16 +45,6 @@ class TestValidateSinkFailsinkDestinations:
             sink_plugins={"output": "database", "json_failsink": "json"},
         )  # No error raised
 
-    def test_xml_failsink_valid(self) -> None:
-        validate_sink_failsink_destinations(
-            sink_configs={
-                "output": _stub("xml_failsink"),
-                "xml_failsink": _stub("discard"),
-            },
-            available_sinks={"output", "xml_failsink"},
-            sink_plugins={"output": "database", "xml_failsink": "xml"},
-        )  # No error raised
-
     def test_unknown_failsink_raises(self) -> None:
         with pytest.raises(RouteValidationError, match="nonexistent"):
             validate_sink_failsink_destinations(
@@ -64,8 +54,8 @@ class TestValidateSinkFailsinkDestinations:
             )
 
     def test_non_file_failsink_raises(self) -> None:
-        """Failsink must be csv, json, or xml."""
-        with pytest.raises(RouteValidationError, match="csv, json, or xml"):
+        """Failsink must be csv or json."""
+        with pytest.raises(RouteValidationError, match="csv or json"):
             validate_sink_failsink_destinations(
                 sink_configs={
                     "output": _stub("db_sink"),
@@ -77,7 +67,7 @@ class TestValidateSinkFailsinkDestinations:
 
     def test_chroma_as_failsink_raises(self) -> None:
         """ChromaSink is not a valid failsink plugin type."""
-        with pytest.raises(RouteValidationError, match="csv, json, or xml"):
+        with pytest.raises(RouteValidationError, match="csv or json"):
             validate_sink_failsink_destinations(
                 sink_configs={
                     "output": _stub("chroma_backup"),

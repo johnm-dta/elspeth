@@ -981,7 +981,7 @@ class SinkSettings(BaseModel):
         description=(
             "Per-row write failure handling. Required — pipeline author must decide: "
             "'discard' to drop with audit record, or a sink name to divert to failsink "
-            "(must be csv, json, or xml plugin)."
+            "(must be csv or json plugin)."
         ),
     )
 

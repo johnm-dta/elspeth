@@ -4,9 +4,9 @@
 **Parent epic:** [elspeth-528bde62bb](filigree:elspeth-528bde62bb) — Composer LLM evaluation remediation
 **Related future epic:** [elspeth-f0460a6594](filigree:elspeth-f0460a6594) — Composer async/background execution model (deferred to Future release)
 **Date:** 2026-04-30
-**Status:** Proposed (revision 2 — incorporates panel review findings)
+**Status:** Proposed (revision 3 — incorporates panel review findings on revision 2)
 **Branch:** RC5-UX (or successor)
-**Tier-artifact match:** This is an XS-tier change captured in a single spec; no separate ADR/RTM/TOGAF artifacts are produced because the work is bounded to one ticket and one PR. The four mini-ADRs are inlined in §3.
+**Tier-artifact match:** **S-tier** change captured in a single spec; the four mini-ADRs are inlined in §3, the infrastructure additions are itemised in §5.7. (Originally labelled XS in revision 1; relabelled S after revision 2 grew to ~950 lines with 9 risk entries, 11 integration scenarios, 7 named property-test strategies, and explicit infrastructure additions.)
 
 ---
 
@@ -58,15 +58,18 @@ specific failure mode).
 
 | NFR | Target | Verification |
 |---|---|---|
-| Per-turn DB write overhead | ≤ 25 ms p95 with N ≤ 8 tool calls per assistant turn | Bench in `tests/integration/web/test_compose_loop_latency.py` (new) |
-| Recovery panel time-to-interactive | ≤ 500 ms with ≤ 50 tool rows in transcript | Frontend perf test (new) |
-| Redaction-summarizer failure rate | ≤ 0.1% of tool calls in a 24-hour window; alarms above | OTel counter `composer.redaction.summarizer_errors` |
-| Replay fidelity | Byte-identical `chat_messages.content` + `tool_call_id` ordering after redaction-sentinel substitution | Property test (§8.3) |
-| Audit-ahead-of-state invariant violation rate | 0 (zero); single violation = audit incident, not an SLO budget | Property test (§8.3) + post-condition assertion in `_compose_loop` |
+| Per-turn DB write overhead (sanity bound) | p95 ≤ 250 ms with N ≤ 8 tool calls per assistant turn, measured in CI on standard infra | `tests/integration/web/test_compose_loop_latency_sanity.py` (new) — order-of-magnitude bound, not a tight budget |
+| Per-turn DB write overhead (tight target) | p95 ≤ 25 ms with N ≤ 8 on dedicated bench host | Nightly bench job, not gated on CI; failure raises a tracking observation, not a build break |
+| Recovery panel time-to-interactive | ≤ 500 ms with ≤ 50 tool rows in transcript | Frontend perf test (new); same sanity-bound discipline as latency NFR |
+| Redaction-summarizer failure rate | ≤ 0.1% of tool calls in a 24-hour window; alerts above | OTel counter `composer.redaction.summarizer_errors_total` |
+| Audit-state-rollback counter | **0 events expected**; any non-zero value in a 24-hour window alerts | OTel counter `composer.audit.state_rolled_back_during_persist_total`; SLO threshold = 0 |
+| Audit-write failure rate (tool-row insert) | **0 events expected**; any non-zero value alerts | OTel counter `composer.audit.tool_row_persist_failed_total`; SLO threshold = 0 |
+| Replay fidelity | Byte-identical `chat_messages.content` + `tool_call_id` + `sequence_no` ordering after redaction-sentinel substitution | Property test (§8.3) |
+| Audit-ahead-of-state invariant violation rate | **0 events**; single violation = audit incident, not an SLO budget | Property test (§8.3) + post-condition assertion in `_compose_loop` |
 
-Targets are deliberately conservative; this is single-operator pre-release
-work. Tightening (or relaxing) belongs to RC 5.1 production hardening when
-real load data exists.
+The latency NFR is split deliberately into a CI-friendly sanity bound and
+a tight nightly-bench target. CI runs on shared infrastructure with
+unbounded noise; tight thresholds at p95 are notorious flake sources.
 
 ---
 
@@ -103,7 +106,7 @@ does not constrain this work.
 |---|---|---|---|---|---|---|
 | Tool-response persistence shape | **A1.** One `role='tool'` `chat_messages` row per tool response, correlated to its assistant turn via `tool_call_id`. | A2 (embed responses in assistant row's `tool_calls` JSON) | One-way after first compose run executes — tool rows accumulate. Pre-release the corpus is empty so revisable. | Drop the tool rows + `tool_call_id` column; revert to A2 shape. Costs one schema migration + audit-data-loss event. | Per-call audit row growth (1 + N rows per turn vs 1) | RC 5.1 readiness review |
 | Frontend recovery UX | **F2.** Diff-and-confirm modal showing pipeline diff + tool transcript with explicit Apply / Discard buttons. | F1 (auto-apply) destructive of unsaved edits; F3 (reload-to-recover) clunky. | Reversible — frontend-only change, no DB shape implications. | Hide the panel; failure path falls back to existing toast/banner. | Frontend dev + accessibility cost | RC 5.1 frontend review |
-| Tool argument redaction | **R3.** Each tool declares `ToolRedactionPolicy(sensitive_argument_keys, sensitive_response_keys, argument_summarizers)`; persistence layer enforces. | R1 (no redaction) leaks by default; R2 (central policy) couples redaction to every tool's argument shape and rots. | One-way — once tool authors declare policies, removing the contract requires touching every tool. | Add a no-op `ToolRedactionPolicy()` to every tool and remove the registry-iteration test. Costs lost central enforcement. | Per-tool author declaration burden + adequacy-guard (§4.4) | RC 5.1 security review |
+| Tool argument redaction | **R3.** Each tool declares `ToolRedactionPolicy(sensitive_argument_keys, sensitive_response_keys, argument_summarizers, handles_no_sensitive_data, handles_no_sensitive_data_reason)`; persistence layer enforces. | R1 (no redaction) leaks by default; R2 (central policy) couples redaction to every tool's argument shape and rots. | One-way — once tool authors declare policies, removing the contract requires touching every tool. | Add a no-op `ToolRedactionPolicy()` to every tool and remove the registry-iteration test. Costs lost central enforcement. | Per-tool author declaration burden + adequacy-guard (§4.4) + reason-text discipline (§4.4) | RC 5.1 security review; quarterly review of `handles_no_sensitive_data=True` declarations |
 | Migration | **None.** Pre-release per CLAUDE.md. New columns ship as part of the schema; no backfill. | Migration would have been required post-release. | One-way — first eval run produces rows in the new shape. | Delete the chat_messages corpus; pre-release acceptable. | No backward-compat shim cost | Once a real corpus exists |
 
 ---
@@ -184,10 +187,10 @@ CREATE UNIQUE INDEX uq_chat_messages_tool_call_id
 
 - `tool_call_id` is non-null iff `role='tool'`. (`ck_chat_messages_tool_call_id_role`.)
 - `parent_assistant_id` is non-null iff `role='tool'`, with `ON DELETE CASCADE` so deleting an assistant row removes its tool rows. (`ck_chat_messages_parent_role`.)
-- `(session_id, sequence_no)` is unique — every row in a session has a unique monotonic sequence number, assigned at insert. Replay fidelity (NFR §1.4) depends on this.
-- `(session_id, tool_call_id)` is unique among `role='tool'` rows. Cross-turn collisions (same `tool_call_id` reused by the LLM provider in a different turn) are rejected.
+- `(session_id, sequence_no)` is unique — every row in a session has a unique monotonic sequence number. Replay fidelity (NFR §1.4) depends on this.
+- `(session_id, tool_call_id)` is unique among `role='tool'` rows. Cross-turn collisions (same `tool_call_id` reused by the LLM provider in a different turn) are rejected as a Tier-3 input-validation failure: the compose loop crashes the request rather than silently mis-correlating.
 
-`composition_state_id` FK behaviour — see §4.4.
+`composition_state_id` FK behaviour — see §4.5.
 
 ### 4.2 `ToolRedactionPolicy` — per-tool declared policy
 
@@ -220,13 +223,19 @@ class ToolRedactionPolicy:
         ``sensitive_argument_keys`` is a configuration error (validator
         rejects at construction).
 
-    handles_no_sensitive_data: an explicit "this tool reviewed and asserts
+    handles_no_sensitive_data: explicit "this tool reviewed and asserts
         no sensitive material in arguments or responses" flag. Required to
         be True if both ``sensitive_argument_keys`` and
         ``sensitive_response_keys`` are empty AND the tool's argument
-        schema contains string-typed keys; the registry-adequacy test
-        (§8) enforces this. The flag is a deliberate friction point so a
-        future tool author cannot silently ship an empty policy.
+        schema contains string-typed properties.
+
+    handles_no_sensitive_data_reason: free-text justification REQUIRED
+        when ``handles_no_sensitive_data=True``. The string is reviewed
+        during the quarterly redaction-policy audit (RSK-02 trigger).
+        Empty / boilerplate reasons fail the adequacy-guard test.
+        This is the friction point that prevents ``True`` from becoming
+        a costless shortcut: the cost is the reviewer-readable
+        justification, which is recorded forever.
 
     NOTE on freeze: ``argument_summarizers`` values are Callables. ``deep_freeze``
     passes Callables through unchanged (they are not mutable containers).
@@ -237,15 +246,30 @@ class ToolRedactionPolicy:
     sensitive_response_keys: tuple[str, ...] = ()
     argument_summarizers: Mapping[str, Callable[[Any], str]] = field(default_factory=dict)
     handles_no_sensitive_data: bool = False
+    handles_no_sensitive_data_reason: str | None = None
 
     def __post_init__(self) -> None:
-        # Construction-time validator: every summarizer key must appear in sensitive_argument_keys.
+        # Validators run BEFORE freeze_fields so they read mutable state.
+        # If any raise, the dataclass __init__ raises and the object is
+        # never returned — atomic construction failure.
+
         orphan_summarizers = set(self.argument_summarizers) - set(self.sensitive_argument_keys)
         if orphan_summarizers:
             raise ValueError(
                 f"argument_summarizers keys {sorted(orphan_summarizers)} are not declared in "
                 f"sensitive_argument_keys; orphan summarizers indicate a policy bug."
             )
+
+        if self.handles_no_sensitive_data and not (self.handles_no_sensitive_data_reason or "").strip():
+            raise ValueError(
+                "handles_no_sensitive_data=True requires a non-empty handles_no_sensitive_data_reason. "
+                "The reason is reviewed during quarterly redaction-policy audits."
+            )
+        if not self.handles_no_sensitive_data and self.handles_no_sensitive_data_reason is not None:
+            raise ValueError(
+                "handles_no_sensitive_data_reason is only meaningful when handles_no_sensitive_data=True."
+            )
+
         freeze_fields(self, "sensitive_argument_keys", "sensitive_response_keys", "argument_summarizers")
 ```
 
@@ -263,61 +287,90 @@ The naive registry test "every tool has a `ToolRedactionPolicy`" is not
 sufficient — an empty policy (`()`, `()`, `{}`) trivially passes. The
 adequacy guard:
 
-For every registered composer tool, the test (§8) asserts:
+**Schema introspection mechanism.** Composer tools declare arguments via
+Pydantic `BaseModel` subclasses (see existing tools in
+`src/elspeth/web/composer/tools.py`). The adequacy test introspects each
+tool's argument model via `model.model_fields` and identifies fields
+whose annotation type is `str`, `bytes`, or any `Annotated` of these.
+Response schemas use the same mechanism on `ToolResponse` subclasses.
 
-- If the tool's argument schema declares **any string-typed property**, then
-  EITHER `sensitive_argument_keys` is non-empty OR `handles_no_sensitive_data=True`.
+**Adequacy rule.** For every registered composer tool, the test asserts:
+
+- If the tool's argument-model `model_fields` includes any string-typed
+  property, then EITHER `sensitive_argument_keys` is non-empty OR
+  `handles_no_sensitive_data=True` with a non-empty
+  `handles_no_sensitive_data_reason`.
 - Same rule for response schema and `sensitive_response_keys`.
 
-This forces the tool author to make an explicit declaration (review this
-schema; tag the sensitive keys, or assert there are none). The
-`handles_no_sensitive_data=True` flag is an audit-visible commitment, not
-a silent default.
+**Fail-closed semantics.** If a tool has no detectable argument model
+(e.g., raw dict accepted), the test FAILS rather than skipping the
+tool. Every tool must have a Pydantic argument model OR an explicit
+opt-out via a separate `EXEMPT_FROM_ADEQUACY_CHECK = True` class
+attribute (also reviewed quarterly).
 
-### 4.5 `composition_state_id` FK behaviour
+**Reason-text discipline.** The test rejects `handles_no_sensitive_data_reason`
+values that match a stop-list of placeholder phrases (e.g., "n/a",
+"none", "no sensitive data", "TODO"). A tool that flags
+`handles_no_sensitive_data=True` must explain in concrete terms why the
+arguments and responses are safe to persist verbatim. Stop-list lives
+in `tests/unit/web/composer/test_redaction_policy.py` and is updated
+during quarterly review.
 
-The FK references `composition_states(id, session_id)` (existing composite
-FK). Tool rows set `composition_state_id` to the new state version when
-the tool mutated state, otherwise NULL. **If the state row was rolled back
-between the tool execution and the audit insert, the FK insert will raise
-`IntegrityError`.** The persistence layer handles this:
+### 4.5 `composition_state_id` FK behaviour and `IntegrityError` semantics
 
-```python
-try:
-    save_chat_message(..., composition_state_id=new_state_id, ...)
-except IntegrityError:
-    # The composition_states row was rolled back. Persist the tool row with
-    # composition_state_id=NULL and emit a reconciliation telemetry event.
-    save_chat_message(..., composition_state_id=None, ...)
-    telemetry.emit("composer.audit.state_rolled_back_during_persist", ...)
-```
+Under §5.2's atomic-pair transaction, the FK race the original §4.5
+described (state row rolled back between tool execution and tool-row
+insert) is **not reachable for the tool-row write** — the new
+`composition_states` row is written inside the same transaction as the
+tool row, or the tool row sets `composition_state_id=NULL`.
 
-This is the only place in the design where a Tier-1 audit write tolerates
-a partial recovery. The justification: writing the tool row at all is more
-important than linking it to a state row that no longer exists. The
-reconciliation event makes the partial recovery visible to operators.
+The remaining places `IntegrityError` can fire on a `chat_messages`
+write:
+
+| Source | Cause | Correct response |
+|---|---|---|
+| `fk_chat_messages_composition_state_session` on Step A (assistant row) | Externally-deleted `composition_states` row (admin tooling, race with cleanup). The assistant row references an *already-committed* state row that vanished between read and write. | Crash — this is a Tier-1 invariant violation. |
+| `uq_chat_messages_tool_call_id` (partial unique) | LLM provider re-used a `tool_call_id` across turns. | Crash — Tier-3 input validation failure surfaced as a database integrity error. The compose request fails fast; the LLM is misbehaving and should not be allowed to proceed. |
+| `ix_chat_messages_session_sequence` (unique) | Sequence-number reservation race. Should be unreachable per §5.7's single-writer-per-session rule. | Crash — concurrency bug. |
+| `ck_chat_messages_*` (CHECK constraints) | Caller bug. | Crash — internal bug. |
+
+**The persistence layer does NOT catch `IntegrityError`.** Any
+`IntegrityError` is treated as a Tier-1 invariant violation and
+propagates. CLAUDE.md offensive-programming policy: detect invalid
+states and throw meaningful exceptions, do not silently recover.
+
+(Earlier revisions of this spec proposed catching `IntegrityError` and
+re-attempting with `composition_state_id=NULL`. The atomic-pair design
+in §5.2 made that unreachable for the tool-row write; for the
+assistant-row write the catch would silently swallow real bugs
+including duplicate `tool_call_id` and CHECK violations. Removed in
+revision 3.)
 
 ### 4.6 Retention path
 
 `chat_messages` rows for a session are eligible for archival under the
-same retention policy as `composition_states`. The existing
-`elspeth purge --retention-days N` CLI does not yet cover web tables;
-extending it to `chat_messages` is out of scope for this ticket and is
-filed under RC 5.1 production-hardening backlog. Until then, sessions are
-retained indefinitely. Operators can manually purge by deleting sessions
-(cascade removes chat_messages).
+same retention policy as `composition_states`. Today, deleting a session
+cascades to all chat_messages rows (existing FK). Extending the
+`elspeth purge --retention-days N` CLI to operate on web sessions
+without manual session deletion is filed as
+[elspeth-RETENTION-WEB] (to be filed during implementation; see §10
+open question OQ-1).
 
 ### 4.7 Initial policy declarations
 
 Final list assembled during implementation; the adequacy guard (§4.4)
 enforces correctness. Representative examples:
 
-| Tool | sensitive_argument_keys | sensitive_response_keys | summarizers | handles_no_sensitive_data |
-|---|---|---|---|---|
-| `wire_secret_ref` | `()` | `()` | none | `True` (the *name* is not sensitive; values are never returned) |
-| `set_source` | `("path",)` (passes through `redact_source_storage_path`) | `()` | `path` → `redact_source_storage_path` | `False` |
-| `create_blob` | `("content",)` | `()` | `content` → `<inline-blob:{n}-bytes>` | `False` |
-| `patch_*` | depends on plugin schema; declared per-tool | `()` | as needed | `False` |
+| Tool | sensitive_argument_keys | sensitive_response_keys | summarizers | handles_no_sensitive_data | reason |
+|---|---|---|---|---|---|
+| `wire_secret_ref` | `()` | `()` | none | `True` | "Secret *names* are inventory metadata, not values; resolved values never appear in arguments or responses (the resolver is server-side and audit-recorded separately)." |
+| `set_source` | `("path",)` | `()` | `path` → `redact_source_storage_path` | `False` | n/a |
+| `create_blob` | `("content",)` | `()` | `content` → `<inline-blob:{n}-bytes>` | `False` | n/a |
+| `patch_*` | depends on plugin schema; declared per-tool | `()` | as needed | `False` | n/a |
+
+The `wire_secret_ref` reason illustrates the discipline: explicit,
+concrete, refers to where the sensitive material *actually* lives and
+why the tool's surface is safe.
 
 ---
 
@@ -326,10 +379,13 @@ enforces correctness. Representative examples:
 ### 5.1 Composer service must hold a `SessionsService` handle
 
 Today the composer service does not have a `SessionsService` reference.
-It will gain one via constructor injection (the request-scoped instance
-that already exists in the route layer). All new persistence calls go
-through `SessionsService.add_message(...)`; no new free function or
-helper is introduced.
+It will gain one via constructor injection.
+
+**Lifetime.** `SessionsService` is constructed at app startup with the
+shared SQLAlchemy `Engine` and lives for the app lifetime (see existing
+`web/dependencies.py`). The composer service has the same lifetime.
+Constructor injection at startup; no per-request rewiring. This matches
+the existing pattern for `WebSecretService`, `BlobServiceImpl`, etc.
 
 ### 5.2 Insertion sites in the compose loop
 
@@ -347,13 +403,14 @@ assistant_msg_id = await sessions_service.add_message(
     content=assistant_message.content or "",
     tool_calls=redacted_tool_calls,
     composition_state_id=current_state_id,
-    # sequence_no reserved atomically inside add_message
+    # sequence_no reserved atomically inside add_message — see §5.7
 )
 
 # Step B — execute and persist each tool turn
 for tool_call in assistant_message.tool_calls:
-    response_for_persistence: dict[str, Any] | ToolResponse | None = None
+    response_for_persistence: dict[str, Any] | ToolResponse
     pre_version = state.version
+    tool_exception_in_flight: BaseException | None = None
     try:
         response = await execute_tool(tool_call, state)
         response_for_persistence = response
@@ -371,27 +428,32 @@ for tool_call in assistant_message.tool_calls:
             "error": type(exc).__name__,
             "message": str(exc),
         }
+        tool_exception_in_flight = exc
         # Re-raise after recording. The audit insert in `finally` is shielded
         # from cancellation so an in-flight CancelledError cannot abandon
         # the row.
         raise
     finally:
-        if response_for_persistence is None:
-            # Defensive: this branch is reachable only if the try body raised
-            # an exception that was neither ToolArgumentError nor a normal
-            # Exception (e.g., BaseException or a corrupted __str__).
-            response_for_persistence = {
-                "error": "UnknownToolFailure",
-                "message": "tool_call did not produce a response or recordable exception",
-            }
-        redacted_response = apply_response_redaction(
-            response_for_persistence,
-            lookup_redaction_policy(tool_call.function.name),
-        )
+        # response_for_persistence is guaranteed bound by this point: every
+        # except arm assigns it, and the try body assigns it on success.
+        # If a BaseException reaches this finally without going through any
+        # except arm (e.g., asyncio.CancelledError mid-execution), the
+        # `nonlocal` rebind doesn't happen and we must NOT silently fabricate
+        # a row — let the BaseException propagate after the audit attempt.
+        # This matches CLAUDE.md offensive-programming policy.
+        try:
+            redacted_response = apply_response_redaction(
+                response_for_persistence,
+                lookup_redaction_policy(tool_call.function.name),
+            )
+        except NameError:
+            # response_for_persistence not bound — BaseException path.
+            # Re-raise immediately; do not swallow.
+            raise
         # Shielded so cancellation between tool execution and audit insert
         # cannot leave chat_messages behind composition_states. The helper
         # writes BOTH the tool row AND the new composition_states row (if
-        # state advanced) in one atomic transaction — see §5.3.
+        # state advanced) in one atomic transaction — see §5.3 and §5.7.
         await asyncio.shield(
             _persist_tool_row_with_audit_failure_handling(
                 sessions_service=sessions_service,
@@ -399,8 +461,9 @@ for tool_call in assistant_message.tool_calls:
                 tool_call_id=tool_call.id,
                 parent_assistant_id=assistant_msg_id,
                 content=json.dumps(redacted_response, separators=(",", ":")),
-                state=state,                  # passed in full; helper compares versions
-                pre_version=pre_version,      # so helper writes the new state row iff advanced
+                state=state,                                  # passed in full; helper compares versions
+                pre_version=pre_version,                       # so helper writes the new state row iff advanced
+                tool_exception_in_flight=tool_exception_in_flight,  # signals primacy disposition
             )
         )
 
@@ -414,13 +477,20 @@ async def _persist_tool_row_with_audit_failure_handling(
     content: str,
     state: CompositionState,
     pre_version: int,
+    tool_exception_in_flight: BaseException | None,
 ) -> None:
     """Atomically write the tool row plus (if state advanced) the new
     composition_states row. Both go in ONE database transaction so the
     bidirectional INV-AUDIT-AHEAD invariant holds: chat_messages and
     composition_states advance together or neither advances.
-    sequence_no is reserved atomically by SessionsService.add_message
-    via SELECT MAX(sequence_no)+1 inside the same transaction.
+
+    Audit-failure primacy:
+    - If a tool exception is in flight (the compose loop is unwinding),
+      we record the audit failure via telemetry and let the tool exception
+      propagate. The tool exception is the dominant signal.
+    - If no tool exception is in flight (the tool succeeded), an audit-write
+      failure is a Tier-1 audit invariant violation per CLAUDE.md primacy.
+      We re-raise audit_exc.
     """
     state_advanced = state.version > pre_version
     try:
@@ -435,32 +505,34 @@ async def _persist_tool_row_with_audit_failure_handling(
                 parent_assistant_id=parent_assistant_id,
                 content=content,
                 composition_state_id=composition_state_id,
-                # sequence_no reserved by add_message inside the same txn
+                # sequence_no reserved by add_message inside the same txn — §5.7
             )
     except IntegrityError:
-        # composition_state_id FK references a rolled-back row by sibling
-        # work — see §4.5. Recover by writing the tool row alone.
-        await sessions_service.add_message(
-            role="tool",
-            tool_call_id=tool_call_id,
-            parent_assistant_id=parent_assistant_id,
-            content=content,
-            composition_state_id=None,
-        )
-        _telemetry.composer_audit_state_rolled_back_counter.add(1)
+        # Per §4.5: any IntegrityError on the chat_messages or composition_states
+        # write is a Tier-1 invariant violation (FK to vanished state, duplicate
+        # tool_call_id from a misbehaving LLM, CHECK constraint bug). Do NOT
+        # silently recover. Propagate.
+        _telemetry.composer_audit_tool_row_persist_failed_total.add(1)
+        raise
     except Exception as audit_exc:
-        # Audit insert failed. The originating tool exception (if any) is
-        # the dominant signal; we record the audit failure via the existing
-        # partial_state_save_failed path and let the outer exception
-        # propagate. We do NOT re-raise audit_exc — that would mask the
-        # tool failure with an audit failure.
-        _telemetry.composer_audit_persist_failed_counter.add(1)
-        log.warning(
-            "audit_insert_failed",
-            tool_call_id=tool_call_id,
-            audit_exc_class=type(audit_exc).__name__,
-        )
-        # No re-raise.
+        # Audit insert failed for a non-IntegrityError reason (DB unavailable,
+        # connection drop, etc.). Apply audit-failure primacy:
+        _telemetry.composer_audit_tool_row_persist_failed_total.add(1)
+        if tool_exception_in_flight is not None:
+            # The tool already failed; the tool exception is the dominant
+            # signal. Record the audit failure (counter above) and let the
+            # tool exception propagate when this finally clause exits.
+            log.warning(  # permitted: audit-system failure (CLAUDE.md primacy)
+                "audit_insert_failed_during_tool_failure_unwind",
+                tool_call_id=tool_call_id,
+                tool_exc_class=type(tool_exception_in_flight).__name__,
+                audit_exc_class=type(audit_exc).__name__,
+            )
+            return
+        # Tool succeeded but audit failed: Tier-1 audit invariant violation.
+        # Per CLAUDE.md primacy ("audit fires first, sync, crash-on-failure")
+        # we MUST raise.
+        raise
 ```
 
 ### 5.3 Bidirectional audit-ahead-of-state invariant (INV-AUDIT-AHEAD)
@@ -488,8 +560,8 @@ forbids.
 - The single transaction that writes the tool row to `chat_messages`
   ALSO writes the new `composition_states` row (when state advanced).
   The `_persist_tool_row_with_audit_failure_handling` helper takes the
-  state row as a deferred `Optional[CompositionStateRow]` and writes
-  both atomically.
+  state row as an in-memory `CompositionState` and writes both
+  atomically.
 - `asyncio.shield` around the entire write protects against cancellation
   between the in-memory mutation and the durable commit.
 - The property test (§8.3) asserts the post-condition.
@@ -505,7 +577,7 @@ policy that applies to `chat_messages.tool_calls` JSON also applies to
 `partial_state.source.options` and node options before persistence.
 Composition state rows with raw paths are an existing inconsistency this
 spec does NOT extend; they will be addressed in a follow-up issue
-(see RC 5.1 backlog). The new code path uniformly redacts.
+(see §10 OQ-2). The new code path uniformly redacts.
 
 ### 5.5 Failure mode interaction
 
@@ -514,11 +586,11 @@ spec does NOT extend; they will be addressed in a follow-up issue
 | Tool returns successfully | assistant row + N tool rows + state mutation in one shielded transaction sequence | Normal continuation. |
 | Tool raises `ToolArgumentError` | assistant row + N-1 normal tool rows + 1 error tool row (Tier-3 boundary signal); loop continues | Conversation continues; the LLM gets the error tool row as feedback. |
 | Tool raises `Exception` (non-ToolArgumentError) | assistant row + tool rows up to the crash + 1 error tool row for the crashing call (shielded best-effort); exception propagates | Existing `_handle_plugin_crash` runs; 500 response with `partial_state`. Recovery panel shows the crash row. |
-| `asyncio.CancelledError` during tool execution | assistant row + completed tool rows; the in-flight tool's row is committed via `asyncio.shield` | `tool_calls_attempted - tool_responses_persisted` arithmetic surfaces the gap. |
-| `asyncio.CancelledError` between tool execution and audit insert | shielded — the audit insert completes | Invariant preserved. |
-| DB write fails mid-loop | Whatever was committed before the failure | Existing `partial_state_save_failed` signal extends naturally. |
-| FK to rolled-back `composition_states` | tool row inserted with `composition_state_id=NULL` + reconciliation telemetry | (Operator-visible only.) |
-| `BaseException` during tool execution | tool row inserted with `UnknownToolFailure` content (defensive branch §5.2) | Operator visible via telemetry; rare path. |
+| `asyncio.CancelledError` during tool execution | assistant row + completed tool rows; `CancelledError` propagates *through* `finally` (no `except` arm catches `BaseException`); shielded audit insert in `finally` completes before `CancelledError` resumes propagation | `tool_calls_attempted - tool_responses_persisted` arithmetic surfaces the gap. |
+| `asyncio.CancelledError` between tool execution and audit insert | shielded — the audit insert completes; `CancelledError` then resumes propagation | Invariant preserved. |
+| DB write fails on tool row, no tool exception in flight | Tier-1 audit failure: helper raises | `partial_state_save_failed=true` propagates as today; 500 response. |
+| DB write fails on tool row, tool exception already in flight | helper logs (permitted use), increments counter, returns | Tool exception propagates normally. Audit failure is visible via telemetry counter. |
+| `IntegrityError` on any constraint | helper increments counter, raises | Crash; surfaces real bug class (LLM misbehaviour, sequence race, etc.). |
 
 ### 5.6 Why a separate transaction per tool row
 
@@ -527,6 +599,96 @@ back early audit records. Splitting per row preserves the
 audit-ahead-of-state invariant in the forward direction. The atomic pair
 (tool row + composition_states row) preserves it in the backward
 direction.
+
+### 5.7 Infrastructure additions on `SessionsService`
+
+This work requires three new methods on `SessionsService`. They are not
+hypothetical — the implementing engineer adds them under this ticket.
+
+```python
+class SessionsService:
+    # Existing public API — unchanged signature except for new parameters:
+    async def add_message(
+        self,
+        *,
+        session_id: str,
+        role: Literal["user", "assistant", "system", "tool"],
+        content: str,
+        tool_calls: Sequence[Mapping[str, Any]] | None = None,
+        tool_call_id: str | None = None,                 # NEW
+        parent_assistant_id: str | None = None,          # NEW
+        composition_state_id: str | None = None,
+    ) -> str:
+        """Insert a chat_messages row. Reserves sequence_no atomically inside
+        a single transaction by (a) holding a session-scoped advisory lock,
+        (b) selecting MAX(sequence_no) for the session, (c) inserting with
+        MAX+1, (d) releasing the lock on commit.
+
+        Returns the inserted row's id.
+
+        Single-writer-per-session is structurally enforced: only the compose
+        loop writes assistant/tool rows; only the route layer writes user
+        rows. The route layer does not run concurrently with the compose
+        loop on the same session because the compose loop is the body of
+        the same HTTP request that received the user message. The advisory
+        lock guards against pathological misuse (e.g., a future admin tool
+        writing system rows mid-compose) and against PostgreSQL READ
+        COMMITTED multi-session reservation collisions.
+
+        Concurrency contract:
+        - SQLite: relies on the global write lock; advisory-lock no-op.
+        - PostgreSQL: pg_advisory_xact_lock(hashtext(session_id)) inside the
+          transaction; lock released on commit.
+        """
+        ...
+
+    @asynccontextmanager
+    async def atomic_transaction(self) -> AsyncIterator[SessionsTransaction]:
+        """Context manager that yields a transaction handle exposing
+        ``commit_composition_state`` and ``add_message`` methods that share
+        a single underlying transaction. On exit, commits or rolls back as
+        usual.
+
+        See §5.3 for the bidirectional INV-AUDIT-AHEAD invariant this
+        primitive enforces.
+        """
+        ...
+
+
+class SessionsTransaction:
+    """Transaction-scoped handle. Lifetime is bounded by the surrounding
+    ``atomic_transaction()`` context manager; do NOT retain references
+    past context exit.
+    """
+
+    async def add_message(self, *, role, content, ..., composition_state_id) -> str:
+        """Same signature as SessionsService.add_message except it does NOT
+        open its own transaction; it uses the ambient one. Reserves
+        sequence_no within the same transaction.
+        """
+        ...
+
+    async def commit_composition_state(self, state: CompositionState) -> str:
+        """Insert a composition_states row reflecting the current in-memory
+        state. Returns the inserted row's id. Uses the ambient transaction.
+        Equivalent in semantics to the existing inline state-row insert at
+        web/sessions/service.py (~lines 396-411, 829-840).
+        """
+        ...
+```
+
+The `_telemetry` module-level singleton lives in
+`src/elspeth/web/composer/telemetry.py` (new), exposing the named OTel
+counters. Tests inject a fake counter via a constructor parameter on
+the composer service for assertable behaviour.
+
+The `lookup_redaction_policy(tool_name: str) -> ToolRedactionPolicy`
+helper raises `MissingRedactionPolicyError` (a new exception) on
+unregistered names. The adequacy guard (§4.4) ensures this never fires
+in practice — every registered tool has a policy, enforced at registry
+build time. The crash on missing policy is offensive programming: the
+case is impossible by construction; if it ever fires, the registry
+itself is corrupt and the audit trail must not proceed.
 
 ---
 
@@ -557,6 +719,12 @@ response_body = {
 
 `tool_calls_attempted - tool_responses_persisted` surfaces "the LLM tried
 4 tools, only 3 finished" without forcing a separate round-trip.
+
+**Read consistency note.** `tool_responses_persisted` is computed by a
+SELECT after the shielded audit writes have completed. The route helpers
+await the surrounding compose-loop coroutine fully before computing the
+count, so the shielded writes have committed by then. This is verified
+by CL-PP-8 (mid-loop cancellation race).
 
 ### 6.2 Transcript fetch endpoint
 
@@ -679,13 +847,19 @@ polish.
 ### 8.1 Backend — unit
 
 - `tests/unit/web/composer/test_redaction_policy.py`
-  - Iterate composer tool registry; assert every tool has a
-    `ToolRedactionPolicy` attribute.
-  - **Adequacy guard test.** For every tool with string-typed argument
-    schema fields, assert either `sensitive_argument_keys` is non-empty
-    OR `handles_no_sensitive_data=True`. Symmetric for response schema.
-  - **Construction-time orphan-summarizer test.** A summarizer key not in
-    `sensitive_argument_keys` raises `ValueError`.
+  - **Registry-presence test.** Iterate composer tool registry; assert
+    every tool has a `ToolRedactionPolicy` attribute or `EXEMPT_FROM_ADEQUACY_CHECK = True`.
+  - **Adequacy guard test.** For every non-exempt tool, introspect its
+    Pydantic argument model via `model_fields`; if any field is string-typed,
+    assert either `sensitive_argument_keys` non-empty OR
+    `handles_no_sensitive_data=True` with a non-stop-list reason. Symmetric
+    for response schema.
+  - **Reason stop-list test.** Reject `handles_no_sensitive_data_reason`
+    matching the stop-list; allow concrete reasons.
+  - **Construction-time validators.**
+    - Orphan summarizer key → `ValueError`.
+    - `handles_no_sensitive_data=True` with empty/whitespace reason → `ValueError`.
+    - `handles_no_sensitive_data=False` with non-None reason → `ValueError`.
   - **Per-policy round-trip.** Synthetic tool call with sentinel-marked
     arguments; `apply_redaction_policy()` produces expected redacted
     output; `argument_summarizers` produce expected strings; **non-listed
@@ -693,7 +867,7 @@ polish.
     that redacts everything).
   - **Summarizer raises.** Inject a summarizer that raises; assert the
     fallback sentinel `<redacted-summarizer-error:{exc_type}>` is written;
-    OTel counter `composer.redaction.summarizer_errors` increments;
+    OTel counter `composer.redaction.summarizer_errors_total` increments;
     redaction never raises through the persistence boundary.
 
 - `tests/unit/web/sessions/test_chat_messages.py`
@@ -717,6 +891,18 @@ polish.
   - Assert composer service constructor accepts and stores a
     `SessionsService` handle (the dependency that was missing today).
 
+- `tests/unit/web/sessions/test_sessions_transaction.py`
+  - Assert `atomic_transaction()` yields a `SessionsTransaction`.
+  - Assert `txn.add_message(...)` reserves sequence_no inside the same txn.
+  - Assert `txn.commit_composition_state(...)` commits inside the same txn.
+  - Assert rollback on context-manager exception rolls both writes.
+
+- `tests/unit/web/composer/test_audit_failure_primacy.py`
+  - Tool succeeds + audit fails (non-IntegrityError) → helper raises.
+  - Tool fails + audit fails (non-IntegrityError) → helper logs (permitted),
+    counter increments, helper returns; tool exception propagates from finally.
+  - Audit IntegrityError (any constraint) → helper raises (no recovery).
+
 ### 8.2 Backend — integration
 
 Extend `tests/integration/pipeline/test_composer_llm_eval_characterization.py`:
@@ -726,15 +912,14 @@ Extend `tests/integration/pipeline/test_composer_llm_eval_characterization.py`:
   calls exist; response body's `failed_turn.tool_calls_attempted` and
   `tool_responses_persisted` match observed counts; `partial_state`
   matches the latest `composition_states` row.
-- **CL-PP-2a: Plugin crash, audit-row-precedes-raise.** Inject a tool
-  whose persistence machinery is monkeypatched so the audit insert
-  completes BEFORE the crashing exception leaves `execute_tool`. Assert
-  the crashing tool's row exists with `{"error": ..., "message": ...}`
-  content.
-- **CL-PP-2b: Plugin crash, raise-precedes-audit.** Inject a tool whose
-  exception fires before the persistence machinery runs. Assert the
-  shielded `finally`-block insert still produces a row (the design
-  guarantees this).
+- **CL-PP-2a: Plugin crash, audit-row-precedes-raise.** Use a
+  `threading.Event` (or asyncio equivalent) inside the patched
+  `execute_tool` so it awaits *after* the audit insert completes,
+  forcing causal ordering. Assert the crashing tool's row exists.
+- **CL-PP-2b: Plugin crash, raise-precedes-audit.** Use the same
+  primitive to force the exception to fire BEFORE the persistence
+  machinery runs. Assert the shielded `finally`-block insert still
+  produces a row.
 - **CL-PP-3: Wall-clock timeout during tool execution.** Force
   `asyncio.TimeoutError` in a tool. Assert the convergence error
   captured `partial_state`; audit trail consistent with captured state;
@@ -742,28 +927,75 @@ Extend `tests/integration/pipeline/test_composer_llm_eval_characterization.py`:
 - **CL-PP-4a: DB write fails on assistant row.** Inject a
   `add_message` failure on the assistant insert. Assert
   `partial_state_save_failed=true` propagates; no tool rows written.
-- **CL-PP-4b: DB write fails on Nth tool row.** Same as 4a but failure
-  is on the 2nd of 3 tool rows. Assert prior rows persist; subsequent
-  loop work depends on the existing partial_state path.
-- **CL-PP-4c: DB write fails on `composition_states` commit (within atomic pair).** Assert the tool-row + state-row atomic write rolls back together so the bidirectional invariant holds.
-- **CL-PP-5: Redaction summarizer raises mid-write.** Same pattern as
-  M3 unit but exercised end-to-end through the route layer.
-- **CL-PP-6: Composition_state FK rolled back.** Force the state row to
-  be rolled back between `execute_tool` and the audit insert. Assert
-  the tool row is persisted with `composition_state_id=NULL` and the
-  reconciliation telemetry counter increments.
-- **CL-PP-7: Cross-session leakage.** Same `tool_call_id` in two
+- **CL-PP-4b: DB write fails on Nth tool row, tool succeeded.** Failure
+  on the 2nd of 3 tool rows; tool itself returned successfully. Assert
+  helper raises (Tier-1 audit failure with no in-flight tool exception).
+- **CL-PP-4c: DB write fails on Nth tool row, tool also failed.**
+  Failure on the same row; tool raised `Exception`. Assert helper logs,
+  counter increments, helper returns; tool exception propagates.
+- **CL-PP-4d: DB write fails on `composition_states` commit (within atomic pair).**
+  Assert the tool-row + state-row atomic write rolls back together so
+  the bidirectional invariant holds.
+- **CL-PP-5: Redaction summarizer raises mid-write.** End-to-end through
+  the route layer. Assert fallback sentinel is in the persisted content;
+  counter increments.
+- **CL-PP-6: Cross-session leakage.** Same `tool_call_id` in two
   sessions. Assert no FK collision; no row from one session links to
   the other.
-- **CL-PP-8: Mid-loop cancellation race.** Cancellation arrives between
+- **CL-PP-7: Mid-loop cancellation race.** Cancellation arrives between
   assistant-row write and a tool-row write. Assert both rows present
-  due to `asyncio.shield`.
+  due to `asyncio.shield`; route helper's `tool_responses_persisted`
+  count matches the actual DB state.
+- **CL-PP-8: Duplicate tool_call_id from misbehaving LLM.** LLM emits
+  the same `tool_call_id` in two assistant turns of the same session.
+  Assert the second write raises `IntegrityError` and the request fails
+  fast — no silent recovery.
 
 ### 8.3 Backend — property test (bidirectional INV-AUDIT-AHEAD)
 
 Hypothesis-style stateful machine over a model of (LLM emissions,
-tool executions, cancellations, retries, redaction policies). After each
-trace:
+tool executions, cancellations, retries, redaction policies).
+
+#### 8.3.1 Strategy contracts
+
+Strategies live in `tests/property/web/composer/strategies.py`.
+
+**`st_tool_call`** — value space: well-formed `ToolCall` instances with
+non-empty function names matching the registered tool registry, and
+argument dicts whose keys match the tool's argument schema. Distribution:
+70% well-formed; 30% with sentinel-marked sensitive keys for redaction
+exercise. Coverage assertion: every test trace touches at least 3 distinct
+tool names.
+
+**`st_argument_dict`** — value space: dicts with string, int, bool, and
+nested-dict values to depth 3. Includes orphan summarizer keys (rejected
+at construction) and well-formed cases. Coverage: every test trace
+exercises both well-formed and orphan-summarizer inputs.
+
+**`st_redaction_policy`** — value space: tuples of (`sensitive_argument_keys`,
+`sensitive_response_keys`, `argument_summarizers`,
+`handles_no_sensitive_data`, `handles_no_sensitive_data_reason`).
+Generates: empty policy + non-empty schema (rejected by adequacy guard);
+non-empty policy; `handles_no_sensitive_data=True` with concrete reason;
+`handles_no_sensitive_data=True` with stop-list reason (rejected).
+Coverage: every adequacy-guard rejection branch exercised.
+
+**`st_failure_injection_point`** — value space: enum of (`tool_returns`,
+`tool_raises_ToolArgumentError`, `tool_raises_Exception`,
+`audit_raises_IntegrityError`, `audit_raises_OperationalError`,
+`state_commit_fails`). Maps 1:1 onto the §5.5 failure-mode rows.
+Coverage: every §5.5 row reached at least once per test campaign.
+
+**`st_cancellation_arrival_time`** — value space: enum of
+(`before_assistant_write`, `between_assistant_and_tool_n`,
+`during_tool_execution`, `during_audit_insert`, `after_audit_insert`).
+Coverage: every CL-PP-7-class race window exercised.
+
+**`st_session_state`** — value space: synthetic `CompositionState`
+instances with `version ∈ [0, 50]` and 0-20 nodes. Coverage:
+`version=0` (no partial state) and `version > 0` cases.
+
+#### 8.3.2 Post-conditions (asserted after each trace)
 
 ```
 Forward direction (audit can be ahead of state):
@@ -774,14 +1006,14 @@ Forward direction (audit can be ahead of state):
     in the assistant.tool_calls array
 
 Backward direction (state never ahead of audit):
-  for every committed composition_states row r where r.version > 0:
-    there exists a chat_messages row m with role='tool' AND
-    m.composition_state_id = r.id AND
-    m.sequence_no <= (any subsequent state row's earliest reference)
+  for every committed composition_states row r where r.version > 0
+    AND r resulted from a tool call (vs route-level convergence-error persist):
+      there exists a chat_messages row m with role='tool' AND
+      m.composition_state_id = r.id
 
 Ordering & uniqueness:
   for every session, sequence_no values are densely monotonic (no gaps,
-    no duplicates)
+    no duplicates, starting at 1 for first message)
   for every (session_id, tool_call_id) where role='tool': exactly one row
   for every assistant row a, every child tool row t:
     t.created_at >= a.created_at
@@ -794,14 +1026,20 @@ Redaction:
     sensitive_argument_keys / sensitive_response_keys
   redacted output is always a string-serializable JSON value
   redaction never raises through the persistence boundary
-```
 
-Hypothesis strategy generators specified per concern:
-`st_tool_call`, `st_argument_dict`, `st_redaction_policy`,
-`st_failure_injection_point`, `st_cancellation_arrival_time`. Without
-explicit strategies the test degenerates to a single hardcoded example;
-each strategy is implemented in the new
-`tests/property/web/composer/strategies.py`.
+Cancellation specific:
+  if cancellation_arrived_during_tool_execution=True:
+    EITHER the tool row exists with the in-flight content,
+    OR the assistant row never existed (no assistant row implies no tool rows).
+  No third state.
+
+Audit-failure primacy:
+  if audit_raises and no tool exception in flight:
+    the test framework observes the audit exception propagating out of the loop.
+  if audit_raises and tool exception in flight:
+    the test framework observes the tool exception (not the audit one) at the route layer.
+  IntegrityError on chat_messages always propagates regardless of in-flight tool state.
+```
 
 ### 8.4 Frontend
 
@@ -833,7 +1071,8 @@ This ticket closes when:
 2. Frontend test set above is green.
 3. RC5-UX (or successor) branch CI passes including
    `enforce_tier_model.py` and `enforce_freeze_guards.py`.
-4. All eight CL-PP-* scenarios listed in §8.2 are present in
+4. All scenarios listed in §8.2 (CL-PP-1, 2a, 2b, 3, 4a, 4b, 4c, 4d, 5,
+   6, 7, 8 — twelve total) are present in
    `test_composer_llm_eval_characterization.py` and pass.
 
 **This ticket does NOT validate that users can actually recover from a
@@ -852,11 +1091,15 @@ authoring surface, not the engine. CLAUDE.md's test-path-integrity rule
 engine integration tests**, not web tests; this design's test plan
 honours that distinction.
 
-### 8.7 Test data hygiene
+### 8.7 Test data hygiene and fixture extension
 
-All tests use the existing `chaos*` fixtures under `tests/` (specifically
-`ChaosLLM` for composer LLM mocking). No live OpenRouter calls in CI.
-The `elspeth-xdist-auto` plugin shipped inside `src/elspeth/testing/` is
+All tests use the existing `chaos*` fixtures under `tests/`
+(specifically `ChaosLLM` for composer LLM mocking). No live OpenRouter
+calls in CI. **Scope note:** if `ChaosLLM` does not currently support
+multi-turn LLM mocking with structured `tool_calls` JSON emissions,
+extending it is part of this ticket's scope. The implementer verifies
+on day 1; if extension is needed, it lands in the same PR. The
+`elspeth-xdist-auto` plugin shipped inside `src/elspeth/testing/` is
 separate from the project's own test suite, per CLAUDE.md.
 
 ---
@@ -865,36 +1108,47 @@ separate from the project's own test suite, per CLAUDE.md.
 
 | ID | Risk | Likelihood | Impact | Trigger | Mitigation | Owner |
 |---|---|---|---|---|---|---|
-| RSK-01 | Tool author ships a tool without redaction policy. | Low | High (silent leakage) | Adequacy-guard CI test fires red on PR. | Adequacy guard (§4.4); registry-iteration test enforces presence; `handles_no_sensitive_data=True` is required for empty policies. | Implementing engineer per PR; reviewer sign-off |
-| RSK-02 | Empty redaction policies normalize over time (Shifting the Burden). | Medium | Medium (erosion of audit safety) | Audit count of `handles_no_sensitive_data=True` declarations exceeds 50% of registered tools. | Quarterly review of all `handles_no_sensitive_data=True` declarations; flag for re-justification. | Security review at RC 5.1 |
-| RSK-03 | Redaction summarizer raises on pathological input. | Low | Medium (audit trail records fallback sentinel instead of intended summary) | OTel counter `composer.redaction.summarizer_errors` exceeds 0.1% of tool calls. | Persistence wrapper catches summarizer exceptions and falls back to `<redacted-summarizer-error:{exc_type}>`. Property test asserts redaction never raises. | RC 5.1 production hardening |
-| RSK-04 | Per-row transactions slow down the loop. | Low | Low (latency budget §1.4) | Per-turn DB write overhead p95 exceeds 25 ms with N ≤ 8. | Each insert is bounded; SQLite/PostgreSQL handle small transactions well. Bench in CL-PP latency test. | Implementing engineer |
-| RSK-05 | Frontend diff blows up on very large `partial_state`. | Low | Low (UX nuisance) | Recovery panel TTI exceeds 500 ms. | Diff helper iterates fields rather than diffing entire JSON; UI shows "large diff — expand" disclosure for thousands of nodes. | Frontend follow-up |
+| RSK-01 | Tool author ships a tool without redaction policy. | Low | High (silent leakage) | Adequacy-guard CI test fires red on PR. | Adequacy guard (§4.4); registry-iteration test enforces presence; Pydantic schema introspection drives detection; `handles_no_sensitive_data=True` requires concrete reason. | Implementing engineer per PR; reviewer sign-off |
+| RSK-02 | `handles_no_sensitive_data=True` declarations normalize over time (Shifting the Burden). | Medium | Medium (erosion of audit safety) | Any new declaration of `handles_no_sensitive_data=True` after the initial set ships, OR existing reasons match the stop-list. | Stop-list of placeholder reasons (§4.4) auto-rejects boilerplate; quarterly review of all `handles_no_sensitive_data=True` declarations + reasons; new declarations surface in PR review via the registry-iteration test diff. | Security review at RC 5.1; PR reviewers |
+| RSK-03 | Redaction summarizer raises on pathological input. | Low | Medium | OTel counter `composer.redaction.summarizer_errors_total` exceeds 0.1% of tool calls in 24h. | Persistence wrapper catches summarizer exceptions and falls back to `<redacted-summarizer-error:{exc_type}>`. Property test asserts redaction never raises. | RC 5.1 production hardening |
+| RSK-04 | Per-row transactions slow down the loop. | Low | Low (latency NFR §1.4) | CI sanity bound (p95 ≤ 250 ms with N ≤ 8) red. | CI sanity bound + nightly tight bench; bounded write per insert; SQLite/PostgreSQL handle small transactions well. | Implementing engineer |
+| RSK-05 | Frontend diff blows up on very large `partial_state`. | Low | Low (UX nuisance) | Recovery panel TTI exceeds 500 ms in CI sanity test. | Diff helper iterates fields rather than diffing entire JSON; UI shows "large diff — expand" disclosure for thousands of nodes. | Frontend follow-up |
 | RSK-06 | New `tool_call_id` index slows large message-table writes. | Very low | Low | Insert latency regression in benchmarks. | Composite single-column index; SQLite/PostgreSQL handle this trivially. | n/a |
-| RSK-07 | Audit-ahead-of-state invariant violated during cancellation. | Low | Critical (auditability standard breach) | Property test failure; or post-condition assertion in `_compose_loop` fires. | `asyncio.shield` around audit writes; bidirectional invariant in §5.3; CL-PP-3 + CL-PP-8 cover the cancel paths. | Implementing engineer; verified by property test |
-| RSK-08 | `chat_messages` table grows unboundedly without retention. | Medium (over time) | Low (single-operator pre-release) | Table size exceeds 1 GB in dev/staging. | `chat_messages` rows cascade-delete with sessions today; explicit retention extension is filed under RC 5.1 backlog (§4.6). | RC 5.1 production hardening |
-| RSK-09 | Partial unique index syntax differs across DB dialects. | Low | Low (build break, immediately visible) | DDL fails on a target dialect. | Use SQL `CREATE UNIQUE INDEX ... WHERE ...` (SQLite 3.8.0+; PostgreSQL); SQLAlchemy DDL emit hook for both dialects. | Implementing engineer |
+| RSK-07 | Audit-ahead-of-state invariant violated during cancellation. | Low | Critical (auditability standard breach) | Property test failure; or post-condition assertion in `_compose_loop` fires. | `asyncio.shield` around audit writes; bidirectional invariant in §5.3; CL-PP-3 + CL-PP-7 cover the cancel paths. | Implementing engineer; verified by property test |
+| RSK-08 | `chat_messages` table grows unboundedly without retention. | Medium (over time) | Low (single-operator pre-release) | Table size exceeds 1 GB in dev/staging. | `chat_messages` rows cascade-delete with sessions today; explicit retention extension is filed under [elspeth-RETENTION-WEB] (§4.6, §10 OQ-1). | RC 5.1 production hardening |
+| RSK-09 | Partial unique index syntax differs across DB dialects. | Low | Low | DDL fails on a target dialect. | Use SQL `CREATE UNIQUE INDEX ... WHERE ...` (SQLite 3.8.0+; PostgreSQL); SQLAlchemy DDL emit hook for both dialects. | Implementing engineer |
+| RSK-10 | `composer.audit.state_rolled_back_during_persist_total` SLO breach (state-rollback race fires in production). | Very low | Critical (audit invariant violation) | Counter exceeds 0 in any 24h window. | Counter wired to alarm at threshold 0; §1.4 SLO. CL-PP-4d covers the sole reachable trigger. | RC 5.1 SRE; security review |
+| RSK-11 | Audit-write failure on tool row when no tool exception in flight (Tier-1 violation). | Very low | Critical | OTel counter `composer.audit.tool_row_persist_failed_total` non-zero. | §5.2 helper raises in this case (audit primacy); §8.1 unit test asserts. | RC 5.1 SRE |
+| RSK-12 | LLM provider re-uses `tool_call_id` across turns within a session. | Medium (provider-dependent) | High (silent mis-correlation) | Partial unique index rejects insert; CL-PP-8 fires. | Crash on duplicate; do not silently recover. Per-provider observation: OpenRouter/OpenAI ids are message-scoped per current spec but not contractually forever. | Implementing engineer |
 
 ---
 
 ## 10. Open Questions
 
-None blocking implementation. The frontend visual treatment is
-intentionally a contract-level sketch; final polish happens in a
-frontend review pass after the backend lands.
+- **OQ-1.** Filigree ticket ID for the `chat_messages` retention CLI
+  extension (referenced as `[elspeth-RETENTION-WEB]` in §4.6 and RSK-08).
+  File during implementation; cite in the implementation PR description.
+- **OQ-2.** `composition_states` redaction symmetry: today the partial
+  state is persisted with raw paths; the new code path uniformly
+  redacts. The historical asymmetry is filed as a follow-up issue
+  during implementation. Document the planned ID in the PR description.
+
+Both questions are administrative (file a ticket, cite an ID); neither
+blocks design or implementation.
 
 ---
 
 ## 11. References
 
 - CLAUDE.md — auditability standard, three-tier trust model, plugin
-  ownership, no-legacy-code policy, frozen-dataclass deep-freeze contract.
+  ownership, no-legacy-code policy, frozen-dataclass deep-freeze contract,
+  defensive-vs-offensive programming policy.
 - `engine-patterns-reference` skill — composite primary keys, schema
   contracts, secret handling, layer architecture & dependency analysis.
 - `tier-model-deep-dive` skill — coercion rules, operation wrapping,
   fabrication decision test, web-server section.
 - `logging-telemetry-policy` skill — audit primacy, telemetry-only
-  exemptions, primacy test.
+  exemptions, primacy test, permitted logger uses.
 - Source report — `notes/composer-llm-eval-2026-04-28.md`.
 - Predecessor commits:
   - `5c17d380` — blob source path normalization.
@@ -908,9 +1162,10 @@ frontend review pass after the backend lands.
   - `b21e9f1a` — inline blob user attribution.
 - Predecessor verification: §2 cites the observed state of the codebase
   as of 2026-04-30, post-merge of all of the above.
-- Panel review: four reviewers (solution architect, systems thinker,
-  Python engineer, QA analyst) reviewed revision 1 on 2026-04-30; this
-  revision 2 incorporates their findings.
+- Panel reviews: revision 1 reviewed 2026-04-30 by four reviewers
+  (solution architect, systems thinker, Python engineer, QA analyst);
+  revision 2 reviewed by the same four reviewers; revision 3
+  incorporates findings from both passes.
 
 ---
 
@@ -939,9 +1194,15 @@ frontend review pass after the backend lands.
   has its row). Derived from CLAUDE.md "no inference — if it's not
   recorded, it didn't happen."
 - **Sequence number (`sequence_no`).** Monotonic per-session integer
-  assigned at insert time. Replay fidelity depends on it; clock-based
-  ordering is insufficient (sub-millisecond collisions and clock jumps).
+  reserved atomically inside `add_message`'s transaction via session-scoped
+  advisory lock. Replay fidelity depends on it; clock-based ordering is
+  insufficient (sub-millisecond collisions and clock jumps).
 - **`ToolArgumentError`.** The Tier-3 boundary signal documented at
   `web/composer/protocol.py:291` — the only exception class the compose
   loop catches around `execute_tool()` and continues past. The compose
   loop is contractually obligated to *not* re-raise `ToolArgumentError`.
+- **Audit-failure primacy.** When an audit write fails, the disposition
+  depends on whether a tool exception is in flight. Tool succeeded +
+  audit fails → raise (Tier-1 invariant violation). Tool fails + audit
+  fails → log permitted, increment counter, let tool exception propagate.
+  See §5.2 helper.

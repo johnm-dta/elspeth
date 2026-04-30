@@ -278,6 +278,14 @@ _ComposerPreflightTelemetrySource = Literal[
     "plugin_crash",
     "runtime_preflight",
     "yaml_export",
+    # Path-1 cached re-raise — composer.compose() re-raised a previously-
+    # cached runtime-preflight failure via web/composer/service.py:
+    # _raise_cached_runtime_preflight_failure. Distinct from "compose" to
+    # let operators separate first-time preflight failures (source=compose,
+    # emitted by _state_data_from_composer_state's raise arm) from
+    # cache-hit re-raises (source=cached_preflight, emitted at the route
+    # outer catch). See elspeth-0891e8da73.
+    "cached_preflight",
 ]
 
 
@@ -803,35 +811,44 @@ async def _handle_runtime_preflight_failure(
 
     Telemetry attribution
     ---------------------
-    This helper is the **second** of a paired emission for path-2
-    failures. The pairing:
+    Every invocation of this helper produces a recovery emission, paired
+    with a primary emission attributed to the originating raise site:
 
-    * Primary site (path-2 only) — ``_state_data_from_composer_state``
-      lifts its exception telemetry above the policy split, so the raise
-      arm fires
+    * Primary site (path-2) — ``_state_data_from_composer_state`` lifts
+      its exception telemetry above the policy split, so the raise arm
+      fires
       ``composer.runtime_preflight.total{result=exception,
       source=<originating>, exception_class=...}`` (where
       ``<originating>`` is ``"compose"`` or ``"recompose"``) before
       propagating the ``ComposerRuntimePreflightError``. This preserves
       originating-route attribution that would otherwise be lost.
 
-    * Recovery site (both paths) — this helper's re-call to
-      ``_state_data_from_composer_state`` with
-      ``preflight_exception_policy="persist_invalid"`` and
-      ``telemetry_source="runtime_preflight"`` fires a second emission
-      with ``source=runtime_preflight``, automatically via the
-      persist_invalid arm — no separate telemetry call inside this helper.
+    * Primary site (path-1, elspeth-0891e8da73) — the route catch around
+      ``composer.compose()`` fires
+      ``composer.runtime_preflight.total{result=exception,
+      source=cached_preflight, exception_class=...}`` before delegating
+      here. The cached raise site lives in the composer service rather
+      than ``_state_data_from_composer_state``, so the primary emission
+      cannot be lifted into the helper itself; the route catch is the
+      first place that knows the failure mode is a runtime-preflight
+      cache re-raise.
+
+    * Recovery site (both paths) — this helper emits
+      ``source=runtime_preflight`` exactly once per invocation. When
+      ``exc.partial_state is not None``, the emission is fired
+      automatically by the persist_invalid arm of the re-call to
+      ``_state_data_from_composer_state``. When ``exc.partial_state is
+      None`` (the path-1 cached re-raise with no LLM mutation case), the
+      persist_invalid re-call is skipped and the helper instead fires
+      the recovery emission inline. Either way, the recovery counter
+      increments once per handler invocation.
 
     Operators querying primary failure rate filter on
-    ``source ∈ {compose, recompose, plugin_crash, convergence,
-    yaml_export}``; querying recovery handler invocations filters on
-    ``source = runtime_preflight``. The two sources represent distinct
-    observable events (failure occurred; recovery ran), not double-counting.
-
-    Path 1 (cached preflight via ``service.py:_raise_cached_runtime_preflight_failure``)
-    only fires the recovery emission, because the cached raise site is in
-    the composer service rather than ``_state_data_from_composer_state``
-    and does not currently emit primary telemetry.
+    ``source ∈ {compose, recompose, cached_preflight, plugin_crash,
+    convergence, yaml_export}``; querying recovery handler invocations
+    filters on ``source = runtime_preflight``. The two sources represent
+    distinct observable events (failure occurred; recovery ran), not
+    double-counting.
 
     Caveat: the persist_invalid arm only re-runs the runtime preflight
     when the partial state is *authoring-valid* (the
@@ -917,6 +934,24 @@ async def _handle_runtime_preflight_failure(
             )
             response_body["partial_state_save_failed"] = True
             response_body["partial_state_save_error"] = type(save_err).__name__
+    else:
+        # Recovery acknowledgment (elspeth-0891e8da73). When no partial
+        # state is captured (the path-1 cached re-raise with no LLM
+        # mutation case), the persist_invalid re-call above is skipped,
+        # so its source=runtime_preflight emission inside
+        # _state_data_from_composer_state never fires. CLAUDE.md
+        # telemetry primacy ("every telemetry emission point must send
+        # or explicitly acknowledge 'nothing to send.'") requires the
+        # recovery handler to count its own invocation regardless of
+        # whether persistence work occurred — otherwise dashboards
+        # filtering composer.runtime_preflight.total{source=
+        # runtime_preflight} silently under-count handler invocations
+        # by exactly the count of "no partial state" recoveries.
+        _record_composer_runtime_preflight_telemetry(
+            "exception",
+            source="runtime_preflight",
+            exception_class=exc.exc_class,
+        )
 
     return response_body
 
@@ -1356,6 +1391,26 @@ def create_session_router() -> APIRouter:
                     # are not silently dropped from the audit trail. The
                     # SAME helper is invoked from the post-compose
                     # state-save catch below for path 2.
+                    #
+                    # Telemetry primacy (elspeth-0891e8da73): the cached
+                    # raise site does NOT have a paired primary emission
+                    # inside _state_data_from_composer_state (path-2's
+                    # raise arm) because the failure originates inside
+                    # composer.compose() before that helper is reached.
+                    # Emit cached_preflight here so dashboards filtering
+                    # composer.runtime_preflight.total{result=exception}
+                    # do not silently under-count cache-hit re-raises —
+                    # particularly the "no LLM mutation before re-raise"
+                    # case, where the recovery handler also short-circuits
+                    # past its persist_invalid emission. The outer catch
+                    # is unambiguously the cached path: path-2 is caught
+                    # inline around the post-compose
+                    # _state_data_from_composer_state call below.
+                    _record_composer_runtime_preflight_telemetry(
+                        "exception",
+                        source="cached_preflight",
+                        exception_class=rpf_exc.exc_class,
+                    )
                     await _publish_progress(
                         progress_registry,
                         session_id=str(session.id),
@@ -1762,8 +1817,15 @@ def create_session_router() -> APIRouter:
                     # Path 1 (cached preflight) mirror of the send_message catch;
                     # see the send_message handler for the full rationale on
                     # why both raise sites delegate to the shared
-                    # _handle_runtime_preflight_failure helper and on the
-                    # path-1 vs path-2 distinction.
+                    # _handle_runtime_preflight_failure helper, on the
+                    # path-1 vs path-2 distinction, and on the
+                    # cached_preflight telemetry attribution
+                    # (elspeth-0891e8da73).
+                    _record_composer_runtime_preflight_telemetry(
+                        "exception",
+                        source="cached_preflight",
+                        exception_class=rpf_exc.exc_class,
+                    )
                     await _publish_progress(
                         progress_registry,
                         session_id=str(session.id),

@@ -4560,6 +4560,177 @@ def test_runtime_preflight_handler_records_exception_telemetry(tmp_path, monkeyp
     )
 
 
+def test_compose_cached_runtime_preflight_no_partial_state_records_telemetry(tmp_path, monkeypatch) -> None:
+    """Path-1 silent-failure lock-in (elspeth-0891e8da73): when
+    composer.compose() re-raises a previously-cached runtime-preflight
+    failure (web/composer/service.py:_raise_cached_runtime_preflight_failure)
+    AND the LLM never mutated state before the cached re-raise (so
+    partial_state is None per ComposerRuntimePreflightError.capture's rule),
+    the route catch handler MUST still emit telemetry on
+    composer.runtime_preflight.total. Without this, dashboards under-count
+    cached-preflight failures by exactly the count of "no LLM mutation
+    before cached failure re-raise" events — operators see neither a
+    primary nor a recovery emission, violating CLAUDE.md telemetry primacy
+    ("every telemetry emission point must send or explicitly acknowledge
+    'nothing to send.'").
+
+    Two emissions are required:
+      (a) Primary: source="cached_preflight" — attributes the failure to
+          the cached re-raise raise site, distinct from path-2's
+          source="compose" attribution. The outer
+          ``except ComposerRuntimePreflightError`` at routes.py reaches the
+          cached path only (path-2 is caught inline around
+          _state_data_from_composer_state).
+      (b) Recovery: source="runtime_preflight" — the recovery handler
+          ran, even though it had no partial_state to persist. Without
+          this acknowledgment, the recovery counter under-counts handler
+          invocations.
+
+    No source="compose" emission is allowed: that label belongs to the
+    path-2 primary site (_state_data_from_composer_state's raise arm) and
+    must not be relabeled onto the cached path.
+    """
+    from elspeth.web.composer.protocol import ComposerRuntimePreflightError
+    from elspeth.web.sessions import routes
+
+    emitted: list[tuple[int, dict[str, str]]] = []
+
+    class FakeCounter:
+        def add(self, value: int, attributes: dict[str, str]) -> None:
+            emitted.append((value, dict(attributes)))
+
+    monkeypatch.setattr(routes, "_COMPOSER_RUNTIME_PREFLIGHT_COUNTER", FakeCounter())
+
+    original = RuntimeError("cached preflight failure with no LLM mutation")
+    mock_composer = AsyncMock()
+    mock_composer.compose = AsyncMock(
+        side_effect=ComposerRuntimePreflightError(
+            original_exc=original,
+            partial_state=None,
+        ),
+    )
+
+    app, _service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp = client.post("/api/sessions", json={"title": "Cached preflight no partial"})
+    session_id = uuid.UUID(resp.json()["id"])
+
+    response = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={"content": "Build me a pipeline"},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["error_type"] == "composer_plugin_error"
+
+    cached_emissions = [
+        attrs
+        for _, attrs in emitted
+        if attrs.get("source") == "cached_preflight"
+        and attrs.get("result") == "exception"
+        and attrs.get("exception_class") == "RuntimeError"
+    ]
+    recovery_emissions = [
+        attrs
+        for _, attrs in emitted
+        if attrs.get("source") == "runtime_preflight"
+        and attrs.get("result") == "exception"
+        and attrs.get("exception_class") == "RuntimeError"
+    ]
+    compose_emissions = [attrs for _, attrs in emitted if attrs.get("source") == "compose"]
+
+    assert cached_emissions, (
+        "Primary cached_preflight attribution missing: route catch MUST emit "
+        "composer.runtime_preflight.total{result=exception, source=cached_preflight, "
+        f"exception_class=RuntimeError}}; emitted={emitted}"
+    )
+    assert recovery_emissions, (
+        "Recovery acknowledgment missing: _handle_runtime_preflight_failure with "
+        "partial_state=None MUST still emit composer.runtime_preflight.total"
+        "{result=exception, source=runtime_preflight, exception_class=...} so the "
+        f"recovery handler invocation count remains complete; emitted={emitted}"
+    )
+    assert not compose_emissions, (
+        "Path-2 attribution leakage: cached path MUST NOT relabel as source=compose "
+        f"(that's _state_data_from_composer_state's primary site); emitted={emitted}"
+    )
+
+
+def test_recompose_cached_runtime_preflight_no_partial_state_records_telemetry(tmp_path, monkeypatch) -> None:
+    """Recompose mirror of
+    test_compose_cached_runtime_preflight_no_partial_state_records_telemetry.
+    The recompose endpoint's outer ComposerRuntimePreflightError catch
+    handles the same path-1 case symmetrically with send_message; the
+    telemetry contract is identical.
+    """
+    from elspeth.web.composer.protocol import ComposerRuntimePreflightError
+    from elspeth.web.sessions import routes
+
+    emitted: list[tuple[int, dict[str, str]]] = []
+
+    class FakeCounter:
+        def add(self, value: int, attributes: dict[str, str]) -> None:
+            emitted.append((value, dict(attributes)))
+
+    monkeypatch.setattr(routes, "_COMPOSER_RUNTIME_PREFLIGHT_COUNTER", FakeCounter())
+
+    original = RuntimeError("cached preflight failure with no LLM mutation on recompose")
+    mock_composer = AsyncMock()
+    mock_composer.compose = AsyncMock(
+        side_effect=ComposerRuntimePreflightError(
+            original_exc=original,
+            partial_state=None,
+        ),
+    )
+
+    app, service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp = client.post(
+        "/api/sessions",
+        json={"title": "Cached preflight no partial recompose"},
+    )
+    session_id = uuid.UUID(resp.json()["id"])
+
+    # Recompose precondition: last persisted message must be a user turn.
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+    finally:
+        loop.close()
+
+    response = client.post(f"/api/sessions/{session_id}/recompose")
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["error_type"] == "composer_plugin_error"
+
+    cached_emissions = [
+        attrs
+        for _, attrs in emitted
+        if attrs.get("source") == "cached_preflight"
+        and attrs.get("result") == "exception"
+        and attrs.get("exception_class") == "RuntimeError"
+    ]
+    recovery_emissions = [
+        attrs
+        for _, attrs in emitted
+        if attrs.get("source") == "runtime_preflight"
+        and attrs.get("result") == "exception"
+        and attrs.get("exception_class") == "RuntimeError"
+    ]
+    recompose_emissions = [attrs for _, attrs in emitted if attrs.get("source") == "recompose"]
+
+    assert cached_emissions, f"Primary cached_preflight attribution missing on recompose path; emitted={emitted}"
+    assert recovery_emissions, f"Recovery acknowledgment missing on recompose path; emitted={emitted}"
+    assert not recompose_emissions, (
+        "Path-2 attribution leakage: cached path MUST NOT relabel as source=recompose "
+        f"(that's _state_data_from_composer_state's primary site); emitted={emitted}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_state_data_raise_arm_emits_telemetry_before_propagating() -> None:
     """I1 unit-level lock-in: when _state_data_from_composer_state runs with

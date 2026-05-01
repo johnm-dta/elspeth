@@ -511,6 +511,141 @@ class TestOutputSchemaConfig:
         assert "region" in transform.declared_output_fields
 
 
+class TestOutputSchemaConfigDoesNotPropagateInputContract:
+    """Regression tests for elspeth-f5f798f797.
+
+    The user-supplied ``schema:`` block describes the INPUT contract for an
+    aggregation. ``_output_schema_config`` describes what the aggregation
+    EMITS, which for batch_stats is independent of input shape (output is
+    {count, sum, batch_size, mean?, group_by?} — never the input fields
+    themselves). Therefore input ``fields``/``required_fields``/
+    ``guaranteed_fields`` from the user's schema must not leak into
+    ``_output_schema_config``; doing so causes the runtime
+    SchemaConfigModeViolation check to require fields the aggregation never
+    emits, and to expect declared field types that the OBSERVED output
+    contract does not carry.
+    """
+
+    def test_output_config_drops_input_fields_for_flexible_mode(self) -> None:
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats(
+            {
+                "schema": {
+                    "mode": "flexible",
+                    "fields": ["customer_tier: str", "amount: float"],
+                    "required_fields": ["customer_tier", "amount"],
+                },
+                "value_field": "amount",
+                "group_by": "customer_tier",
+                "compute_mean": False,
+            }
+        )
+
+        cfg = transform._output_schema_config
+        assert cfg is not None
+        # Input fields/required_fields describe input contract, not output.
+        assert cfg.fields is None, f"Output config must not echo input fields, got {cfg.fields!r}"
+        assert cfg.required_fields is None, f"Output config must not echo input required_fields, got {cfg.required_fields!r}"
+        # guaranteed_fields reflect the actual aggregation output.
+        assert frozenset(cfg.guaranteed_fields or ()) == frozenset({"count", "sum", "batch_size", "customer_tier"})
+
+    def test_output_config_drops_input_fields_for_fixed_mode(self) -> None:
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats(
+            {
+                "schema": {
+                    "mode": "fixed",
+                    "fields": ["id: int", "amount: float"],
+                },
+                "value_field": "amount",
+            }
+        )
+
+        cfg = transform._output_schema_config
+        assert cfg is not None
+        assert cfg.fields is None
+        assert cfg.required_fields is None
+
+    def test_output_config_drops_input_guaranteed_fields(self) -> None:
+        """Input-side ``guaranteed_fields`` describe upstream guarantees, not aggregation output."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats(
+            {
+                "schema": {
+                    "mode": "observed",
+                    "guaranteed_fields": ["upstream_only_field"],
+                },
+                "value_field": "amount",
+                "compute_mean": False,
+            }
+        )
+
+        cfg = transform._output_schema_config
+        assert cfg is not None
+        # upstream_only_field is an INPUT guarantee — must not appear as an OUTPUT guarantee.
+        assert "upstream_only_field" not in (cfg.guaranteed_fields or ())
+        assert frozenset(cfg.guaranteed_fields or ()) == frozenset({"count", "sum", "batch_size"})
+
+    def test_runtime_verify_passes_for_failing_eval_reproducer(self) -> None:
+        """End-to-end: the eval-S2-v2 failing config must clear ``verify_schema_config_mode``.
+
+        Reproduced from notes/composer-llm-eval-2026-05-01.md S2 v2: the
+        composer accepted the config but runtime rejected with
+        SchemaConfigModeViolation. After the fix, the runtime check must
+        pass for the same simulated emission.
+        """
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.contracts.schema_contract import PipelineRow
+        from elspeth.contracts.schema_contract_factory import create_contract_from_config
+        from elspeth.engine.executors.schema_config_mode import verify_schema_config_mode
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats(
+            {
+                "schema": {
+                    "mode": "flexible",
+                    "fields": ["customer_tier: str", "amount: float"],
+                    "required_fields": ["customer_tier", "amount"],
+                },
+                "value_field": "amount",
+                "group_by": "customer_tier",
+                "compute_mean": False,
+            }
+        )
+
+        input_contract = create_contract_from_config(
+            SchemaConfig.from_dict({"mode": "flexible", "fields": ["customer_tier: str", "amount: float"]})
+        )
+        rows = [
+            PipelineRow({"customer_tier": "enterprise", "amount": 100.0}, input_contract),
+            PipelineRow({"customer_tier": "enterprise", "amount": 150.0}, input_contract),
+            PipelineRow({"customer_tier": "pro", "amount": 50.0}, input_contract),
+        ]
+
+        results = []
+        for group_value, grouped in transform._group_rows(rows):
+            aggregate, error = transform._aggregate_group(grouped, group_value)
+            assert error is None
+            results.append(aggregate)
+
+        contract = transform._output_contract_for(results)
+        emitted_rows = [PipelineRow(r, contract) for r in results]
+
+        # Must NOT raise SchemaConfigModeViolation.
+        verify_schema_config_mode(
+            output_schema_config=transform._output_schema_config,
+            emitted_rows=emitted_rows,
+            plugin_name="batch_stats",
+            node_id="agg",
+            run_id="r",
+            row_id="row1",
+            token_id="t1",
+        )
+
+
 # =============================================================================
 # Bug fix tests: batch_stats.py bug cluster
 # =============================================================================

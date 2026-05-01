@@ -498,6 +498,13 @@ class BaseTransform(ABC):
         Merges the transform's declared_output_fields into guaranteed_fields
         so the DAG builder can validate downstream field requirements.
 
+        Default assumes output ⊇ input fields (additive transforms). Subclasses
+        with reductive output — where emitted rows do NOT carry the user's
+        input ``fields``/``required_fields``/``guaranteed_fields`` — MUST
+        override this method to drop input-side declarations. See
+        ``BatchStats._build_output_schema_config`` (elspeth-f5f798f797) for the
+        canonical override pattern.
+
         Args:
             schema_config: The transform's input schema config (base fields).
 

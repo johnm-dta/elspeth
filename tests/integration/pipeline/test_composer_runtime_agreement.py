@@ -1299,6 +1299,169 @@ class TestComposerRuntimeAgreement:
         assert "incompatible" in message
         assert "value" in message
 
+    def test_both_accept_aggregation_with_input_fields_and_required_fields(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Regression for elspeth-f5f798f797.
+
+        S2 v2 from notes/composer-llm-eval-2026-05-01.md: a ``batch_stats``
+        aggregation with ``schema: {mode: flexible, fields: [...],
+        required_fields: [...]}`` was accepted by composer ``/validate`` but
+        rejected at runtime with ``SchemaConfigModeViolation`` because
+        ``BaseTransform._build_output_schema_config`` propagated the user's
+        input ``fields``/``required_fields`` into the aggregation's output
+        schema config — which then required fields the aggregation never
+        emits and expected types the OBSERVED-typed output cannot satisfy.
+
+        After the fix in ``BatchStats._build_output_schema_config``, both
+        composer preview and runtime emission verification accept this
+        config. The aggregation honestly declares its output as observed
+        with ``guaranteed_fields`` matching what the aggregation emits.
+        """
+        from elspeth.contracts.schema_contract import PipelineRow
+        from elspeth.contracts.schema_contract_factory import create_contract_from_config
+        from elspeth.engine.executors.schema_config_mode import verify_schema_config_mode
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        csv_path = tmp_path / "input.csv"
+        csv_path.write_text(
+            "customer_tier,amount\nenterprise,100.0\nenterprise,150.0\npro,50.0\n",
+            encoding="utf-8",
+        )
+        output_path = tmp_path / "out.csv"
+
+        state = self._empty_state()
+        state = state.with_source(
+            SourceSpec(
+                plugin="csv",
+                on_success="agg1",
+                options={
+                    "path": str(csv_path),
+                    "schema": {
+                        "mode": "flexible",
+                        "fields": ["customer_tier: str", "amount: float"],
+                    },
+                },
+                on_validation_failure="quarantine",
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="agg1",
+                node_type="aggregation",
+                plugin="batch_stats",
+                input="agg1",
+                on_success="main",
+                on_error="discard",
+                options={
+                    "schema": {
+                        "mode": "flexible",
+                        "fields": ["customer_tier: str", "amount: float"],
+                        "required_fields": ["customer_tier", "amount"],
+                    },
+                    "value_field": "amount",
+                    "group_by": "customer_tier",
+                    "compute_mean": False,
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+                trigger={"count": 3},
+                output_mode="transform",
+                expected_output_count=2,
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="csv",
+                options={
+                    "path": str(output_path),
+                    "schema": {"mode": "observed"},
+                },
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(EdgeSpec(id="e1", from_node="source", to_node="agg1", edge_type="on_success", label=None))
+
+        composer_result = state.validate()
+        assert composer_result.is_valid, "\n".join(err.message for err in composer_result.errors)
+
+        graph = self._build_runtime_graph(
+            source_plugin="csv",
+            source_options={
+                "path": str(csv_path),
+                "schema": {
+                    "mode": "flexible",
+                    "fields": ["customer_tier: str", "amount: float"],
+                },
+            },
+            transform_plugin=None,
+            aggregation_plugin="batch_stats",
+            aggregation_options={
+                "schema": {
+                    "mode": "flexible",
+                    "fields": ["customer_tier: str", "amount: float"],
+                    "required_fields": ["customer_tier", "amount"],
+                },
+                "value_field": "amount",
+                "group_by": "customer_tier",
+                "compute_mean": False,
+            },
+            sink_options={
+                "path": str(output_path),
+                "schema": {"mode": "observed"},
+            },
+        )
+        graph.validate_edge_compatibility()
+
+        # Final tier of the agreement: simulate aggregate emission and
+        # verify the runtime SchemaConfigModeViolation predicate accepts
+        # the output. Pre-fix this raised; post-fix it must not raise.
+        transform = BatchStats(
+            {
+                "schema": {
+                    "mode": "flexible",
+                    "fields": ["customer_tier: str", "amount: float"],
+                    "required_fields": ["customer_tier", "amount"],
+                },
+                "value_field": "amount",
+                "group_by": "customer_tier",
+                "compute_mean": False,
+            }
+        )
+        from elspeth.contracts.schema import SchemaConfig as _SchemaConfig
+
+        input_contract = create_contract_from_config(
+            _SchemaConfig.from_dict({"mode": "flexible", "fields": ["customer_tier: str", "amount: float"]})
+        )
+        rows = [
+            PipelineRow({"customer_tier": "enterprise", "amount": 100.0}, input_contract),
+            PipelineRow({"customer_tier": "enterprise", "amount": 150.0}, input_contract),
+            PipelineRow({"customer_tier": "pro", "amount": 50.0}, input_contract),
+        ]
+        results: list[dict[str, object]] = []
+        for group_value, grouped in transform._group_rows(rows):
+            aggregate, error = transform._aggregate_group(grouped, group_value)
+            assert error is None
+            results.append(aggregate)
+        emitted_contract = transform._output_contract_for(results)
+        emitted_rows = [PipelineRow(r, emitted_contract) for r in results]
+
+        verify_schema_config_mode(
+            output_schema_config=transform._output_schema_config,
+            emitted_rows=emitted_rows,
+            plugin_name="batch_stats",
+            node_id="agg1",
+            run_id="r",
+            row_id="row1",
+            token_id="t1",
+        )
+
 
 class TestComposerRuntimeRouteTargetAgreement:
     """Composer ``/validate`` and runtime preflight agree on dangling route

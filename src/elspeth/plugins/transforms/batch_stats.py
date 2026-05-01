@@ -111,7 +111,7 @@ class BatchStats(BaseTransform):
 
     name = "batch_stats"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4b558dfc1d85fef2"
+    source_file_hash: str | None = "sha256:697f5d855566950f"
     config_model = BatchStatsConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
 
@@ -181,6 +181,38 @@ class BatchStats(BaseTransform):
             adds_fields=True,
         )
         self._output_schema_config = self._build_output_schema_config(schema_config)
+
+    def _build_output_schema_config(self, schema_config: SchemaConfig) -> SchemaConfig:
+        """Override (elspeth-f5f798f797): aggregation output is independent of input shape.
+
+        The user's ``schema:`` block describes the INPUT contract that batch_stats
+        consumes — what fields/types upstream produces and which the consumer
+        requires. The aggregation's OUTPUT is computed: stat fields plus an
+        optional group_by, all OBSERVED-typed (``python_type=object``). It does
+        not carry the user's input field declarations.
+
+        The base class implementation copies ``fields``, ``required_fields``, and
+        the user's input-side ``guaranteed_fields`` into the output config, which
+        causes ``SchemaConfigModeViolation`` at runtime: ``get_effective_guaranteed_fields``
+        unions the input fields into the expected output, and the OBSERVED-typed
+        emission then misses fields like ``amount`` and mismatches metadata on
+        ``customer_tier`` (declared ``str``, observed ``object``).
+
+        Returns a config that honestly describes batch_stats output:
+          - ``mode='observed'`` — output types are inferred from aggregate values.
+          - ``fields=None`` — no explicit field declarations on output.
+          - ``guaranteed_fields`` — the actual emitted set (declared_output_fields).
+          - ``required_fields=None`` — input-only consumer requirement, irrelevant on output.
+          - ``audit_fields=None`` — input-side audit hints don't apply to derived output.
+        """
+        guaranteed = tuple(sorted(self.declared_output_fields)) if self.declared_output_fields else None
+        return SchemaConfig(
+            mode="observed",
+            fields=None,
+            guaranteed_fields=guaranteed,
+            required_fields=None,
+            audit_fields=None,
+        )
 
     def backward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
         """Exercise the real aggregate output path for the backward invariant."""

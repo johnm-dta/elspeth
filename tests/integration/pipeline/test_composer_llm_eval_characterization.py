@@ -201,11 +201,16 @@ def _source(source_path: str | Path, *, on_success: str, extra_options: dict[str
         "schema": {"mode": "fixed", "fields": ["ticket_id: str", "customer_tier: str", "amount: float"]},
     }
     options.update(extra_options or {})
+    # ``on_validation_failure`` accepts ``"discard"`` or a real sink name
+    # (route-target validators reject anything else). The eval scenarios do
+    # not exercise quarantine routing, so use ``discard`` to keep fixtures
+    # internally consistent. Issue elspeth-127de6865a closed the silent-pass
+    # behaviour that previously let dangling quarantine targets through.
     return SourceSpec(
         plugin="csv",
         on_success=on_success,
         options=options,
-        on_validation_failure="quarantine",
+        on_validation_failure="discard",
     )
 
 
@@ -474,7 +479,7 @@ def test_scenario_3_get_pipeline_state_preserves_redacted_patched_blob_path_that
             plugin="csv",
             on_success="summary",
             options={"blob_ref": blob_id, "schema": {"mode": "observed"}},
-            on_validation_failure="quarantine",
+            on_validation_failure="discard",
         ),
         nodes=(),
         edges=(EdgeSpec(id="e_source_summary", from_node="source", to_node="summary", edge_type="on_success", label=None),),

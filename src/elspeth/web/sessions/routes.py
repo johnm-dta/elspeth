@@ -291,13 +291,151 @@ _ComposerPreflightTelemetrySource = Literal[
 
 @dataclass(frozen=True, slots=True)
 class _RuntimePreflightFailed:
-    """Sentinel for internal preflight failure during composer state persistence."""
+    """Sentinel for internal preflight failure during composer state persistence.
+
+    Carries structured diagnostic fields so the persisted state's
+    ``validation_errors`` row attributes the failure (exception class,
+    first line of the message, ``file:line:function`` frames) instead of
+    the legacy opaque ``["runtime_preflight_failed"]`` sentinel — which
+    forced operators to ``/state/revert`` because the audit row had
+    nowhere to record triage data (slog deliberately omits ``exc_info``
+    to avoid leaking secret-bearing ``__cause__`` chains; the OTel
+    counter only carries the bounded exception_class bucket).
+
+    Frame strings are ``file:line:function`` only — never source-line
+    text or local-variable repr — so secret-bearing values that may
+    live in plugin config dicts, DB connection strings, or bound SQL
+    parameters do not enter the audit row. See
+    :func:`_safe_frame_strings` for the capture rule.
+
+    The fields are optional (with empty defaults) so the ``with no
+    diagnostics captured`` legacy path — preserved for the
+    ``_RUNTIME_PREFLIGHT_FAILED`` module-level constant referenced by
+    older tests — continues to produce the bare sentinel through
+    :func:`_composer_persisted_validation`.
+    """
 
     exception_class: str | None = None
+    exception_message_first_line: str = ""
+    frames: tuple[str, ...] = ()
 
 
 _RUNTIME_PREFLIGHT_FAILED = _RuntimePreflightFailed()
 _RuntimePreflightOutcome = ValidationResult | _RuntimePreflightFailed | None
+
+# Bound on diagnostic detail captured for runtime-preflight failures. Keeps
+# the audit row, structured response body, and slog event size predictable
+# regardless of how deep the failing call stack is.
+_RUNTIME_PREFLIGHT_FRAME_LIMIT = 6
+_RUNTIME_PREFLIGHT_MESSAGE_LIMIT = 240
+
+
+def _first_message_line(text: str) -> str:
+    """Return the first non-empty line of an exception's str(), trimmed.
+
+    ``str(exc)`` may contain newlines, embedded SQL fragments, or
+    Pydantic-style multi-line dumps. The audit row only retains the
+    leading message line so a bounded, scannable signal lands in
+    ``validation_errors`` even when the underlying exception's repr is
+    sprawling.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _safe_frame_strings(
+    exc: BaseException,
+    *,
+    max_frames: int = _RUNTIME_PREFLIGHT_FRAME_LIMIT,
+) -> tuple[str, ...]:
+    """Format ``exc.__traceback__`` (and ``__cause__`` chain) frames.
+
+    Returns a bounded tuple of ``frame=<file>:<line>:<function>`` strings
+    drawn from the live traceback, walking the ``__cause__`` chain so a
+    ``raise ... from ...`` boundary inside the failing helper does not
+    cut diagnostics short.
+
+    Includes only file path, line number, and function name. **Never**
+    captures source-line text, local-variable repr, or exception values
+    that ``traceback.format_exception`` would render — secret-bearing
+    plugin config values, DB connection strings, and bound SQL
+    parameters can flow through those surfaces and the audit row /
+    structured server log must not retain them. File paths reference
+    the on-disk source tree, which the operator already has access to
+    under ELSPETH's single-operator deployment model (see the
+    ``_runtime_preflight_failure_message`` comment in
+    ``web/composer/service.py`` for the deployment-shape caveat).
+
+    Frames are emitted in walked order — outermost frame of the original
+    exception first, then deeper frames, then the next ``__cause__``.
+    The ``max_frames`` cap is shared across the entire chain so the
+    audit row size stays predictable regardless of stack depth.
+    """
+    frames: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and len(frames) < max_frames:
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        tb = current.__traceback__
+        while tb is not None and len(frames) < max_frames:
+            f = tb.tb_frame
+            frames.append(f"frame={f.f_code.co_filename}:{tb.tb_lineno}:{f.f_code.co_name}")
+            tb = tb.tb_next
+        current = current.__cause__
+    return tuple(frames)
+
+
+def _runtime_preflight_failure_errors(
+    exception_class: str,
+    exception_message_first_line: str,
+    frames: Sequence[str],
+) -> list[str]:
+    """Build the structured ``validation_errors`` list for a runtime-preflight crash.
+
+    Replaces the legacy opaque ``["runtime_preflight_failed"]`` sentinel
+    with a self-describing list. The first entry remains
+    ``"runtime_preflight_failed"`` so existing parsers/UIs that key on
+    the sentinel continue to work; subsequent entries are advisory and
+    may be empty when frame capture is impossible (e.g. when only
+    ``exception_class`` is available without a live traceback).
+
+    Schema is preserved: each entry is a string, so
+    :class:`CompositionStateData.validation_errors` (typed
+    ``Sequence[str]``) does not need a migration. Operators / the LLM
+    parsing the audit row receive ``"key=value"`` shaped strings.
+
+    Bounded length: ``exception_message_first_line`` is clipped to
+    :data:`_RUNTIME_PREFLIGHT_MESSAGE_LIMIT` characters. ``frames`` is
+    limited at the caller (see :func:`_safe_frame_strings`).
+    """
+    truncated_msg = exception_message_first_line[:_RUNTIME_PREFLIGHT_MESSAGE_LIMIT]
+    return [
+        "runtime_preflight_failed",
+        f"exception_class={exception_class}",
+        f"exception_message={truncated_msg}",
+        *frames,
+    ]
+
+
+def _capture_runtime_preflight_failure(exc: BaseException) -> _RuntimePreflightFailed:
+    """Build a :class:`_RuntimePreflightFailed` with structured diagnostics.
+
+    Single source of truth for the capture: any new raise site that
+    converts an unexpected runtime-preflight exception to a
+    persist-invalid sentinel must use this helper so the audit-row
+    attribution is uniform.
+    """
+    return _RuntimePreflightFailed(
+        exception_class=type(exc).__name__,
+        exception_message_first_line=_first_message_line(str(exc)),
+        frames=_safe_frame_strings(exc),
+    )
+
 
 _COMPOSER_RUNTIME_PREFLIGHT_COUNTER = metrics.get_meter(__name__).create_counter(
     "composer.runtime_preflight.total",
@@ -424,9 +562,30 @@ def _composer_persisted_validation(
     authoring: ValidationSummary,
     runtime_preflight: _RuntimePreflightOutcome,
 ) -> tuple[bool, list[str] | None]:
-    """Return persisted validity/errors for a composer-produced state."""
+    """Return persisted validity/errors for a composer-produced state.
+
+    When the runtime preflight crashed unexpectedly, emit a structured
+    diagnostic list (sentinel + ``exception_class=...`` +
+    ``exception_message=...`` + ``frame=...`` entries) so the persisted
+    audit row carries the attribution the previous opaque
+    ``["runtime_preflight_failed"]`` sentinel withheld. The first entry
+    remains the legacy sentinel so external parsers keying on it (the
+    SPA / LLM recovery loop) continue to detect the failure class.
+
+    The bare-sentinel path is preserved for the
+    :data:`_RUNTIME_PREFLIGHT_FAILED` zero-arg constant — older tests
+    construct it directly and assert the legacy single-string output
+    to lock in the contract that authoring-valid + opaque-runtime-fail
+    persists as ``is_valid=False``.
+    """
     if isinstance(runtime_preflight, _RuntimePreflightFailed):
-        return False, ["runtime_preflight_failed"]
+        if runtime_preflight.exception_class is None:
+            return False, ["runtime_preflight_failed"]
+        return False, _runtime_preflight_failure_errors(
+            runtime_preflight.exception_class,
+            runtime_preflight.exception_message_first_line,
+            runtime_preflight.frames,
+        )
     if runtime_preflight is not None:
         messages = [error.message for error in runtime_preflight.errors]
         return runtime_preflight.is_valid, messages or None
@@ -516,7 +675,14 @@ async def _state_data_from_composer_state(
                     state=state,
                     initial_version=initial_version if initial_version is not None else state.version,
                 ) from exc
-            runtime = _RuntimePreflightFailed(type(exc).__name__)
+            # persist_invalid path: capture structured diagnostics
+            # (exception class + first message line + bounded frames)
+            # so the persisted state's validation_errors row is
+            # self-describing instead of the opaque legacy sentinel.
+            # Frames are file:line:function only — no source text, no
+            # local-variable repr — so secrets in plugin config dicts
+            # / DB URLs / bound SQL params do not enter the audit row.
+            runtime = _capture_runtime_preflight_failure(exc)
     if isinstance(runtime, ValidationResult):
         _record_composer_runtime_preflight_telemetry(
             "passed" if runtime.is_valid else "failed",
@@ -710,7 +876,32 @@ async def _handle_plugin_crash(
     """
     response_body: dict[str, object] = {
         "error_type": "composer_plugin_error",
-        "detail": ("A composer plugin crashed; see server logs for the traceback. This is not a user-retryable error."),
+        # Honest detail (elspeth-2c3d63037c): the prior wording promised
+        # "see server logs for the traceback" but the slog event below
+        # deliberately omits ``exc_info`` to keep secret-bearing
+        # ``__cause__`` chains out of journald. Operators following the
+        # claim found nothing to read.
+        #
+        # Stage attribution: this helper handles plugin crashes inside
+        # the compose loop's ``execute_tool()`` (per
+        # ``ComposerPluginCrashError``'s docstring). It is NOT the
+        # runtime-preflight path — that's
+        # :func:`_handle_runtime_preflight_failure`. The diagnostic
+        # surface for the primary plugin crash is the structured slog
+        # event ``{log_prefix}_plugin_crash`` with ``exc_class``
+        # (existing tech debt being migrated under elspeth-940bfe3a0d).
+        # If the partial-state runtime preflight ALSO crashes
+        # downstream, that secondary failure's structured frames land
+        # in the persisted state's ``validation_errors`` via the
+        # post-elspeth-2c3d63037c capture helper — but we don't promise
+        # frames in the response detail because the dominant case is
+        # a single plugin crash with only the slog ``exc_class`` to
+        # show for it.
+        "detail": (
+            "A composer plugin crashed during a composer tool call. "
+            "The exception class is recorded in the structured server "
+            "log event for triage. This is not a user-retryable error."
+        ),
     }
 
     if exc.partial_state is not None:
@@ -896,7 +1087,23 @@ async def _handle_runtime_preflight_failure(
     """
     response_body: dict[str, object] = {
         "error_type": "composer_plugin_error",
-        "detail": ("A composer plugin crashed; see server logs for the traceback. This is not a user-retryable error."),
+        # Honest detail (elspeth-2c3d63037c): the prior wording promised
+        # "see server logs for the traceback" but this helper deliberately
+        # emits no slog.error triage event (per the "Logging policy"
+        # section above) and the sibling helpers' slog calls omit
+        # exc_info to avoid leaking secret-bearing __cause__ chains. The
+        # diagnostic surface is now the persisted state's
+        # validation_errors row (see :func:`_runtime_preflight_failure_errors`
+        # — exception_class + first-line message + bounded
+        # file:line:function frames) plus the OTel
+        # ``composer.runtime_preflight.total`` counter, bucketed by
+        # ``exception_class``.
+        "detail": (
+            "A composer plugin crashed during runtime preflight. "
+            "Diagnostic frames are recorded in the persisted state's "
+            "validation_errors when a partial state was captured. "
+            "This is not a user-retryable error."
+        ),
     }
 
     if exc.partial_state is not None:

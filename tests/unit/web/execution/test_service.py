@@ -42,6 +42,24 @@ _TEST_PIPELINE_YAML = "source:\n  plugin: csv\n"
 
 
 @pytest.fixture
+def mock_pipeline_config_assembly() -> Iterator[MagicMock]:
+    """Opt-in patch for ``assemble_and_validate_pipeline_config``.
+
+    Service tests that exercise ``_run_pipeline`` and mock the plugin bundle
+    and graph would otherwise have the helper's route-target validators fire
+    against MagicMock attributes and raise ``RouteValidationError``
+    spuriously. Tests using real settings + real plugin instantiation must
+    NOT use this fixture — the real helper is required for those flows.
+    Issue elspeth-127de6865a introduced the helper.
+    """
+    with patch(
+        "elspeth.web.execution.service.assemble_and_validate_pipeline_config",
+        return_value=MagicMock(),
+    ) as mock_assemble:
+        yield mock_assemble
+
+
+@pytest.fixture
 def mock_loop() -> MagicMock:
     return MagicMock(spec=asyncio.AbstractEventLoop)
 
@@ -333,6 +351,7 @@ sinks:
 # ── B2: shutdown_event Always Passed ───────────────────────────────────
 
 
+@pytest.mark.usefixtures("mock_pipeline_config_assembly")
 class TestB2ShutdownEvent:
     """B2 fix: _run_pipeline() MUST pass shutdown_event to orchestrator.run().
 
@@ -400,6 +419,7 @@ class TestB2ShutdownEvent:
 # ── B3: LandscapeDB and PayloadStore Construction ─────────────────────
 
 
+@pytest.mark.usefixtures("mock_pipeline_config_assembly")
 class TestB3Construction:
     """B3 fix: Construct LandscapeDB and FilesystemPayloadStore from WebSettings.
 
@@ -586,6 +606,7 @@ class TestB7ExceptionHandling:
 # ── Cancel Mechanism ───────────────────────────────────────────────────
 
 
+@pytest.mark.usefixtures("mock_pipeline_config_assembly")
 class TestCancelMechanism:
     @pytest.mark.asyncio
     async def test_cancel_active_run_sets_event(self, service: ExecutionServiceImpl) -> None:
@@ -1051,6 +1072,7 @@ class TestP2aCleanupCatchNarrowing:
 # ── Completion-Path Guard ─────────────────────────────────────────────
 
 
+@pytest.mark.usefixtures("mock_pipeline_config_assembly")
 class TestCompletionPathExternalCancellation:
     """Defence-in-depth: if the DB says 'cancelled' when _run_pipeline
     tries to write 'completed', exit gracefully — no 'failed' broadcast,
@@ -2209,6 +2231,7 @@ class TestRelativePathResolution:
 # ── Edge Compatibility in _run_pipeline ───────────────────────────────
 
 
+@pytest.mark.usefixtures("mock_pipeline_config_assembly")
 class TestEdgeCompatibility:
     """P2 fix: _run_pipeline must call validate_edge_compatibility() so that
     schema-incompatible pipelines are rejected before execution begins."""
@@ -2406,6 +2429,7 @@ def _collect_terminal_types(mock_broadcaster: MagicMock) -> list[str]:
     return terminals
 
 
+@pytest.mark.usefixtures("mock_pipeline_config_assembly")
 class TestTerminalOrderingInvariant:
     """Bug: elspeth-25df1be367 — run termination is published before output
     blob finalization. A late finalize failure triggers a second terminal event

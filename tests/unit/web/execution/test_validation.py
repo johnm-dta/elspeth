@@ -603,6 +603,7 @@ class TestValidatePipelineRelativePaths:
 
 
 class TestValidatePipelineSuccess:
+    @patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config")
     @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.validation.instantiate_runtime_plugins")
     @patch("elspeth.web.execution.validation.build_runtime_graph")
@@ -611,6 +612,7 @@ class TestValidatePipelineSuccess:
         mock_build_graph: MagicMock,
         mock_instantiate: MagicMock,
         mock_load: MagicMock,
+        mock_assemble: MagicMock,
     ) -> None:
         mock_yaml_gen = MagicMock()
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
@@ -627,19 +629,21 @@ class TestValidatePipelineSuccess:
 
         mock_graph = MagicMock()
         mock_build_graph.return_value = mock_graph
+        mock_assemble.return_value = MagicMock()
 
         state = _make_state()
         settings = _make_settings()
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is True
-        assert len(result.checks) == 8
+        assert len(result.checks) == 9
         assert all(c.passed for c in result.checks)
         # B11 fix: path_allowlist check is always recorded
         assert _check(result, "path_allowlist").passed is True
         assert _check(result, "secret_refs").passed is True
         assert _check(result, "semantic_contracts").passed is True
         assert _check(result, "batch_transform_options").passed is True
+        assert _check(result, "route_target_resolution").passed is True
         assert result.errors == []
 
         # Verify real engine functions were called
@@ -647,6 +651,7 @@ class TestValidatePipelineSuccess:
         mock_instantiate.assert_called_once_with(mock_settings, preflight_mode=True)
         mock_build_graph.assert_called_once()
         mock_graph.validate.assert_called_once()
+        mock_assemble.assert_called_once()
         mock_graph.validate_edge_compatibility.assert_called_once()
 
 
@@ -1127,6 +1132,292 @@ class TestValidatePipelineSecretRefs:
         assert any("OPENROUTER_API_KEY" in e.message for e in result.errors)
 
 
+class TestValidatePipelineFabricatedCredentials:
+    """Issue elspeth-72d1dccd44 / S1A regression: literal placeholder strings in
+    credential-bearing fields must be rejected by the secret_refs check.
+
+    The runtime treats fields like ``api_key`` / ``password`` / ``*_token`` as
+    credential-bearing (see ``elspeth.core.secrets.is_secret_field``). The
+    composer's ``secret_refs`` validator must enforce the same contract: such
+    fields hold a wired ``{secret_ref: ...}`` marker, an inventory env-marker,
+    or are absent — never a literal placeholder string.
+
+    Source: notes/composer-llm-eval-2026-05-01.md S1A architectural finding #3.
+    """
+
+    _PLACEHOLDER = "WILL_BE_WIRED_FROM_OPENROUTER_API_KEY"
+
+    def _assert_value_redacted(self, result, *, value: str) -> None:
+        """Audit hygiene: the literal placeholder value MUST NOT be echoed
+        into the validation response. A value that *looks* like a placeholder
+        in this test may be a near-miss real secret in production; reflecting
+        it back to the operator surface is data leakage."""
+        for check in result.checks:
+            assert value not in check.detail, f"placeholder value leaked into check '{check.name}' detail"
+        for error in result.errors:
+            assert value not in error.message, "placeholder value leaked into error.message"
+            if error.suggestion is not None:
+                assert value not in error.suggestion, "placeholder value leaked into error.suggestion"
+
+    def test_literal_placeholder_in_transform_api_key_rejected(self) -> None:
+        """The exact S1A shape: an LLM transform whose ``api_key`` is a literal
+        placeholder string passes 0 wired secret_refs and validates as
+        ``is_valid: true`` today — this test pins the post-fix behavior.
+        """
+        state = _make_state(
+            source_options={},
+            nodes=(
+                _make_node(
+                    options={
+                        "provider": "openrouter",
+                        "model": "openai/gpt-4.1-nano",
+                        "api_key": self._PLACEHOLDER,
+                    }
+                ),
+            ),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        secret_svc = FakeSecretService(available_refs=set())
+
+        result = validate_pipeline(
+            state,
+            settings,
+            mock_yaml_gen,
+            secret_service=secret_svc,
+            user_id="user-1",
+        )
+
+        assert result.is_valid is False
+        secret_check = _check(result, "secret_refs")
+        assert secret_check.passed is False
+        assert "api_key" in secret_check.detail
+        # Structured ValidationError points at the offending node + field.
+        api_key_errors = [e for e in result.errors if "api_key" in e.message]
+        assert api_key_errors, "expected at least one error naming the api_key field"
+        assert any(e.component_id == "test_node" for e in api_key_errors)
+        assert any(e.component_type == "transform" for e in api_key_errors)
+        # Downstream checks skipped — no point loading settings on a known-bad shape.
+        assert any("Skipped" in c.detail for c in result.checks if c.name == "settings_load")
+        # Settings load must NOT be invoked: the secret-shape gate fires first.
+        mock_yaml_gen.generate_yaml.assert_not_called()
+        # Audit hygiene.
+        self._assert_value_redacted(result, value=self._PLACEHOLDER)
+
+    def test_literal_placeholder_in_source_api_key_rejected(self) -> None:
+        """Same defect on a source plugin's credential field."""
+        state = _make_state(
+            source_options={"api_key": "PLACEHOLDER_TOKEN"},
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        secret_svc = FakeSecretService(available_refs=set())
+
+        result = validate_pipeline(
+            state,
+            settings,
+            mock_yaml_gen,
+            secret_service=secret_svc,
+            user_id="user-1",
+        )
+
+        assert result.is_valid is False
+        assert _check(result, "secret_refs").passed is False
+        api_key_errors = [e for e in result.errors if "api_key" in e.message]
+        assert any(e.component_id == "source" and e.component_type == "source" for e in api_key_errors)
+        self._assert_value_redacted(result, value="PLACEHOLDER_TOKEN")
+
+    def test_literal_placeholder_in_sink_password_rejected(self) -> None:
+        """Suffix-matched secret field (``password``) on a sink."""
+        state = _make_state(
+            source_options={},
+            outputs=(_make_output(options={"password": "fake-pwd"}, name="db_sink"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        secret_svc = FakeSecretService(available_refs=set())
+
+        result = validate_pipeline(
+            state,
+            settings,
+            mock_yaml_gen,
+            secret_service=secret_svc,
+            user_id="user-1",
+        )
+
+        assert result.is_valid is False
+        assert _check(result, "secret_refs").passed is False
+        sink_errors = [e for e in result.errors if "password" in e.message]
+        assert any(e.component_id == "db_sink" and e.component_type == "sink" for e in sink_errors)
+        self._assert_value_redacted(result, value="fake-pwd")
+
+    def test_suffix_match_field_rejected(self) -> None:
+        """Suffix heuristic: ``custom_token`` ends with ``_token`` — credential."""
+        state = _make_state(
+            source_options={"custom_token": "literal-token-string"},
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        secret_svc = FakeSecretService(available_refs=set())
+
+        result = validate_pipeline(
+            state,
+            settings,
+            mock_yaml_gen,
+            secret_service=secret_svc,
+            user_id="user-1",
+        )
+
+        assert result.is_valid is False
+        assert _check(result, "secret_refs").passed is False
+        assert any("custom_token" in e.message for e in result.errors)
+        self._assert_value_redacted(result, value="literal-token-string")
+
+    def test_nested_credential_field_rejected(self) -> None:
+        """Walk recurses into nested option dicts — a credential anywhere is a
+        credential."""
+        state = _make_state(
+            source_options={"auth": {"api_key": "BOGUS"}},
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        secret_svc = FakeSecretService(available_refs=set())
+
+        result = validate_pipeline(
+            state,
+            settings,
+            mock_yaml_gen,
+            secret_service=secret_svc,
+            user_id="user-1",
+        )
+
+        assert result.is_valid is False
+        assert _check(result, "secret_refs").passed is False
+        assert any("api_key" in e.message for e in result.errors)
+        self._assert_value_redacted(result, value="BOGUS")
+
+    def test_env_marker_outside_inventory_rejected(self) -> None:
+        """A ``${NAME}`` shape where NAME is NOT in the secret inventory means
+        the user typed a placeholder that won't resolve. Same UX defect class
+        as a literal string — flag it.
+        """
+        state = _make_state(
+            source_options={"api_key": "${SOME_UNREGISTERED_NAME}"},
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        # No matching inventory entry — env-marker name unknown.
+        secret_svc = FakeSecretService(available_refs=set(), inventory_refs=set())
+
+        result = validate_pipeline(
+            state,
+            settings,
+            mock_yaml_gen,
+            secret_service=secret_svc,
+            user_id="user-1",
+        )
+
+        assert result.is_valid is False
+        assert _check(result, "secret_refs").passed is False
+        assert any("api_key" in e.message for e in result.errors)
+        # Audit hygiene: the env-marker text echoes a name the user typed; do
+        # not reflect it back into the response either.
+        self._assert_value_redacted(result, value="${SOME_UNREGISTERED_NAME}")
+
+    def test_wired_secret_ref_passes(self) -> None:
+        """Positive control: ``{"secret_ref": NAME}`` is the wired shape."""
+        state = _make_state(
+            source_options={"api_key": {"secret_ref": "REAL_KEY"}},
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+        secret_svc = FakeSecretService(available_refs={"REAL_KEY"})
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(
+                state,
+                settings,
+                mock_yaml_gen,
+                secret_service=secret_svc,
+                user_id="user-1",
+            )
+
+        assert _check(result, "secret_refs").passed is True
+
+    def test_inventory_env_marker_passes(self) -> None:
+        """Positive control: ``${NAME}`` with NAME in inventory is wired."""
+        state = _make_state(
+            source_options={"api_key": "${OPENROUTER_API_KEY}"},
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+        secret_svc = FakeSecretService(
+            available_refs={"OPENROUTER_API_KEY"},
+            inventory_refs={"OPENROUTER_API_KEY"},
+        )
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(
+                state,
+                settings,
+                mock_yaml_gen,
+                secret_service=secret_svc,
+                user_id="user-1",
+            )
+
+        assert _check(result, "secret_refs").passed is True
+
+    def test_empty_string_in_credential_field_passes(self) -> None:
+        """Empty string is "not provided" — not a fabricated literal. Settings
+        load decides whether the field is required."""
+        state = _make_state(
+            source_options={"api_key": ""},
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+        secret_svc = FakeSecretService(available_refs=set())
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(
+                state,
+                settings,
+                mock_yaml_gen,
+                secret_service=secret_svc,
+                user_id="user-1",
+            )
+
+        assert _check(result, "secret_refs").passed is True
+
+    def test_non_credential_string_unaffected(self) -> None:
+        """Literal strings in non-credential fields pass — only credential
+        fields are scope of the fabrication check."""
+        state = _make_state(
+            source_options={"path": "/tmp/test_data/blobs/data.csv", "delimiter": ","},
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+        secret_svc = FakeSecretService(available_refs=set())
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(
+                state,
+                settings,
+                mock_yaml_gen,
+                secret_service=secret_svc,
+                user_id="user-1",
+            )
+
+        assert _check(result, "secret_refs").passed is True
+
+
 class TestReservedNameSecretRefPreflight:
     """Regression: pipeline validation must report reserved-name refs as
     missing, not crash on the raise that used to fall out of
@@ -1524,6 +1815,7 @@ sinks:
             patch("elspeth.web.execution.validation.load_settings_from_yaml_string", return_value=MagicMock()),
             patch("elspeth.web.execution.validation.instantiate_runtime_plugins", return_value=MagicMock()) as mock_instantiate,
             patch("elspeth.web.execution.validation.build_runtime_graph", return_value=fake_graph),
+            patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config", return_value=MagicMock()),
         ):
             result = validate_pipeline(state, settings, mock_yaml_gen)
 
@@ -1575,6 +1867,7 @@ sinks:
         assert any(check.name == "schema_compatibility" and not check.passed for check in result.checks)
         fake_graph.validate_edge_compatibility.assert_not_called()
 
+    @patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config")
     @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.validation.instantiate_runtime_plugins")
     @patch("elspeth.web.execution.validation.build_runtime_graph")
@@ -1583,6 +1876,7 @@ sinks:
         mock_build_graph: MagicMock,
         mock_instantiate: MagicMock,
         mock_load: MagicMock,
+        mock_assemble: MagicMock,
     ) -> None:
         state = _make_state(
             source_options={"path": "/tmp/test_data/blobs/input.csv"},
@@ -1609,9 +1903,11 @@ sinks:
         mock_load.return_value = fake_settings
         mock_instantiate.return_value = MagicMock()
         mock_build_graph.return_value = fake_graph
+        mock_assemble.return_value = MagicMock()
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is False
         assert _check(result, "graph_structure").passed is True
+        assert _check(result, "route_target_resolution").passed is True
         assert _check(result, "schema_compatibility").passed is False

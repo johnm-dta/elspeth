@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from elspeth.contracts.enums import OutputMode, RunMode
 from elspeth.contracts.security import SecretFingerprintError as SecretFingerprintError
 from elspeth.core.dependency_config import CollectionProbeConfig, CommencementGateConfig, DependencyConfig
+from elspeth.core.secrets import is_secret_field
 
 # Reserved edge labels that cannot be used as user-defined routing names.
 # "continue" is used for sequential edges, "fork" is a gate-only routing action,
@@ -1563,31 +1564,6 @@ def _expand_env_vars(config: dict[str, Any]) -> dict[str, Any]:
     return {k: _expand_value(v) for k, v in config.items()}
 
 
-# Secret field names that should be fingerprinted (exact matches, case-insensitive)
-_SECRET_FIELD_NAMES = frozenset(
-    {
-        "api_key",
-        "api-key",
-        "authorization",
-        "connection_string",
-        "credential",
-        "password",
-        "secret",
-        "token",
-        "x-api-key",
-    }
-)
-
-# Secret field suffixes that should be fingerprinted (case-insensitive)
-_SECRET_FIELD_SUFFIXES = ("_secret", "_key", "_token", "_password", "_credential", "_connection_string")
-
-
-def _is_secret_field(field_name: str) -> bool:
-    """Check if a field name represents a secret that should be fingerprinted."""
-    normalized = field_name.lower()
-    return normalized in _SECRET_FIELD_NAMES or normalized.endswith(_SECRET_FIELD_SUFFIXES)
-
-
 def _fingerprint_secrets(
     options: dict[str, Any],
     *,
@@ -1626,7 +1602,7 @@ def _fingerprint_secrets(
             return key, _recurse(value), False
         elif isinstance(value, list):
             return key, [_process_value("", item)[1] for item in value], False
-        elif isinstance(value, str) and _is_secret_field(key):
+        elif isinstance(value, str) and is_secret_field(key):
             # This is a secret field
             if have_key:
                 fp = secret_fingerprint(value)
@@ -1649,7 +1625,7 @@ def _fingerprint_secrets(
         # Without this check, the pre-existing _fingerprint value would silently overwrite
         # the computed HMAC, allowing an attacker to inject a fake fingerprint.
         for key in d:
-            if isinstance(d[key], str) and _is_secret_field(key):
+            if isinstance(d[key], str) and is_secret_field(key):
                 fp_key = f"{key}_fingerprint"
                 if fp_key in d:
                     raise SecretFingerprintError(

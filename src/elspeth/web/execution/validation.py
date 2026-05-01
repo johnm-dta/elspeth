@@ -2,7 +2,8 @@
 
 Calls the same functions as `elspeth run`: load_settings(),
 instantiate_runtime_plugins(), build_runtime_graph(),
-graph.validate(), graph.validate_edge_compatibility().
+graph.validate(), assemble_and_validate_pipeline_config() (route targets),
+graph.validate_edge_compatibility().
 
 W18 fix: Only typed exceptions are caught. Bare except Exception is forbidden.
 Unknown exception types propagate as 500 Internal Server Error, signalling
@@ -11,6 +12,13 @@ that this function needs updating — not that the error should be swallowed.
 Settings loading uses load_settings_from_yaml_string() — the same in-memory
 loader as the execution service. This ensures validation exercises the exact
 same code path as execution, and resolved secrets never touch disk.
+
+Route-target validation (issue elspeth-127de6865a) closes the parity gap
+where the orchestrator's four pre-init validators
+(validate_route_destinations, validate_transform_error_sinks,
+validate_source_quarantine_destination, validate_sink_failsink_destinations)
+were not reached by /validate, letting dangling references pass preflight
+only to be rejected pre-token at /execute.
 """
 
 from __future__ import annotations
@@ -24,7 +32,9 @@ from pydantic import ValidationError as PydanticValidationError
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.core.dag.models import GraphValidationError
-from elspeth.core.secrets import resolve_secret_refs, secret_env_ref_name
+from elspeth.core.secrets import is_secret_field, resolve_secret_refs, secret_env_ref_name
+from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
+from elspeth.engine.orchestrator.types import RouteValidationError
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
@@ -57,6 +67,7 @@ _CHECK_BATCH_TRANSFORM_OPTIONS = "batch_transform_options"
 _CHECK_SETTINGS = "settings_load"
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
 _CHECK_GRAPH = RUNTIME_CHECK_GRAPH_STRUCTURE
+_CHECK_ROUTE_TARGETS = "route_target_resolution"
 _CHECK_SCHEMA = RUNTIME_CHECK_SCHEMA_COMPATIBILITY
 assert RUNTIME_GRAPH_VALIDATION_CHECKS == (_CHECK_PLUGINS, _CHECK_GRAPH, _CHECK_SCHEMA)
 
@@ -68,6 +79,7 @@ _ALL_CHECKS = [
     _CHECK_SETTINGS,
     _CHECK_PLUGINS,
     _CHECK_GRAPH,
+    _CHECK_ROUTE_TARGETS,
     _CHECK_SCHEMA,
 ]
 
@@ -124,6 +136,73 @@ def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> lis
         if ref is not None:
             refs.append(ref)
     return refs
+
+
+def _value_is_wired_secret(value: Any, env_ref_names: set[str]) -> bool:
+    """A value is "wired" if it is either a ``{secret_ref: NAME}`` marker or
+    an exact ``${NAME}`` env-marker for a NAME present in the secret inventory.
+
+    Anything else placed in a credential-bearing field — a literal placeholder
+    string like ``"WILL_BE_WIRED_FROM_OPENROUTER_API_KEY"``, an env-marker for
+    an unregistered name, etc. — is fabrication: the runtime would treat the
+    value as the literal credential and authentication would fail per-row in a
+    misleading way (issue elspeth-72d1dccd44).
+    """
+    if isinstance(value, Mapping) and len(value) == 1 and "secret_ref" in value:
+        return isinstance(value["secret_ref"], str)
+    if isinstance(value, str):
+        return secret_env_ref_name(value, env_ref_names) is not None
+    return False
+
+
+def _collect_credential_field_violations(
+    options: Any,
+    env_ref_names: set[str],
+) -> list[str]:
+    """Walk an options tree and return the field names whose value is a
+    fabricated literal sitting in a credential-bearing field.
+
+    Returns the list of offending top-level field names (as discovered by
+    ``is_secret_field``) — caller decides how to surface them. The returned
+    list is intentionally name-only (no value): credential values must never
+    be reflected back into the validation response.
+
+    Skips:
+    - ``{"secret_ref": ...}`` markers (wired)
+    - exact ``${NAME}`` env-markers where NAME is in ``env_ref_names`` (wired)
+    - missing keys, ``None`` values, and empty strings (treated as
+      "not provided" — the runtime config validator decides if the field is
+      required)
+    - non-string values in credential fields (Pydantic at settings_load
+      will reject these with the proper schema-typed error)
+
+    Recurses through nested mappings and sequences so that
+    ``{"auth": {"api_key": "..."}}`` is detected as well as a top-level shape.
+    """
+    violations: list[str] = []
+    if isinstance(options, Mapping):
+        # A ``{"secret_ref": ...}`` marker is itself wired — do not descend
+        # into it (otherwise the literal NAME inside would be evaluated).
+        if len(options) == 1 and "secret_ref" in options:
+            return violations
+        for key, value in options.items():
+            if isinstance(key, str) and is_secret_field(key):
+                if _value_is_wired_secret(value, env_ref_names):
+                    continue
+                if value is None or value == "":
+                    continue
+                if isinstance(value, str):
+                    violations.append(key)
+                    continue
+                # Non-string in a credential field: defer to Pydantic at
+                # settings_load — its error is more precise (shape mismatch
+                # vs. fabrication).
+                continue
+            violations.extend(_collect_credential_field_violations(value, env_ref_names))
+    elif isinstance(options, (list, tuple)):
+        for item in options:
+            violations.extend(_collect_credential_field_violations(item, env_ref_names))
+    return violations
 
 
 def validate_pipeline(
@@ -242,35 +321,82 @@ def validate_pipeline(
             )
         )
 
-    # Step 1b: Secret ref validation — check all refs are resolvable
+    # Step 1b: Secret ref validation — check that
+    #   (a) every wired ``{secret_ref: ...}`` / inventory ``${NAME}`` resolves
+    #       (existing missing-refs gate), AND
+    #   (b) every credential-bearing field (per ``is_secret_field``) contains
+    #       a wired secret rather than a literal placeholder string
+    #       (issue elspeth-72d1dccd44 — S1A "WILL_BE_WIRED_FROM_..." defect).
+    #
+    # The remediation note (notes/composer-remediation-program-2026-05-01.md)
+    # suggested "the catalog already knows which fields require secrets."  In
+    # practice the catalog renders the per-plugin schema but does not mark
+    # credential fields; the closed list of credential-bearing field names
+    # already lives in ``elspeth.core.secrets.is_secret_field`` and is shared
+    # with the runtime fingerprinting code path.  Reusing it here keeps
+    # validate-time and runtime in lock-step — divergence would re-open the
+    # parity gap this issue was filed to close.
     all_refs: list[str] = []
     env_ref_names: set[str] = set()
+    fabricated_components: list[tuple[str | None, str | None, list[str]]] = []
     if secret_service is not None and user_id is not None:
         env_ref_names = {item.name for item in secret_service.list_refs(user_id)}
         # Walk source options, node configs, and output options for secret refs
         if state.source is not None:
             all_refs.extend(_collect_secret_refs(state.source.options, env_ref_names))
+            fabricated = _collect_credential_field_violations(state.source.options, env_ref_names)
+            if fabricated:
+                fabricated_components.append(("source", "source", fabricated))
         for node in state.nodes or ():
             all_refs.extend(_collect_secret_refs(node.options, env_ref_names))
+            fabricated = _collect_credential_field_violations(node.options, env_ref_names)
+            if fabricated:
+                fabricated_components.append((node.id, "transform", fabricated))
         for output in state.outputs or ():
             all_refs.extend(_collect_secret_refs(output.options, env_ref_names))
+            fabricated = _collect_credential_field_violations(output.options, env_ref_names)
+            if fabricated:
+                fabricated_components.append((output.name, "sink", fabricated))
 
         missing_refs = [ref for ref in all_refs if not secret_service.has_ref(user_id, ref)]
-        if missing_refs:
-            names = ", ".join(missing_refs)
+        if missing_refs or fabricated_components:
+            detail_parts: list[str] = []
+            if missing_refs:
+                names = ", ".join(missing_refs)
+                detail_parts.append(f"Missing secret references: {names}")
+                errors.append(
+                    ValidationError(
+                        component_id=None,
+                        component_type=None,
+                        message=f"Cannot resolve secret references: {names}",
+                        suggestion="Add the missing secrets via the Secrets panel before executing.",
+                    )
+                )
+            if fabricated_components:
+                fabricated_summary = ", ".join(f"{cid}:{','.join(fields)}" for cid, _ctype, fields in fabricated_components)
+                detail_parts.append("Literal value in credential field(s): " + fabricated_summary)
+                # Audit hygiene: name the field, never echo the value.  A value
+                # that looks like a placeholder may be a near-miss real secret
+                # and the validation response is operator-visible.
+                for component_id, component_type, fields in fabricated_components:
+                    fields_text = ", ".join(fields)
+                    errors.append(
+                        ValidationError(
+                            component_id=component_id,
+                            component_type=component_type,
+                            message=(f"Credential field(s) {fields_text} contain a literal value; expected a wired secret reference."),
+                            suggestion=(
+                                "Wire each credential field through the Secrets panel "
+                                "(produces a {secret_ref: NAME} marker) instead of typing "
+                                "the value directly."
+                            ),
+                        )
+                    )
             checks.append(
                 ValidationCheck(
                     name=_CHECK_SECRET_REFS,
                     passed=False,
-                    detail=f"Missing secret references: {names}",
-                )
-            )
-            errors.append(
-                ValidationError(
-                    component_id=None,
-                    component_type=None,
-                    message=f"Cannot resolve secret references: {names}",
-                    suggestion="Add the missing secrets via the Secrets panel before executing.",
+                    detail="; ".join(detail_parts),
                 )
             )
             checks.extend(_skipped_checks(_CHECK_SECRET_REFS))
@@ -501,6 +627,62 @@ def validate_pipeline(
             )
         )
         checks.extend(_skipped_checks(_CHECK_GRAPH))
+        return ValidationResult(
+            is_valid=False,
+            checks=checks,
+            errors=errors,
+            semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+        )
+
+    # Step 5b: Route target resolution
+    #
+    # The orchestrator's pre-init runs four route-target validators that
+    # ``graph.validate()`` does not cover:
+    # ``validate_route_destinations``, ``validate_transform_error_sinks``,
+    # ``validate_source_quarantine_destination``, and
+    # ``validate_sink_failsink_destinations``. Without this step the composer's
+    # ``/validate`` returns ``is_valid: true`` for pipelines whose
+    # ``on_error`` / ``on_validation_failure`` / ``on_write_failure`` /
+    # ``gates[*].routes[*]`` reference a non-existent sink, and the runtime
+    # then rejects them at ``/execute`` pre-token (issue elspeth-127de6865a).
+    #
+    # ``OrchestrationInvariantError`` is intentionally NOT caught — it
+    # signals a framework bug (e.g. transform on_error is None when
+    # TransformSettings requires it) and must surface as a 500, not as a
+    # per-pipeline validation failure.
+    try:
+        assemble_and_validate_pipeline_config(
+            source=bundle.source,
+            transforms=bundle.transforms,
+            sinks=bundle.sinks,
+            aggregations=bundle.aggregations,
+            settings=elspeth_settings,
+            graph=graph,
+        )
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_ROUTE_TARGETS,
+                passed=True,
+                detail="All route targets resolve to existing sinks",
+            )
+        )
+    except RouteValidationError as exc:
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_ROUTE_TARGETS,
+                passed=False,
+                detail=str(exc),
+            )
+        )
+        errors.append(
+            ValidationError(
+                component_id=None,
+                component_type=None,
+                message=str(exc),
+                suggestion=("Use 'discard' to drop rows without routing, or wire the destination to an existing sink."),
+            )
+        )
+        checks.extend(_skipped_checks(_CHECK_ROUTE_TARGETS))
         return ValidationResult(
             is_valid=False,
             checks=checks,

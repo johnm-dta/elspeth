@@ -14,6 +14,41 @@ from elspeth.contracts.secrets import ResolvedSecret, WebSecretResolver
 
 _EXACT_ENV_VAR_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}")
 
+# Field-name heuristic for credential-bearing options.
+#
+# This is the closed list of field names that the runtime (config fingerprinting)
+# treats as carrying credentials, and that the composer's fabrication-aware
+# `secret_refs` validator (web.execution.validation) treats as requiring a
+# wired `{secret_ref: ...}` or inventory env-marker.  Keeping the predicate in
+# core.secrets gives runtime and validate a single source of truth — divergence
+# would re-open the validator/runtime parity gap that issue elspeth-72d1dccd44
+# was filed to close.
+SECRET_FIELD_NAMES = frozenset(
+    {
+        "api_key",
+        "api-key",
+        "authorization",
+        "connection_string",
+        "credential",
+        "password",
+        "secret",
+        "token",
+        "x-api-key",
+    }
+)
+
+SECRET_FIELD_SUFFIXES = ("_secret", "_key", "_token", "_password", "_credential", "_connection_string")
+
+
+def is_secret_field(field_name: str) -> bool:
+    """Return True when a field name represents a credential-bearing option.
+
+    Case-insensitive: matches an exact name in ``SECRET_FIELD_NAMES`` or any
+    suffix in ``SECRET_FIELD_SUFFIXES``.
+    """
+    normalized = field_name.lower()
+    return normalized in SECRET_FIELD_NAMES or normalized.endswith(SECRET_FIELD_SUFFIXES)
+
 
 class SecretResolutionError(Exception):
     """Raised when one or more secret refs cannot be resolved."""

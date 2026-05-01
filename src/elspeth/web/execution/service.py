@@ -36,7 +36,7 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.core.secrets import SecretResolutionError
 from elspeth.engine.orchestrator.core import Orchestrator
-from elspeth.engine.orchestrator.types import PipelineConfig
+from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobNotFoundError, BlobQuotaExceededError, BlobServiceProtocol, BlobStateError
@@ -650,29 +650,20 @@ class ExecutionServiceImpl:
             bundle = runtime_graph.plugin_bundle
             graph = runtime_graph.graph
 
-            # Include aggregation transforms alongside regular transforms,
-            # following the CLI pattern (see ``_orchestrator_context``
-            # in ``elspeth.cli``).
-            from elspeth.contracts.types import AggregationName
-
-            all_transforms = [t.plugin for t in bundle.transforms]
-
-            agg_id_map = graph.get_aggregation_id_map()
-            aggregation_settings: dict[str, Any] = {}
-
-            for agg_name, (transform, agg_config) in bundle.aggregations.items():
-                node_id = agg_id_map[AggregationName(agg_name)]
-                aggregation_settings[node_id] = agg_config
-                transform.node_id = node_id
-                all_transforms.append(transform)
-
-            pipeline_config = PipelineConfig(
+            # Fold aggregations into transforms, assemble PipelineConfig, and
+            # run the four orchestrator route-target validators. The
+            # orchestrator runs these validators again at run-init
+            # (engine/orchestrator/core.py:1746-1777). The validators are pure
+            # and idempotent — calling them here surfaces dangling-reference
+            # errors before any rows flow, with a cleaner error surface, and
+            # closes the composer/runtime parity gap (issue elspeth-127de6865a).
+            pipeline_config = assemble_and_validate_pipeline_config(
                 source=bundle.source,
-                transforms=all_transforms,
+                transforms=bundle.transforms,
                 sinks=bundle.sinks,
-                gates=list(settings.gates),
-                aggregation_settings=aggregation_settings,
-                coalesce_settings=(list(settings.coalesce) if settings.coalesce else []),
+                aggregations=bundle.aggregations,
+                settings=settings,
+                graph=graph,
             )
 
             # Set up EventBus to bridge ProgressEvent -> RunEvent -> broadcaster.

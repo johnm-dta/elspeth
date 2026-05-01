@@ -6,7 +6,7 @@ that operate at the trust boundary (user YAML → internal representation):
 
 1. _expand_env_vars() - Environment variable expansion with ${VAR:-default}
 2. _sanitize_dsn() - Database URL password removal with fingerprinting
-3. _is_secret_field() - Secret field name detection
+3. is_secret_field() - Secret field name detection (lives in core.secrets)
 4. _fingerprint_secrets() - Recursive secret replacement
 
 Properties tested:
@@ -26,11 +26,11 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from elspeth.core.config import (
-    _SECRET_FIELD_NAMES,
-    _SECRET_FIELD_SUFFIXES,
-    _expand_env_vars,
-    _is_secret_field,
+from elspeth.core.config import _expand_env_vars
+from elspeth.core.secrets import (
+    SECRET_FIELD_NAMES,
+    SECRET_FIELD_SUFFIXES,
+    is_secret_field,
 )
 
 # =============================================================================
@@ -81,7 +81,7 @@ non_secret_field_names = st.text(
     min_size=1,
     max_size=30,
     alphabet="abcdefghijklmnopqrstuvwxyz_0123456789",
-).filter(lambda s: s.lower() not in _SECRET_FIELD_NAMES and not s.lower().endswith(_SECRET_FIELD_SUFFIXES))
+).filter(lambda s: s.lower() not in SECRET_FIELD_NAMES and not s.lower().endswith(SECRET_FIELD_SUFFIXES))
 
 
 # =============================================================================
@@ -242,27 +242,27 @@ class TestExpandEnvVarsIdempotency:
 
 
 # =============================================================================
-# _is_secret_field Properties
+# is_secret_field Properties
 # =============================================================================
 
 
 class TestIsSecretFieldExactMatches:
-    """All names in _SECRET_FIELD_NAMES must be detected."""
+    """All names in SECRET_FIELD_NAMES must be detected."""
 
-    @given(name=st.sampled_from(sorted(_SECRET_FIELD_NAMES)))
+    @given(name=st.sampled_from(sorted(SECRET_FIELD_NAMES)))
     @settings(max_examples=50)
     def test_exact_names_detected(self, name: str) -> None:
-        """Property: Every name in _SECRET_FIELD_NAMES returns True."""
-        assert _is_secret_field(name) is True
+        """Property: Every name in SECRET_FIELD_NAMES returns True."""
+        assert is_secret_field(name) is True
 
     @given(
-        name=st.sampled_from(sorted(_SECRET_FIELD_NAMES)),
+        name=st.sampled_from(sorted(SECRET_FIELD_NAMES)),
         case_fn=st.sampled_from([str.upper, str.lower, str.title, str.swapcase]),
     )
     @settings(max_examples=100)
     def test_exact_names_case_insensitive(self, name: str, case_fn) -> None:
         """Property: Exact name matches are case-insensitive."""
-        assert _is_secret_field(case_fn(name)) is True
+        assert is_secret_field(case_fn(name)) is True
 
 
 class TestIsSecretFieldSuffixMatches:
@@ -274,12 +274,12 @@ class TestIsSecretFieldSuffixMatches:
             max_size=20,
             alphabet="abcdefghijklmnopqrstuvwxyz_",
         ).filter(lambda s: s[0].isalpha()),
-        suffix=st.sampled_from(list(_SECRET_FIELD_SUFFIXES)),
+        suffix=st.sampled_from(list(SECRET_FIELD_SUFFIXES)),
     )
     @settings(max_examples=200)
     def test_suffix_matches_detected(self, prefix: str, suffix: str) -> None:
         """Property: Any field ending in a secret suffix returns True."""
-        assert _is_secret_field(f"{prefix}{suffix}") is True
+        assert is_secret_field(f"{prefix}{suffix}") is True
 
     @given(
         prefix=st.text(
@@ -287,14 +287,14 @@ class TestIsSecretFieldSuffixMatches:
             max_size=20,
             alphabet="abcdefghijklmnopqrstuvwxyz_",
         ).filter(lambda s: s[0].isalpha()),
-        suffix=st.sampled_from(list(_SECRET_FIELD_SUFFIXES)),
+        suffix=st.sampled_from(list(SECRET_FIELD_SUFFIXES)),
         case_fn=st.sampled_from([str.upper, str.lower, str.title]),
     )
     @settings(max_examples=100)
     def test_suffix_matches_case_insensitive(self, prefix: str, suffix: str, case_fn) -> None:
         """Property: Suffix matches are case-insensitive."""
         field_name = case_fn(f"{prefix}{suffix}")
-        assert _is_secret_field(field_name) is True
+        assert is_secret_field(field_name) is True
 
 
 class TestIsSecretFieldNoFalsePositives:
@@ -304,7 +304,7 @@ class TestIsSecretFieldNoFalsePositives:
     @settings(max_examples=300)
     def test_non_secret_fields_not_detected(self, name: str) -> None:
         """Property: Fields that don't match exact names or suffixes return False."""
-        assert _is_secret_field(name) is False
+        assert is_secret_field(name) is False
 
     def test_partial_suffix_not_detected(self) -> None:
         """Edge case: Partial suffix matches don't trigger detection.
@@ -315,14 +315,14 @@ class TestIsSecretFieldNoFalsePositives:
         Let's verify the actual field names that should NOT match.
         """
         # These should NOT match because they don't end with exact suffixes
-        assert _is_secret_field("keyboard") is False
-        assert _is_secret_field("token_count") is False
-        assert _is_secret_field("password_length") is False
-        assert _is_secret_field("secret_sauce") is False
+        assert is_secret_field("keyboard") is False
+        assert is_secret_field("token_count") is False
+        assert is_secret_field("password_length") is False
+        assert is_secret_field("secret_sauce") is False
 
     def test_empty_string_not_detected(self) -> None:
         """Edge case: Empty string is not a secret field."""
-        assert _is_secret_field("") is False
+        assert is_secret_field("") is False
 
 
 # =============================================================================

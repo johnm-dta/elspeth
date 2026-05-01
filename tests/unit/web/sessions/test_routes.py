@@ -3976,6 +3976,15 @@ def test_runtime_preflight_errors_are_used_for_composition_state_persistence() -
 
 
 def test_authoring_validity_is_not_marked_valid_when_runtime_preflight_failed_internally() -> None:
+    """Legacy zero-arg sentinel still produces the bare ``runtime_preflight_failed``.
+
+    The :data:`_RUNTIME_PREFLIGHT_FAILED` module-level constant is a
+    no-diagnostics fallback constructed at import time. Production code
+    paths now use :func:`_capture_runtime_preflight_failure` to populate
+    the structured fields, but the bare sentinel is preserved as a
+    defensive default and locks in the contract that authoring-valid +
+    opaque-runtime-fail still persists as ``is_valid=False``.
+    """
     from elspeth.web.sessions.routes import _RUNTIME_PREFLIGHT_FAILED, _composer_persisted_validation
 
     authoring = ValidationSummary(is_valid=True, errors=(), warnings=(), suggestions=())
@@ -3984,6 +3993,188 @@ def test_authoring_validity_is_not_marked_valid_when_runtime_preflight_failed_in
 
     assert is_valid is False
     assert messages == ["runtime_preflight_failed"]
+
+
+def test_runtime_preflight_failed_with_diagnostics_emits_structured_errors() -> None:
+    """elspeth-2c3d63037c: replace opaque ``["runtime_preflight_failed"]``.
+
+    Verifies that a populated :class:`_RuntimePreflightFailed` (the
+    production path produced by :func:`_capture_runtime_preflight_failure`)
+    yields a structured ``validation_errors`` list. The first entry MUST
+    remain the legacy sentinel so SPA / LLM recovery loops keying on it
+    still match; subsequent entries carry attribution that the prior
+    opaque path forced operators to ``/state/revert`` to discover.
+    """
+    from elspeth.web.sessions.routes import _composer_persisted_validation, _RuntimePreflightFailed
+
+    authoring = ValidationSummary(is_valid=True, errors=(), warnings=(), suggestions=())
+    runtime = _RuntimePreflightFailed(
+        exception_class="AttributeError",
+        exception_message_first_line="'NoneType' object has no attribute 'lower'",
+        frames=(
+            "frame=src/elspeth/web/execution/validation.py:436:validate_pipeline",
+            "frame=src/elspeth/cli_helpers.py:120:instantiate_plugins_from_config",
+        ),
+    )
+
+    is_valid, messages = _composer_persisted_validation(authoring, runtime)
+
+    assert is_valid is False
+    assert messages is not None
+    assert messages[0] == "runtime_preflight_failed", (
+        "Legacy sentinel must remain at index 0 — SPA / LLM parsers "
+        "key on this exact string and would silently fail to detect "
+        "the failure class if it moved or changed."
+    )
+    assert "exception_class=AttributeError" in messages
+    assert any(m.startswith("exception_message=") for m in messages)
+    assert sum(1 for m in messages if m.startswith("frame=")) == 2
+
+
+def test_capture_runtime_preflight_failure_redacts_locals_and_source() -> None:
+    """Frames must contain only file:line:function — no source, no values.
+
+    Frame strings flow into the persisted audit row and a structured
+    server log; secret-bearing plugin config values, DB connection
+    strings, and bound SQL parameters travel through ``str(exc)`` /
+    ``__cause__`` chains and through ``traceback.format_exception``'s
+    source-line and locals-render output. The capture helper's contract
+    is to redact everything except the structural ``frame=path:line:func``
+    triple. This test pins the contract.
+    """
+    from elspeth.web.sessions.routes import _capture_runtime_preflight_failure
+
+    secret = "API_KEY=sk-LIVE-MUST-NOT-LEAK-ABCDEF"
+
+    def deeper() -> None:
+        local_secret = secret
+        raise RuntimeError(f"plugin bug referencing {local_secret}")
+
+    try:
+        deeper()
+    except RuntimeError as exc:
+        captured = _capture_runtime_preflight_failure(exc)
+
+    # Exception class and a redacted message line are captured.
+    assert captured.exception_class == "RuntimeError"
+    assert "plugin bug" in captured.exception_message_first_line
+    assert "sk-LIVE" in captured.exception_message_first_line, (
+        "Test relies on knowing the message text contains the secret — if this assertion fails the test setup is wrong, not the code."
+    )
+
+    # Frames are file:line:function ONLY. Source-line text and local
+    # repr (which would include ``secret`` and ``local_secret``) MUST
+    # NOT appear in the frame strings.
+    assert captured.frames, "expected at least one frame from the live traceback"
+    for frame in captured.frames:
+        assert frame.startswith("frame="), frame
+        assert "sk-LIVE" not in frame
+        assert "API_KEY" not in frame
+        # No source-line capture — frames are structural only.
+        assert "raise RuntimeError" not in frame
+        assert "local_secret" not in frame
+
+
+def test_state_data_carries_structured_errors_before_save_for_atomicity() -> None:
+    """elspeth-2c3d63037c sub-fix 3: structured errors must be baked into
+    the :class:`CompositionStateData` DTO BEFORE
+    :meth:`SessionServiceProtocol.save_composition_state` is called.
+
+    Atomicity contract: ``save_composition_state`` writes
+    ``version``, ``is_valid``, and ``validation_errors`` in a single
+    SQLAlchemy ``engine.begin()`` transaction (see
+    :meth:`SessionServiceImpl.save_composition_state`). Any path that
+    would let the version bump commit without the structured errors
+    would re-introduce the opaque-sentinel symptom by accident — a
+    reader of the new row would see ``is_valid=False`` with no
+    attribution.
+
+    This test pins the contract at the helper's seam: if a future
+    refactor moves the ``_RuntimePreflightFailed`` build site out from
+    under :func:`_state_data_from_composer_state` so the structured
+    errors are filled in *after* the DTO is constructed, the resulting
+    DTO would carry the legacy bare sentinel and this assertion would
+    catch it.
+    """
+    import asyncio
+
+    from elspeth.web.sessions.routes import _state_data_from_composer_state
+
+    # Authoring-valid state — otherwise runtime preflight is skipped and the
+    # structured-errors path under test is never exercised.
+    state = _make_authoring_valid_partial("atomicity-test")
+
+    async def boom(state, *, settings, secret_service, user_id):
+        raise AttributeError("'NoneType' has no attribute 'something_that_failed'")
+
+    with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=boom):
+        state_data, _validation = asyncio.run(
+            _state_data_from_composer_state(
+                state,
+                settings=object(),
+                secret_service=None,
+                user_id="alice",
+                runtime_preflight=None,
+                preflight_exception_policy="persist_invalid",
+                initial_version=None,
+                telemetry_source="compose",
+            ),
+        )
+
+    # The DTO that will be passed to save_composition_state already
+    # carries the structured attribution. The DB-side INSERT is
+    # transactional (see SessionServiceImpl.save_composition_state),
+    # so no observable row at v(N+1) can lack these fields.
+    assert state_data.is_valid is False
+    errors = list(state_data.validation_errors or ())
+    assert errors[0] == "runtime_preflight_failed"
+    assert "exception_class=AttributeError" in errors
+    assert any(e.startswith("exception_message=") for e in errors)
+    assert any(e.startswith("frame=") for e in errors)
+
+
+def test_runtime_preflight_failure_500_detail_does_not_promise_journal_traceback() -> None:
+    """elspeth-2c3d63037c: 500 detail must not claim "see server logs".
+
+    The prior wording promised a traceback in journald that the helpers
+    deliberately do not emit (per the secret-leak guard on
+    ``slog.error(... exc_info omitted)``). Operators following the
+    promise found nothing. The new wording must point at the persisted
+    state's ``validation_errors`` row — the actual diagnostic surface.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock
+    from uuid import UUID as _UUID
+
+    from elspeth.web.composer.protocol import ComposerRuntimePreflightError
+    from elspeth.web.sessions.routes import _handle_runtime_preflight_failure
+
+    exc = ComposerRuntimePreflightError(
+        original_exc=RuntimeError("boom"),
+        partial_state=None,
+    )
+    service = AsyncMock()
+
+    body = asyncio.run(
+        _handle_runtime_preflight_failure(
+            exc,
+            service,
+            _UUID("00000000-0000-4000-8000-000000000001"),
+            "user-id",
+            "compose",
+            settings=object(),
+            secret_service=None,
+        ),
+    )
+
+    assert body["error_type"] == "composer_plugin_error"
+    detail_text = str(body["detail"]).lower()
+    assert "see server logs" not in detail_text, (
+        "The 500 detail must not promise a journald traceback that the "
+        "helpers deliberately do not emit — that's exactly the diagnostic "
+        "lie elspeth-2c3d63037c was filed for."
+    )
+    assert "validation_errors" in detail_text or "persisted state" in detail_text
 
 
 def test_composer_persisted_validation_has_no_split_runtime_failed_knob() -> None:
@@ -4372,8 +4563,20 @@ def test_compose_runtime_preflight_persists_partial_state(tmp_path) -> None:
     assert persisted.metadata_ is not None
     assert persisted.metadata_["name"] == "partial-after-runtime-preflight"
     assert persisted.is_valid is False
-    # _composer_persisted_validation maps _RuntimePreflightFailed → ["runtime_preflight_failed"]
-    assert list(persisted.validation_errors) == ["runtime_preflight_failed"]
+    # _composer_persisted_validation maps _RuntimePreflightFailed →
+    # structured diagnostic strings (elspeth-2c3d63037c). The first entry
+    # remains the legacy sentinel so external parsers keying on it still
+    # match; subsequent entries carry exception_class + first-line message
+    # + bounded file:line:function frames.
+    errors = list(persisted.validation_errors)
+    assert errors[0] == "runtime_preflight_failed"
+    assert "exception_class=RuntimeError" in errors
+    assert any(e.startswith("exception_message=") for e in errors)
+    assert any(e.startswith("frame=") for e in errors), (
+        "Frame strings (file:line:function) must be persisted for triage; "
+        "without them the operator only sees the exception class and is "
+        "back to the opaque-sentinel state."
+    )
 
 
 def test_recompose_runtime_preflight_persists_partial_state(tmp_path) -> None:
@@ -4424,7 +4627,13 @@ def test_recompose_runtime_preflight_persists_partial_state(tmp_path) -> None:
     assert persisted.metadata_ is not None
     assert persisted.metadata_["name"] == "partial-after-recompose-preflight"
     assert persisted.is_valid is False
-    assert list(persisted.validation_errors) == ["runtime_preflight_failed"]
+    # See sibling test in test_compose_runtime_preflight_persists_partial_state
+    # for the structured-error rationale (elspeth-2c3d63037c).
+    errors = list(persisted.validation_errors)
+    assert errors[0] == "runtime_preflight_failed"
+    assert "exception_class=RuntimeError" in errors
+    assert any(e.startswith("exception_message=") for e in errors)
+    assert any(e.startswith("frame=") for e in errors)
 
 
 def test_compose_cached_runtime_preflight_persists_partial_state(tmp_path) -> None:

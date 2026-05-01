@@ -294,7 +294,14 @@ class TestRunEventJsonRoundTrip:
 
 
 class TestCompletedDataDecomposition:
-    """Enforce rows_processed == succeeded + failed + routed + quarantined."""
+    """Enforce rows_processed >= succeeded + failed + routed + quarantined.
+
+    Narrow invariant per elspeth-31d53c7493 — full DAG-aware balance is
+    tracked in elspeth-cf84eb1b52 (P0).  Over-counting (sum > processed)
+    is still a Tier 1 anomaly; under-counting (sum < processed) is the
+    legitimate signature of an aggregation pipeline that absorbed source
+    rows into CONSUMED_IN_BATCH.
+    """
 
     def test_consistent_counts_accepted(self) -> None:
         data = CompletedData(
@@ -306,16 +313,38 @@ class TestCompletedDataDecomposition:
         )
         assert data.rows_processed == 100
 
-    def test_inconsistent_counts_rejected(self) -> None:
+    def test_overcounted_terminals_rejected(self) -> None:
+        """Sum of terminal counts must not exceed rows_processed (over-counting bug)."""
         with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
             CompletedData(
                 rows_processed=100,
                 rows_succeeded=95,
                 rows_failed=5,
                 rows_routed=0,
-                rows_quarantined=3,  # 95 + 5 + 3 = 103 != 100
+                rows_quarantined=3,  # 95 + 5 + 0 + 3 = 103 > 100
                 landscape_run_id="lscape-1",
             )
+
+    def test_aggregation_undercount_accepted(self) -> None:
+        """S2 reproducer (run id 44f52421-a379-459b-96a8-6f0656086f16, 2026-05-01 eval).
+
+        csv 6 source rows -> batch_stats(group_by=customer_tier) -> json sink emits
+        2 aggregation outputs.  Source rows reach CONSUMED_IN_BATCH (no counter)
+        so rows_processed=6 but sum-of-four-buckets=2.  Equality formulation
+        rejected this legitimate shape, breaking pipeline_done_callback.
+        Inequality formulation accepts it.  Full DAG-aware balance equation
+        in elspeth-cf84eb1b52.
+        """
+        data = CompletedData(
+            rows_processed=6,
+            rows_succeeded=2,
+            rows_failed=0,
+            rows_routed=0,
+            rows_quarantined=0,
+            landscape_run_id="lscape-batchstats",
+        )
+        assert data.rows_processed == 6
+        assert data.rows_succeeded == 2
 
     def test_zero_counts_accepted(self) -> None:
         data = CompletedData(
@@ -706,7 +735,8 @@ class TestRunStatusDecomposition:
         )
         assert resp.rows_processed == 10
 
-    def test_completed_rejects_inconsistent_counts(self) -> None:
+    def test_completed_rejects_overcounted_terminals(self) -> None:
+        """Sum of terminal counts > rows_processed is still a Tier 1 anomaly."""
         with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
             RunStatusResponse(
                 run_id="r1",
@@ -717,12 +747,33 @@ class TestRunStatusDecomposition:
                 rows_succeeded=95,
                 rows_failed=5,
                 rows_routed=0,
-                rows_quarantined=3,  # 95 + 5 + 3 = 103 != 100
+                rows_quarantined=3,  # 95 + 5 + 0 + 3 = 103 > 100
                 error=None,
                 landscape_run_id="lscape-1",
             )
 
-    def test_failed_rejects_inconsistent_counts(self) -> None:
+    def test_completed_aggregation_undercount_accepted(self) -> None:
+        """Aggregation pipelines legitimately undercount under the narrow
+        invariant (elspeth-31d53c7493).  S2 reproducer shape via the
+        terminal-status path.  Full balance in elspeth-cf84eb1b52.
+        """
+        resp = RunStatusResponse(
+            run_id="r1",
+            status="completed",
+            started_at=datetime.now(tz=UTC),
+            finished_at=datetime.now(tz=UTC),
+            rows_processed=6,
+            rows_succeeded=2,
+            rows_failed=0,
+            rows_routed=0,
+            rows_quarantined=0,
+            error=None,
+            landscape_run_id="lscape-batchstats",
+        )
+        assert resp.rows_processed == 6
+        assert resp.rows_succeeded == 2
+
+    def test_failed_rejects_overcounted_terminals(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
             RunStatusResponse(
                 run_id="r1",
@@ -730,14 +781,15 @@ class TestRunStatusDecomposition:
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
                 rows_processed=10,
-                rows_succeeded=0,
-                rows_failed=0,
-                rows_quarantined=0,  # 0 != 10
+                rows_succeeded=8,
+                rows_failed=5,
+                rows_routed=0,
+                rows_quarantined=0,  # 8 + 5 = 13 > 10
                 error="pipeline crashed",
                 landscape_run_id=None,
             )
 
-    def test_cancelled_rejects_inconsistent_counts(self) -> None:
+    def test_cancelled_rejects_overcounted_terminals(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
             RunStatusResponse(
                 run_id="r1",
@@ -747,8 +799,8 @@ class TestRunStatusDecomposition:
                 rows_processed=50,
                 rows_succeeded=30,
                 rows_failed=10,
-                rows_routed=0,
-                rows_quarantined=5,  # 30 + 10 + 5 = 45 != 50
+                rows_routed=20,
+                rows_quarantined=5,  # 30 + 10 + 20 + 5 = 65 > 50
                 error=None,
                 landscape_run_id=None,
             )
@@ -859,7 +911,8 @@ class TestRunResultsDecomposition:
         )
         assert resp.rows_processed == 100
 
-    def test_inconsistent_counts_rejected(self) -> None:
+    def test_overcounted_terminals_rejected(self) -> None:
+        """Sum of terminal counts > rows_processed is over-counting (Tier 1 bug)."""
         with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
             RunResultsResponse(
                 run_id="r1",
@@ -867,23 +920,43 @@ class TestRunResultsDecomposition:
                 rows_processed=100,
                 rows_succeeded=50,
                 rows_failed=20,
-                rows_routed=0,
-                rows_quarantined=10,  # 50 + 20 + 10 = 80 != 100
+                rows_routed=40,
+                rows_quarantined=10,  # 50 + 20 + 40 + 10 = 120 > 100
                 landscape_run_id="lscape-1",
                 error=None,
             )
 
-    def test_failed_status_inconsistent_counts_rejected(self) -> None:
+    def test_aggregation_undercount_accepted(self) -> None:
+        """S2 reproducer (2026-05-01 eval) via results endpoint.  Aggregation
+        pipelines legitimately have rows_processed > sum-of-terminal-counts
+        because CONSUMED_IN_BATCH source-row outcomes increment no counter
+        (engine/orchestrator/outcomes.py:194).  Full balance in elspeth-cf84eb1b52.
+        """
+        resp = RunResultsResponse(
+            run_id="r1",
+            status="completed",
+            rows_processed=6,
+            rows_succeeded=2,
+            rows_failed=0,
+            rows_routed=0,
+            rows_quarantined=0,
+            landscape_run_id="lscape-batchstats",
+            error=None,
+        )
+        assert resp.rows_processed == 6
+        assert resp.rows_succeeded == 2
+
+    def test_failed_status_overcounted_rejected(self) -> None:
         """Unconditional check: any terminal status triggers validation."""
         with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
             RunResultsResponse(
                 run_id="r1",
                 status="failed",
                 rows_processed=10,
-                rows_succeeded=1,
-                rows_failed=0,
+                rows_succeeded=8,
+                rows_failed=5,
                 rows_routed=0,
-                rows_quarantined=0,  # 1 != 10
+                rows_quarantined=0,  # 8 + 5 = 13 > 10
                 landscape_run_id=None,
                 error="kaboom",
             )

@@ -113,20 +113,43 @@ def _validate_row_decomposition(
     rows_routed: int,
     rows_quarantined: int,
 ) -> None:
-    """Enforce rows_processed == succeeded + failed + routed + quarantined.
+    """Enforce rows_processed >= succeeded + failed + routed + quarantined.
 
-    Shared by CompletedData, RunResultsResponse, and (conditionally on
-    terminal status) RunStatusResponse.  A mismatch is a Tier 1 anomaly —
-    the orchestrator and session service must produce consistent counts
-    on terminal states.  Crash at construction rather than propagating
-    wrong numbers to the frontend and audit trail.
+    NARROW INVARIANT (elspeth-31d53c7493). The original equality
+    formulation (``processed == succeeded + failed + routed + quarantined``)
+    does not hold for any DAG with aggregation, fork, expansion, or
+    coalesce — source rows reach terminal states the formula does not
+    account for. A ``batch_stats`` aggregation pipeline absorbs source
+    rows into ``CONSUMED_IN_BATCH`` (no counter incremented in
+    ``engine/orchestrator/outcomes.py``), so a legitimate run reports
+    ``rows_processed > sum``.
+
+    The relaxed inequality preserves the half of the invariant we can
+    still defend at this layer: the orchestrator must never emit MORE
+    terminal-state counts than input rows ingested.  Over-counting is a
+    bookkeeping bug (e.g., a token's outcome recorded twice) and remains
+    a Tier 1 anomaly worth crashing on.
+
+    The architecturally-correct formula — extending the schema to carry
+    rows_consumed_in_batch / rows_forked / rows_coalesced /
+    rows_expanded counters and re-deriving the orchestrator-side balance
+    equation across parent/child token relationships — is tracked in
+    elspeth-cf84eb1b52 (P0, blocks RC 5.0).  When that lands, this
+    inequality is replaced by the full balance.
+
+    Note: even this inequality does NOT hold for fork/coalesce pipelines
+    (a single input can produce multiple terminal child counts).  Those
+    shapes are not currently exposed via the composer, so the practical
+    surface for this narrow patch is aggregation pipelines.
     """
-    expected = rows_succeeded + rows_failed + rows_routed + rows_quarantined
-    if rows_processed != expected:
+    sum_terminal = rows_succeeded + rows_failed + rows_routed + rows_quarantined
+    if rows_processed < sum_terminal:
         raise ValueError(
-            f"Row count decomposition mismatch: rows_processed={rows_processed} "
-            f"!= rows_succeeded({rows_succeeded}) + rows_failed({rows_failed}) "
-            f"+ rows_routed({rows_routed}) + rows_quarantined({rows_quarantined}) = {expected}"
+            f"Row count decomposition mismatch (over-counting): rows_processed={rows_processed} "
+            f"< rows_succeeded({rows_succeeded}) + rows_failed({rows_failed}) "
+            f"+ rows_routed({rows_routed}) + rows_quarantined({rows_quarantined}) = {sum_terminal}. "
+            f"Tier 1 anomaly: orchestrator emitted more terminal-state counts than input rows. "
+            f"See elspeth-cf84eb1b52 for the full DAG-aware balance equation."
         )
 
 
@@ -420,13 +443,16 @@ class RunStatusResponse(_StrictResponse):
 
     @model_validator(mode="after")
     def _check_row_decomposition(self) -> Self:
-        """Enforce decomposition ONLY on terminal states.
+        """Enforce decomposition invariant ONLY on terminal states.
 
         Non-terminal states (pending/running) may have transiently
         inconsistent counts while the orchestrator is mid-flight
         (a row may be marked processed before being categorised).
-        Terminal states must decompose cleanly — a mismatch served
-        via REST is a Tier 1 anomaly.
+        Terminal states must satisfy the narrow invariant in
+        ``_validate_row_decomposition`` (rows_processed >= sum of
+        terminal-state counts) — over-counting is a Tier 1 anomaly.
+        Full DAG-aware balance equation is tracked in elspeth-cf84eb1b52
+        (P0, blocks RC 5.0).
         """
         if self.status in RUN_STATUS_TERMINAL_VALUES:
             _validate_row_decomposition(

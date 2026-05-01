@@ -709,8 +709,8 @@ class TestWebSocketReconnectTier1Guards:
         ):
             pass
 
-    def test_completed_run_with_inconsistent_row_counts_raises(self) -> None:
-        """Tier 1 anomaly: row count decomposition mismatch in completed run.
+    def test_completed_run_with_overcounted_row_counts_raises(self) -> None:
+        """Tier 1 anomaly: row count over-counting in completed run.
 
         Defence-in-depth: even if a session service bypasses the
         RunStatusResponse validator (e.g., via ``model_construct`` on a
@@ -718,6 +718,11 @@ class TestWebSocketReconnectTier1Guards:
         coherent Tier 1 anomaly message rather than an unhandled
         ``pydantic.ValidationError`` that leaves the client disconnected
         without explanation (routes.py close code 1011).
+
+        Under the narrow inequality invariant (elspeth-31d53c7493), only
+        over-counting (sum > processed) trips the catch.  Under-counting
+        is the legitimate aggregation-pipeline shape and must pass.
+        Full DAG-aware balance is tracked in elspeth-cf84eb1b52 (P0).
         """
         from starlette.testclient import TestClient
 
@@ -731,10 +736,10 @@ class TestWebSocketReconnectTier1Guards:
             started_at=datetime.now(tz=UTC),
             finished_at=datetime.now(tz=UTC),
             rows_processed=100,
-            rows_succeeded=50,
+            rows_succeeded=80,
             rows_failed=20,
-            rows_routed=0,
-            rows_quarantined=10,  # 50+20+0+10 = 80 != 100 — Tier 1 anomaly
+            rows_routed=10,
+            rows_quarantined=10,  # 80+20+10+10 = 120 > 100 — over-counting Tier 1 bug
             error=None,
             landscape_run_id="lscape-1",
         )

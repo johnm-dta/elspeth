@@ -12,6 +12,35 @@ SecretScope = Literal["user", "server", "org"]
 _ALLOWED_SECRET_SCOPES = frozenset({"user", "server", "org"})
 _LOWERCASE_HEX = frozenset("0123456789abcdef")
 
+SecretUnavailabilityReason = Literal[
+    "fingerprint_resolver_not_configured",
+    "env_var_not_set",
+    "value_decryption_failed",
+]
+"""Closed-list reasons a secret is unavailable through the inventory API.
+
+The taxonomy is deliberately structural — every value names a deployment-
+or row-level failure mode that the store can decide *without inspecting
+secret material*.  Free-form reason strings are forbidden: a ``Literal``
+prevents any code path from interpolating env-var or candidate-secret
+values into the response, mechanically enforcing the audit-hygiene
+constraint that ``/api/secrets`` must not echo secret content.
+
+Adding a new reason: widen this Literal AND ``_ALLOWED_UNAVAILABILITY_REASONS``
+in the same commit.  Per the project's no-legacy-code policy, every
+producer of ``SecretInventoryItem`` updates to populate it in the same
+commit; never extend the Literal without enumerating where the new
+reason is produced.
+"""
+
+_ALLOWED_UNAVAILABILITY_REASONS = frozenset(
+    {
+        "fingerprint_resolver_not_configured",
+        "env_var_not_set",
+        "value_decryption_failed",
+    }
+)
+
 
 def _validate_secret_scope(owner: str, scope: SecretScope) -> None:
     if scope not in _ALLOWED_SECRET_SCOPES:
@@ -126,15 +155,33 @@ class SecretInventoryItem:
     ``CreateSecretResult.scope`` and ``ResolvedSecret.scope``: type-checked
     callers cannot pass an invented scope value through the inventory
     without first widening this Literal and every sibling schema.
+
+    ``reason`` carries the structural failure mode when ``available`` is
+    False so an operator inspecting ``/api/secrets`` can act on the cause
+    without consulting source code or runtime errors.  The biconditional
+    ``available ⟺ reason is None`` is enforced in ``__post_init__``: an
+    available secret with a reason is incoherent, an unavailable secret
+    without a reason is the operator-hostile shape this field exists to
+    eliminate.
     """
 
     name: str
     scope: SecretScope
     available: bool
     source_kind: str = ""
+    reason: SecretUnavailabilityReason | None = None
 
     def __post_init__(self) -> None:
         _validate_secret_scope(type(self).__name__, self.scope)
+        if self.available and self.reason is not None:
+            raise ValueError(f"{type(self).__name__}: reason must be None when available=True, got {self.reason!r}")
+        if not self.available and self.reason is None:
+            raise ValueError(
+                f"{type(self).__name__}: reason is required when available=False; "
+                f"valid values are {sorted(_ALLOWED_UNAVAILABILITY_REASONS)}"
+            )
+        if self.reason is not None and self.reason not in _ALLOWED_UNAVAILABILITY_REASONS:
+            raise ValueError(f"{type(self).__name__}: reason must be one of {sorted(_ALLOWED_UNAVAILABILITY_REASONS)}, got {self.reason!r}")
 
 
 @runtime_checkable

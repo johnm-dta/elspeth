@@ -921,7 +921,15 @@ class FakeSecretService:
         self._inventory = available_refs | (inventory_refs or set())
 
     def list_refs(self, user_id: str) -> list[SecretInventoryItem]:
-        return [SecretInventoryItem(name=name, scope="user", available=name in self._available) for name in sorted(self._inventory)]
+        return [
+            SecretInventoryItem(
+                name=name,
+                scope="user",
+                available=name in self._available,
+                reason=None if name in self._available else "value_decryption_failed",
+            )
+            for name in sorted(self._inventory)
+        ]
 
     def has_ref(self, user_id: str, name: str) -> bool:
         return name in self._available

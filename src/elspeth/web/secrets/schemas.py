@@ -16,9 +16,9 @@ into successful writes.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from elspeth.contracts.secrets import SecretScope
+from elspeth.contracts.secrets import SecretScope, SecretUnavailabilityReason
 from elspeth.web.validation import SECRET_NAME_MAX_LENGTH, SECRET_NAME_PATTERN, has_visible_content
 
 
@@ -29,12 +29,34 @@ class _StrictResponse(BaseModel):
 
 
 class SecretInventoryResponse(_StrictResponse):
-    """Public metadata for a secret reference -- NEVER includes the value."""
+    """Public metadata for a secret reference -- NEVER includes the value.
+
+    ``reason`` mirrors ``SecretInventoryItem.reason``: a closed-list
+    structural failure mode populated when ``available`` is False.  The
+    biconditional ``available ⟺ reason is None`` is enforced by
+    ``_check_reason_invariant``; same discipline as the contract
+    dataclass so the HTTP response cannot represent the operator-hostile
+    "false-with-no-explanation" shape this field exists to eliminate.
+
+    SECURITY: ``reason`` is typed as ``SecretUnavailabilityReason``
+    (a ``Literal``), so no code path can interpolate env-var or
+    candidate-secret content into the response — the type system
+    enforces the audit-hygiene constraint.
+    """
 
     name: str
     scope: SecretScope
     available: bool
     source_kind: str = ""
+    reason: SecretUnavailabilityReason | None = None
+
+    @model_validator(mode="after")
+    def _check_reason_invariant(self) -> SecretInventoryResponse:
+        if self.available and self.reason is not None:
+            raise ValueError("reason must be None when available=True")
+        if not self.available and self.reason is None:
+            raise ValueError("reason is required when available=False")
+        return self
 
 
 class CreateSecretRequest(BaseModel):

@@ -61,6 +61,7 @@ def create_secrets_router() -> APIRouter:
                 scope=item.scope,
                 available=item.available,
                 source_kind=item.source_kind,
+                reason=item.reason,
             )
             for item in items
         ]

@@ -501,11 +501,15 @@ allow_hits:
     SecretNotFoundError
   safety: Missing env var raises SecretNotFoundError; no default fabrication
   expires: null
-- key: web/secrets/server_store.py:R1:ServerSecretStore:list_secrets:fp=24c0960485b6a97d
+- key: web/secrets/server_store.py:R1:ServerSecretStore:list_secrets:fp=19395c7ca9458241
   owner: web-secrets
-  reason: Tier 3 boundary — os.environ.get() checks env var presence for availability
-    metadata
-  safety: Only produces bool available flag; no secret value exposed
+  reason: Tier 3 boundary — os.environ.get() checks env var presence to populate
+    the inventory's structural reason (env_var_not_set vs
+    fingerprint_resolver_not_configured). The env value is never read into the
+    response — only its truthy/falsy state controls the closed-list reason.
+  safety: Returns SecretInventoryItem with closed-list Literal reason field; no
+    secret value or env content can reach the response (the Literal type makes
+    free-form interpolation a structural impossibility).
   expires: null
 - key: web/secrets/user_store.py:R1:_fingerprint_key_available:fp=9ec1dd9710d48731
   owner: web-secrets

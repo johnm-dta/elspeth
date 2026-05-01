@@ -292,12 +292,13 @@ class TestUserSecretStore:
         assert store.has_secret("KEY", user_id="u1", auth_provider_type="local") is False
 
     def test_list_secrets_unavailable_when_fingerprint_key_missing(self, store: UserSecretStore, monkeypatch: pytest.MonkeyPatch) -> None:
-        """list_secrets marks available=False when fingerprint key is missing."""
+        """list_secrets marks available=False with structural reason when fingerprint key is missing."""
         store.set_secret("KEY", value="val", user_id="u1", auth_provider_type="local")
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY")
         items = store.list_secrets(user_id="u1", auth_provider_type="local")
         assert len(items) == 1
         assert items[0].available is False
+        assert items[0].reason == "fingerprint_resolver_not_configured"
 
     def test_rotation_makes_existing_secret_unresolvable(self, db_engine) -> None:
         """A master-key rotation must make old rows unavailable, not falsely available.
@@ -316,6 +317,7 @@ class TestUserSecretStore:
         assert len(items) == 1
         assert items[0].name == "ROTATED"
         assert items[0].available is False
+        assert items[0].reason == "value_decryption_failed"
         with pytest.raises(SecretDecryptionError, match="cannot be decrypted"):
             rotated_store.get_secret("ROTATED", user_id="u1", auth_provider_type="local")
 
@@ -340,6 +342,7 @@ class TestUserSecretStore:
         items = store.list_secrets(user_id="u1", auth_provider_type="local")
         assert len(items) == 1
         assert items[0].available is False
+        assert items[0].reason == "value_decryption_failed"
         with pytest.raises(SecretDecryptionError, match="cannot be decrypted"):
             store.get_secret("CORRUPT", user_id="u1", auth_provider_type="local")
 

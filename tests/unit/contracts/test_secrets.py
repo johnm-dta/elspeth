@@ -74,13 +74,49 @@ class TestSecretInventoryItem:
         item = SecretInventoryItem(name="KEY", scope="user", available=True)
         assert not hasattr(item, "value")
 
-    def test_fields(self):
-        item = SecretInventoryItem(name="KEY", scope="server", available=False, source_kind="env")
+    def test_available_item_has_no_reason(self) -> None:
+        item = SecretInventoryItem(name="KEY", scope="user", available=True)
+        assert item.reason is None
+
+    def test_unavailable_item_carries_reason(self) -> None:
+        item = SecretInventoryItem(
+            name="KEY",
+            scope="server",
+            available=False,
+            source_kind="env",
+            reason="env_var_not_set",
+        )
         assert item.name == "KEY"
         assert item.scope == "server"
         assert item.available is False
         assert item.source_kind == "env"
+        assert item.reason == "env_var_not_set"
 
     def test_invalid_scope_rejected(self) -> None:
         with pytest.raises(ValueError, match="scope must be one of"):
             SecretInventoryItem(name="KEY", scope="bogus", available=True)  # type: ignore[arg-type]
+
+    def test_available_with_reason_rejected(self) -> None:
+        """An available secret with a reason is incoherent."""
+        with pytest.raises(ValueError, match="reason must be None when available=True"):
+            SecretInventoryItem(
+                name="KEY",
+                scope="user",
+                available=True,
+                reason="env_var_not_set",
+            )
+
+    def test_unavailable_without_reason_rejected(self) -> None:
+        """The shape this field exists to eliminate: false-with-no-explanation."""
+        with pytest.raises(ValueError, match="reason is required when available=False"):
+            SecretInventoryItem(name="KEY", scope="server", available=False, source_kind="env")
+
+    def test_unknown_reason_rejected(self) -> None:
+        """The Literal contract is enforced at construction time."""
+        with pytest.raises(ValueError, match="reason must be one of"):
+            SecretInventoryItem(
+                name="KEY",
+                scope="server",
+                available=False,
+                reason="something_else",  # type: ignore[arg-type]
+            )

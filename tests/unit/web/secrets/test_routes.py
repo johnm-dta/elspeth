@@ -127,6 +127,58 @@ class TestListSecrets:
         names = [item["name"] for item in resp.json()]
         assert "NEW_SECRET" in names
 
+    def test_list_available_entries_carry_no_reason(self) -> None:
+        """Available secrets must report ``reason: null`` per the API contract."""
+        app = _make_app()
+        client = TestClient(app)
+        client.post("/api/secrets", json={"name": "AVAILABLE_KEY", "value": "v"})
+
+        resp = client.get("/api/secrets")
+        assert resp.status_code == 200
+        item = next(i for i in resp.json() if i["name"] == "AVAILABLE_KEY")
+        assert item["available"] is True
+        assert item["reason"] is None
+
+    def test_list_unavailable_entries_carry_structural_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The eval reproducer: ``ELSPETH_FINGERPRINT_KEY`` unset must surface
+        ``reason: "fingerprint_resolver_not_configured"`` in the response —
+        an operator can identify the configuration gap from the API alone.
+        """
+        # Build the app with the fingerprint key set (route fixture requires it
+        # for the create call), then unset it before listing — the live state at
+        # list time is what governs the response.
+        app = _make_app(server_allowlist=("OPENROUTER_API_KEY",))
+        client = TestClient(app)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-real-value")
+        client.post("/api/secrets", json={"name": "USER_KEY", "value": "v"})
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+
+        resp = client.get("/api/secrets")
+        assert resp.status_code == 200
+        items = resp.json()
+        assert items, "expected the inventory to enumerate user + server entries"
+        for item in items:
+            assert item["available"] is False
+            assert item["reason"] == "fingerprint_resolver_not_configured"
+
+    def test_list_response_never_echoes_secret_material(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Audit-hygiene: a sentinel value assigned to a secret env var must not
+        appear anywhere in the response body — name, scope, source_kind, or
+        reason.  Closed-list ``reason`` is the structural mechanism enforcing
+        this; the test probes the property directly so a future refactor that
+        widened ``reason`` to a free-form string would fail audibly here.
+        """
+        sentinel = "SENTINEL-LEAK-CHECK-9876"
+        monkeypatch.setenv("ALLOWED_SERVER_KEY", sentinel)
+        app = _make_app(server_allowlist=("ALLOWED_SERVER_KEY",))
+        client = TestClient(app)
+        client.post("/api/secrets", json={"name": "USER_KEY", "value": sentinel})
+
+        resp = client.get("/api/secrets")
+        assert resp.status_code == 200
+        body_text = resp.text
+        assert sentinel not in body_text
+
 
 # ---------------------------------------------------------------------------
 # CREATE secret

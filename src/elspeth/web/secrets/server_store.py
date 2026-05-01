@@ -99,16 +99,51 @@ class ServerSecretStore:
 
         The ``available`` flag requires both the env var being set AND
         the fingerprint key being configured — without the latter,
-        get_secret() would raise RuntimeError on fingerprint computation.
+        get_secret() would raise FingerprintKeyMissingError.
+
+        Reason precedence is **fingerprint-key-first**: when
+        ``ELSPETH_FINGERPRINT_KEY`` is unset, every entry reports
+        ``fingerprint_resolver_not_configured`` regardless of env-var
+        state.  Rationale: the fingerprint-key gap is global deployment
+        misconfiguration; reporting per-secret env-var details under it
+        would mislead operators into chasing the wrong cause.  The same
+        precedence is mirrored in ``UserSecretStore.list_secrets`` so
+        an operator sees one consistent reason taxonomy across both
+        scopes.
         """
         can_fingerprint = _fingerprint_key_available()
-        return [
-            SecretInventoryItem(
-                name=name,
-                scope="server",
-                available=bool(os.environ.get(name)) and can_fingerprint,
-                source_kind="env",
+        items: list[SecretInventoryItem] = []
+        for name in self._allowlist:
+            if _is_reserved(name):
+                continue
+            if not can_fingerprint:
+                items.append(
+                    SecretInventoryItem(
+                        name=name,
+                        scope="server",
+                        available=False,
+                        source_kind="env",
+                        reason="fingerprint_resolver_not_configured",
+                    )
+                )
+                continue
+            if not os.environ.get(name):
+                items.append(
+                    SecretInventoryItem(
+                        name=name,
+                        scope="server",
+                        available=False,
+                        source_kind="env",
+                        reason="env_var_not_set",
+                    )
+                )
+                continue
+            items.append(
+                SecretInventoryItem(
+                    name=name,
+                    scope="server",
+                    available=True,
+                    source_kind="env",
+                )
             )
-            for name in self._allowlist
-            if not _is_reserved(name)
-        ]
+        return items

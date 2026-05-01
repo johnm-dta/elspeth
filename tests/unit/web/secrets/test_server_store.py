@@ -109,7 +109,9 @@ class TestListSecrets:
         assert len(items) == 2
         by_name = {item.name: item for item in items}
         assert by_name["ALLOWED_KEY_A"].available is True
+        assert by_name["ALLOWED_KEY_A"].reason is None
         assert by_name["ALLOWED_KEY_B"].available is False
+        assert by_name["ALLOWED_KEY_B"].reason == "env_var_not_set"
 
     def test_inventory_items_have_correct_fields(self, store: ServerSecretStore, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ALLOWED_KEY_A", "val")
@@ -228,22 +230,62 @@ class TestFingerprintKeyAvailability:
         assert store.has_secret("ALLOWED_KEY") is True
 
     def test_list_secrets_unavailable_when_fingerprint_key_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """list_secrets marks available=False when fingerprint key is missing."""
+        """list_secrets marks available=False with structural reason when fingerprint key is missing."""
         monkeypatch.setenv("ALLOWED_KEY", "value")
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
         store = ServerSecretStore(allowlist=("ALLOWED_KEY",))
         items = store.list_secrets()
         item = next(i for i in items if i.name == "ALLOWED_KEY")
         assert item.available is False
+        assert item.reason == "fingerprint_resolver_not_configured"
 
     def test_list_secrets_available_when_fingerprint_key_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """list_secrets marks available=True when both env var and fingerprint key set."""
+        """list_secrets marks available=True (and reason=None) when both env var and fingerprint key set."""
         monkeypatch.setenv("ALLOWED_KEY", "value")
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "fp-key")
         store = ServerSecretStore(allowlist=("ALLOWED_KEY",))
         items = store.list_secrets()
         item = next(i for i in items if i.name == "ALLOWED_KEY")
         assert item.available is True
+        assert item.reason is None
+
+    def test_list_secrets_fingerprint_key_takes_precedence_over_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When BOTH the fingerprint key AND the env var are unset, the global
+        deployment gap is reported — not the per-secret env-var gap.
+
+        The precedence is deliberate: fixing the env var without first fixing
+        the fingerprint key would not make the secret resolvable, so reporting
+        ``env_var_not_set`` first would mislead operators into chasing the
+        wrong cause.  Locking this in a test so the choice survives future
+        refactors.
+        """
+        monkeypatch.delenv("ALLOWED_KEY", raising=False)
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        store = ServerSecretStore(allowlist=("ALLOWED_KEY",))
+        items = store.list_secrets()
+        item = next(i for i in items if i.name == "ALLOWED_KEY")
+        assert item.available is False
+        assert item.reason == "fingerprint_resolver_not_configured"
+
+    def test_list_secrets_reason_is_closed_list_when_env_var_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Audit-hygiene: a sentinel value placed in another env var must
+        never appear in any inventory item — the reason field is structural,
+        never derived from candidate-secret material.
+
+        Probes the structural property directly: if the reason were ever
+        widened to a free-form string interpolating env content, this
+        assertion would fail.
+        """
+        sentinel = "DO-NOT-LEAK-THIS-VALUE-1234"
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "fp-key")
+        monkeypatch.setenv("ALLOWED_KEY_A", sentinel)
+        monkeypatch.delenv("ALLOWED_KEY_B", raising=False)
+        store = ServerSecretStore(allowlist=("ALLOWED_KEY_A", "ALLOWED_KEY_B"))
+        items = store.list_secrets()
+        for item in items:
+            assert sentinel not in (item.reason or "")
+            assert sentinel not in (item.source_kind or "")
+            assert sentinel not in item.name
 
     def test_get_secret_raises_fingerprint_missing_typed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """get_secret surfaces FingerprintKeyMissingError (typed) when key is unset.

@@ -290,6 +290,17 @@ class UserSecretStore:
         The ``available`` flag reflects full resolvability: the
         fingerprint key must be configured and the stored ciphertext must
         be decryptable with the current web ``secret_key``.
+
+        Reason precedence is **fingerprint-key-first**, mirroring
+        :meth:`ServerSecretStore.list_secrets`.  When
+        ``ELSPETH_FINGERPRINT_KEY`` is unset every row reports
+        ``fingerprint_resolver_not_configured`` even if its ciphertext
+        would otherwise be undecryptable — the global deployment gap
+        masks per-row state because fixing the per-row state without
+        first fixing the deployment state would not make the secret
+        resolvable.  Rows that survive the fingerprint-key gate but
+        fail decryption (key rotation, row corruption, tamper) report
+        ``value_decryption_failed``.
         """
         t = user_secrets_table
         stmt = (
@@ -307,15 +318,39 @@ class UserSecretStore:
             rows = conn.execute(stmt).fetchall()
 
         can_resolve = _fingerprint_key_available()
-        return [
-            SecretInventoryItem(
-                name=row.name,
-                scope="user",
-                available=can_resolve and self._row_is_resolvable(row.name, row=row),
-                source_kind="user_store",
+        items: list[SecretInventoryItem] = []
+        for row in rows:
+            if not can_resolve:
+                items.append(
+                    SecretInventoryItem(
+                        name=row.name,
+                        scope="user",
+                        available=False,
+                        source_kind="user_store",
+                        reason="fingerprint_resolver_not_configured",
+                    )
+                )
+                continue
+            if not self._row_is_resolvable(row.name, row=row):
+                items.append(
+                    SecretInventoryItem(
+                        name=row.name,
+                        scope="user",
+                        available=False,
+                        source_kind="user_store",
+                        reason="value_decryption_failed",
+                    )
+                )
+                continue
+            items.append(
+                SecretInventoryItem(
+                    name=row.name,
+                    scope="user",
+                    available=True,
+                    source_kind="user_store",
+                )
             )
-            for row in rows
-        ]
+        return items
 
     # ------------------------------------------------------------------
     # Internal helpers

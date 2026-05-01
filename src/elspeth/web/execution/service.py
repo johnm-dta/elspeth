@@ -28,6 +28,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.audit import SecretResolutionInput
 from elspeth.contracts.cli import ProgressEvent
+from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.core.config import load_settings_from_yaml_string
@@ -58,7 +59,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.sessions.converters import state_from_record
-from elspeth.web.sessions.protocol import RunAlreadyActiveError, SessionServiceProtocol  # B1: canonical definition
+from elspeth.web.sessions.protocol import RunAlreadyActiveError, SessionRunStatus, SessionServiceProtocol  # B1: canonical definition
 
 slog = structlog.get_logger()
 
@@ -91,6 +92,64 @@ def _sanitize_error_for_client(exc: BaseException) -> str:
     if isinstance(exc, _CLIENT_SAFE_EXCEPTIONS):
         return str(exc)
     return f"Pipeline execution failed ({type(exc).__name__})"
+
+
+# Phase 2.2 (elspeth-0de989c56d): mapping from the engine's L0 RunStatus
+# to the L3 SessionRunStatus Literal that the API surfaces and the web
+# sessions DB persists.  The two enums share the same value strings for
+# the four-value taxonomy (completed / completed_with_failures / failed /
+# empty) so the mapping is the lower-case enum value.  RUNNING and
+# INTERRUPTED don't appear here — INTERRUPTED is mapped to "cancelled" in
+# the GracefulShutdownError branch separately, and RUNNING is non-terminal
+# (the engine never returns it from a normal completion path).
+_RUN_RESULT_STATUS_TO_SESSION_STATUS: dict[RunStatus, SessionRunStatus] = {
+    RunStatus.COMPLETED: "completed",
+    RunStatus.COMPLETED_WITH_FAILURES: "completed_with_failures",
+    RunStatus.FAILED: "failed",
+    RunStatus.EMPTY: "empty",
+}
+
+
+def _session_status_from_run_result_status(status: RunStatus) -> SessionRunStatus:
+    """Translate the engine's L0 RunStatus to the API's SessionRunStatus.
+
+    Raises:
+        ValueError: when the engine returns a status this site does not
+            handle (RUNNING, INTERRUPTED).  RUNNING from a normal
+            completion path is a framework-level invariant violation;
+            INTERRUPTED is handled by the GracefulShutdownError branch
+            with explicit ``status="cancelled"``.
+    """
+    try:
+        return _RUN_RESULT_STATUS_TO_SESSION_STATUS[status]
+    except KeyError as exc:
+        raise ValueError(
+            f"Cannot translate RunStatus {status!r} to a SessionRunStatus on the success path. "
+            f"INTERRUPTED is handled by the GracefulShutdownError branch; RUNNING is non-terminal "
+            f"and must not appear after orchestrator.run() returns."
+        ) from exc
+
+
+def _structural_failure_message(*, rows_processed: int) -> str:
+    """Phase 2.2 — synthetic structural error for FAILED-from-row-shape.
+
+    The L3 ``RunRecord.__post_init__`` invariant requires a non-empty
+    ``error`` for ``status="failed"``.  When the engine returns
+    ``RunStatus.FAILED`` from a row-shape decision (no exception
+    propagated, but rows_succeeded==0), there is no exception message to
+    persist.  This helper produces a structural fact — operator-readable,
+    no candidate-secret material, no echoed user-row data — that names
+    the failure mode the API consumer sees.
+
+    The shape is deliberately stable so the frontend can pattern-match
+    rather than parsing free prose; if a future change refines the
+    template (e.g., naming a specific failure indicator), the existing
+    consumers continue to discriminate against the prefix.
+    """
+    return (
+        f"No row reached the success path (rows_processed={rows_processed}, rows_succeeded=0). "
+        f"Inspect /diagnostics for per-row failure details."
+    )
 
 
 # B1 fix: RunAlreadyActiveError is NOT defined here — imported from
@@ -752,11 +811,30 @@ class ExecutionServiceImpl:
             # output blobs. If the DB transition loses a race to an
             # external cancellation, we must never expose ready outputs
             # for a cancelled run.
+            #
+            # Phase 2.2 (elspeth-0de989c56d): the orchestrator's RunResult
+            # carries the engine-decided four-value terminal status
+            # (completed / completed_with_failures / failed / empty); pass
+            # it verbatim to the session-runs DB so an operator reading
+            # ``/api/runs/{rid}`` sees the same verdict the engine wrote
+            # to Landscape.  The legacy hard-coded ``status="completed"``
+            # collapsed S1A's reproducer ("0 succeeded, 6 routed via
+            # on_error") into a clean-completion label.
+            session_status = _session_status_from_run_result_status(result.status)
+            # FAILED-from-row-shape (engine returned normally with
+            # rows_succeeded==0) has no exception to surface.  Provide a
+            # structural error message that satisfies the
+            # ``failed-requires-error`` audit invariant while remaining
+            # operator-readable and free of secret/row content.
+            session_error: str | None = None
+            if result.status == RunStatus.FAILED:
+                session_error = _structural_failure_message(rows_processed=result.rows_processed)
             try:
                 self._call_async(
                     self._session_service.update_run_status(
                         run_uuid,
-                        status="completed",
+                        status=session_status,
+                        error=session_error,
                         rows_processed=result.rows_processed,
                         rows_succeeded=result.rows_succeeded,
                         rows_failed=result.rows_failed,
@@ -795,24 +873,51 @@ class ExecutionServiceImpl:
             # succeeds, but before broadcasting the completed terminal event.
             # Finalization failures are logged in _finalize_output_blobs()
             # and must not trigger a second terminal event.
-            self._finalize_output_blobs(run_id, success=True)
+            #
+            # Phase 2.2 (elspeth-0de989c56d): treat the four operator-
+            # completion statuses (the run reached engine completion and
+            # produced output) as success for blob finalization.  The
+            # FAILED-from-row-shape case is "engine ran, no row succeeded"
+            # — the partial output that exists is still legitimate
+            # evidence (e.g. quarantine sink contents), so finalize as
+            # success=False to keep the failure-track outputs distinct
+            # from clean-completion outputs in the blob lifecycle.
+            self._finalize_output_blobs(run_id, success=(result.status != RunStatus.FAILED))
 
-            self._broadcaster.broadcast(
-                run_id,
-                RunEvent(
-                    run_id=run_id,
-                    timestamp=datetime.now(tz=UTC),
-                    event_type="completed",
-                    data=CompletedData(
-                        rows_processed=result.rows_processed,
-                        rows_succeeded=result.rows_succeeded,
-                        rows_failed=result.rows_failed,
-                        rows_routed=result.rows_routed,
-                        rows_quarantined=result.rows_quarantined,
-                        landscape_run_id=result.run_id,
+            if result.status == RunStatus.FAILED:
+                # Engine returned normally but no row reached success.  Emit
+                # the operator-visible failure event so the frontend can
+                # render the structural failure mode (S1A / S1B-msg2 shape).
+                # session_error is set above; reuse it as the WebSocket detail.
+                self._broadcaster.broadcast(
+                    run_id,
+                    RunEvent(
+                        run_id=run_id,
+                        timestamp=datetime.now(tz=UTC),
+                        event_type="failed",
+                        data=FailedData(
+                            detail=session_error or _structural_failure_message(rows_processed=result.rows_processed),
+                            node_id=None,
+                        ),
                     ),
-                ),
-            )
+                )
+            else:
+                self._broadcaster.broadcast(
+                    run_id,
+                    RunEvent(
+                        run_id=run_id,
+                        timestamp=datetime.now(tz=UTC),
+                        event_type="completed",
+                        data=CompletedData(
+                            rows_processed=result.rows_processed,
+                            rows_succeeded=result.rows_succeeded,
+                            rows_failed=result.rows_failed,
+                            rows_routed=result.rows_routed,
+                            rows_quarantined=result.rows_quarantined,
+                            landscape_run_id=result.run_id,
+                        ),
+                    ),
+                )
 
         except GracefulShutdownError as gse:
             # Orchestrator detected shutdown during processing and raised

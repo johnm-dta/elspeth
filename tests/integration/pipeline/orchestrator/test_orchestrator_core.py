@@ -161,7 +161,9 @@ class TestOrchestrator:
         graph = build_production_graph(config)
         run_result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
-        assert run_result.status == RunStatus.COMPLETED
+        # Phase 2.2: rows_succeeded > 0 alongside rows_quarantined > 0 maps
+        # to `completed_with_failures` under the presence-indicator predicate.
+        assert run_result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert run_result.rows_processed == 2
         assert run_result.rows_quarantined == 1
         assert len(default_sink.results) == 1
@@ -200,7 +202,8 @@ class TestOrchestrator:
         orchestrator = Orchestrator(landscape_db)
         run_result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert run_result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
+        assert run_result.status == RunStatus.FAILED
         # value=10 and value=30 go to default, value=100 goes to high
         assert len(default_sink.results) == 2
         assert len(high_sink.results) == 1
@@ -264,7 +267,8 @@ class TestOrchestrator:
             payload_store=payload_store,
         )
 
-        assert run_result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
+        assert run_result.status == RunStatus.FAILED
         assert run_result.rows_processed == 2
         assert len(output_sink.results) == 2
         assert len(source_sink.results) == 0
@@ -410,7 +414,8 @@ class TestOrchestratorEmptyPipeline:
         orchestrator = Orchestrator(landscape_db)
         run_result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert run_result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as EMPTY.
+        assert run_result.status == RunStatus.EMPTY
         assert run_result.rows_processed == 0
         assert len(sink.results) == 0
 
@@ -444,7 +449,8 @@ class TestOrchestratorEmptyPipeline:
         orchestrator = Orchestrator(landscape_db)
         run_result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert run_result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
+        assert run_result.status == RunStatus.FAILED
         assert run_result.rows_processed == 2
         assert run_result.rows_quarantined == 2
         assert len(default_sink.results) == 0

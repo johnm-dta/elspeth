@@ -22,8 +22,14 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields
 
 ChatMessageRole = Literal["user", "assistant", "system", "tool"]
-SessionRunStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
-TerminalSessionRunStatus = Literal["completed", "failed", "cancelled"]
+# Phase 2.2 (elspeth-0de989c56d): four-value terminal taxonomy.
+# `completed_with_failures` and `empty` join the previous three so an
+# operator scanning `/api/runs/{rid}` can distinguish "ran cleanly" from
+# "ran but no row succeeded" without opening output files.  Mirrors the
+# L0 RunStatus enum widening; row-count biconditional enforced in
+# RunRecord.__post_init__.
+SessionRunStatus = Literal["pending", "running", "completed", "completed_with_failures", "failed", "empty", "cancelled"]
+TerminalSessionRunStatus = Literal["completed", "completed_with_failures", "failed", "empty", "cancelled"]
 
 CHAT_MESSAGE_ROLE_VALUES: frozenset[str] = frozenset(get_args(ChatMessageRole))
 SESSION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(SessionRunStatus))
@@ -37,12 +43,18 @@ SESSION_TERMINAL_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(Terminal
 # raises TypeError rather than silently redefining terminal-state policy
 # for every downstream consumer.  The inline dict has no retained alias,
 # so the proxy is the only reference — there is no mutable back-door.
+#
+# Phase 2.2: pending → empty is legal (a run that begins and immediately
+# finds an empty source skips the running state); running → every terminal
+# value is legal (the row-count predicate decides which terminal value).
 LEGAL_RUN_TRANSITIONS: Mapping[SessionRunStatus, frozenset[SessionRunStatus]] = MappingProxyType(
     {
-        "pending": frozenset({"running", "failed", "cancelled"}),
-        "running": frozenset({"completed", "failed", "cancelled"}),
+        "pending": frozenset({"running", "completed_with_failures", "failed", "empty", "cancelled"}),
+        "running": frozenset({"completed", "completed_with_failures", "failed", "empty", "cancelled"}),
         "completed": frozenset(),  # terminal
+        "completed_with_failures": frozenset(),  # terminal
         "failed": frozenset(),  # terminal
+        "empty": frozenset(),  # terminal
         "cancelled": frozenset(),  # terminal
     }
 )
@@ -199,8 +211,16 @@ class RunRecord:
             raise AuditIntegrityError(f"Tier 1: runs.status is {self.status!r}, expected one of {sorted(SESSION_RUN_STATUS_VALUES)}")
         if self.status in SESSION_TERMINAL_RUN_STATUS_VALUES and self.finished_at is None:
             raise AuditIntegrityError(f"Tier 1: terminal runs.finished_at is NULL for status={self.status!r}")
-        if self.status == "completed" and not self.landscape_run_id:
-            raise AuditIntegrityError("Tier 1: completed run is missing landscape_run_id")
+        # Phase 2.2 (elspeth-0de989c56d): the four operator-completion terminal
+        # values (completed / completed_with_failures / empty) all imply the
+        # run reached the engine-completion path and produced a Landscape
+        # audit record.  `failed` may or may not have a Landscape ID — the
+        # engine takes the failed path on exceptions before any Landscape
+        # write, so requiring a Landscape ID would crash legitimate
+        # exception-bounded shapes.  `cancelled` is signal-bounded; same
+        # rationale.
+        if self.status in {"completed", "completed_with_failures", "empty"} and not self.landscape_run_id:
+            raise AuditIntegrityError(f"Tier 1: status={self.status!r} run is missing landscape_run_id")
         if self.status == "failed" and not self.error:
             raise AuditIntegrityError("Tier 1: failed run is missing error")
 

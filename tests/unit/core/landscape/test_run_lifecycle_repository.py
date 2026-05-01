@@ -480,6 +480,41 @@ class TestCompleteRun:
         with pytest.raises(AuditIntegrityError, match="terminal status"):
             repo.complete_run("run-1", RunStatus.RUNNING)
 
+    # Phase 2.2 (elspeth-0de989c56d): four-value terminal taxonomy must
+    # round-trip through Landscape — write the value, read it back,
+    # confirm the persisted enum equals the input enum.
+
+    def test_completed_with_failures_status_accepted_and_round_trips(self) -> None:
+        _, repo = _make_repo(run_id="run-cwf")
+        run = repo.complete_run("run-cwf", RunStatus.COMPLETED_WITH_FAILURES)
+        assert run.status == RunStatus.COMPLETED_WITH_FAILURES
+        # Read back via get_run — confirm persistence preserves the value
+        # verbatim through the SQL string round-trip.
+        reread = repo.get_run("run-cwf")
+        assert reread is not None
+        assert reread.status == RunStatus.COMPLETED_WITH_FAILURES
+
+    def test_empty_status_accepted_and_round_trips(self) -> None:
+        _, repo = _make_repo(run_id="run-empty")
+        run = repo.complete_run("run-empty", RunStatus.EMPTY)
+        assert run.status == RunStatus.EMPTY
+        reread = repo.get_run("run-empty")
+        assert reread is not None
+        assert reread.status == RunStatus.EMPTY
+
+    def test_new_terminal_statuses_block_re_completion(self) -> None:
+        """COMPLETED_WITH_FAILURES and EMPTY are terminal — same immutability
+        guarantee as the pre-existing terminal statuses."""
+        _, repo = _make_repo(run_id="run-immut-cwf")
+        repo.complete_run("run-immut-cwf", RunStatus.COMPLETED_WITH_FAILURES)
+        with pytest.raises(AuditIntegrityError, match="already terminal"):
+            repo.complete_run("run-immut-cwf", RunStatus.COMPLETED)
+
+        _, repo2 = _make_repo(run_id="run-immut-empty")
+        repo2.complete_run("run-immut-empty", RunStatus.EMPTY)
+        with pytest.raises(AuditIntegrityError, match="already terminal"):
+            repo2.complete_run("run-immut-empty", RunStatus.FAILED)
+
 
 # ---------------------------------------------------------------------------
 # set_export_status — branching logic

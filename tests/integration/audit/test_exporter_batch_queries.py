@@ -86,7 +86,8 @@ def _run_fork(
     )
 
     result = Orchestrator(db).run(config, graph=graph, payload_store=payload_store)
-    assert result.status == RunStatus.COMPLETED
+    # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
+    assert result.status == RunStatus.FAILED
     return result.run_id, db
 
 

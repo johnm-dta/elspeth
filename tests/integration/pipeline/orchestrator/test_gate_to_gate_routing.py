@@ -68,7 +68,8 @@ class TestConfigGateToConfigGate:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
+        assert result.status == RunStatus.FAILED
         # gate2 routes: value > 50 → high, else → default
         assert len(high_sink.results) == 1  # value=100
         assert len(default_sink.results) == 2  # value=10, value=30
@@ -110,7 +111,8 @@ class TestConfigGateToConfigGate:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
+        assert result.status == RunStatus.FAILED
         assert len(high_sink.results) == 1  # value=100
         assert len(default_sink.results) == 1  # value=10
 
@@ -172,7 +174,8 @@ class TestGateToGateWithDownstreamTransform:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
+        assert result.status == RunStatus.FAILED
         # gate2: value > 50 → high, else → default
         assert len(high_sink.results) == 1  # value=100
         assert len(default_sink.results) == 1  # value=42
@@ -206,6 +209,7 @@ class TestGateRouteToTransformChain:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
+        assert result.status == RunStatus.FAILED
         assert len(high_sink.results) == 1
         assert len(default_sink.results) == 1

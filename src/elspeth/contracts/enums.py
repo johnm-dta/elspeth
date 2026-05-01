@@ -12,11 +12,26 @@ class RunStatus(StrEnum):
     """Status of a pipeline run.
 
     Stored in the database (runs.status).
+
+    The four-value terminal taxonomy (COMPLETED / COMPLETED_WITH_FAILURES /
+    FAILED / EMPTY) was introduced in Phase 2.2 (elspeth-0de989c56d) so an
+    operator scanning ``/api/runs/{rid}`` can distinguish "ran cleanly" from
+    "ran but no row succeeded" without reading diagnostics.  RUNNING is
+    non-terminal; INTERRUPTED is signal-bounded (SIGINT/SIGTERM).
+
+    The presence-indicator predicate that maps row-count shapes to status
+    values is enforced in :class:`elspeth.contracts.run_result.RunResult`'s
+    ``__post_init__`` (the in-memory engine record carries the row counters).
+    The web sessions DB and the Pydantic API schemas mirror the same
+    invariant; the Landscape audit ``Run`` dataclass has no row-count
+    fields so the enum widening alone is sufficient at that layer.
     """
 
     RUNNING = "running"
     COMPLETED = "completed"
+    COMPLETED_WITH_FAILURES = "completed_with_failures"
     FAILED = "failed"
+    EMPTY = "empty"
     INTERRUPTED = "interrupted"
 
 

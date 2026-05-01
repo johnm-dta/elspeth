@@ -26,6 +26,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from elspeth.contracts.enums import RunStatus
 from elspeth.core.config import (
     CheckpointSettings,
     ConcurrencySettings,
@@ -393,6 +394,7 @@ class TestB2ShutdownEvent:
         mock_orch_cls.return_value = mock_orch
         mock_result = MagicMock()
         mock_result.run_id = str(run_id)
+        mock_result.status = RunStatus.COMPLETED
         mock_result.rows_processed = 10
         mock_result.rows_succeeded = 10
         mock_result.rows_failed = 0
@@ -457,6 +459,7 @@ class TestB3Construction:
         mock_orch_cls.return_value = mock_orch
         mock_orch.run.return_value = MagicMock(
             run_id="r1",
+            status=RunStatus.COMPLETED,
             rows_processed=10,
             rows_succeeded=10,
             rows_failed=0,
@@ -803,6 +806,7 @@ class TestCancelMechanism:
         mock_orch = MagicMock()
         mock_orch_cls.return_value = mock_orch
         mock_result = MagicMock()
+        mock_result.status = RunStatus.COMPLETED_WITH_FAILURES
         mock_result.rows_processed = 50
         mock_result.rows_succeeded = 48
         mock_result.rows_failed = 2
@@ -1105,6 +1109,7 @@ class TestCompletionPathExternalCancellation:
         mock_orch = MagicMock()
         mock_orch_cls.return_value = mock_orch
         mock_result = MagicMock()
+        mock_result.status = RunStatus.COMPLETED_WITH_FAILURES
         mock_result.rows_processed = 100
         mock_result.rows_succeeded = 95
         mock_result.rows_failed = 5
@@ -1166,6 +1171,7 @@ class TestCompletionPathExternalCancellation:
         mock_orch = MagicMock()
         mock_orch_cls.return_value = mock_orch
         mock_result = MagicMock()
+        mock_result.status = RunStatus.COMPLETED_WITH_FAILURES
         mock_result.rows_processed = 100
         mock_result.rows_succeeded = 95
         mock_result.rows_failed = 5
@@ -1230,6 +1236,7 @@ class TestCompletionPathExternalCancellation:
         mock_orch = MagicMock()
         mock_orch_cls.return_value = mock_orch
         mock_result = MagicMock()
+        mock_result.status = RunStatus.COMPLETED
         mock_result.rows_processed = 7
         mock_result.rows_succeeded = 7
         mock_result.rows_failed = 0
@@ -1291,6 +1298,7 @@ class TestCompletionPathExternalCancellation:
         mock_orch = MagicMock()
         mock_orch_cls.return_value = mock_orch
         mock_result = MagicMock()
+        mock_result.status = RunStatus.COMPLETED
         mock_result.rows_processed = 10
         mock_result.rows_succeeded = 10
         mock_result.rows_failed = 0
@@ -2268,6 +2276,7 @@ class TestEdgeCompatibility:
         mock_orch_cls.return_value = mock_orch
         mock_orch.run.return_value = MagicMock(
             run_id="r1",
+            status=RunStatus.COMPLETED,
             rows_processed=10,
             rows_succeeded=10,
             rows_failed=0,
@@ -2473,6 +2482,7 @@ class TestTerminalOrderingInvariant:
         mock_orch_cls.return_value = mock_orch
         mock_result = MagicMock()
         mock_result.run_id = "landscape-run-1"
+        mock_result.status = RunStatus.COMPLETED_WITH_FAILURES
         mock_result.rows_processed = 10
         mock_result.rows_succeeded = 9
         mock_result.rows_failed = 1
@@ -2539,6 +2549,7 @@ class TestTerminalOrderingInvariant:
         mock_orch_cls.return_value = mock_orch
         mock_result = MagicMock()
         mock_result.run_id = "landscape-run-2"
+        mock_result.status = RunStatus.COMPLETED
         mock_result.rows_processed = 5
         mock_result.rows_succeeded = 5
         mock_result.rows_failed = 0

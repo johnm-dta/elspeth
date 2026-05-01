@@ -759,10 +759,14 @@ class TestRunStatusEndpoint:
     async def test_status_returns_200(self) -> None:
         run_id = uuid4()
         svc = MagicMock()
+        # Phase 2.2: shape with failures => `completed_with_failures`.
+        # The original test assertion just checked the route surfaces the
+        # status string; using the right status preserves the route-level
+        # check while satisfying the new biconditional.
         svc.get_status = AsyncMock(
             return_value=RunStatusResponse(
                 run_id=str(run_id),
-                status="completed",
+                status="completed_with_failures",
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
                 rows_processed=10,
@@ -779,7 +783,7 @@ class TestRunStatusEndpoint:
             resp = await client.get(f"/api/runs/{run_id}")
             assert resp.status_code == 200
             body = resp.json()
-            assert body["status"] == "completed"
+            assert body["status"] == "completed_with_failures"
             assert body["rows_processed"] == 10
             assert body["rows_routed"] == 1
 
@@ -891,10 +895,11 @@ class TestResultsEndpoint:
     async def test_results_returns_200_for_completed_run(self) -> None:
         run_id = uuid4()
         svc = MagicMock()
+        # Phase 2.2: shape with failures => `completed_with_failures`.
         svc.get_status = AsyncMock(
             return_value=RunStatusResponse(
                 run_id=str(run_id),
-                status="completed",
+                status="completed_with_failures",
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
                 rows_processed=10,
@@ -919,10 +924,11 @@ class TestResultsEndpoint:
     async def test_results_includes_virtual_discard_summary(self) -> None:
         run_id = uuid4()
         svc = MagicMock()
+        # Phase 2.2: shape with failures => `completed_with_failures`.
         svc.get_status = AsyncMock(
             return_value=RunStatusResponse(
                 run_id=str(run_id),
-                status="completed",
+                status="completed_with_failures",
                 started_at=datetime.now(tz=UTC),
                 finished_at=datetime.now(tz=UTC),
                 rows_processed=10,

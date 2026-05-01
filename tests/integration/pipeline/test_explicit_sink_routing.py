@@ -236,7 +236,8 @@ class TestExplicitSinkRouting:
             payload_store=payload_store,
         )
 
-        assert run_result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
+        assert run_result.status == RunStatus.FAILED
         assert run_result.rows_processed == 2
 
         # Merged results route to output sink via terminal gate

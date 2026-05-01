@@ -59,7 +59,8 @@ class TestMultiOutput:
         result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
         # -- Assert --
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
+        assert result.status == RunStatus.FAILED
         assert result.rows_processed == 10
 
         # 5 rows with even ids (category A) -> sink_a
@@ -110,7 +111,8 @@ class TestMultiOutput:
         result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
         # -- Assert: audit trail --
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
+        assert result.status == RunStatus.FAILED
 
         with db.engine.connect() as conn:
             # All 5 source rows recorded

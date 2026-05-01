@@ -575,7 +575,7 @@ class TestRetryBehavior:
         )
 
         # Pipeline completes (errors are handled via routing, not as failures)
-        assert result.status == RunStatus.COMPLETED
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_processed == 3
 
         # Only 2 rows make it to the sink (id=2 was discarded)

@@ -299,7 +299,8 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
+        assert result.status == RunStatus.FAILED
         assert result.rows_quarantined == 1
 
         # Query node_states for the quarantined token
@@ -335,7 +336,8 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
+        assert result.status == RunStatus.FAILED
 
         # Query routing events
         with db.engine.connect() as conn:
@@ -378,7 +380,8 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
+        assert result.status == RunStatus.FAILED
         assert result.rows_quarantined == 1
 
         # Verify the quarantine sink received the row
@@ -420,7 +423,8 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: mixed valid + quarantined => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_processed == 4
         assert result.rows_quarantined == 2
 
@@ -492,7 +496,8 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: mixed valid + quarantined => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 2
         assert len(quarantine_sink.results) == 2
         assert len(default_sink.results) == 1
@@ -528,7 +533,8 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: mixed valid + quarantined => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_processed == 8
         assert result.rows_quarantined == 3
         assert result.rows_succeeded == 5
@@ -568,7 +574,8 @@ class TestQuarantineNonCanonicalData:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: mixed valid + quarantined => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 1
         assert len(quarantine_sink.results) == 1
         assert len(default_sink.results) == 1
@@ -597,7 +604,8 @@ class TestQuarantineNonCanonicalData:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
+        assert result.status == RunStatus.FAILED
         assert result.rows_quarantined == 2
         assert len(quarantine_sink.results) == 2
 
@@ -627,7 +635,8 @@ class TestQuarantineNonCanonicalData:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: mixed valid + quarantined => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 1
         assert result.rows_succeeded == 1
 

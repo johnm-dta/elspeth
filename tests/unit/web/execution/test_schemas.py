@@ -806,9 +806,13 @@ class TestRunStatusDecomposition:
             )
 
     def test_completed_accepts_consistent_counts(self) -> None:
+        # Phase 2.2: this shape (rows_failed=3, rows_quarantined=2 alongside
+        # rows_succeeded=95) is now `completed_with_failures` per the
+        # presence-indicator predicate.  The test still pins the
+        # row-count decomposition inequality at the API surface.
         resp = RunStatusResponse(
             run_id="r1",
-            status="completed",
+            status="completed_with_failures",
             started_at=datetime.now(tz=UTC),
             finished_at=datetime.now(tz=UTC),
             rows_processed=100,
@@ -822,9 +826,10 @@ class TestRunStatusDecomposition:
         assert resp.rows_processed == 100
 
     def test_completed_accepts_routed_rows_in_terminal_counts(self) -> None:
+        # Phase 2.2: shape with failures => `completed_with_failures`.
         resp = RunStatusResponse(
             run_id="r1",
-            status="completed",
+            status="completed_with_failures",
             started_at=datetime.now(tz=UTC),
             finished_at=datetime.now(tz=UTC),
             rows_processed=100,
@@ -898,9 +903,10 @@ class TestRunResultsDecomposition:
     """
 
     def test_consistent_counts_accepted(self) -> None:
+        # Phase 2.2: shape with failures => `completed_with_failures`.
         resp = RunResultsResponse(
             run_id="r1",
-            status="completed",
+            status="completed_with_failures",
             rows_processed=100,
             rows_succeeded=95,
             rows_failed=3,
@@ -962,9 +968,10 @@ class TestRunResultsDecomposition:
             )
 
     def test_consistent_counts_accept_routed_rows(self) -> None:
+        # Phase 2.2: shape with failures => `completed_with_failures`.
         resp = RunResultsResponse(
             run_id="r1",
-            status="completed",
+            status="completed_with_failures",
             rows_processed=100,
             rows_succeeded=90,
             rows_failed=3,
@@ -1027,11 +1034,157 @@ class TestRunStatusDerivedSets:
         assert frozenset({"pending", "running"}) == RUN_STATUS_NON_TERMINAL_VALUES
 
     def test_terminal_matches_hardcoded_expected(self) -> None:
-        assert frozenset({"completed", "failed", "cancelled"}) == RUN_STATUS_TERMINAL_VALUES
+        # Phase 2.2 (elspeth-0de989c56d): four-value terminal taxonomy.
+        # `completed_with_failures` and `empty` join the previous three so
+        # operators reading /api/runs/{rid} can distinguish "ran cleanly"
+        # from "ran but no row succeeded" without opening output files.
+        assert frozenset({"completed", "completed_with_failures", "failed", "empty", "cancelled"}) == RUN_STATUS_TERMINAL_VALUES
 
     def test_non_terminal_is_nonempty(self) -> None:
         """The /results 409 guard depends on this set being non-empty."""
         assert RUN_STATUS_NON_TERMINAL_VALUES
+
+
+class TestRunStatusResponseStatusInvariant:
+    """Phase 2.2 (elspeth-0de989c56d) — Pydantic mirror of the L0 biconditional.
+
+    The same presence-indicator predicate that gates ``RunResult.__post_init__``
+    must gate the API surface so neither layer can serialize an inconsistent
+    status / row-count pair.  Mirrors the Phase 2.3 precedent
+    (``SecretInventoryResponse._check_reason_invariant``).
+    """
+
+    @staticmethod
+    def _build(**overrides: object) -> RunStatusResponse:
+        kwargs: dict[str, object] = {
+            "run_id": "run-1",
+            "status": "completed",
+            "started_at": datetime.now(tz=UTC),
+            "finished_at": datetime.now(tz=UTC),
+            "rows_processed": 10,
+            "rows_succeeded": 10,
+            "rows_failed": 0,
+            "rows_routed": 0,
+            "rows_quarantined": 0,
+            "error": None,
+            "landscape_run_id": "landscape-1",
+        }
+        kwargs.update(overrides)
+        return RunStatusResponse(**kwargs)  # type: ignore[arg-type]
+
+    def test_completed_with_failures_legal(self) -> None:
+        response = self._build(
+            status="completed_with_failures",
+            rows_processed=10,
+            rows_succeeded=7,
+            rows_failed=3,
+        )
+        assert response.status == "completed_with_failures"
+
+    def test_empty_legal(self) -> None:
+        response = self._build(
+            status="empty",
+            rows_processed=0,
+            rows_succeeded=0,
+        )
+        assert response.status == "empty"
+
+    def test_failed_with_zero_rows_succeeded_legal(self) -> None:
+        """S1B msg2 reproducer at the API layer."""
+        response = self._build(
+            status="failed",
+            rows_processed=6,
+            rows_succeeded=0,
+            rows_failed=6,
+            error="LLM transform raised on every row",
+        )
+        assert response.status == "failed"
+
+    def test_failed_s1a_reproducer_legal(self) -> None:
+        """S1A reproducer at the API layer (rows_routed-only failure shape)."""
+        response = self._build(
+            status="failed",
+            rows_processed=6,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed=6,
+            error="LLM transform diverted every row to on_error",
+        )
+        assert response.status == "failed"
+
+    def test_completed_rejects_zero_succeeded(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match=r"completed.*rows_succeeded > 0"):
+            self._build(status="completed", rows_processed=10, rows_succeeded=0, rows_failed=10, error="X")
+
+    def test_completed_rejects_failures(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match=r"completed.*requires no failures"):
+            self._build(status="completed", rows_processed=10, rows_succeeded=7, rows_failed=3)
+
+    def test_completed_with_failures_rejects_zero_succeeded(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match=r"completed_with_failures.*rows_succeeded > 0"):
+            self._build(status="completed_with_failures", rows_processed=6, rows_succeeded=0, rows_failed=6, error="X")
+
+    def test_completed_with_failures_rejects_no_failures(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match=r"completed_with_failures.*requires.*failure"):
+            self._build(status="completed_with_failures", rows_processed=10, rows_succeeded=10, rows_failed=0)
+
+    def test_failed_tolerates_partial_successes_for_exception_bounded_runs(self) -> None:
+        # See ``_check_status_row_count_invariant`` — `failed` has two
+        # origins (predicate-decided no-success or exception-bounded with
+        # partial successes).  The API mirror tolerates either; the
+        # predicate picks COMPLETED_WITH_FAILURES on the success path
+        # whenever rows_succeeded > 0 alongside failures.
+        response = self._build(status="failed", rows_processed=10, rows_succeeded=5, rows_failed=5, error="X")
+        assert response.status == "failed"
+
+    def test_empty_rejects_nonzero_processed(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match=r"empty.*rows_processed == 0"):
+            self._build(status="empty", rows_processed=5, rows_succeeded=0)
+
+    # NOTE: `empty` + `has_failures` (rows_failed > 0 / rows_quarantined > 0)
+    # is unreachable at the API layer because `_validate_row_decomposition`
+    # fires first — `rows_processed=0` with any non-zero failure counter
+    # violates the inequality `rows_processed >= sum_terminal_counts`.  The
+    # L0 contract layer catches this case directly without the inequality
+    # in the way; see ``tests/unit/contracts/test_run_result.py::
+    # TestRunResultStatusInvariant::test_empty_rejects_failures`` for the
+    # primary coverage.
+
+
+class TestRunResultsResponseStatusInvariant:
+    """Same biconditional, but on the terminal-only ``RunResultsResponse``."""
+
+    @staticmethod
+    def _build(**overrides: object) -> RunResultsResponse:
+        kwargs: dict[str, object] = {
+            "run_id": "run-1",
+            "status": "completed",
+            "rows_processed": 10,
+            "rows_succeeded": 10,
+            "rows_failed": 0,
+            "rows_routed": 0,
+            "rows_quarantined": 0,
+            "landscape_run_id": "landscape-1",
+            "error": None,
+        }
+        kwargs.update(overrides)
+        return RunResultsResponse(**kwargs)  # type: ignore[arg-type]
+
+    def test_completed_with_failures_legal(self) -> None:
+        response = self._build(
+            status="completed_with_failures",
+            rows_processed=10,
+            rows_succeeded=7,
+            rows_failed=3,
+        )
+        assert response.status == "completed_with_failures"
+
+    def test_empty_legal(self) -> None:
+        assert self._build(status="empty", rows_processed=0, rows_succeeded=0).status == "empty"
+
+    def test_completed_rejects_failures(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match=r"completed.*requires no failures"):
+            self._build(status="completed", rows_processed=10, rows_succeeded=7, rows_failed=3)
 
 
 class TestErrorEventRoundTrip:

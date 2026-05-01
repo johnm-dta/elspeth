@@ -438,9 +438,18 @@ class TestResumeComprehensive:
             payload_store=payload_store,
         )
 
-        # Verify early-exit behavior
-        assert result.rows_processed == 0, "Early-exit path should process 0 rows (all already done)"
-        assert result.rows_succeeded == 0
+        # Verify early-exit behavior.
+        #
+        # Phase 2.2 (elspeth-0de989c56d): the early-exit branch now derives
+        # the truthful row counts from token_outcomes rather than reporting
+        # the resume's zero-delta.  The pre-Phase-2.2 behavior was
+        # ``rows_processed=0`` regardless of how many rows the original run
+        # had completed — under the new four-value RunStatus taxonomy that
+        # would force EMPTY for runs that actually succeeded.  Reading the
+        # audit DB makes the ``RunStatus`` correct AND surfaces the true
+        # row counts to operators reading the CLI summary on resume.
+        assert result.rows_processed == 3, "Early-exit path now reports truthful counts from token_outcomes"
+        assert result.rows_succeeded == 3
         assert result.status == RunStatus.COMPLETED
 
         # CRITICAL: Verify checkpoints deleted on early-exit path (Bug #8 fix)

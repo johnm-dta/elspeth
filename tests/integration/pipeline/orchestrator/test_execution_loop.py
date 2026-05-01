@@ -259,7 +259,8 @@ class TestExecutionLoopRowProcessing:
         """An empty source completes with COMPLETED status and 0 rows."""
         result, _events, sink = _run_pipeline_with_event_capture([])
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2: status taxonomy now distinguishes this shape as EMPTY.
+        assert result.status == RunStatus.EMPTY
         assert result.rows_processed == 0
         assert result.rows_succeeded == 0
         assert len(sink.results) == 0

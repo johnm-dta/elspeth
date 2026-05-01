@@ -145,7 +145,7 @@ class TestPartialFailure:
         result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
         # 1. Pipeline completes
-        assert result.status == RunStatus.COMPLETED
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
 
         # 2. 7 rows reach the sink
         assert len(sink.results) == 7
@@ -236,7 +236,7 @@ class TestPartialFailure:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
 
         # All 4 remaining rows reach sink
         assert len(sink.results) == 4
@@ -280,7 +280,7 @@ class TestPartialFailure:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
-        assert result.status == RunStatus.COMPLETED
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
 
         # 4 rows reach sink (all except last)
         assert len(sink.results) == 4

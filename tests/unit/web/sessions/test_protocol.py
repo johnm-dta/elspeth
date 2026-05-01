@@ -147,7 +147,146 @@ class TestRunRecord:
         assert frozenset(get_args(SessionRunStatus)) == SESSION_RUN_STATUS_VALUES
         assert frozenset(LEGAL_RUN_TRANSITIONS.keys()) == SESSION_RUN_STATUS_VALUES
         assert all(allowed.issubset(SESSION_RUN_STATUS_VALUES) for allowed in LEGAL_RUN_TRANSITIONS.values())
-        assert frozenset({"completed", "failed", "cancelled"}) == SESSION_TERMINAL_RUN_STATUS_VALUES
+        # Phase 2.2 (elspeth-0de989c56d): four-value terminal taxonomy.
+        # `completed_with_failures` and `empty` join `completed` / `failed` /
+        # `cancelled` as terminal states so operators can distinguish "ran
+        # cleanly" from "ran but no row succeeded".
+        assert frozenset({"completed", "completed_with_failures", "failed", "empty", "cancelled"}) == SESSION_TERMINAL_RUN_STATUS_VALUES
+
+    def test_running_can_transition_to_new_terminal_states(self) -> None:
+        """Phase 2.2: `running` MUST be able to transition to every terminal state."""
+        running_targets = LEGAL_RUN_TRANSITIONS["running"]
+        # The four-value taxonomy plus cancelled.
+        for terminal in ("completed", "completed_with_failures", "failed", "empty", "cancelled"):
+            assert terminal in running_targets, f"running must allow transition to {terminal!r}"
+
+    def test_pending_can_transition_to_empty(self) -> None:
+        """Phase 2.2: a run that begins and immediately finds an empty source
+        skips ``running`` — pending must allow direct transition to ``empty``.
+        """
+        # Plus failed/cancelled which were already there.
+        pending_targets = LEGAL_RUN_TRANSITIONS["pending"]
+        assert "empty" in pending_targets
+
+    def test_completed_with_failures_requires_landscape_run_id(self) -> None:
+        """Same audit invariant as `completed` — the run executed, so the
+        Landscape ID exists.  A future read-back without it would mean the
+        engine wrote audit data we cannot correlate to the session."""
+        with pytest.raises(AuditIntegrityError, match="landscape_run_id"):
+            RunRecord(
+                id=uuid4(),
+                session_id=uuid4(),
+                state_id=uuid4(),
+                status="completed_with_failures",
+                started_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+                rows_processed=10,
+                rows_succeeded=7,
+                rows_failed=3,
+                rows_routed=0,
+                rows_quarantined=0,
+                error=None,
+                landscape_run_id=None,
+                pipeline_yaml=None,
+            )
+
+    def test_empty_requires_landscape_run_id(self) -> None:
+        """The `empty` outcome is recorded only when the source ran and emitted
+        zero rows — the run still produced a Landscape audit record."""
+        with pytest.raises(AuditIntegrityError, match="landscape_run_id"):
+            RunRecord(
+                id=uuid4(),
+                session_id=uuid4(),
+                state_id=uuid4(),
+                status="empty",
+                started_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+                rows_processed=0,
+                rows_succeeded=0,
+                rows_failed=0,
+                rows_routed=0,
+                rows_quarantined=0,
+                error=None,
+                landscape_run_id=None,
+                pipeline_yaml=None,
+            )
+
+    def test_completed_with_failures_terminal_requires_finished_at(self) -> None:
+        with pytest.raises(AuditIntegrityError, match="finished_at"):
+            RunRecord(
+                id=uuid4(),
+                session_id=uuid4(),
+                state_id=uuid4(),
+                status="completed_with_failures",
+                started_at=datetime.now(UTC),
+                finished_at=None,
+                rows_processed=10,
+                rows_succeeded=7,
+                rows_failed=3,
+                rows_routed=0,
+                rows_quarantined=0,
+                error=None,
+                landscape_run_id="landscape-1",
+                pipeline_yaml=None,
+            )
+
+    def test_empty_terminal_requires_finished_at(self) -> None:
+        with pytest.raises(AuditIntegrityError, match="finished_at"):
+            RunRecord(
+                id=uuid4(),
+                session_id=uuid4(),
+                state_id=uuid4(),
+                status="empty",
+                started_at=datetime.now(UTC),
+                finished_at=None,
+                rows_processed=0,
+                rows_succeeded=0,
+                rows_failed=0,
+                rows_routed=0,
+                rows_quarantined=0,
+                error=None,
+                landscape_run_id="landscape-1",
+                pipeline_yaml=None,
+            )
+
+    def test_completed_with_failures_legal_construction(self) -> None:
+        """Smoke test: a fully-populated COMPLETED_WITH_FAILURES record constructs."""
+        record = RunRecord(
+            id=uuid4(),
+            session_id=uuid4(),
+            state_id=uuid4(),
+            status="completed_with_failures",
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+            rows_processed=10,
+            rows_succeeded=7,
+            rows_failed=3,
+            rows_routed=0,
+            rows_quarantined=0,
+            error=None,
+            landscape_run_id="landscape-1",
+            pipeline_yaml=None,
+        )
+        assert record.status == "completed_with_failures"
+
+    def test_empty_legal_construction(self) -> None:
+        record = RunRecord(
+            id=uuid4(),
+            session_id=uuid4(),
+            state_id=uuid4(),
+            status="empty",
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed=0,
+            rows_quarantined=0,
+            error=None,
+            landscape_run_id="landscape-1",
+            pipeline_yaml=None,
+        )
+        assert record.status == "empty"
 
     def test_invalid_status_raises_audit_integrity_error(self) -> None:
         with pytest.raises(AuditIntegrityError, match=r"runs\.status is 'ready'"):

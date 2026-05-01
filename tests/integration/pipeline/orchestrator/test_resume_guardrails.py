@@ -247,8 +247,17 @@ class TestResumeGuardrails:
                 payload_store=resume_test_env["payload_store"],
             )
 
-        assert result.status == RunStatus.COMPLETED
+        # Phase 2.2 (elspeth-0de989c56d): the resume's early-exit branch
+        # now derives the truthful terminal status from the audit DB
+        # ``token_outcomes`` instead of writing ``COMPLETED``
+        # unconditionally.  This run was set up via ``_create_failed_run``
+        # with ``status=FAILED`` and zero token_outcomes — the truthful
+        # state is therefore ``EMPTY`` (no row outcomes) rather than the
+        # pre-Phase-2.2 unconditional ``COMPLETED``.  Both the local
+        # ``RunResult`` and the persisted Landscape ``Run`` reflect the
+        # same predicate output.
+        assert result.status == RunStatus.EMPTY
         assert result.rows_processed == 0
         run = resume_test_env["factory"].run_lifecycle.get_run(run_id)
         assert run is not None
-        assert run.status == RunStatus.COMPLETED
+        assert run.status == RunStatus.EMPTY

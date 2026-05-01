@@ -452,9 +452,20 @@ class TestToRunResultProperties:
     @given(counters=execution_counters())
     @settings(max_examples=50)
     def test_status_explicit(self, counters: ExecutionCounters) -> None:
-        """Property: Status must be passed explicitly (no default)."""
-        result = counters.to_run_result("run-1", status=RunStatus.COMPLETED)
-        assert result.status == RunStatus.COMPLETED
+        """Property: Status must be passed explicitly (no default).
+
+        Phase 2.2 (elspeth-0de989c56d) added a biconditional invariant
+        linking ``status`` to row-count shape on :class:`RunResult`.  This
+        property test exercises *explicitness* of the status parameter,
+        not the biconditional — Hypothesis generates arbitrary counter
+        shapes which would not satisfy COMPLETED/COMPLETED_WITH_FAILURES
+        in general.  ``RUNNING`` and ``FAILED`` both bypass the row-count
+        predicate (RUNNING is non-terminal, FAILED tolerates the
+        exception-bounded partial-success shape), so they're the natural
+        unconstrained statuses to round-trip here.
+        """
+        result = counters.to_run_result("run-1", status=RunStatus.RUNNING)
+        assert result.status == RunStatus.RUNNING
 
         result = counters.to_run_result("run-1", status=RunStatus.FAILED)
         assert result.status == RunStatus.FAILED

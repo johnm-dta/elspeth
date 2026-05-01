@@ -89,6 +89,7 @@ from elspeth.contracts.events import (
 )
 from elspeth.contracts.hashing import repr_hash
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.run_result import derive_terminal_run_status
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.contracts.tier_registry import freeze_tier_registry
@@ -416,6 +417,100 @@ class Orchestrator:
             )
             if pending_exc is None:
                 raise
+
+    def _derive_resume_terminal_status_from_audit(self, factory: RecorderFactory, run_id: str) -> tuple[RunStatus, int, int, int, int]:
+        """Phase 2.2 (elspeth-0de989c56d) — recover the truthful terminal
+        status of a run from the Landscape audit DB when the resume found
+        no unprocessed rows.
+
+        The "all-rows-already-processed" resume branch fires when a prior
+        run was interrupted *after* all source rows had reached terminal
+        states.  At that point the resume's local counters are 0 (nothing
+        was reprocessed), but the audit DB carries the truth in
+        ``token_outcomes``.  Pre-Phase-2.2 the engine wrote
+        ``RunStatus.COMPLETED`` here unconditionally, masking runs that
+        actually failed.  This helper aggregates ``token_outcomes`` and
+        applies the presence-indicator predicate so the persisted status
+        reflects what really happened.
+
+        Returns:
+            ``(terminal_status, rows_processed, rows_succeeded, rows_failed,
+            rows_quarantined)`` — the second through fifth elements feed
+            the local RunResult so its row counts match the chosen status
+            (otherwise the biconditional in
+            :class:`elspeth.contracts.run_result.RunResult` would crash).
+        """
+        outcomes = factory.query.get_all_token_outcomes_for_run(run_id)
+        # The "is_terminal" filter is defensive — non-terminal outcomes
+        # (BUFFERED) are not counted toward terminal totals.
+        rows_succeeded = 0
+        rows_failed = 0
+        rows_quarantined = 0
+        rows_coalesce_failed = 0
+        rows_processed = 0
+        for outcome in outcomes:
+            if not outcome.is_terminal:
+                continue
+            match outcome.outcome:
+                case RowOutcome.COMPLETED | RowOutcome.COALESCED | RowOutcome.DROPPED_BY_FILTER:
+                    rows_succeeded += 1
+                    rows_processed += 1
+                case RowOutcome.ROUTED:
+                    # rows_routed: excluded from the predicate (DIVERT vs MOVE
+                    # ambiguity); still counts as processed.
+                    rows_processed += 1
+                case RowOutcome.FAILED:
+                    rows_failed += 1
+                    rows_processed += 1
+                case RowOutcome.QUARANTINED:
+                    rows_quarantined += 1
+                    rows_processed += 1
+                case RowOutcome.DIVERTED:
+                    # Sink-write diversion: counts as processed but neither
+                    # succeeded nor failed in the predicate's sense — the
+                    # row reached a sink (failsink), and rows_diverted is
+                    # tracked separately on RunResult.
+                    rows_processed += 1
+                case _:
+                    # Other terminal outcomes (FORKED, EXPANDED, CONSUMED_IN_BATCH)
+                    # are parent-token / aggregation accounting and don't
+                    # contribute to the success/failure tally.
+                    pass
+        terminal_status = derive_terminal_run_status(
+            rows_processed=rows_processed,
+            rows_succeeded=rows_succeeded,
+            rows_failed=rows_failed,
+            rows_quarantined=rows_quarantined,
+            rows_coalesce_failed=rows_coalesce_failed,
+        )
+        return terminal_status, rows_processed, rows_succeeded, rows_failed, rows_quarantined
+
+    def _cli_completion_for(self, status: RunStatus) -> tuple[RunCompletionStatus, int]:
+        """Phase 2.2 (elspeth-0de989c56d) — map terminal RunStatus to the
+        CLI ``RunCompletionStatus`` + exit code.
+
+        ``COMPLETED`` and ``EMPTY`` both map to ``COMPLETED`` / exit 0:
+        a run that ingested zero rows is operationally a clean exit at the
+        CLI surface (the Web layer carries the structural distinction).
+        ``COMPLETED_WITH_FAILURES`` reuses the existing ``PARTIAL``
+        ceremony — same exit-code-1 semantics as the post-run export-failure
+        path that already emits ``PARTIAL``.
+        """
+        match status:
+            case RunStatus.COMPLETED | RunStatus.EMPTY:
+                return RunCompletionStatus.COMPLETED, 0
+            case RunStatus.COMPLETED_WITH_FAILURES:
+                return RunCompletionStatus.PARTIAL, 1
+            case RunStatus.FAILED:
+                return RunCompletionStatus.FAILED, 2
+            case RunStatus.INTERRUPTED:
+                return RunCompletionStatus.INTERRUPTED, 3
+            case _:
+                raise OrchestrationInvariantError(
+                    f"Cannot map RunStatus {status!r} to RunCompletionStatus — "
+                    f"this is a terminal-status-only mapping; RUNNING and other "
+                    f"non-terminal values must not reach this site."
+                )
 
     def _emit_interrupted_ceremony(
         self,
@@ -1422,9 +1517,21 @@ class Orchestrator:
                     shutdown_event=active_event,
                 )
 
+            # Phase 2.2 (elspeth-0de989c56d): pick the new four-value
+            # terminal status from the row-count shape so an operator
+            # reading /api/runs/{rid} can distinguish "ran cleanly" from
+            # "ran but no row succeeded" without opening output files.
+            terminal_status = derive_terminal_run_status(
+                rows_processed=result.rows_processed,
+                rows_succeeded=result.rows_succeeded,
+                rows_failed=result.rows_failed,
+                rows_quarantined=result.rows_quarantined,
+                rows_coalesce_failed=result.rows_coalesce_failed,
+            )
+
             # Complete run with reproducibility grade computation
-            factory.run_lifecycle.finalize_run(run.run_id, status=RunStatus.COMPLETED)
-            result = replace(result, status=RunStatus.COMPLETED)
+            factory.run_lifecycle.finalize_run(run.run_id, status=terminal_status)
+            result = replace(result, status=terminal_status)
             run_completed = True
 
             # Emit telemetry AFTER Landscape finalize succeeds
@@ -1433,7 +1540,7 @@ class Orchestrator:
                 RunFinished(
                     timestamp=datetime.now(UTC),
                     run_id=run.run_id,
-                    status=RunStatus.COMPLETED,
+                    status=terminal_status,
                     row_count=result.rows_processed,
                     duration_ms=run_duration_ms,
                 )
@@ -1453,18 +1560,22 @@ class Orchestrator:
                     )
                 self._execute_export_phase(factory, run.run_id, settings, sink_factory)
 
-            # Emit RunSummary event with final metrics
+            # Emit RunSummary event with final metrics.  Map the new
+            # terminal status onto the CLI exit-code taxonomy via
+            # ``_cli_completion_for`` so the operator-facing CLI summary
+            # remains coherent with /api/runs/{rid}.
+            cli_status, exit_code = self._cli_completion_for(terminal_status)
             total_duration = time.perf_counter() - run_start_time
             self._events.emit(
                 RunSummary(
                     run_id=run.run_id,
-                    status=RunCompletionStatus.COMPLETED,
+                    status=cli_status,
                     total_rows=result.rows_processed,
                     succeeded=result.rows_succeeded,
                     failed=result.rows_failed,
                     quarantined=result.rows_quarantined,
                     duration_seconds=total_duration,
-                    exit_code=0,
+                    exit_code=exit_code,
                     routed=result.rows_routed,
                     routed_destinations=tuple(result.routed_destinations.items()),
                 )
@@ -3039,8 +3150,21 @@ class Orchestrator:
         unprocessed_rows = state.unprocessed_rows
 
         if not unprocessed_rows and not restored_state and restored_coalesce_state is None:
-            # All rows were processed - complete the run
-            factory.run_lifecycle.finalize_run(run_id, status=RunStatus.COMPLETED)
+            # All rows were processed - complete the run.
+            #
+            # Phase 2.2 (elspeth-0de989c56d): the resume's local counters
+            # are 0 here because nothing was reprocessed, but the audit DB
+            # carries the truth.  Aggregate token_outcomes to derive the
+            # correct four-value terminal status and feed it to both the
+            # Landscape finalize and the local RunResult.
+            (
+                terminal_status,
+                audit_rows_processed,
+                audit_rows_succeeded,
+                audit_rows_failed,
+                audit_rows_quarantined,
+            ) = self._derive_resume_terminal_status_from_audit(factory, run_id)
+            factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
 
             # Emit RunFinished telemetry (matching the normal completion path)
             from elspeth.telemetry import RunFinished
@@ -3049,23 +3173,24 @@ class Orchestrator:
                 RunFinished(
                     timestamp=datetime.now(UTC),
                     run_id=run_id,
-                    status=RunStatus.COMPLETED,
-                    row_count=0,
+                    status=terminal_status,
+                    row_count=audit_rows_processed,
                     duration_ms=0.0,
                 )
             )
 
             # Emit RunSummary event
+            cli_status, exit_code = self._cli_completion_for(terminal_status)
             self._events.emit(
                 RunSummary(
                     run_id=run_id,
-                    status=RunCompletionStatus.COMPLETED,
-                    total_rows=0,
-                    succeeded=0,
-                    failed=0,
-                    quarantined=0,
+                    status=cli_status,
+                    total_rows=audit_rows_processed,
+                    succeeded=audit_rows_succeeded,
+                    failed=audit_rows_failed,
+                    quarantined=audit_rows_quarantined,
                     duration_seconds=0.0,
-                    exit_code=0,
+                    exit_code=exit_code,
                     routed=0,
                     routed_destinations=(),
                 )
@@ -3076,11 +3201,12 @@ class Orchestrator:
 
             return RunResult(
                 run_id=run_id,
-                status=RunStatus.COMPLETED,
-                rows_processed=0,
-                rows_succeeded=0,
-                rows_failed=0,
+                status=terminal_status,
+                rows_processed=audit_rows_processed,
+                rows_succeeded=audit_rows_succeeded,
+                rows_failed=audit_rows_failed,
                 rows_routed=0,
+                rows_quarantined=audit_rows_quarantined,
                 routed_destinations={},
             )
 
@@ -3114,8 +3240,19 @@ class Orchestrator:
             # BEFORE the finally block flushes telemetry to exporters.
             # Fix: elspeth-rapid-sg0q — previously this was after the finally block,
             # meaning RunFinished was emitted after telemetry flush (never exported).
-            factory.run_lifecycle.finalize_run(run_id, status=RunStatus.COMPLETED)
-            result = replace(result, status=RunStatus.COMPLETED)
+            #
+            # Phase 2.2 (elspeth-0de989c56d): pick the new four-value terminal
+            # status from the row-count shape returned by the resume's row
+            # processing.
+            terminal_status = derive_terminal_run_status(
+                rows_processed=result.rows_processed,
+                rows_succeeded=result.rows_succeeded,
+                rows_failed=result.rows_failed,
+                rows_quarantined=result.rows_quarantined,
+                rows_coalesce_failed=result.rows_coalesce_failed,
+            )
+            factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
+            result = replace(result, status=terminal_status)
 
             # 7. Emit RunFinished telemetry
             resume_duration_ms = (time.perf_counter() - resume_start_time) * 1000
@@ -3123,24 +3260,25 @@ class Orchestrator:
                 RunFinished(
                     timestamp=datetime.now(UTC),
                     run_id=run_id,
-                    status=RunStatus.COMPLETED,
+                    status=terminal_status,
                     row_count=result.rows_processed,
                     duration_ms=resume_duration_ms,
                 )
             )
 
             # 8. Emit RunSummary event
+            cli_status, exit_code = self._cli_completion_for(terminal_status)
             total_duration = time.perf_counter() - resume_start_time
             self._events.emit(
                 RunSummary(
                     run_id=run_id,
-                    status=RunCompletionStatus.COMPLETED,
+                    status=cli_status,
                     total_rows=result.rows_processed,
                     succeeded=result.rows_succeeded,
                     failed=result.rows_failed,
                     quarantined=result.rows_quarantined,
                     duration_seconds=total_duration,
-                    exit_code=0,
+                    exit_code=exit_code,
                     routed=result.rows_routed,
                     routed_destinations=tuple(result.routed_destinations.items()),
                 )

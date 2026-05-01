@@ -275,14 +275,21 @@ class TestExecutionCountersToRunResultRequired:
     """Test that to_run_result requires status parameter (T18 safety fix)."""
 
     def test_status_is_required_parameter(self) -> None:
-        """After T18, status has no default — callers must be explicit."""
+        """After T18, status has no default — callers must be explicit.
+
+        Phase 2.2 (elspeth-0de989c56d): the biconditional invariant on
+        :class:`RunResult` rejects ``status=COMPLETED`` with zero counters
+        (``EMPTY`` is the right shape for an ingested-zero-rows run).
+        Use ``RUNNING`` / ``INTERRUPTED`` — the only statuses that bypass
+        the row-count predicate — for the explicit-status smoke test.
+        """
         counters = ExecutionCounters()
         # Must pass status explicitly
-        result = counters.to_run_result("run-1", status=RunStatus.COMPLETED)
-        assert result.status == RunStatus.COMPLETED
+        result = counters.to_run_result("run-1", status=RunStatus.RUNNING)
+        assert result.status == RunStatus.RUNNING
 
-        result2 = counters.to_run_result("run-1", status=RunStatus.RUNNING)
-        assert result2.status == RunStatus.RUNNING
+        result2 = counters.to_run_result("run-1", status=RunStatus.INTERRUPTED)
+        assert result2.status == RunStatus.INTERRUPTED
 
 
 class TestPipelineConfig:

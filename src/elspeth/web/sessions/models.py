@@ -148,8 +148,13 @@ runs_table = Table(
         ["composition_states.id", "composition_states.session_id"],
         name="fk_runs_state_session",
     ),
+    # Phase 2.2 (elspeth-0de989c56d): four-value terminal taxonomy.
+    # The constraint mirrors SessionRunStatus in web/sessions/protocol.py;
+    # adding a value to the Literal without updating this CheckConstraint
+    # would let the dataclass validator pass while the DB rejects the row,
+    # so widen both in lockstep.
     CheckConstraint(
-        "status IN ('pending', 'running', 'completed', 'failed', 'cancelled')",
+        "status IN ('pending', 'running', 'completed', 'completed_with_failures', 'failed', 'empty', 'cancelled')",
         name="ck_runs_status",
     ),
 )

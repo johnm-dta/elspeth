@@ -164,10 +164,105 @@ def _require_terminal_run_fields(
     """Enforce status-specific terminal invariants for Tier 1 run data."""
     if finished_at_required and status in RUN_STATUS_TERMINAL_VALUES and finished_at is None:
         raise ValueError(f"status={status!r} requires finished_at")
-    if status == "completed" and not landscape_run_id:
-        raise ValueError("status='completed' requires landscape_run_id")
+    # Phase 2.2 (elspeth-0de989c56d): operator-completion statuses
+    # (the run reached engine completion and produced a Landscape audit
+    # record) require a landscape_run_id.  `failed` and `cancelled` may not
+    # have one — the engine can take the failed path on exceptions before
+    # the Landscape audit row is created, and cancelled runs are signal-
+    # bounded with similar timing.
+    if status in {"completed", "completed_with_failures", "empty"} and not landscape_run_id:
+        raise ValueError(f"status={status!r} requires landscape_run_id")
     if status == "failed" and not error:
         raise ValueError("status='failed' requires error")
+
+
+def _check_status_row_count_invariant(
+    status: str,
+    rows_processed: int,
+    rows_succeeded: int,
+    rows_failed: int,
+    rows_quarantined: int,
+) -> None:
+    """Phase 2.2 (elspeth-0de989c56d) — Pydantic mirror of the L0 biconditional.
+
+    Same presence-indicator predicate as
+    :class:`elspeth.contracts.run_result.RunResult` so neither the engine's
+    in-memory record nor the API response can serialize an inconsistent
+    status / row-count pair.
+
+    The Pydantic mirror does NOT see ``rows_coalesce_failed`` (the API
+    schema does not surface it) — failures are detected from
+    ``rows_failed`` and ``rows_quarantined`` only.  This is a deliberate
+    narrowing: a run with rows_coalesce_failed > 0 also carries rows_failed
+    counts (see ``handle_coalesce_timeouts`` in
+    ``engine/orchestrator/outcomes.py`` — every coalesce failure also
+    increments rows_failed by the count of consumed tokens), so the
+    failure indicator is preserved at the API layer.
+
+    Non-terminal (``running`` / ``pending``) and signal-bounded
+    (``cancelled``) statuses bypass the predicate.
+    """
+    has_failures = rows_failed > 0 or rows_quarantined > 0
+
+    if status in {"running", "pending", "cancelled"}:
+        return
+
+    if status == "completed":
+        # rows_processed == 0 AND rows_succeeded > 0 is the resume /
+        # coalesce-continuation shape — operationally COMPLETED.  Only
+        # reject COMPLETED when neither rows_processed nor rows_succeeded
+        # provides evidence that the run produced anything.
+        if rows_succeeded == 0:
+            raise ValueError(
+                f"status='completed' requires rows_succeeded > 0, got {rows_succeeded} "
+                f"(use status='empty' for ingested-zero-rows runs, "
+                f"'failed' when rows were processed but none succeeded)"
+            )
+        if has_failures:
+            raise ValueError(
+                f"status='completed' requires no failures (rows_failed={rows_failed}, "
+                f"rows_quarantined={rows_quarantined}); use status='completed_with_failures'"
+            )
+        return
+
+    if status == "completed_with_failures":
+        if rows_succeeded == 0:
+            raise ValueError(
+                f"status='completed_with_failures' requires rows_succeeded > 0, "
+                f"got {rows_succeeded} (use status='failed' when no row succeeded)"
+            )
+        if not has_failures:
+            raise ValueError(
+                f"status='completed_with_failures' requires at least one failure indicator "
+                f"(rows_failed > 0 or rows_quarantined > 0); got rows_failed={rows_failed}, "
+                f"rows_quarantined={rows_quarantined} (use status='completed' for clean runs)"
+            )
+        return
+
+    if status == "failed":
+        # ``failed`` has two origins (see RunResult._check_status_invariant):
+        # the predicate decided rows_succeeded==0, OR an exception bounded
+        # the run mid-flight with partial successes already counted.  The
+        # API surface tolerates either shape so exception-bounded runs
+        # serialize correctly; the operator-discriminating power vs.
+        # COMPLETED is preserved (predicate never picks FAILED when
+        # rows_succeeded > 0 on the success path).
+        return
+
+    if status == "empty":
+        if rows_processed != 0:
+            raise ValueError(f"status='empty' requires rows_processed == 0, got {rows_processed}")
+        if rows_succeeded != 0:
+            raise ValueError(f"status='empty' requires rows_succeeded == 0, got {rows_succeeded}")
+        if has_failures:
+            raise ValueError(
+                f"status='empty' requires no failures (rows_failed={rows_failed}, "
+                f"rows_quarantined={rows_quarantined}); use status='failed' when "
+                f"the run encountered failures with no successful rows"
+            )
+        return
+
+    raise ValueError(f"unhandled status value {status!r} in row-count invariant check")
 
 
 class CompletedData(_StrictResponse):
@@ -453,6 +548,12 @@ class RunStatusResponse(_StrictResponse):
         terminal-state counts) — over-counting is a Tier 1 anomaly.
         Full DAG-aware balance equation is tracked in elspeth-cf84eb1b52
         (P0, blocks RC 5.0).
+
+        Phase 2.2 (elspeth-0de989c56d) also gates the four-value status
+        taxonomy via ``_check_status_row_count_invariant`` so the API
+        cannot serialize a status string that doesn't match the
+        row-count shape.  The two invariants are orthogonal — one is
+        about count consistency, the other about status accuracy.
         """
         if self.status in RUN_STATUS_TERMINAL_VALUES:
             _validate_row_decomposition(
@@ -469,6 +570,13 @@ class RunStatusResponse(_StrictResponse):
                 error=self.error,
                 landscape_run_id=self.landscape_run_id,
             )
+        _check_status_row_count_invariant(
+            self.status,
+            self.rows_processed,
+            self.rows_succeeded,
+            self.rows_failed,
+            self.rows_quarantined,
+        )
         return self
 
 
@@ -499,6 +607,14 @@ class RunResultsResponse(_StrictResponse):
             self.status,
             error=self.error,
             landscape_run_id=self.landscape_run_id,
+        )
+        # Phase 2.2 (elspeth-0de989c56d): status / row-count biconditional.
+        _check_status_row_count_invariant(
+            self.status,
+            self.rows_processed,
+            self.rows_succeeded,
+            self.rows_failed,
+            self.rows_quarantined,
         )
         return self
 

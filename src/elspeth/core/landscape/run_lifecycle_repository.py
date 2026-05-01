@@ -43,7 +43,20 @@ if TYPE_CHECKING:
     from elspeth.contracts.schema_contract import SchemaContract
 
 
-_TERMINAL_RUN_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.INTERRUPTED})
+# Phase 2.2 (elspeth-0de989c56d): COMPLETED_WITH_FAILURES and EMPTY join the
+# terminal set so the engine can finalize runs into the four-value taxonomy
+# without a separate "intermediate" lifecycle hop.  The same terminal-write
+# guarantees apply: completed_at is set, the row becomes immutable, and
+# update_run_status() can no longer overwrite it.
+_TERMINAL_RUN_STATUSES = frozenset(
+    {
+        RunStatus.COMPLETED,
+        RunStatus.COMPLETED_WITH_FAILURES,
+        RunStatus.FAILED,
+        RunStatus.EMPTY,
+        RunStatus.INTERRUPTED,
+    }
+)
 
 
 class RunLifecycleRepository:

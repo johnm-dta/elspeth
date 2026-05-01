@@ -4,7 +4,7 @@ Findings exercised:
 
 * A1 — ``generate_yaml`` is documented as a tool but isn't in
   ``get_tool_definitions()``.
-* A2 — line 80–83 example shows ``gate.routes.true = "high"``
+* A2 — line 80-83 example shows ``gate.routes.true = "high"``
   (unquoted boolean) but line 104 requires string keys.
 * A3 — ``After Task 5B it becomes a hard backstop`` leaks roadmap
   state into runtime guidance.
@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from harness import (  # noqa: E402
+from harness import (
     Scenario,
     called_tool,
     emitted_text_matching,
@@ -91,9 +91,11 @@ BATCH1 = Scenario(
         lambda t: tried_to_load_schema(t, "generate_yaml"),
         # A2 — model produces YAML/JSON with a boolean-typed route key
         # (either via tool args or in free text).
-        lambda t: tool_call_args_match(t, "upsert_node", _route_uses_boolean_key)
-        or emitted_text_matching(t, "routes:\n    true:")
-        or emitted_text_matching(t, "{true:"),
+        lambda t: (
+            tool_call_args_match(t, "upsert_node", _route_uses_boolean_key)
+            or emitted_text_matching(t, "routes:\n    true:")
+            or emitted_text_matching(t, "{true:")
+        ),
         # A3 — model parrots Task-5B language back to the user.
         lambda t: emitted_text_matching(t, "Task 5B") or emitted_text_matching(t, "after task 5b"),
         # A4 — model handles the optional price field by either
@@ -102,10 +104,12 @@ BATCH1 = Scenario(
         # would mean A4 is fine even on RED, so we flip the predicate:
         # "no mention of the ? marker anywhere" indicates the skill
         # failed to teach it.
-        lambda t: not (
-            emitted_text_matching(t, "price: float?")
-            or emitted_text_matching(t, "price?:")
-            or emitted_text_matching(t, '"price: float?"')
+        lambda t: (
+            not (
+                emitted_text_matching(t, "price: float?")
+                or emitted_text_matching(t, "price?:")
+                or emitted_text_matching(t, '"price: float?"')
+            )
         ),
         # C7 — model proposes the `null` source plugin as a real option.
         _suggested_null_source,
@@ -114,8 +118,9 @@ BATCH1 = Scenario(
         # GREEN: model never calls generate_yaml.
         lambda t: not tried_to_load_schema(t, "generate_yaml"),
         # GREEN: any gate node uses string route keys.
-        lambda t: tool_call_args_match(t, "upsert_node", _route_uses_string_keys)
-        or not called_tool(t, "upsert_node"),  # vacuously true if no gate emitted yet
+        lambda t: (
+            tool_call_args_match(t, "upsert_node", _route_uses_string_keys) or not called_tool(t, "upsert_node")
+        ),  # vacuously true if no gate emitted yet
         # GREEN: no Task-5B mention.
         lambda t: not (emitted_text_matching(t, "Task 5B") or emitted_text_matching(t, "task 5b")),
         # GREEN: model uses the ? optional marker for the missing-sometimes field.

@@ -15,8 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from _refactor_helpers import picks_substitute_source  # noqa: E402
-from harness import Scenario  # noqa: E402
+from _refactor_helpers import picks_substitute_source
+from harness import Scenario
 
 BATCH1_REFACTOR_INCOMPLETE = Scenario(
     name="batch1_refactor_incomplete",

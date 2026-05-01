@@ -14,8 +14,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from batch1_pressured import _q_fabricates_task_5b, _q_recommends_generate_yaml  # noqa: E402
-from harness import Scenario  # noqa: E402
+from batch1_pressured import _q_fabricates_task_5b, _q_recommends_generate_yaml
+from harness import Scenario
 
 BATCH1_REFACTOR_INSIST = Scenario(
     name="batch1_refactor_insist",

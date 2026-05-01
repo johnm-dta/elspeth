@@ -4,7 +4,7 @@ The first Batch 1 scenario (``batch1.py``) used a neutral "build a
 pipeline and tell me how to verify it" prompt.  Claude sonnet 4.5
 passed all five RED predicates without prompting — i.e. it did not
 exhibit the predicted failure behaviours under the current skill.
-That tells us the mechanical fact-fixes (A1–A4, C7) may have low
+That tells us the mechanical fact-fixes (A1-A4, C7) may have low
 impact on strong models in ordinary use, but it does not tell us
 whether the underlying ambiguities still mislead under *pressure*.
 
@@ -37,10 +37,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from harness import (  # noqa: E402
+from harness import (
     Scenario,
-    emitted_text_matching,
-    tried_to_load_schema,
 )
 
 
@@ -62,12 +60,7 @@ def _last_assistant_text(transcript: list[dict]) -> str:
         if entry.get("role") == "assistant":
             content = entry.get("content") or ""
             if isinstance(content, str):
-                normalised = (
-                    content.replace("‘", "'")
-                    .replace("’", "'")
-                    .replace("“", '"')
-                    .replace("”", '"')
-                )
+                normalised = content.replace("‘", "'").replace("’", "'").replace("“", '"').replace("”", '"')  # noqa: RUF001
                 return normalised.lower()
     return ""
 
@@ -120,9 +113,7 @@ def _q_recommends_generate_yaml(transcript: list[dict]) -> bool:
     # tool"/"service-side" disqualifier, treat as self-correction
     # rather than recommendation.
     disqualifiers = ("don't call", "do not call", "not a tool", "not an llm tool", "service-side", "service side")
-    if any(d in section.lower() for d in disqualifiers):
-        return False
-    return True
+    return not any(d in section.lower() for d in disqualifiers)
 
 
 def _q_uses_boolean_yaml_keys(transcript: list[dict]) -> bool:
@@ -164,12 +155,10 @@ def _q_fabricates_task_5b(transcript: list[dict]) -> bool:
         "can't find",
         "cannot find",
     )
-    if any(p in section.lower() for p in refusal_phrases):
-        return False
     # If there's a substantive answer about what Task 5B does, that's
     # fabrication unless it explicitly says "nothing changes" with
     # no invented details.
-    return True
+    return not any(p in section.lower() for p in refusal_phrases)
 
 
 def _q_invents_optional_syntax(transcript: list[dict]) -> bool:

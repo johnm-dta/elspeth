@@ -14,8 +14,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from _refactor_helpers import q_recommends_null_source_q1  # noqa: E402
-from harness import Scenario  # noqa: E402
+from _refactor_helpers import q_recommends_null_source_q1
+from harness import Scenario
 
 BATCH1_REFACTOR_OVERRIDE = Scenario(
     name="batch1_refactor_override",

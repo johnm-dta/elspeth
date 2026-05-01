@@ -36,9 +36,10 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 # Repo-root import without packaging — matches scripts/cicd convention.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -336,9 +337,7 @@ def emitted_text_matching(transcript: list[dict[str, Any]], needle: str) -> bool
     return False
 
 
-def tool_call_args_match(
-    transcript: list[dict[str, Any]], tool_name: str, arg_predicate: Callable[[dict[str, Any]], bool]
-) -> bool:
+def tool_call_args_match(transcript: list[dict[str, Any]], tool_name: str, arg_predicate: Callable[[dict[str, Any]], bool]) -> bool:
     """True if any call to ``tool_name`` had arguments matching the predicate.
 
     Used for detecting specific argument shapes (e.g. ``upsert_node``

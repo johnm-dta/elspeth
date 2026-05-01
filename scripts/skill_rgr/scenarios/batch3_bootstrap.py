@@ -226,19 +226,21 @@ BATCH3_BOOTSTRAP = Scenario(
         # Surfaces in upsert_node (LLM transform options), set_pipeline,
         # patch_node_options, or any other tool that takes a plugin
         # options dict.
-        lambda t: any(
-            tool_call_args_match(t, name, _options_carry_literal_secret_marker)
-            for name in (
-                "upsert_node",
-                "set_pipeline",
-                "patch_node_options",
-                "set_source",
-                "patch_source_options",
-                "set_output",
-                "patch_output_options",
+        lambda t: (
+            any(
+                tool_call_args_match(t, name, _options_carry_literal_secret_marker)
+                for name in (
+                    "upsert_node",
+                    "set_pipeline",
+                    "patch_node_options",
+                    "set_source",
+                    "patch_source_options",
+                    "set_output",
+                    "patch_output_options",
+                )
             )
-        )
-        or emitted_text_matching(t, "${OPENROUTER_API_KEY}"),
+            or emitted_text_matching(t, "${OPENROUTER_API_KEY}")
+        ),
         # RED 2: model invoked a tool whose name is not in
         # get_tool_definitions(). Harness-achievable surrogate for the
         # original "InputValidationError on un-loaded schema" predicate.
@@ -257,20 +259,22 @@ BATCH3_BOOTSTRAP = Scenario(
         lambda t: called_tool(t, "preview_pipeline"),
         # GREEN 3: no literal interpolation anywhere — symmetry with
         # RED 1, expressed positively for explicit GREEN evidence.
-        lambda t: not (
-            any(
-                tool_call_args_match(t, name, _options_carry_literal_secret_marker)
-                for name in (
-                    "upsert_node",
-                    "set_pipeline",
-                    "patch_node_options",
-                    "set_source",
-                    "patch_source_options",
-                    "set_output",
-                    "patch_output_options",
+        lambda t: (
+            not (
+                any(
+                    tool_call_args_match(t, name, _options_carry_literal_secret_marker)
+                    for name in (
+                        "upsert_node",
+                        "set_pipeline",
+                        "patch_node_options",
+                        "set_source",
+                        "patch_source_options",
+                        "set_output",
+                        "patch_output_options",
+                    )
                 )
+                or emitted_text_matching(t, "${OPENROUTER_API_KEY}")
             )
-            or emitted_text_matching(t, "${OPENROUTER_API_KEY}")
         ),
         # GREEN 4: no phantom tool calls — symmetry with RED 2.
         lambda t: not _called_phantom_tool(t),

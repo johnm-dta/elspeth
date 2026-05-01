@@ -25,7 +25,7 @@ sys.path.insert(0, str(_HARNESS_ROOT))
 # (e.g. batch1_refactor_insist imports batch1_pressured).
 sys.path.insert(0, str(_HARNESS_ROOT / "scenarios"))
 
-from harness import evaluate, load_skill, run_scenario
+from harness import evaluate, load_skill, run_scenario  # noqa: E402
 
 
 def _load_scenario(name: str):

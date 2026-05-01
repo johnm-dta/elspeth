@@ -23,13 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from harness import Scenario, called_tool
 
-
 CALIBRATION = Scenario(
     name="calibration",
-    user_prompt=(
-        "What sources can I use in an ELSPETH pipeline? "
-        "Don't build anything yet — just list what's available."
-    ),
+    user_prompt=("What sources can I use in an ELSPETH pipeline? Don't build anything yet — just list what's available."),
     red_predicates=[
         # No RED in calibration: this scenario is pass/fail, not before/after.
     ],

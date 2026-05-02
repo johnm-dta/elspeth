@@ -340,7 +340,7 @@ allow_hits:
     malformed aggregation wrapper options as blocking ValidationEntry results, while top-level required_input_fields
     is still rejected
   expires: null
-- key: web/composer/state.py:R5:_check_schema_contracts:_is_config_probe_exception:fp=5a230a0da5a4022c
+- key: web/composer/state.py:R5:_check_schema_contracts:_is_config_probe_exception:fp=b86d7bc37facd99d
   owner: web-composer
   reason: "Composer preview classifies only known plugin config/probe exception types while probing plugin-computed\
     \ output contracts for shape-changing transforms. The caught exception message is NOT surfaced to\
@@ -350,6 +350,27 @@ allow_hits:
   safety: Unexpected exceptions are re-raised. Known config/probe exceptions are converted into a warning
     and preview falls back to raw declared schema guarantees (or frozenset() for known pass-through plugins,
     which then forces Stage 1 rejection) instead of crashing or fabricating a stronger contract
+  expires: null
+- key: web/composer/state.py:R5:_consumer_locked_input_set:fp=7d0eebc7f1756de1
+  owner: web-composer
+  reason: "_consumer_locked_input_set inspects aggregation wrapper-shaped options for a nested options
+    mapping carrying the input contract. The isinstance check mirrors the existing _declared_input_fields_option
+    pattern (also allowlisted) \u2014 the same Tier-3 LLM/user-supplied options shape with an optional nested
+    mapping. The nested-mapping branch is taken only when the value is actually a Mapping; otherwise the
+    flat top-level options are used."
+  safety: Non-mapping wrapper values fall through to the flat options path; existing schema-contract
+    validation rejects malformed wrapper options as blocking ValidationEntry results, so the locked-input
+    membership check never operates on adversarial shapes that bypass the type narrowing
+  expires: null
+- key: web/composer/state.py:R1:_check_schema_contracts:_producer_emit_set:fp=903c7ec6f6e51cef
+  owner: web-composer
+  reason: "_producer_emit_set looks up a producer's NodeSpec in node_by_id; sources have producer_id ==
+    \"source\" which is not a node, so the lookup may legitimately miss. Direct dict access would crash
+    on every source-as-producer call. The None branch falls back to _effective_producer_guarantees, which
+    is the established source-aware path."
+  safety: Missing-key triggers the established declared-set fallback used by all source/non-transform
+    producers \u2014 Rule A/B membership check then operates on the source's raw guarantee set rather than
+    crashing. No data fabrication; no audit divergence
   expires: null
 - key: web/composer/_semantic_validator.py:R5:_is_config_probe_exception:fp=f4dd333a133b13c6
   owner: web-composer
@@ -365,33 +386,92 @@ allow_hits:
     FAIL-policy consumers then emit a structured error naming only the requirement_code and plugin names,
     never the exception text.
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=8aa047c887b1708b
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=2c7b9d662f8c8b9c
   owner: web-composer
-  reason: Contract helper ValueError is intentionally converted into a blocking ValidationEntry on the
-    consumer node instead of raising immediately
+  reason: Contract helper ValueError (consumer required-fields parse) is intentionally converted into
+    a blocking ValidationEntry on the consumer node instead of raising immediately
   safety: The pipeline remains invalid; no contract telemetry is fabricated for that consumer edge
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=3cfcf6ff90894108
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=558ca2de6b6810b6
+  owner: web-composer
+  reason: "_consumer_locked_input_set ValueError (consumer schema parse) is intentionally converted into
+    a blocking ValidationEntry on the consumer node instead of raising immediately. Same pattern as the
+    consumer required-fields parse path above; both feed Rule A's membership check and must surface as
+    a structured validation error rather than a /validate crash."
+  safety: The pipeline remains invalid; no contract telemetry is fabricated for that consumer edge and
+    Rule A is short-circuited for that consumer
+  expires: null
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=2382e95a35a93985
   owner: web-composer
   reason: Producer contract parse failures are intentionally converted into blocking ValidationEntry results
     and the producer is marked uncheckable
   safety: The invalid producer blocks validation and suppresses downstream edge contracts instead of silently
     continuing
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=1494444ed48b9eca
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=6206995f45779c57
+  owner: web-composer
+  reason: "Rule A producer-emit ValueError swallowed silently because _effective_producer_guarantees has
+    already raised the same producer parse error above and surfaced it as a blocking ValidationEntry.
+    Re-surfacing here would duplicate the error message; the continue short-circuits Rule A for this
+    consumer-producer pair without losing the diagnostic."
+  safety: The producer's parse failure is already in errors[] from the previous _effective_producer_guarantees
+    call; pipeline remains invalid; Rule A is correctly skipped for this edge
+  expires: null
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=12b119589d13f3ec
   owner: web-composer
   reason: Sink contract parse failures are intentionally converted into blocking ValidationEntry results
     on the output
   safety: The pipeline remains invalid and the sink edge contract is skipped rather than fabricated
   expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=414c8f92c2bd2cda
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=fc2550162a738d41
+  owner: web-composer
+  reason: "_sink_locked_input_set ValueError (sink schema parse) is intentionally converted into a blocking
+    ValidationEntry on the output. Mirrors the sink required-fields parse path above; both feed Rule
+    B's membership check and must surface as a structured error rather than a /validate crash."
+  safety: The pipeline remains invalid; no contract telemetry is fabricated for that sink and Rule B
+    is short-circuited for that output
+  expires: null
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=bda8f455213a1779
   owner: web-composer
   reason: Sink-side producer parse failures are intentionally converted into blocking ValidationEntry
     results and the producer is marked uncheckable
   safety: The pipeline remains invalid and downstream sink contract evidence is suppressed for the bad
     producer
   expires: null
-- key: web/composer/state.py:R6:CompositionState:validate:fp=dc255c63a84477a2
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=409ab63d82b2da26
+  owner: web-composer
+  reason: "Rule B producer-emit ValueError swallowed silently because _effective_producer_guarantees has
+    already raised the same producer parse error above and surfaced it as a blocking ValidationEntry.
+    Same dedup rationale as Rule A's symmetric path: re-surfacing would duplicate the error message;
+    the continue short-circuits Rule B for this sink-producer pair without losing the diagnostic."
+  safety: The producer's parse failure is already in errors[] from the previous _effective_producer_guarantees
+    call; pipeline remains invalid; Rule B is correctly skipped for this edge
+  expires: null
+- key: web/composer/state.py:R1:_check_schema_contracts:fp=5111f816d9f2dae2
+  owner: web-composer
+  reason: "Rule C reads field_mapper's select_only flag from raw Tier-3 user/LLM-supplied options. dict.get
+    with default False matches FieldMapperConfig.select_only's pydantic default, so missing-key behaviour
+    is documented and identical to the plugin's own config parsing. Direct dict access would falsely
+    reject configs that omit the optional flag (legal per the plugin contract)."
+  safety: Missing-key falls back to False (the documented default); Rule C then short-circuits because
+    select_only=False puts field_mapper into the additive/loose-bound regime that Rule C explicitly does
+    not adjudicate
+  expires: null
+- key: web/composer/state.py:R4:_check_schema_contracts:fp=f0618f00470421a4
+  owner: web-composer
+  reason: "Rule C catches Exception broadly when probing field_mapper construction because the rule is
+    purely additive: when a transform can't be instantiated for any reason, the existing edge-loop validation
+    (raw-schema parsing on lines 1068-1099 above) and plugin construction at /execute will surface the
+    underlying error. Re-raising here would convert a Rule C non-applicability into a /validate crash
+    that masks the primary diagnostic. Distinct from _effective_producer_vote/_is_config_probe_exception
+    where unexpected exceptions are re-raised — those paths feed downstream edge contracts that depend
+    on the producer signal; Rule C is a pure self-consistency check with no downstream signal."
+  safety: Rule C silently no-ops for the offending transform; the underlying construction error is reported
+    by the other validation layers (edge loop, /execute) so the user still sees a structured diagnostic;
+    the only signal lost is Rule C's specific self-consistency rejection, which is degenerate when the
+    plugin can't even be constructed
+  expires: null
+- key: web/composer/state.py:R6:CompositionState:validate:fp=dac5151a896ece02
   owner: web-composer
   reason: Aggregation trigger PydanticValidationError is intentionally converted into a blocking ValidationEntry
     so composer rejects malformed trigger.condition values before runtime settings load

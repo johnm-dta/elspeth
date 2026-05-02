@@ -503,6 +503,46 @@ def _validate_gate_expression(condition: str) -> str | None:
     return None
 
 
+def _locked_input_field_set(options: Mapping[str, Any], owner: str) -> frozenset[str] | None:
+    """Return the consumer's accepted-input field set when its input is locked.
+
+    Mirrors ``_create_explicit_schema`` (schema_factory.py): a generated input
+    Pydantic model gets ``extra="forbid"`` only when ``schema.mode == "fixed"``.
+    For ``mode: flexible`` (extras allowed) and ``mode: observed`` (no field
+    constraints), returns None so the membership rule short-circuits.
+
+    The accepted set IS the declared ``schema.fields`` — that is what the
+    Pydantic model whitelists. Fields enumerated only via ``required_fields``
+    or ``audit_fields`` do not appear in the input model and therefore are not
+    part of the accepted set.
+    """
+    schema_config = get_raw_schema_config(options, owner=owner)
+    if schema_config is None or schema_config.mode != "fixed" or schema_config.fields is None:
+        return None
+    return frozenset(field.name for field in schema_config.fields)
+
+
+def _consumer_locked_input_set(node: NodeSpec) -> frozenset[str] | None:
+    """Return the consumer node's accepted-input set when input is locked.
+
+    Aggregation nodes carry their contract under either flat ``options`` or a
+    nested ``options.options`` wrapper (see ``_get_aggregation_contract_options``);
+    surface the same alias resolution so locked-input detection works for both
+    shapes uniformly.
+    """
+    if node.node_type == "aggregation":
+        contract_options = node.options
+        if "options" in node.options and isinstance(node.options["options"], Mapping):
+            contract_options = node.options["options"]
+        return _locked_input_field_set(contract_options, owner=f"node:{node.id}")
+    return _locked_input_field_set(node.options, owner=f"node:{node.id}")
+
+
+def _sink_locked_input_set(output: OutputSpec) -> frozenset[str] | None:
+    """Return the sink's accepted-input set when its input contract is locked."""
+    return _locked_input_field_set(output.options, owner=f"output:{output.name}")
+
+
 def _check_schema_contracts(
     source: SourceSpec | None,
     nodes: tuple[NodeSpec, ...],
@@ -978,6 +1018,52 @@ def _check_schema_contracts(
     def _format_fields(fields: frozenset[str]) -> str:
         return ", ".join(sorted(fields)) if fields else "(none)"
 
+    def _producer_emit_set(producer: ProducerEntry) -> frozenset[str]:
+        """Return the producer's *predicted emit* field set.
+
+        This is distinct from ``_effective_producer_guarantees``: that one returns
+        the producer's *declared* output set (``get_effective_guaranteed_fields``,
+        which unions ``guaranteed_fields`` with declared-required ``fields``).
+        Field-set membership rules need the *actual* emission — the set the
+        runtime will see — which equals ``_output_schema_config.guaranteed_fields``
+        for transforms whose plugins compute their own emit set
+        (``field_mapper``, ``batch_stats``, etc.). When the two sets diverge,
+        the transform itself is internally inconsistent (caught by the per-node
+        self-consistency loop below); using the declared set for downstream
+        Rule A/B checks would cascade Rule C breakage into spurious extras
+        attribution at downstream consumers/sinks.
+
+        For sources (no instance) and probe-failed transforms, falls back to
+        the declared set — those are the cases where we don't have a separate
+        emission inference, and the declared/raw set is the best signal.
+        """
+        if producer.producer_id == "source":
+            return _effective_producer_guarantees(producer)
+
+        producer_node = node_by_id.get(producer.producer_id)
+        if producer_node is None or producer_node.plugin is None:
+            return _effective_producer_guarantees(producer)
+        if producer_node.node_type not in {"transform", "aggregation"}:
+            return _effective_producer_guarantees(producer)
+
+        try:
+            from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+            transform = get_shared_plugin_manager().create_transform(
+                producer_node.plugin,
+                deep_thaw(producer_node.options),
+            )
+        except Exception as exc:
+            if not _is_config_probe_exception(exc):
+                raise
+            return _effective_producer_guarantees(producer)
+
+        output_config = transform._output_schema_config
+        if output_config is None or output_config.guaranteed_fields is None:
+            # No computed emit set available — fall back to declared.
+            return _effective_producer_guarantees(producer)
+        return frozenset(output_config.guaranteed_fields)
+
     for node in nodes:
         try:
             consumer_required = get_raw_node_required_fields(
@@ -989,7 +1075,13 @@ def _check_schema_contracts(
             errors.append(_err(f"node:{node.id}", f"Invalid contract config: {exc}", "high"))
             continue
 
-        if not consumer_required:
+        try:
+            consumer_locked_input = _consumer_locked_input_set(node)
+        except ValueError as exc:
+            errors.append(_err(f"node:{node.id}", f"Invalid contract config: {exc}", "high"))
+            continue
+
+        if not consumer_required and consumer_locked_input is None:
             continue
 
         actual_producer = _walk_to_real_producer(
@@ -1006,28 +1098,72 @@ def _check_schema_contracts(
             parse_failed_producers.add(actual_producer.producer_id)
             continue
 
-        missing_fields = consumer_required - producer_guaranteed
-        edge_contracts.append(
-            EdgeContract(
-                from_id=actual_producer.producer_id,
-                to_id=node.id,
-                producer_guarantees=tuple(sorted(producer_guaranteed)),
-                consumer_requires=tuple(sorted(consumer_required)),
-                missing_fields=tuple(sorted(missing_fields)),
-                satisfied=not missing_fields,
-            )
-        )
-        if missing_fields:
-            errors.append(
-                _err(
-                    f"node:{node.id}",
-                    f"Schema contract violation: '{actual_producer.producer_id}' -> '{node.id}'. "
-                    f"Consumer ({node.plugin or node.node_type}) requires fields: [{_format_fields(consumer_required)}]. "
-                    f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
-                    f"Missing fields: [{_format_fields(missing_fields)}].",
-                    "high",
+        if consumer_required:
+            missing_fields = consumer_required - producer_guaranteed
+            edge_contracts.append(
+                EdgeContract(
+                    from_id=actual_producer.producer_id,
+                    to_id=node.id,
+                    producer_guarantees=tuple(sorted(producer_guaranteed)),
+                    consumer_requires=tuple(sorted(consumer_required)),
+                    missing_fields=tuple(sorted(missing_fields)),
+                    satisfied=not missing_fields,
                 )
             )
+            if missing_fields:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Schema contract violation: '{actual_producer.producer_id}' -> '{node.id}'. "
+                        f"Consumer ({node.plugin or node.node_type}) requires fields: [{_format_fields(consumer_required)}]. "
+                        f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
+                        f"Missing fields: [{_format_fields(missing_fields)}].",
+                        "high",
+                    )
+                )
+
+        # Rule A: producer emits a field that consumer's locked input forbids.
+        # The runtime check is the auto-generated input Pydantic model with
+        # ``extra="forbid"`` (schema_factory.py: triggered by ``mode: fixed``);
+        # composer-time we mirror the same predicate against the producer's
+        # *predicted emit set* (not its declared set — see _producer_emit_set).
+        if consumer_locked_input is not None:
+            try:
+                producer_emit = _producer_emit_set(actual_producer)
+            except ValueError:
+                # Already surfaced above via _effective_producer_guarantees.
+                continue
+            extras = producer_emit - consumer_locked_input
+            if extras:
+                # When consumer is itself a field_mapper, suggesting "insert a
+                # field_mapper upstream" is degenerate — the operator is already
+                # at one. The same applies to declared `fields` expansion: for
+                # field_mapper, the input contract IS the declared output schema,
+                # so widening fields means widening the schema declaration too.
+                if node.plugin == "field_mapper":
+                    fix_suggestion = (
+                        f"Fix by adding {sorted(extras)!r} to the consumer's schema.fields, "
+                        f"OR by setting schema.mode: flexible on the consumer, "
+                        f"OR by adjusting upstream config so the extra field(s) are not emitted."
+                    )
+                else:
+                    fix_suggestion = (
+                        "Fix by relaxing the consumer schema (mode: flexible) or by inserting a "
+                        "field_mapper with select_only: true to drop the extras before this consumer."
+                    )
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Schema contract violation: '{actual_producer.producer_id}' -> '{node.id}'. "
+                        f"Consumer ({node.plugin or node.node_type}) input is locked (mode: fixed) and accepts: "
+                        f"[{_format_fields(consumer_locked_input)}]. "
+                        f"Producer ({_producer_label(actual_producer)}) will emit: "
+                        f"[{_format_fields(producer_emit)}]. "
+                        f"Extra fields rejected by consumer input contract: [{_format_fields(extras)}]. "
+                        f"{fix_suggestion}",
+                        "high",
+                    )
+                )
 
     for output in outputs:
         try:
@@ -1039,7 +1175,13 @@ def _check_schema_contracts(
             errors.append(_err(f"output:{output.name}", f"Invalid contract config: {exc}", "high"))
             continue
 
-        if not sink_required:
+        try:
+            sink_locked_input = _sink_locked_input_set(output)
+        except ValueError as exc:
+            errors.append(_err(f"output:{output.name}", f"Invalid contract config: {exc}", "high"))
+            continue
+
+        if not sink_required and sink_locked_input is None:
             continue
 
         if output.name in direct_sink_producers:
@@ -1076,28 +1218,128 @@ def _check_schema_contracts(
                 parse_failed_producers.add(actual_producer.producer_id)
                 continue
 
-            missing_fields = sink_required - producer_guaranteed
-            edge_contracts.append(
-                EdgeContract(
-                    from_id=actual_producer.producer_id,
-                    to_id=f"output:{output.name}",
-                    producer_guarantees=tuple(sorted(producer_guaranteed)),
-                    consumer_requires=tuple(sorted(sink_required)),
-                    missing_fields=tuple(sorted(missing_fields)),
-                    satisfied=not missing_fields,
-                )
-            )
-            if missing_fields:
-                errors.append(
-                    _err(
-                        f"output:{output.name}",
-                        f"Schema contract violation: '{actual_producer.producer_id}' -> 'output:{output.name}'. "
-                        f"Sink '{output.name}' requires fields: [{_format_fields(sink_required)}]. "
-                        f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
-                        f"Missing fields: [{_format_fields(missing_fields)}].",
-                        "high",
+            if sink_required:
+                missing_fields = sink_required - producer_guaranteed
+                edge_contracts.append(
+                    EdgeContract(
+                        from_id=actual_producer.producer_id,
+                        to_id=f"output:{output.name}",
+                        producer_guarantees=tuple(sorted(producer_guaranteed)),
+                        consumer_requires=tuple(sorted(sink_required)),
+                        missing_fields=tuple(sorted(missing_fields)),
+                        satisfied=not missing_fields,
                     )
                 )
+                if missing_fields:
+                    errors.append(
+                        _err(
+                            f"output:{output.name}",
+                            f"Schema contract violation: '{actual_producer.producer_id}' -> 'output:{output.name}'. "
+                            f"Sink '{output.name}' requires fields: [{_format_fields(sink_required)}]. "
+                            f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
+                            f"Missing fields: [{_format_fields(missing_fields)}].",
+                            "high",
+                        )
+                    )
+
+            # Rule B: producer emits a field that sink's locked input forbids.
+            # Same predicate as Rule A but routed at the sink boundary; runtime
+            # surface is the auto-generated sink Pydantic model with
+            # ``extra="forbid"`` triggered by ``mode: fixed`` on the sink schema.
+            if sink_locked_input is not None:
+                try:
+                    producer_emit = _producer_emit_set(actual_producer)
+                except ValueError:
+                    continue
+                extras = producer_emit - sink_locked_input
+                if extras:
+                    errors.append(
+                        _err(
+                            f"output:{output.name}",
+                            f"Schema contract violation: '{actual_producer.producer_id}' -> 'output:{output.name}'. "
+                            f"Sink '{output.name}' input is locked (mode: fixed) and accepts: "
+                            f"[{_format_fields(sink_locked_input)}]. "
+                            f"Producer ({_producer_label(actual_producer)}) will emit: "
+                            f"[{_format_fields(producer_emit)}]. "
+                            f"Extra fields rejected by sink input contract: [{_format_fields(extras)}]. "
+                            f"Fix by relaxing the sink schema (mode: flexible) or by inserting a "
+                            f"field_mapper with select_only: true to drop the extras before this sink.",
+                            "high",
+                        )
+                    )
+
+    # Rule C: per-transform self-consistency between declared output schema
+    # and the *actual* predicted emit set, scoped to plugins whose emit set
+    # can be computed deterministically from config alone. Currently:
+    # ``field_mapper`` with ``select_only=True`` — the actual output is
+    # exactly ``mapping.values()``, so any declared output field absent from
+    # mapping targets cannot be emitted.
+    #
+    # Why this is plugin-scoped rather than generic: ``_output_schema_config.
+    # guaranteed_fields`` has plugin-specific semantics. For field_mapper it
+    # IS the actual emit set (computed by ``_build_field_mapper_output_schema_config``
+    # from the mapping). For additive plugins like ``line_explode``/``web_scrape``
+    # it is a *lower bound* on emission (only the fields the transform itself
+    # adds — passes-through input fields are not enumerated), so a generic
+    # ``get_effective_guaranteed_fields() - guaranteed_fields`` check would
+    # mis-attribute every passthrough field as "missing". The runtime check
+    # ``verify_schema_config_mode`` only sees the actually emitted row, so it
+    # does not have this disambiguation problem; we earn that ambiguity-free
+    # signal composer-time only by restricting to plugins where emit is fully
+    # determined by config.
+    #
+    # As more reductive plugins land, extend the predicate below — do NOT
+    # generalize by removing the plugin gate without first lifting an
+    # ``actual_emit_set`` declaration onto each plugin class.
+    for node in nodes:
+        if node.node_type not in {"transform", "aggregation"} or node.plugin is None:
+            continue
+        if node.plugin != "field_mapper":
+            continue
+        if node.id in parse_failed_producers:
+            continue
+        # Read select_only directly from the raw options so the plugin gate
+        # short-circuits before construction and stays free of access to
+        # private plugin instance attributes from outside the plugin layer.
+        # The semantics match ``FieldMapperConfig.select_only``: bool with
+        # default False; any non-false-y option value triggers the reductive
+        # emit semantics that make Rule C applicable.
+        if not bool(node.options.get("select_only", False)):
+            # Without select_only, field_mapper preserves input fields by
+            # default and falls into the additive/loose-bound regime that we
+            # cannot adjudicate without knowing the upstream emit set.
+            continue
+        try:
+            from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+            transform = get_shared_plugin_manager().create_transform(
+                node.plugin,
+                deep_thaw(node.options),
+            )
+        except Exception:
+            continue
+
+        output_config = transform._output_schema_config
+        if output_config is None:
+            continue
+
+        predicted_emit = frozenset(output_config.guaranteed_fields or ())
+        declared_required = output_config.get_effective_guaranteed_fields()
+        missing = declared_required - predicted_emit
+        if not missing:
+            continue
+        errors.append(
+            _err(
+                f"node:{node.id}",
+                f"Transform contract violation: node '{node.id}' ({node.plugin}) declares output fields "
+                f"[{_format_fields(declared_required)}] (required) but with select_only: true the mapping will only emit "
+                f"[{_format_fields(predicted_emit)}]. "
+                f"Declared required output fields not produced by this transform: [{_format_fields(missing)}]. "
+                f"Fix by removing the missing field(s) from the schema declaration, OR by extending "
+                f"`mapping` so the transform actually emits them, OR by setting select_only: false.",
+                "high",
+            )
+        )
 
     return tuple(errors), tuple(contract_warnings), tuple(edge_contracts)
 

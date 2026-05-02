@@ -2923,7 +2923,15 @@ class TestSchemaContractValidation:
         assert not any(ec.to_id == "t1" for ec in result.edge_contracts)
 
     def test_multiple_transforms_can_share_sink_target(self) -> None:
-        """Shared sink targets stay outside the internal producer namespace."""
+        """Shared sink targets stay outside the internal producer namespace.
+
+        Uses ``mode: flexible`` for t1/t2 input contracts: this test exercises
+        shared-sink-target wiring, not strict input schemas. With ``mode: fixed``
+        the auto-injected ``_placeholder`` field that ``_make_transform`` adds
+        via its default value_transform operation would be rejected by t2's
+        locked input contract (Rule A) — surfacing as a real runtime violation
+        but unrelated to the wiring property under test.
+        """
         state = self._empty_state()
         state = state.with_source(
             self._make_source(
@@ -2937,7 +2945,7 @@ class TestSchemaContractValidation:
                 "t2",
                 options={
                     "required_input_fields": ["text"],
-                    "schema": {"mode": "fixed", "fields": ["text: str"]},
+                    "schema": {"mode": "flexible", "fields": ["text: str"]},
                 },
                 on_error="errors",
             )
@@ -2949,7 +2957,7 @@ class TestSchemaContractValidation:
                 "main",
                 options={
                     "required_input_fields": ["text"],
-                    "schema": {"mode": "fixed", "fields": ["text: str"]},
+                    "schema": {"mode": "flexible", "fields": ["text: str"]},
                 },
                 on_error="errors",
             )
@@ -3881,6 +3889,418 @@ class TestSchemaContractValidation:
         assert payload["satisfied"] is True
         assert "from_id" not in payload
         assert "to_id" not in payload
+
+    # --- Field-set membership tests (elspeth-3d25355784) ---
+    #
+    # The three S3 evaluation fixtures (msg{1,2,3}.json captured under
+    # /tmp/elspeth_eval/2026-05-03/s3/) are the ground-truth reproducers for
+    # the composer-time membership checks. Each surfaces a different rejection
+    # shape that previously slipped past /validate (is_valid: true) and only
+    # crashed at /execute with a structured engine error. The test cases below
+    # mirror those YAMLs so the regression locks in the rejection at the
+    # composer boundary.
+
+    def _batch_stats_to_locked_sink_state(self) -> CompositionState:
+        """v1 reproducer: ``batch_stats`` → locked-mode JSON sink."""
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                on_success="aggregate_by_tier",
+                plugin="csv",
+                options={
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": [
+                            "ticket_id: str",
+                            "subject: str",
+                            "body: str",
+                            "customer_tier: str",
+                            "amount: float",
+                        ],
+                    },
+                },
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="aggregate_by_tier",
+                node_type="aggregation",
+                plugin="batch_stats",
+                input="aggregate_by_tier",
+                on_success="results",
+                on_error="discard",
+                options={
+                    "schema": {
+                        "mode": "flexible",
+                        "fields": ["customer_tier: str", "amount: float"],
+                        "required_fields": ["customer_tier", "amount"],
+                    },
+                    "value_field": "amount",
+                    "group_by": "customer_tier",
+                    "compute_mean": False,
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+                output_mode="transform",
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="results",
+                plugin="json",
+                options={
+                    "path": "outputs/ticket_totals_by_tier.json",
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": ["customer_tier: str", "count: int", "sum: float"],
+                    },
+                    "format": "json",
+                    "indent": 2,
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                on_write_failure="discard",
+            )
+        )
+        return state
+
+    def test_v1_locked_sink_rejects_upstream_batch_size_extra(self) -> None:
+        """Sink ``mode: fixed`` rejects ``batch_size`` emitted by upstream batch_stats.
+
+        Reproduces /tmp/elspeth_eval/2026-05-03/s3/msg1.json. The composer
+        previously accepted this YAML; the engine then crashed at sink_write
+        with PluginContractViolation (``Extra inputs are not permitted:
+        batch_size``). The new field-set membership check rejects this at
+        /validate with a message that names ``batch_size`` — the same field
+        the engine names — and points the operator at both fixes.
+        """
+        state = self._batch_stats_to_locked_sink_state()
+
+        result = state.validate()
+
+        assert not result.is_valid, "Composer must reject locked sink that forbids producer-emitted extras."
+        sink_extra_errors = [
+            e for e in result.errors if e.component == "output:results" and "batch_size" in e.message and "input is locked" in e.message
+        ]
+        assert sink_extra_errors, f"Expected sink locked-input rejection naming batch_size, got: {[e.message for e in result.errors]}"
+        msg = sink_extra_errors[0].message
+        assert "Extra fields rejected by sink input contract: [batch_size]" in msg
+        assert "mode: flexible" in msg  # operator-actionable: relax sink schema
+        assert "field_mapper" in msg and "select_only: true" in msg  # operator-actionable: drop extras upstream
+
+    def test_v2_field_mapper_select_only_with_inconsistent_declared_output(self) -> None:
+        """Rule C: field_mapper declares an output field its mapping won't emit.
+
+        Reproduces /tmp/elspeth_eval/2026-05-03/s3/msg2.json. The composer
+        previously accepted this YAML; the engine crashed at the schema
+        config mode contract with SchemaConfigModeViolation (``missing
+        required fields ['batch_size']``). The runtime check expects the
+        emitted row to satisfy the declared output schema, but with
+        ``select_only: true`` the actual emit is exactly ``mapping.values()``
+        — which excludes ``batch_size``.
+        """
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                on_success="aggregate_by_tier",
+                plugin="csv",
+                options={
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": [
+                            "ticket_id: str",
+                            "subject: str",
+                            "body: str",
+                            "customer_tier: str",
+                            "amount: float",
+                        ],
+                    },
+                },
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="aggregate_by_tier",
+                node_type="aggregation",
+                plugin="batch_stats",
+                input="aggregate_by_tier",
+                on_success="select_output_fields",
+                on_error="discard",
+                options={
+                    "schema": {
+                        "mode": "flexible",
+                        "fields": ["customer_tier: str", "amount: float"],
+                        "required_fields": ["customer_tier", "amount"],
+                    },
+                    "value_field": "amount",
+                    "group_by": "customer_tier",
+                    "compute_mean": False,
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+                output_mode="transform",
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "select_output_fields",
+                "select_output_fields",
+                "results",
+                plugin="field_mapper",
+                options={
+                    "schema": {
+                        "mode": "flexible",
+                        "fields": [
+                            "batch_size: int",
+                            "count: int",
+                            "customer_tier: str",
+                            "sum: float",
+                        ],
+                        "required_fields": ["customer_tier", "count", "sum"],
+                    },
+                    "required_input_fields": ["customer_tier", "count", "sum"],
+                    "mapping": {
+                        "customer_tier": "customer_tier",
+                        "count": "count",
+                        "sum": "sum",
+                    },
+                    "select_only": True,
+                    "strict": True,
+                },
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="results",
+                plugin="json",
+                options={
+                    "path": "outputs/ticket_totals_by_tier.json",
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": ["customer_tier: str", "count: int", "sum: float"],
+                    },
+                    "format": "json",
+                    "indent": 2,
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                on_write_failure="discard",
+            )
+        )
+
+        result = state.validate()
+
+        assert not result.is_valid, "Composer must reject field_mapper whose declared output won't be emitted."
+        rule_c_errors = [
+            e
+            for e in result.errors
+            if e.component == "node:select_output_fields" and "Transform contract violation" in e.message and "batch_size" in e.message
+        ]
+        assert rule_c_errors, f"Expected Rule C self-consistency rejection naming batch_size, got: {[e.message for e in result.errors]}"
+        msg = rule_c_errors[0].message
+        assert "select_only: true" in msg
+        assert "Declared required output fields not produced by this transform: [batch_size]" in msg
+
+    def test_v3_field_mapper_locked_input_rejects_upstream_batch_size_extra(self) -> None:
+        """Rule A: locked-mode field_mapper input rejects upstream batch_stats extra.
+
+        Reproduces /tmp/elspeth_eval/2026-05-03/s3/msg3.json. The composer
+        previously accepted this YAML; the engine crashed at input validation
+        with PluginContractViolation (``Extra inputs are not permitted:
+        batch_size``). The field_mapper's input Pydantic model gets
+        ``extra="forbid"`` because its ``schema.mode`` is fixed; upstream
+        batch_stats emits ``batch_size`` which is not in the declared
+        ``fields``.
+        """
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                on_success="aggregate_by_tier",
+                plugin="csv",
+                options={
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": [
+                            "ticket_id: str",
+                            "subject: str",
+                            "body: str",
+                            "customer_tier: str",
+                            "amount: float",
+                        ],
+                    },
+                },
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="aggregate_by_tier",
+                node_type="aggregation",
+                plugin="batch_stats",
+                input="aggregate_by_tier",
+                on_success="select_output_fields",
+                on_error="discard",
+                options={
+                    "schema": {
+                        "mode": "flexible",
+                        "fields": ["customer_tier: str", "amount: float"],
+                        "required_fields": ["customer_tier", "amount"],
+                    },
+                    "value_field": "amount",
+                    "group_by": "customer_tier",
+                    "compute_mean": False,
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+                output_mode="transform",
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "select_output_fields",
+                "select_output_fields",
+                "results",
+                plugin="field_mapper",
+                options={
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": ["customer_tier: str", "count: int", "sum: float"],
+                        "required_fields": ["customer_tier", "count", "sum"],
+                    },
+                    "required_input_fields": ["customer_tier", "count", "sum"],
+                    "mapping": {
+                        "customer_tier": "customer_tier",
+                        "count": "count",
+                        "sum": "sum",
+                    },
+                    "select_only": True,
+                    "strict": True,
+                },
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="results",
+                plugin="json",
+                options={
+                    "path": "outputs/ticket_totals_by_tier.json",
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": ["customer_tier: str", "count: int", "sum: float"],
+                    },
+                    "format": "json",
+                    "indent": 2,
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                on_write_failure="discard",
+            )
+        )
+
+        result = state.validate()
+
+        assert not result.is_valid, "Composer must reject locked field_mapper input that forbids producer-emitted extras."
+        consumer_extra_errors = [
+            e
+            for e in result.errors
+            if e.component == "node:select_output_fields" and "input is locked" in e.message and "batch_size" in e.message
+        ]
+        assert consumer_extra_errors, (
+            f"Expected consumer locked-input rejection naming batch_size, got: {[e.message for e in result.errors]}"
+        )
+        msg = consumer_extra_errors[0].message
+        assert "Extra fields rejected by consumer input contract: [batch_size]" in msg
+        assert "'aggregate_by_tier' -> 'select_output_fields'" in msg  # producer/consumer attribution
+        assert "schema.mode: flexible" in msg  # operator-actionable: relax consumer schema
+        assert "schema.fields" in msg  # operator-actionable: widen the field declaration
+        assert "['batch_size']" in msg  # message names the specific field to add
+        # When consumer IS field_mapper, the "insert a field_mapper" suggestion is degenerate.
+        assert "insert a field_mapper" not in msg, "Rule A must not suggest inserting a field_mapper when the consumer is already one."
+
+    def test_locked_input_check_does_not_fire_on_flexible_consumer(self) -> None:
+        """Rule A negative: ``mode: flexible`` consumer accepts producer extras.
+
+        Sanity guard against over-generalization: the same upstream
+        (batch_stats with batch_size) feeding a ``mode: flexible`` consumer
+        does not trigger the locked-input rejection. Only ``mode: fixed``
+        produces ``extra="forbid"`` on the auto-generated input contract.
+        """
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                on_success="aggregate_by_tier",
+                plugin="csv",
+                options={
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": ["customer_tier: str", "amount: float"],
+                    },
+                },
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="aggregate_by_tier",
+                node_type="aggregation",
+                plugin="batch_stats",
+                input="aggregate_by_tier",
+                on_success="select_output_fields",
+                on_error="discard",
+                options={
+                    "schema": {"mode": "flexible", "fields": ["customer_tier: str", "amount: float"]},
+                    "value_field": "amount",
+                    "group_by": "customer_tier",
+                    "compute_mean": False,
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+                output_mode="transform",
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "select_output_fields",
+                "select_output_fields",
+                "main",
+                plugin="field_mapper",
+                options={
+                    # Same shape as v3 except mode=flexible — extras allowed.
+                    "schema": {
+                        "mode": "flexible",
+                        "fields": ["customer_tier: str", "count: int", "sum: float"],
+                    },
+                    "mapping": {
+                        "customer_tier": "customer_tier",
+                        "count": "count",
+                        "sum": "sum",
+                    },
+                    "select_only": True,
+                    "strict": True,
+                },
+            )
+        )
+        state = state.with_output(self._make_output("main"))
+
+        result = state.validate()
+
+        assert not any("input is locked" in e.message and "batch_size" in e.message for e in result.errors), (
+            f"Flexible consumer must not trigger locked-input rejection, got errors: {[e.message for e in result.errors]}"
+        )
 
 
 class TestPassThroughComposerParity:

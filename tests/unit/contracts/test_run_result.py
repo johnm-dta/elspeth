@@ -9,9 +9,11 @@ from types import MappingProxyType
 from typing import Any
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from elspeth.contracts.enums import RunStatus
-from elspeth.contracts.run_result import RunResult
+from elspeth.contracts.run_result import RunResult, derive_terminal_run_status
 from tests.fixtures.factories import make_run_result
 
 
@@ -397,3 +399,426 @@ class TestRunResultStatusInvariant:
         """EMPTY forbids any failure indicator (use FAILED if there were failures)."""
         with pytest.raises(ValueError, match=r"EMPTY.*requires no failures"):
             self._build(status=RunStatus.EMPTY, rows_processed=0, rows_succeeded=0, rows_failed=1)
+
+
+class TestRunStatusRowsRoutedSplitPredicate:
+    """elspeth-5069612f3c — predicate behavior for the split rows_routed counters.
+
+    These tests pin the post-split semantics: rows_routed_success counts toward
+    the success indicator (gate MOVE pipelines complete cleanly), and
+    rows_routed_failure counts toward the failure indicator (on_error DIVERT
+    pipelines fail, distinct from rows_failed but predicate-equivalent).
+
+    REPLACES the older test_runstatus_rows_routed_only_classifies_as_failed
+    pattern at lines 289-295 of this file, which asserted FAILED for the
+    structurally ambiguous rows_routed counter (now removed).
+    """
+
+    def _build(
+        self,
+        *,
+        status: RunStatus,
+        rows_processed: int = 0,
+        rows_succeeded: int = 0,
+        rows_failed: int = 0,
+        rows_routed_success: int = 0,
+        rows_routed_failure: int = 0,
+        rows_quarantined: int = 0,
+        rows_coalesce_failed: int = 0,
+    ) -> RunResult:
+        return RunResult(
+            run_id="rsp-1",
+            status=status,
+            rows_processed=rows_processed,
+            rows_succeeded=rows_succeeded,
+            rows_failed=rows_failed,
+            rows_routed_success=rows_routed_success,
+            rows_routed_failure=rows_routed_failure,
+            rows_quarantined=rows_quarantined,
+            rows_coalesce_failed=rows_coalesce_failed,
+        )
+
+    def test_gate_routed_only_classifies_as_completed(self) -> None:
+        """User reproducer shape: csv -> gate -> sink_a/sink_b, every row
+        intentionally gate-routed (RowOutcome.ROUTED via MOVE). rows_succeeded
+        is 0 because the orchestrator's success-path counter never increments
+        for terminally-gate-routed rows; the new rows_routed_success counter
+        carries the structural success signal.
+        """
+        derived = derive_terminal_run_status(
+            rows_processed=8,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=8,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.COMPLETED
+        # The biconditional invariant accepts the (COMPLETED, 8, 0, 8, 0, 0, 0) shape.
+        result = self._build(
+            status=RunStatus.COMPLETED,
+            rows_processed=8,
+            rows_succeeded=0,
+            rows_routed_success=8,
+        )
+        assert result.status == RunStatus.COMPLETED
+
+    def test_on_error_routed_only_classifies_as_failed(self) -> None:
+        """S1A reproducer shape: every row triggers a transform exception, all
+        routed via on_error to a quarantine/error sink (RowOutcome.ROUTED_ON_ERROR
+        via DIVERT). rows_routed_failure carries the structural failure signal;
+        no success indicator is present.
+        """
+        derived = derive_terminal_run_status(
+            rows_processed=2,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=2,
+            rows_quarantined=0,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.FAILED
+
+    def test_mixed_gate_and_on_error_classifies_as_completed_with_failures(self) -> None:
+        """Mixed shape: some rows gate-routed (success) AND some rows
+        on_error-routed (failure). Predicate must report
+        COMPLETED_WITH_FAILURES — at least one success indicator AND at least
+        one failure indicator.
+        """
+        derived = derive_terminal_run_status(
+            rows_processed=10,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=7,
+            rows_routed_failure=3,
+            rows_quarantined=0,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.COMPLETED_WITH_FAILURES
+
+    def test_empty_pipeline_still_classifies_as_empty(self) -> None:
+        """Regression: empty source (rows_processed == 0, no failure
+        indicator) still classifies as EMPTY after the split.
+        """
+        derived = derive_terminal_run_status(
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.EMPTY
+
+    def test_resume_continuation_still_classifies_as_completed(self) -> None:
+        """Regression: resume / coalesce-continuation shape (rows_processed == 0
+        AND rows_succeeded > 0) still classifies as COMPLETED after the split.
+        """
+        derived = derive_terminal_run_status(
+            rows_processed=0,
+            rows_succeeded=3,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.COMPLETED
+
+    def test_resume_continuation_with_success_and_failure_indicators_classifies_as_completed_with_failures(self) -> None:
+        """Regression for resume-after-coalesce shapes: rows_processed can be 0
+        while continuation bookkeeping reports both a success indicator and a
+        failure indicator. derive_terminal_run_status() and the L0
+        _check_status_invariant must agree on COMPLETED_WITH_FAILURES without
+        requiring rows_processed > 0.
+        """
+        derived = derive_terminal_run_status(
+            rows_processed=0,
+            rows_succeeded=3,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=1,
+            rows_quarantined=0,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.COMPLETED_WITH_FAILURES
+        result = self._build(
+            status=RunStatus.COMPLETED_WITH_FAILURES,
+            rows_processed=0,
+            rows_succeeded=3,
+            rows_routed_failure=1,
+        )
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
+
+    # ------------------------------------------------------------------
+    # Additional positive-shape coverage (elspeth-5069612f3c review pass)
+    # The six canonical shapes above cover the user-facing reproducer
+    # scenarios and the resume-after-coalesce zero-processed mixed-indicator
+    # regression. These three additional shapes pin mixed-counter cases
+    # the canonical set leaves under-tested. Without them the predicate
+    # could regress on operationally-common shapes (success-path-with-
+    # on-error-failures, gate-routed-with-hard-failures, etc.) without
+    # any test catching it.
+    # ------------------------------------------------------------------
+
+    def test_succeeded_mixed_with_on_error_routing_classifies_as_completed_with_failures(self) -> None:
+        """Mixed-success shape: some rows reached on_success success-path sinks
+        (rows_succeeded > 0) while others triggered transform exceptions and
+        were on_error-routed (rows_routed_failure > 0). Predicate must report
+        COMPLETED_WITH_FAILURES — both indicators are present.
+        """
+        derived = derive_terminal_run_status(
+            rows_processed=10,
+            rows_succeeded=7,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=3,
+            rows_quarantined=0,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.COMPLETED_WITH_FAILURES
+        # Verify the L0 invariant accepts this shape without raising.
+        result = self._build(
+            status=RunStatus.COMPLETED_WITH_FAILURES,
+            rows_processed=10,
+            rows_succeeded=7,
+            rows_routed_failure=3,
+        )
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
+
+    def test_gate_routed_mixed_with_hard_failures_classifies_as_completed_with_failures(self) -> None:
+        """Mixed-routing shape: some rows gate-routed via MOVE
+        (rows_routed_success > 0) while others reached the canonical FAILED
+        terminal via transform exceptions that were NOT on_error-rerouted
+        (rows_failed > 0). Both indicators present; predicate is
+        COMPLETED_WITH_FAILURES.
+        """
+        derived = derive_terminal_run_status(
+            rows_processed=10,
+            rows_succeeded=0,
+            rows_failed=4,
+            rows_routed_success=6,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.COMPLETED_WITH_FAILURES
+        # Verify the L0 invariant accepts this shape without raising.
+        result = self._build(
+            status=RunStatus.COMPLETED_WITH_FAILURES,
+            rows_processed=10,
+            rows_failed=4,
+            rows_routed_success=6,
+        )
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
+
+    def test_canonical_failed_via_rows_failed_only_classifies_as_failed(self) -> None:
+        """Canonical FAILED shape: every row reached RowOutcome.FAILED via an
+        unhandled transform exception (no on_error reroute, no gate routing).
+        rows_failed > 0 is the sole failure indicator; predicate is FAILED.
+
+        This pins the legacy FAILED path that pre-existed the rows_routed
+        split — without this test, a regression that only checked the new
+        rows_routed_failure indicator could silently bypass rows_failed.
+        """
+        derived = derive_terminal_run_status(
+            rows_processed=5,
+            rows_succeeded=0,
+            rows_failed=5,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.FAILED
+
+    # ------------------------------------------------------------------
+    # Predicate matrix coverage for old failure counters crossed with the
+    # new routed counters. These are cheap but important: rows_quarantined
+    # and rows_coalesce_failed are pre-existing failure indicators, and the
+    # rows_routed_success / rows_routed_failure split must compose with
+    # them exactly like rows_failed does.
+    # ------------------------------------------------------------------
+
+    def test_gate_routed_with_quarantined_rows_classifies_as_completed_with_failures(self) -> None:
+        derived = derive_terminal_run_status(
+            rows_processed=8,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=5,
+            rows_routed_failure=0,
+            rows_quarantined=3,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.COMPLETED_WITH_FAILURES
+        result = self._build(
+            status=RunStatus.COMPLETED_WITH_FAILURES,
+            rows_processed=8,
+            rows_routed_success=5,
+            rows_quarantined=3,
+        )
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
+
+    def test_gate_routed_with_coalesce_failures_classifies_as_completed_with_failures(self) -> None:
+        derived = derive_terminal_run_status(
+            rows_processed=8,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=5,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            rows_coalesce_failed=3,
+        )
+        assert derived == RunStatus.COMPLETED_WITH_FAILURES
+        result = self._build(
+            status=RunStatus.COMPLETED_WITH_FAILURES,
+            rows_processed=8,
+            rows_routed_success=5,
+            rows_coalesce_failed=3,
+        )
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
+
+    def test_on_error_routed_with_quarantine_and_coalesce_failures_classifies_as_failed(self) -> None:
+        derived = derive_terminal_run_status(
+            rows_processed=8,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=4,
+            rows_quarantined=2,
+            rows_coalesce_failed=2,
+        )
+        assert derived == RunStatus.FAILED
+        result = self._build(
+            status=RunStatus.FAILED,
+            rows_processed=8,
+            rows_routed_failure=4,
+            rows_quarantined=2,
+            rows_coalesce_failed=2,
+        )
+        assert result.status == RunStatus.FAILED
+
+    @given(
+        rows_processed=st.integers(min_value=0, max_value=20),
+        rows_succeeded=st.integers(min_value=0, max_value=20),
+        rows_failed=st.integers(min_value=0, max_value=20),
+        rows_routed_success=st.integers(min_value=0, max_value=20),
+        rows_routed_failure=st.integers(min_value=0, max_value=20),
+        rows_quarantined=st.integers(min_value=0, max_value=20),
+        rows_coalesce_failed=st.integers(min_value=0, max_value=20),
+    )
+    def test_derived_status_round_trips_l0_invariant(
+        self,
+        rows_processed: int,
+        rows_succeeded: int,
+        rows_failed: int,
+        rows_routed_success: int,
+        rows_routed_failure: int,
+        rows_quarantined: int,
+        rows_coalesce_failed: int,
+    ) -> None:
+        """Biconditional property: any counter tuple classified by
+        derive_terminal_run_status() must be accepted by RunResult's L0
+        status invariant when used with the derived status.
+
+        This is the cheapest guard against the mirror-drift class that
+        produced elspeth-71520f5e30: the predicate function and the
+        dataclass invariant must agree for arbitrary non-negative counter
+        tuples, including the new routed counters crossed with legacy
+        failure counters.
+        """
+        counters = {
+            "rows_processed": rows_processed,
+            "rows_succeeded": rows_succeeded,
+            "rows_failed": rows_failed,
+            "rows_routed_success": rows_routed_success,
+            "rows_routed_failure": rows_routed_failure,
+            "rows_quarantined": rows_quarantined,
+            "rows_coalesce_failed": rows_coalesce_failed,
+        }
+        derived = derive_terminal_run_status(**counters)
+        result = self._build(status=derived, **counters)
+        assert result.status == derived
+
+    # ------------------------------------------------------------------
+    # Negative invariant coverage (elspeth-5069612f3c review pass)
+    # The updated _check_status_invariant has seven raise-paths. Without
+    # negative tests, a future regression that relaxes the invariant
+    # (admits a shape it should reject) passes every positive test
+    # silently. These six negative tests pin the most consequential
+    # raise-paths so loosened-invariant regressions are caught.
+    # ------------------------------------------------------------------
+
+    def test_completed_without_success_indicator_raises(self) -> None:
+        """COMPLETED requires rows_succeeded > 0 OR rows_routed_success > 0.
+        With both at zero AND no failure indicator, the run should classify
+        as EMPTY (rows_processed == 0) or FAILED (rows_processed > 0) — NOT
+        COMPLETED. The invariant must reject this construction.
+        """
+        with pytest.raises(ValueError, match="status=COMPLETED requires a success indicator"):
+            self._build(
+                status=RunStatus.COMPLETED,
+                rows_processed=5,
+                rows_succeeded=0,
+                rows_routed_success=0,
+            )
+
+    def test_completed_with_failure_indicator_raises(self) -> None:
+        """COMPLETED requires NO failure indicator. If any failure counter is
+        non-zero, the status is COMPLETED_WITH_FAILURES, not COMPLETED.
+        """
+        with pytest.raises(ValueError, match="status=COMPLETED requires no failures"):
+            self._build(
+                status=RunStatus.COMPLETED,
+                rows_processed=5,
+                rows_succeeded=4,
+                rows_failed=1,  # Failure indicator must trigger COMPLETED_WITH_FAILURES, not COMPLETED.
+            )
+
+    def test_completed_with_failures_without_success_indicator_raises(self) -> None:
+        """COMPLETED_WITH_FAILURES requires BOTH a success indicator AND a
+        failure indicator. With only failures present (no success path), the
+        status must be FAILED, not COMPLETED_WITH_FAILURES.
+        """
+        with pytest.raises(ValueError, match="COMPLETED_WITH_FAILURES requires a success indicator"):
+            self._build(
+                status=RunStatus.COMPLETED_WITH_FAILURES,
+                rows_processed=3,
+                rows_failed=3,
+            )
+
+    def test_completed_with_failures_without_failure_indicator_raises(self) -> None:
+        """COMPLETED_WITH_FAILURES requires BOTH indicators. With only success
+        present (no failures), the status must be COMPLETED, not
+        COMPLETED_WITH_FAILURES.
+        """
+        with pytest.raises(ValueError, match="COMPLETED_WITH_FAILURES requires at least one failure indicator"):
+            self._build(
+                status=RunStatus.COMPLETED_WITH_FAILURES,
+                rows_processed=3,
+                rows_succeeded=3,
+            )
+
+    def test_empty_with_rows_processed_raises(self) -> None:
+        """EMPTY requires rows_processed == 0 (no input rows reached the
+        engine). Any non-zero rows_processed contradicts EMPTY semantics.
+        """
+        with pytest.raises(ValueError, match="status=EMPTY requires rows_processed == 0"):
+            self._build(
+                status=RunStatus.EMPTY,
+                rows_processed=1,  # Contradicts EMPTY.
+            )
+
+    def test_empty_with_success_indicator_raises(self) -> None:
+        """EMPTY requires no success indicator. A run with rows_succeeded > 0
+        or rows_routed_success > 0 is not EMPTY by definition.
+        """
+        with pytest.raises(ValueError, match="status=EMPTY requires no success indicator"):
+            self._build(
+                status=RunStatus.EMPTY,
+                rows_processed=0,
+                rows_routed_success=1,  # Success indicator contradicts EMPTY.
+            )

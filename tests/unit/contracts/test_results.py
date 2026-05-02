@@ -885,6 +885,64 @@ class TestRowResultWithFailureInfo:
         type_str = str(error_field.type)
         assert "FailureInfo" in type_str or error_field.type is FailureInfo
 
+    def test_routed_on_error_with_failure_info(self) -> None:
+        """ROUTED_ON_ERROR carries sink_name and typed originating failure evidence."""
+        token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
+        error = FailureInfo(
+            exception_type="ValueError",
+            message="bad row",
+        )
+
+        result = RowResult(
+            token=token,
+            final_data=_wrap_dict_as_pipeline_row({"x": 1}),
+            outcome=RowOutcome.ROUTED_ON_ERROR,
+            sink_name="error_sink",
+            error=error,
+        )
+
+        assert result.outcome == RowOutcome.ROUTED_ON_ERROR
+        assert result.sink_name == "error_sink"
+        assert result.error is error
+
+    def test_routed_on_error_without_sink_name_raises(self) -> None:
+        """ROUTED_ON_ERROR must identify the failure sink for audit lineage."""
+        token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
+        error = FailureInfo(exception_type="ValueError", message="bad row")
+
+        with pytest.raises(OrchestrationInvariantError, match="ROUTED_ON_ERROR outcome requires sink_name"):
+            RowResult(
+                token=token,
+                final_data=_wrap_dict_as_pipeline_row({"x": 1}),
+                outcome=RowOutcome.ROUTED_ON_ERROR,
+                error=error,
+            )
+
+    def test_routed_on_error_without_error_raises(self) -> None:
+        """ROUTED_ON_ERROR must carry the originating transform failure."""
+        token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
+
+        with pytest.raises(OrchestrationInvariantError, match=r"ROUTED_ON_ERROR outcome requires error \(FailureInfo\)"):
+            RowResult(
+                token=token,
+                final_data=_wrap_dict_as_pipeline_row({"x": 1}),
+                outcome=RowOutcome.ROUTED_ON_ERROR,
+                sink_name="error_sink",
+            )
+
+    def test_routed_on_error_with_non_failure_info_error_raises(self) -> None:
+        """ROUTED_ON_ERROR rejects untyped error evidence at runtime."""
+        token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
+
+        with pytest.raises(OrchestrationInvariantError, match="ROUTED_ON_ERROR outcome requires error to be a FailureInfo instance"):
+            RowResult(
+                token=token,
+                final_data=_wrap_dict_as_pipeline_row({"x": 1}),
+                outcome=RowOutcome.ROUTED_ON_ERROR,
+                sink_name="error_sink",
+                error=object(),  # type: ignore[arg-type]
+            )
+
 
 class TestExceptionResult:
     """Tests for ExceptionResult dataclass."""

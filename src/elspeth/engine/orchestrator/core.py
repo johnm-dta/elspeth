@@ -2446,12 +2446,20 @@ class Orchestrator:
             self._events.emit(
                 ProgressEvent(
                     rows_processed=counters.rows_processed,
-                    # Include intentionally-routed rows (MOVE) in success count;
-                    # exclude on_error-routed rows (DIVERT) — those are
-                    # operator-visible failures.
-                    rows_succeeded=counters.rows_succeeded + counters.rows_routed_success,
+                    # elspeth-5069612f3c — rows_routed split. Each terminal
+                    # bucket is emitted on its own field so downstream
+                    # consumers (web ProgressData → SSE → frontend, CLI
+                    # progress formatter) can mirror the terminal-state
+                    # taxonomy. The pre-split fold (rows_succeeded +=
+                    # rows_routed_success) silently conflated MOVE-routed
+                    # rows into rows_succeeded and dropped DIVERT entirely,
+                    # leaving the in-flight signal incompatible with the
+                    # terminal Pydantic schemas (CompletedData, etc.).
+                    rows_succeeded=counters.rows_succeeded,
                     rows_failed=counters.rows_failed,
                     rows_quarantined=counters.rows_quarantined,
+                    rows_routed_success=counters.rows_routed_success,
+                    rows_routed_failure=counters.rows_routed_failure,
                     elapsed_seconds=elapsed,
                 )
             )
@@ -3002,12 +3010,16 @@ class Orchestrator:
                 self._events.emit(
                     ProgressEvent(
                         rows_processed=loop_ctx.counters.rows_processed,
-                        # Include intentionally-routed rows (MOVE) in success count;
-                        # exclude on_error-routed rows (DIVERT) — those are
-                        # operator-visible failures.
-                        rows_succeeded=loop_ctx.counters.rows_succeeded + loop_ctx.counters.rows_routed_success,
+                        # elspeth-5069612f3c — rows_routed split. See the
+                        # earlier emitter in this file for the full rationale;
+                        # this final-progress emission must match so the last
+                        # streaming snapshot before terminal events agrees
+                        # with the forthcoming CompletedData payload.
+                        rows_succeeded=loop_ctx.counters.rows_succeeded,
                         rows_failed=loop_ctx.counters.rows_failed,
                         rows_quarantined=loop_ctx.counters.rows_quarantined,
+                        rows_routed_success=loop_ctx.counters.rows_routed_success,
+                        rows_routed_failure=loop_ctx.counters.rows_routed_failure,
                         elapsed_seconds=elapsed,
                     )
                 )

@@ -84,10 +84,25 @@ class ValidationResult(_StrictResponse):
 
 
 class ProgressData(_StrictResponse):
-    """Payload for ``progress`` events (non-terminal, streaming)."""
+    """Payload for ``progress`` events (non-terminal, streaming).
+
+    elspeth-5069612f3c — ``rows_routed`` is split into MOVE (intentional gate
+    ``route_to_sink``) and DIVERT (transform ``on_error`` reroute). Both
+    fields are present on the wire so the streaming progress payload mirrors
+    ``CompletedData`` / ``CancelledData`` / TS ``RunEventProgress`` shape
+    exactly.
+
+    Note: the ``_validate_row_decomposition`` invariant is deliberately NOT
+    enforced here. Non-terminal counts are allowed transient inconsistency
+    while the orchestrator is mid-flight (a row may be marked processed
+    before being categorised) — matching the rationale on
+    ``RunStatusResponse._check_row_decomposition`` for non-terminal states.
+    """
 
     rows_processed: int = Field(ge=0)
     rows_failed: int = Field(ge=0)
+    rows_routed_success: int = Field(default=0, ge=0)
+    rows_routed_failure: int = Field(default=0, ge=0)
 
 
 class ErrorData(_StrictResponse):

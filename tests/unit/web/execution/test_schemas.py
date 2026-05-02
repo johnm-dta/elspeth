@@ -140,11 +140,34 @@ class TestRunEvent:
             run_id="run-1",
             timestamp=datetime.now(tz=UTC),
             event_type="progress",
-            data=ProgressData(rows_processed=10, rows_failed=2),
+            data=ProgressData(
+                rows_processed=10,
+                rows_failed=2,
+                rows_routed_success=3,
+                rows_routed_failure=1,
+            ),
         )
         assert isinstance(event.data, ProgressData)
         assert event.data.rows_processed == 10
         assert event.data.rows_failed == 2
+        assert event.data.rows_routed_success == 3
+        assert event.data.rows_routed_failure == 1
+
+    def test_progress_event_carries_rows_routed_split(self) -> None:
+        """elspeth-5069612f3c — ProgressData wire shape MUST carry the routed
+        split so the in-flight SSE stream stays consistent with the TypeScript
+        ``RunEventProgress`` interface (``web/frontend/src/types/index.ts``)
+        which declares both fields as required.
+
+        Regression guard: prior to this fix the streaming progress payload
+        carried only ``rows_processed`` + ``rows_failed`` while the terminal
+        ``CompletedData`` / ``CancelledData`` shapes carried the split. The
+        frontend reducer fell back silently to zero, so running pipelines
+        always reported ``rows_routed_*`` as 0 in production.
+        """
+        progress_fields = set(ProgressData.model_fields)
+        assert "rows_routed_success" in progress_fields
+        assert "rows_routed_failure" in progress_fields
 
     def test_completed_event_valid(self) -> None:
         event = RunEvent(

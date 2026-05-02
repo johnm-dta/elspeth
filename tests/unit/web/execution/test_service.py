@@ -2051,15 +2051,24 @@ class TestEventBusBridge:
     is translated to RunEvent and broadcast via the ProgressBroadcaster."""
 
     def test_progress_event_translated_to_run_event(self, service: ExecutionServiceImpl) -> None:
-        """_to_run_event maps ProgressEvent fields to RunEvent.data."""
+        """_to_run_event maps ProgressEvent fields to RunEvent.data.
+
+        elspeth-5069612f3c — assert the routed split (MOVE / DIVERT) is
+        plumbed verbatim through the translator. Pre-fix the engine emitter
+        folded ``rows_routed_success`` into ``rows_succeeded`` and dropped
+        ``rows_routed_failure`` entirely; the wire payload then lacked the
+        fields. This test guards against regression to that shape.
+        """
         from elspeth.contracts.cli import ProgressEvent
         from elspeth.web.execution.schemas import ProgressData
 
         progress = ProgressEvent(
             rows_processed=100,
-            rows_succeeded=95,
+            rows_succeeded=92,
             rows_failed=5,
             rows_quarantined=3,
+            rows_routed_success=7,
+            rows_routed_failure=2,
             elapsed_seconds=10.5,
         )
         run_id = "run-123"
@@ -2069,6 +2078,8 @@ class TestEventBusBridge:
         assert isinstance(run_event.data, ProgressData)
         assert run_event.data.rows_processed == 100
         assert run_event.data.rows_failed == 5
+        assert run_event.data.rows_routed_success == 7
+        assert run_event.data.rows_routed_failure == 2
         assert run_event.run_id == "run-123"
 
 

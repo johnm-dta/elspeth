@@ -188,11 +188,21 @@ class TestWebSocketTimeoutRecovery:
             ]
         )
         app = self._make_authed_app(svc)
+        # elspeth-5069612f3c — exercise the routed split on the streaming
+        # progress path so a regression that drops the new wire fields back
+        # to the pre-fix two-field shape would fail this assertion. Without
+        # this, only terminal events would carry the split and an in-flight
+        # silent-zero regression would slip through.
         queued_event = RunEvent(
             run_id=str(run_id),
             timestamp=datetime.now(tz=UTC),
             event_type="progress",
-            data=ProgressData(rows_processed=2, rows_failed=0),
+            data=ProgressData(
+                rows_processed=2,
+                rows_failed=0,
+                rows_routed_success=3,
+                rows_routed_failure=1,
+            ),
         )
 
         with (
@@ -207,6 +217,8 @@ class TestWebSocketTimeoutRecovery:
 
         assert payload["event_type"] == "progress"
         assert payload["data"]["rows_processed"] == 2
+        assert payload["data"]["rows_routed_success"] == 3
+        assert payload["data"]["rows_routed_failure"] == 1
         assert "type" not in payload
 
     def test_timeout_synthesizes_terminal_event_when_status_turned_completed(self) -> None:

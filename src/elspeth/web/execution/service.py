@@ -1291,6 +1291,11 @@ class ExecutionServiceImpl:
         Only handles progress events — terminal events (completed, failed,
         cancelled) are constructed inline in _run_pipeline where the full
         run result is available.
+
+        elspeth-5069612f3c — ``rows_routed_success`` / ``rows_routed_failure``
+        are plumbed verbatim from the engine ProgressEvent so the streaming
+        wire payload mirrors the terminal CompletedData/CancelledData shape
+        and matches the TS ``RunEventProgress`` interface.
         """
         return RunEvent(
             run_id=run_id,
@@ -1299,6 +1304,8 @@ class ExecutionServiceImpl:
             data=ProgressData(
                 rows_processed=progress.rows_processed,
                 rows_failed=progress.rows_failed,
+                rows_routed_success=progress.rows_routed_success,
+                rows_routed_failure=progress.rows_routed_failure,
             ),
         )
 

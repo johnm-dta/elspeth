@@ -110,7 +110,8 @@ class AggregationFlushResult:
 
     rows_succeeded: int = 0
     rows_failed: int = 0
-    rows_routed: int = 0
+    rows_routed_success: int = 0
+    rows_routed_failure: int = 0
     rows_quarantined: int = 0
     rows_coalesced: int = 0
     rows_forked: int = 0
@@ -131,7 +132,8 @@ class AggregationFlushResult:
         return {
             "rows_succeeded": self.rows_succeeded,
             "rows_failed": self.rows_failed,
-            "rows_routed": self.rows_routed,
+            "rows_routed_success": self.rows_routed_success,
+            "rows_routed_failure": self.rows_routed_failure,
             "rows_quarantined": self.rows_quarantined,
             "rows_coalesced": self.rows_coalesced,
             "rows_forked": self.rows_forked,
@@ -148,7 +150,8 @@ class AggregationFlushResult:
         return AggregationFlushResult(
             rows_succeeded=self.rows_succeeded + other.rows_succeeded,
             rows_failed=self.rows_failed + other.rows_failed,
-            rows_routed=self.rows_routed + other.rows_routed,
+            rows_routed_success=self.rows_routed_success + other.rows_routed_success,
+            rows_routed_failure=self.rows_routed_failure + other.rows_routed_failure,
             rows_quarantined=self.rows_quarantined + other.rows_quarantined,
             rows_coalesced=self.rows_coalesced + other.rows_coalesced,
             rows_forked=self.rows_forked + other.rows_forked,
@@ -174,7 +177,8 @@ class ExecutionCounters:
     rows_processed: int = 0
     rows_succeeded: int = 0
     rows_failed: int = 0
-    rows_routed: int = 0
+    rows_routed_success: int = 0
+    rows_routed_failure: int = 0
     rows_quarantined: int = 0
     rows_forked: int = 0
     rows_coalesced: int = 0
@@ -192,7 +196,8 @@ class ExecutionCounters:
         """
         self.rows_succeeded += result.rows_succeeded
         self.rows_failed += result.rows_failed
-        self.rows_routed += result.rows_routed
+        self.rows_routed_success += result.rows_routed_success
+        self.rows_routed_failure += result.rows_routed_failure
         self.rows_quarantined += result.rows_quarantined
         self.rows_coalesced += result.rows_coalesced
         self.rows_forked += result.rows_forked
@@ -210,7 +215,8 @@ class ExecutionCounters:
         return AggregationFlushResult(
             rows_succeeded=self.rows_succeeded,
             rows_failed=self.rows_failed,
-            rows_routed=self.rows_routed,
+            rows_routed_success=self.rows_routed_success,
+            rows_routed_failure=self.rows_routed_failure,
             rows_quarantined=self.rows_quarantined,
             rows_coalesced=self.rows_coalesced,
             rows_forked=self.rows_forked,
@@ -233,7 +239,8 @@ class ExecutionCounters:
             rows_processed=self.rows_processed,
             rows_succeeded=self.rows_succeeded,
             rows_failed=self.rows_failed,
-            rows_routed=self.rows_routed,
+            rows_routed_success=self.rows_routed_success,
+            rows_routed_failure=self.rows_routed_failure,
             rows_quarantined=self.rows_quarantined,
             rows_forked=self.rows_forked,
             rows_coalesced=self.rows_coalesced,

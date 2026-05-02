@@ -38,7 +38,9 @@ where the architectural fix landed:
   ``tests/integration/pipeline/orchestrator/test_orchestrator_core.py``; this
   suite adds the cross-layer (engine RunResult ⇔ Landscape audit ``Run`` row)
   agreement and the named design-call regression
-  ``test_runstatus_rows_routed_only_classifies_as_failed``.
+  ``test_runstatus_on_error_routed_only_classifies_as_failed`` (plus the
+  post-split companion ``test_runstatus_gate_routed_only_classifies_as_completed``
+  introduced by ``elspeth-5069612f3c``).
 * Shape 6 — Phase 2.3 ``/api/secrets`` reason taxonomy (eval session
   S1B, ``ELSPETH_FINGERPRINT_KEY`` unset). Closes ``elspeth-0d31c22d26``
   (commit ``22e3e0d9``). Per-mode coverage lives in
@@ -2355,16 +2357,16 @@ class TestComposerRuntimeRunStatusAgreement:
     * ``COMPLETED_WITH_FAILURES`` — mixed run, some succeed and some fail.
     * ``FAILED`` — every row fails via ``on_error: discard`` (S1B msg2 shape).
     * ``EMPTY`` — empty source, no failures, no rows.
-    * Design call — every row routes via ``on_error`` to a sink (rows_routed
-      only, rows_succeeded == 0).  Phase 2.2 closure rationale on
-      ``elspeth-0de989c56d`` (comment 693) classifies this as ``FAILED``
-      because ``rows_routed`` conflates ``RoutingMode.DIVERT`` (failure-handling)
-      with ``RoutingMode.MOVE`` (intentional gate routing) and the operator's
-      question "did the success path produce results?" answers "no" in
-      both cases.  This is locked here as
-      ``test_runstatus_rows_routed_only_classifies_as_failed`` so a future
-      maintainer changing the predicate confronts the design decision rather
-      than silently flipping it to ``COMPLETED_WITH_FAILURES``.
+    * Design call (post-split, ``elspeth-5069612f3c``) — every row routes
+      via ``on_error`` to a sink (``rows_routed_failure == N``,
+      ``rows_succeeded == 0``).  Now classifies as ``FAILED`` because
+      ``rows_routed_failure`` is a first-class failure indicator in the
+      predicate.  Locked here as
+      ``test_runstatus_on_error_routed_only_classifies_as_failed``.
+      Companion: ``test_runstatus_gate_routed_only_classifies_as_completed``
+      pins the symmetric MOVE shape (gate ``route_to_sink``) classifying as
+      ``COMPLETED``.  A future maintainer changing either verdict confronts
+      the design decision rather than silently flipping it.
     """
 
     @staticmethod
@@ -2489,37 +2491,22 @@ class TestComposerRuntimeRunStatusAgreement:
         assert run_result.rows_failed == 0
         assert len(sink.results) == 0
 
-    def test_runstatus_rows_routed_only_classifies_as_failed(self, landscape_db: LandscapeDB, payload_store) -> None:
-        """S1A reproducer: every row routes via ``on_error`` to a quarantine
-        sink; rows_succeeded == 0 and rows_routed == N.  Phase 2.2 design
-        call (closure rationale on ``elspeth-0de989c56d``, comment 693)
-        classifies this as ``RunStatus.FAILED``.
+    def test_runstatus_on_error_routed_only_classifies_as_failed(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """elspeth-5069612f3c — every row triggers a transform exception and
+        is routed via on_error to a quarantine sink. After the rows_routed
+        split, this shape produces rows_routed_failure == N (DIVERT) with no
+        success indicator, and the predicate classifies as FAILED.
 
-        Rationale (verbatim from the closure summary):
+        The verdict (FAILED) matches the prior locked-in test, but the
+        structural reason changes: previously the predicate excluded
+        rows_routed entirely (sidestepping the DIVERT/MOVE conflation); now
+        rows_routed_failure is a first-class failure indicator and contributes
+        to the predicate decision directly.
 
-            The operator's question is "did the success-path produce
-            results?" — the answer is no.  ``rows_routed`` is structurally
-            ambiguous (the engine's ``ExecutionCounters.rows_routed``
-            conflates ``RoutingMode.DIVERT`` from ``on_error`` paths with
-            ``RoutingMode.MOVE`` from intentional gate routing) so any
-            predicate that uses it inherits that ambiguity.  Excluding it
-            sidesteps the structural defect; ``rows_succeeded == 0`` maps
-            to FAILED whether the rows ended up in a quarantine sink via
-            ``on_error`` or in a directly-failed terminal state.
-
-        A future maintainer who wants to change this verdict (for example to
-        introduce a ``rows_routed_via_on_error`` distinction or to split
-        DIVERT from MOVE in the counter model — see observation
-        ``elspeth-obs-abc8baa1cd``) must change THIS test deliberately.
-        Silently flipping the verdict from ``FAILED`` to
-        ``COMPLETED_WITH_FAILURES`` re-introduces the operator-misleading
-        shape this test exists to prevent.
+        Companion: test_runstatus_gate_routed_only_classifies_as_completed
+        below (the gate MOVE shape).
         """
         source = ListSource([{"value": 1, "fail": True}, {"value": 2, "fail": True}])
-        # on_error="quarantine" routes failed rows to the quarantine sink
-        # rather than discarding to the FAILED terminal state — this is the
-        # exact wiring shape S1A produced when the LLM transform's API call
-        # 401'd on the literal placeholder api_key.
         transform = ConditionalErrorTransform(on_success="default", on_error="quarantine")
         default_sink = CollectSink(name="default")
         quarantine_sink = CollectSink(name="quarantine")
@@ -2532,15 +2519,69 @@ class TestComposerRuntimeRunStatusAgreement:
 
         run_result = Orchestrator(landscape_db).run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # The design-call assertion: rows_routed > 0 and rows_succeeded == 0
-        # classifies as FAILED, not COMPLETED_WITH_FAILURES.
         self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.FAILED)
         assert run_result.rows_processed == 2
         assert run_result.rows_succeeded == 0
-        assert run_result.rows_routed == 2
-        # Rows landed in the quarantine sink, not the default sink.
+        assert run_result.rows_routed_success == 0
+        assert run_result.rows_routed_failure == 2
         assert len(default_sink.results) == 0
         assert len(quarantine_sink.results) == 2
+
+    def test_runstatus_gate_routed_only_classifies_as_completed(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """elspeth-5069612f3c / elspeth-71520f5e30 — user reproducer shape:
+        csv source -> gate routes high-priority rows to one sink, low-priority
+        rows to another, no on_success success-path sink. Every row is
+        intentionally gate-routed via RoutingMode.MOVE (RowOutcome.ROUTED).
+
+        After the rows_routed split, this shape produces rows_routed_success > 0
+        with no failure indicator, and the predicate classifies as COMPLETED.
+
+        Before the split (commit cc895589), this shape misclassified as
+        RunStatus.FAILED with the misleading error "No row reached the success
+        path" because the predicate excluded rows_routed entirely (DIVERT/MOVE
+        conflation). This test pins the corrected behavior.
+        """
+        source = ListSource(
+            [
+                {"value": 1, "tier": "high"},
+                {"value": 2, "tier": "low"},
+                {"value": 3, "tier": "high"},
+                {"value": 4, "tier": "low"},
+            ],
+            on_success="source_out",
+        )
+        tier_gate = GateSettings(
+            name="tier_gate",
+            input="source_out",
+            condition="row['tier'] == 'high'",
+            routes={"true": "high_priority", "false": "low_priority"},
+        )
+        high_sink = CollectSink(name="high_priority")
+        low_sink = CollectSink(name="low_priority")
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[],
+            sinks={
+                "high_priority": as_sink(high_sink),
+                "low_priority": as_sink(low_sink),
+            },
+            gates=[tier_gate],
+        )
+
+        run_result = Orchestrator(landscape_db).run(
+            config,
+            graph=build_production_graph(config),
+            payload_store=payload_store,
+        )
+
+        self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.COMPLETED)
+        assert run_result.rows_processed == 4
+        assert run_result.rows_succeeded == 0  # No success-path sink
+        assert run_result.rows_routed_success == 4  # All routed via MOVE
+        assert run_result.rows_routed_failure == 0  # No on_error reroutes
+        assert len(high_sink.results) == 2
+        assert len(low_sink.results) == 2
 
 
 # ── Shape 6 — SecretInventoryItem biconditional agreement ────────────────────

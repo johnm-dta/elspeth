@@ -102,10 +102,24 @@ function applyRunEvent(
     "rows_processed" in data ? (data as RunEventProgress).rows_processed : (state.progress?.rows_processed ?? 0);
   const rowsFailed =
     "rows_failed" in data ? (data as RunEventProgress).rows_failed : (state.progress?.rows_failed ?? 0);
+  // elspeth-5069612f3c — preserve the rows_routed split from progress /
+  // completed / cancelled payloads (failed terminal events do not carry
+  // these counters today, so the previous progress values are kept on
+  // failure-side terminal events).
+  const rowsRoutedSuccess =
+    "rows_routed_success" in data
+      ? (data as RunEventProgress).rows_routed_success
+      : (state.progress?.rows_routed_success ?? 0);
+  const rowsRoutedFailure =
+    "rows_routed_failure" in data
+      ? (data as RunEventProgress).rows_routed_failure
+      : (state.progress?.rows_routed_failure ?? 0);
 
   const newProgress: RunProgress = {
     rows_processed: rowsProcessed,
     rows_failed: rowsFailed,
+    rows_routed_success: rowsRoutedSuccess,
+    rows_routed_failure: rowsRoutedFailure,
     recent_errors: recentErrors,
     // "error" is non-terminal (per-row exception) -- status stays "running"
     status:
@@ -129,6 +143,8 @@ function applyRunEvent(
             status: newProgress.status as Run["status"],
             rows_processed: rowsProcessed,
             rows_failed: rowsFailed,
+            rows_routed_success: rowsRoutedSuccess,
+            rows_routed_failure: rowsRoutedFailure,
             error:
               event.event_type === "failed"
                 ? (data as RunEventFailed).detail
@@ -194,6 +210,8 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         progress: {
           rows_processed: 0,
           rows_failed: 0,
+          rows_routed_success: 0,
+          rows_routed_failure: 0,
           recent_errors: [],
           status: "running",
         },

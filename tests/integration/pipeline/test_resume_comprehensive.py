@@ -1455,3 +1455,164 @@ class TestResumeComprehensive:
                 graph=resume_graph,
                 payload_store=payload_store,
             )
+
+    def test_resume_gate_routed_pipeline_classifies_as_completed(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """elspeth-5069612f3c — pin the resume code path's correct accumulation
+        of rows_routed_success.
+
+        The L0 unit test test_resume_continuation_still_classifies_as_completed
+        pins the predicate's behavior on a synthetic resume-shaped counter
+        tuple, but does NOT exercise the actual resume site where the terminal
+        status is derived from the resume-side accumulator.  A regression in
+        the resume-side local accumulators (an off-by-one in the new locals,
+        a missed kwarg in the derive_terminal_run_status call, or a broken
+        return-tuple expansion) would slip past that unit test.
+
+        Scenario (early-exit resume — all rows already gate-routed before the
+        pre-resume crash):
+        1. Failed run with 5 rows (0-4), linear topology re-used from
+           ``_setup_failed_run`` for the persisted DAG, but every row is
+           pre-marked as ``RowOutcome.ROUTED`` via ``record_token_outcome`` —
+           the canonical pre-split-fix shape for gate-routed rows.
+        2. Resume's early-exit path reads existing terminal outcomes from
+           Landscape and calls ``derive_terminal_run_status`` with the
+           accumulated counters.
+        3. Verify: ``result.status == RunStatus.COMPLETED`` (not FAILED).
+        4. Verify: ``result.rows_succeeded == 0`` — no on_success success-path
+           outcomes; every row is ROUTED.
+        5. Verify: ``result.rows_routed_success == 5`` — the resume-side
+           accumulator must surface the existing ``ROUTED`` outcomes via the
+           split counter.
+        6. Verify: ``result.rows_routed_failure == 0`` — no on_error reroutes.
+
+        Pre-PR (commit 8865559e, before the rows_routed split): the resume's
+        ``derive_terminal_run_status`` excludes ``rows_routed`` from the
+        predicate (DIVERT/MOVE conflation), so the run misclassifies as
+        FAILED.  Post-PR: classifies as COMPLETED.
+        """
+        db = resume_test_env["db"]
+        checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        recovery_mgr = resume_test_env["recovery_manager"]
+        payload_store = resume_test_env["payload_store"]
+        checkpoint_config = resume_test_env["checkpoint_config"]
+        tmp_path = resume_test_env["tmp_path"]
+
+        run_id = "resume-gate-routed-test"
+        output_path = tmp_path / "gate_routed_output.csv"
+        run_id, graph = self._setup_failed_run(
+            db, payload_store, run_id, num_rows=5, checkpoint_at=4
+        )
+
+        # Mark every row as gate-routed (RowOutcome.ROUTED, sink_name set,
+        # error_hash NULL — the canonical pre-split-fix shape for
+        # intentional gate route_to_sink MOVE rows).  By marking ALL rows
+        # as terminal, the resume takes the early-exit path; what we are
+        # pinning is whether the resume's terminal-status derivation
+        # correctly accumulates ``rows_routed_success`` from Landscape.
+        factory = make_factory(db)
+        for i in range(5):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=f"t{i}", run_id=run_id),
+                outcome=RowOutcome.ROUTED,
+                sink_name="sink",
+            )
+
+        # Create checkpoint at the last row so resume's recovery path is
+        # exercised even though no rows remain to process.
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id="t4",
+            node_id="xform",
+            sequence_number=4,
+            graph=graph,
+        )
+
+        assert recovery_mgr.can_resume(run_id, graph).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        orchestrator = Orchestrator(
+            db,
+            checkpoint_manager=checkpoint_mgr,
+            checkpoint_config=checkpoint_config,
+        )
+
+        # Resume config matches the persisted DAG topology (linear src ->
+        # xform -> sink), even though every persisted outcome is ROUTED.
+        # The predicate's behaviour, not the topology, is the unit under
+        # test here.
+        resume_schema = {"mode": "fixed", "fields": ["id: int", "value: str"]}
+        passthrough = PassThrough({"schema": resume_schema})
+        passthrough.on_error = "discard"
+        config = PipelineConfig(
+            source=_null_source("default"),
+            transforms=[passthrough],
+            sinks={
+                "default": inject_write_failure(
+                    CSVSink(
+                        {
+                            "path": str(output_path),
+                            "schema": resume_schema,
+                            "mode": "append",
+                        }
+                    )
+                )
+            },
+        )
+        resume_graph = ExecutionGraph()
+        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
+        resume_graph.add_node(
+            "xform",
+            node_type=NodeType.TRANSFORM,
+            plugin_name="passthrough",
+            config=resume_schema_config,
+        )
+        resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=resume_schema_config)
+        resume_graph.add_edge("src", "xform", label="continue")
+        resume_graph.add_edge("xform", "sink", label="continue")
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
+
+        # Pre-write the output file header so any append-mode interaction
+        # is consistent (no remaining rows will actually be written; this
+        # is the early-exit path).
+        with open(output_path, "w") as f:
+            f.write("id,value\n")
+            for i in range(5):
+                f.write(f"{i},row-{i}\n")
+
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=resume_graph,
+            payload_store=payload_store,
+        )
+
+        # CORE ASSERTION — verify the resume-side accumulator + predicate
+        # together classify a gate-routed run as COMPLETED.
+        assert result.status == RunStatus.COMPLETED, (
+            "Resume of gate-routed pipeline misclassified — expected "
+            f"COMPLETED, got {result.status!r}. The resume-side "
+            f"derive_terminal_run_status call must accumulate "
+            f"rows_routed_success from the resume locals (or the "
+            f"early-exit Landscape readback). "
+            f"result={result.to_dict()}"
+        )
+        assert result.rows_succeeded == 0  # No on_success success-path sink.
+        assert result.rows_routed_success == 5  # All rows recorded as ROUTED.
+        assert result.rows_routed_failure == 0  # No on_error reroutes.
+
+        # Cross-check against Landscape: every token_outcomes row has the
+        # routed shape (matches Step 9c's audit-distinguishability test).
+        from elspeth.core.landscape.schema import token_outcomes_table
+        with db.engine.connect() as conn:
+            outcomes = conn.execute(
+                select(token_outcomes_table.c.outcome, token_outcomes_table.c.sink_name)
+                .where(token_outcomes_table.c.run_id == run_id)
+            ).fetchall()
+        routed_outcomes = [o for o in outcomes if o.outcome == "routed"]
+        assert len(routed_outcomes) == 5

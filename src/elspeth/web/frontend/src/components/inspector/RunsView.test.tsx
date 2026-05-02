@@ -19,6 +19,8 @@ function makeRun(overrides: Partial<Run> & { error?: string | null } = {}): Run 
     status: "failed",
     rows_processed: 1,
     rows_failed: 0,
+    rows_routed_success: 0,
+    rows_routed_failure: 0,
     started_at: "2026-04-26T05:31:58.000Z",
     finished_at: "2026-04-26T05:31:59.000Z",
     composition_version: 1,
@@ -132,6 +134,35 @@ describe("RunsView", () => {
 
     expect(screen.getByText("0s")).toBeInTheDocument();
     expect(screen.queryByText("-1s")).not.toBeInTheDocument();
+  });
+
+  it("renders gate-routed completed runs without failure alert", () => {
+    // elspeth-5069612f3c / elspeth-71520f5e30 — the dashboard UI VAL gate
+    // for the gate-only-pipeline misclassification fix.  The fixed API
+    // response shape (status="completed", rows_routed_success>0,
+    // rows_routed_failure==0) must render without the failed-run alert
+    // and without the historical "No row reached the success path"
+    // structural-failure message.
+    useExecutionStore.setState({
+      runs: [
+        makeRun({
+          status: "completed",
+          rows_processed: 3,
+          rows_failed: 0,
+          rows_routed_success: 3,
+          rows_routed_failure: 0,
+          error: null,
+        }),
+      ],
+    });
+
+    render(<RunsView />);
+
+    expect(screen.getByText("completed")).toBeInTheDocument();
+    expect(screen.getByText("3 rows")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText(/No row reached/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Pipeline execution failed/i)).not.toBeInTheDocument();
   });
 
   it("renders rows routed to the virtual discard sink", () => {

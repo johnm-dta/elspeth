@@ -60,11 +60,17 @@ routed_dests = st.dictionaries(
 
 @st.composite
 def aggregation_flush_results(draw: st.DrawFn) -> AggregationFlushResult:
-    """Generate arbitrary AggregationFlushResult instances."""
+    """Generate arbitrary AggregationFlushResult instances.
+
+    Pure monoid — independent draws of ``rows_routed_success`` /
+    ``rows_routed_failure`` are sound here because nothing this strategy
+    feeds calls ``RunResult._check_status_invariant`` on a terminal status.
+    """
     return AggregationFlushResult(
         rows_succeeded=draw(counter_values),
         rows_failed=draw(counter_values),
-        rows_routed=draw(counter_values),
+        rows_routed_success=draw(counter_values),
+        rows_routed_failure=draw(counter_values),
         rows_quarantined=draw(counter_values),
         rows_coalesced=draw(counter_values),
         rows_forked=draw(counter_values),
@@ -76,12 +82,22 @@ def aggregation_flush_results(draw: st.DrawFn) -> AggregationFlushResult:
 
 @st.composite
 def execution_counters(draw: st.DrawFn) -> ExecutionCounters:
-    """Generate arbitrary ExecutionCounters instances."""
+    """Generate arbitrary ExecutionCounters instances.
+
+    Pure-engine accumulation strategy — independent draws of
+    ``rows_routed_success`` / ``rows_routed_failure`` remain sound because
+    the property tests using this strategy round-trip via
+    ``to_run_result(status=RunStatus.RUNNING|FAILED)``, both of which
+    bypass the row-count biconditional in ``_check_status_invariant``.
+    Tests that construct a validated COMPLETED / COMPLETED_WITH_FAILURES /
+    EMPTY shape must use ``completed_row_counter_shapes`` instead.
+    """
     return ExecutionCounters(
         rows_processed=draw(counter_values),
         rows_succeeded=draw(counter_values),
         rows_failed=draw(counter_values),
-        rows_routed=draw(counter_values),
+        rows_routed_success=draw(counter_values),
+        rows_routed_failure=draw(counter_values),
         rows_quarantined=draw(counter_values),
         rows_forked=draw(counter_values),
         rows_coalesced=draw(counter_values),
@@ -90,6 +106,57 @@ def execution_counters(draw: st.DrawFn) -> ExecutionCounters:
         rows_buffered=draw(counter_values),
         routed_destinations=Counter(draw(routed_dests)),
     )
+
+
+@st.composite
+def completed_row_counter_shapes(draw: st.DrawFn) -> dict[str, int]:
+    """Counters valid for COMPLETED / completed API response construction.
+
+    elspeth-5069612f3c — for property tests that construct a validated
+    terminal model (``RunResult(status=COMPLETED...)``, ``CompletedData``,
+    ``RunStatusResponse``, or any path invoking ``_validate_row_decomposition``).
+    Drawing ``rows_routed_success`` / ``rows_routed_failure`` independently
+    is forbidden in those paths because ``rows_processed < sum_terminal``
+    can crash the harness at model construction.  This composite ensures
+    ``rows_processed >= sum_terminal`` is true by construction so the
+    property body — not the harness — is the unit under test.
+
+    A property that needs ``COMPLETED`` specifically should add an
+    ``assume(shape['rows_succeeded'] > 0 or shape['rows_routed_success'] > 0)``
+    guard or draw at least one success indicator as positive.  A property
+    that needs ``FAILED`` should leave success indicators zero and draw a
+    failure indicator positive.  Do NOT rely on Pydantic constructor
+    crashes as a Hypothesis filter.
+    """
+    rows_succeeded = draw(st.integers(min_value=0, max_value=10))
+    rows_failed = draw(st.integers(min_value=0, max_value=10))
+    rows_routed_success = draw(st.integers(min_value=0, max_value=10))
+    rows_routed_failure = draw(st.integers(min_value=0, max_value=10))
+    rows_quarantined = draw(st.integers(min_value=0, max_value=10))
+    rows_diverted = draw(st.integers(min_value=0, max_value=10))
+    rows_coalesce_failed = draw(st.integers(min_value=0, max_value=10))
+    terminal_sum = (
+        rows_succeeded
+        + rows_failed
+        + rows_routed_success
+        + rows_routed_failure
+        + rows_quarantined
+        + rows_diverted
+        + rows_coalesce_failed
+    )
+    rows_processed = draw(
+        st.integers(min_value=terminal_sum, max_value=terminal_sum + 10)
+    )
+    return {
+        "rows_processed": rows_processed,
+        "rows_succeeded": rows_succeeded,
+        "rows_failed": rows_failed,
+        "rows_routed_success": rows_routed_success,
+        "rows_routed_failure": rows_routed_failure,
+        "rows_quarantined": rows_quarantined,
+        "rows_diverted": rows_diverted,
+        "rows_coalesce_failed": rows_coalesce_failed,
+    }
 
 
 def _make_token(*, branch_name: str | None = None) -> TokenInfo:
@@ -108,16 +175,31 @@ def _make_row_result(
     *,
     sink_name: str | None = None,
     branch_name: str | None = None,
+    error: object | None = None,
 ) -> RowResult:
-    """Create a RowResult for outcome accumulation tests."""
+    """Create a RowResult for outcome accumulation tests.
+
+    ``ROUTED_ON_ERROR`` (DIVERT) requires a ``FailureInfo`` on the
+    ``error`` field — pass one explicitly via the ``error`` kwarg, or
+    leave it ``None`` and the helper will inject a synthetic
+    ``FailureInfo`` for that outcome variant.
+    """
     if outcome in (RowOutcome.COMPLETED, RowOutcome.ROUTED, RowOutcome.COALESCED) and sink_name is None:
         sink_name = "default"
+    if outcome == RowOutcome.ROUTED_ON_ERROR:
+        if sink_name is None:
+            sink_name = "error_sink"
+        if error is None:
+            from elspeth.contracts.results import FailureInfo
+
+            error = FailureInfo(exception_type="TransformError", message="boom")
     token = _make_token(branch_name=branch_name)
     return RowResult(
         token=token,
         final_data=make_pipeline_row({"field": "value"}),
         outcome=outcome,
         sink_name=sink_name,
+        error=error,  # type: ignore[arg-type]
     )
 
 
@@ -138,7 +220,8 @@ class TestFlushResultMonoidProperties:
 
         assert ab.rows_succeeded == ba.rows_succeeded
         assert ab.rows_failed == ba.rows_failed
-        assert ab.rows_routed == ba.rows_routed
+        assert ab.rows_routed_success == ba.rows_routed_success
+        assert ab.rows_routed_failure == ba.rows_routed_failure
         assert ab.rows_quarantined == ba.rows_quarantined
         assert ab.rows_coalesced == ba.rows_coalesced
         assert ab.rows_forked == ba.rows_forked
@@ -164,7 +247,8 @@ class TestFlushResultMonoidProperties:
 
         assert left.rows_succeeded == right.rows_succeeded
         assert left.rows_failed == right.rows_failed
-        assert left.rows_routed == right.rows_routed
+        assert left.rows_routed_success == right.rows_routed_success
+        assert left.rows_routed_failure == right.rows_routed_failure
         assert left.rows_quarantined == right.rows_quarantined
         assert left.rows_coalesced == right.rows_coalesced
         assert left.rows_forked == right.rows_forked
@@ -181,7 +265,8 @@ class TestFlushResultMonoidProperties:
 
         assert result.rows_succeeded == a.rows_succeeded
         assert result.rows_failed == a.rows_failed
-        assert result.rows_routed == a.rows_routed
+        assert result.rows_routed_success == a.rows_routed_success
+        assert result.rows_routed_failure == a.rows_routed_failure
         assert result.rows_quarantined == a.rows_quarantined
         assert result.rows_coalesced == a.rows_coalesced
         assert result.rows_forked == a.rows_forked
@@ -198,7 +283,8 @@ class TestFlushResultMonoidProperties:
 
         assert result.rows_succeeded == a.rows_succeeded
         assert result.rows_failed == a.rows_failed
-        assert result.rows_routed == a.rows_routed
+        assert result.rows_routed_success == a.rows_routed_success
+        assert result.rows_routed_failure == a.rows_routed_failure
         assert result.rows_quarantined == a.rows_quarantined
         assert result.rows_coalesced == a.rows_coalesced
         assert result.rows_forked == a.rows_forked
@@ -214,7 +300,8 @@ class TestFlushResultMonoidProperties:
 
         assert result.rows_succeeded == a.rows_succeeded + b.rows_succeeded
         assert result.rows_failed == a.rows_failed + b.rows_failed
-        assert result.rows_routed == a.rows_routed + b.rows_routed
+        assert result.rows_routed_success == a.rows_routed_success + b.rows_routed_success
+        assert result.rows_routed_failure == a.rows_routed_failure + b.rows_routed_failure
         assert result.rows_quarantined == a.rows_quarantined + b.rows_quarantined
         assert result.rows_coalesced == a.rows_coalesced + b.rows_coalesced
         assert result.rows_forked == a.rows_forked + b.rows_forked
@@ -248,7 +335,8 @@ class TestFlushResultMonoidProperties:
         zero = AggregationFlushResult()
         assert zero.rows_succeeded == 0
         assert zero.rows_failed == 0
-        assert zero.rows_routed == 0
+        assert zero.rows_routed_success == 0
+        assert zero.rows_routed_failure == 0
         assert zero.rows_quarantined == 0
         assert zero.rows_coalesced == 0
         assert zero.rows_forked == 0
@@ -272,7 +360,8 @@ class TestAccumulateFlushResultProperties:
         # Snapshot before
         before_succeeded = counters.rows_succeeded
         before_failed = counters.rows_failed
-        before_routed = counters.rows_routed
+        before_routed_success = counters.rows_routed_success
+        before_routed_failure = counters.rows_routed_failure
         before_quarantined = counters.rows_quarantined
         before_coalesced = counters.rows_coalesced
         before_forked = counters.rows_forked
@@ -284,7 +373,8 @@ class TestAccumulateFlushResultProperties:
 
         assert counters.rows_succeeded == before_succeeded + flush.rows_succeeded
         assert counters.rows_failed == before_failed + flush.rows_failed
-        assert counters.rows_routed == before_routed + flush.rows_routed
+        assert counters.rows_routed_success == before_routed_success + flush.rows_routed_success
+        assert counters.rows_routed_failure == before_routed_failure + flush.rows_routed_failure
         assert counters.rows_quarantined == before_quarantined + flush.rows_quarantined
         assert counters.rows_coalesced == before_coalesced + flush.rows_coalesced
         assert counters.rows_forked == before_forked + flush.rows_forked
@@ -310,14 +400,16 @@ class TestAccumulateFlushResultProperties:
         """Property: Accumulating a zero-valued flush result changes nothing."""
         before_succeeded = counters.rows_succeeded
         before_failed = counters.rows_failed
-        before_routed = counters.rows_routed
+        before_routed_success = counters.rows_routed_success
+        before_routed_failure = counters.rows_routed_failure
         before_dests = dict(counters.routed_destinations)
 
         counters.accumulate_flush_result(AggregationFlushResult())
 
         assert counters.rows_succeeded == before_succeeded
         assert counters.rows_failed == before_failed
-        assert counters.rows_routed == before_routed
+        assert counters.rows_routed_success == before_routed_success
+        assert counters.rows_routed_failure == before_routed_failure
         assert dict(counters.routed_destinations) == before_dests
 
     @given(counters=execution_counters())
@@ -362,7 +454,8 @@ class TestAccumulateFlushResultProperties:
             rows_processed=counters.rows_processed,
             rows_succeeded=counters.rows_succeeded,
             rows_failed=counters.rows_failed,
-            rows_routed=counters.rows_routed,
+            rows_routed_success=counters.rows_routed_success,
+            rows_routed_failure=counters.rows_routed_failure,
             rows_quarantined=counters.rows_quarantined,
             rows_forked=counters.rows_forked,
             rows_coalesced=counters.rows_coalesced,
@@ -379,7 +472,8 @@ class TestAccumulateFlushResultProperties:
             rows_processed=counters.rows_processed,
             rows_succeeded=counters.rows_succeeded,
             rows_failed=counters.rows_failed,
-            rows_routed=counters.rows_routed,
+            rows_routed_success=counters.rows_routed_success,
+            rows_routed_failure=counters.rows_routed_failure,
             rows_quarantined=counters.rows_quarantined,
             rows_forked=counters.rows_forked,
             rows_coalesced=counters.rows_coalesced,
@@ -396,7 +490,8 @@ class TestAccumulateFlushResultProperties:
         # Must be identical
         assert seq_counters.rows_succeeded == sum_counters.rows_succeeded
         assert seq_counters.rows_failed == sum_counters.rows_failed
-        assert seq_counters.rows_routed == sum_counters.rows_routed
+        assert seq_counters.rows_routed_success == sum_counters.rows_routed_success
+        assert seq_counters.rows_routed_failure == sum_counters.rows_routed_failure
         assert seq_counters.rows_quarantined == sum_counters.rows_quarantined
         assert seq_counters.rows_coalesced == sum_counters.rows_coalesced
         assert seq_counters.rows_forked == sum_counters.rows_forked
@@ -423,7 +518,8 @@ class TestToRunResultProperties:
         assert result.rows_processed == counters.rows_processed
         assert result.rows_succeeded == counters.rows_succeeded
         assert result.rows_failed == counters.rows_failed
-        assert result.rows_routed == counters.rows_routed
+        assert result.rows_routed_success == counters.rows_routed_success
+        assert result.rows_routed_failure == counters.rows_routed_failure
         assert result.rows_quarantined == counters.rows_quarantined
         assert result.rows_forked == counters.rows_forked
         assert result.rows_coalesced == counters.rows_coalesced
@@ -514,7 +610,8 @@ class TestAccumulateRowOutcomesProperties:
 
         assert counters.rows_succeeded == 1
         assert counters.rows_failed == 0
-        assert counters.rows_routed == 0
+        assert counters.rows_routed_success == 0
+        assert counters.rows_routed_failure == 0
         assert len(pending["default"]) == 1
 
     def test_completed_uses_explicit_sink_name(self) -> None:
@@ -535,12 +632,15 @@ class TestAccumulateRowOutcomesProperties:
         assert len(pending["default"]) == 1
         assert len(pending["alerts"]) == 0
 
-    def test_routed_increments_routed(self) -> None:
-        """Property: ROUTED outcome increments rows_routed."""
+    def test_routed_increments_routed_success(self) -> None:
+        """Property: RowOutcome.ROUTED (gate route_to_sink MOVE) increments
+        rows_routed_success.
+        """
         result = _make_row_result(RowOutcome.ROUTED, sink_name="alerts")
         counters, pending = self._run_accumulation([result])
 
-        assert counters.rows_routed == 1
+        assert counters.rows_routed_success == 1
+        assert counters.rows_routed_failure == 0
         assert counters.routed_destinations["alerts"] == 1
         assert len(pending["alerts"]) == 1
 
@@ -585,7 +685,8 @@ class TestAccumulateRowOutcomesProperties:
 
         assert counters.rows_succeeded == 0
         assert counters.rows_failed == 0
-        assert counters.rows_routed == 0
+        assert counters.rows_routed_success == 0
+        assert counters.rows_routed_failure == 0
         assert counters.rows_quarantined == 0
         assert counters.rows_forked == 0
         assert counters.rows_coalesced == 0
@@ -623,26 +724,67 @@ class TestAccumulateRowOutcomesProperties:
     @given(
         completed=st.integers(min_value=0, max_value=10),
         failed=st.integers(min_value=0, max_value=10),
-        routed=st.integers(min_value=0, max_value=10),
+        routed_success=st.integers(min_value=0, max_value=10),
+        routed_failure=st.integers(min_value=0, max_value=10),
         quarantined=st.integers(min_value=0, max_value=10),
     )
     @settings(max_examples=100)
-    def test_mixed_outcomes_conservation(self, completed: int, failed: int, routed: int, quarantined: int) -> None:
+    def test_mixed_outcomes_conservation(
+        self,
+        completed: int,
+        failed: int,
+        routed_success: int,
+        routed_failure: int,
+        quarantined: int,
+    ) -> None:
         """Property: Total counter increments == total number of results.
 
         For simple outcomes (no double-counting like COALESCED), the sum
         of all counter increments must equal the number of input results.
+
+        elspeth-5069612f3c — the conservation invariant on the post-split
+        accumulator must include BOTH ``rows_routed_success`` (gate MOVE)
+        and ``rows_routed_failure`` (transform on_error DIVERT).  Drawing
+        the two routed buckets independently is sound here because
+        ``accumulate_row_outcomes`` does not invoke the row-count
+        biconditional in ``_check_status_invariant``.
         """
         results: list[RowResult] = []
         results.extend(_make_row_result(RowOutcome.COMPLETED) for _ in range(completed))
         results.extend(_make_row_result(RowOutcome.FAILED) for _ in range(failed))
-        results.extend(_make_row_result(RowOutcome.ROUTED, sink_name="alerts") for _ in range(routed))
+        results.extend(
+            _make_row_result(RowOutcome.ROUTED, sink_name="alerts")
+            for _ in range(routed_success)
+        )
+        # ROUTED_ON_ERROR routes to the same configured sink namespace as
+        # ROUTED in this synthetic test (both ``default`` and ``alerts`` are
+        # configured by the ``_run_accumulation`` helper).  Distinct sinks
+        # are not required to exercise the conservation property — the
+        # property is on the counter side, not the routing topology.
+        results.extend(
+            _make_row_result(RowOutcome.ROUTED_ON_ERROR, sink_name="alerts")
+            for _ in range(routed_failure)
+        )
         results.extend(_make_row_result(RowOutcome.QUARANTINED) for _ in range(quarantined))
 
         counters, _ = self._run_accumulation(results)
 
-        total_increments = counters.rows_succeeded + counters.rows_failed + counters.rows_routed + counters.rows_quarantined
-        assert total_increments == completed + failed + routed + quarantined
+        # Conservation invariant updated in lockstep with the strategy:
+        # both routed buckets MUST appear in the sum.  Failing to update
+        # this in lockstep would silently weaken the property — the test
+        # would still pass on Hypothesis-drawn shapes but it would no
+        # longer be testing total conservation.
+        total_increments = (
+            counters.rows_succeeded
+            + counters.rows_failed
+            + counters.rows_routed_success
+            + counters.rows_routed_failure
+            + counters.rows_quarantined
+        )
+        assert (
+            total_increments
+            == completed + failed + routed_success + routed_failure + quarantined
+        )
 
     @given(n=st.integers(min_value=1, max_value=10))
     @settings(max_examples=50)
@@ -652,7 +794,10 @@ class TestAccumulateRowOutcomesProperties:
         counters, _ = self._run_accumulation(results)
 
         assert counters.routed_destinations["alerts"] == n
-        assert counters.rows_routed == n
+        # RowOutcome.ROUTED (gate route_to_sink MOVE) increments
+        # rows_routed_success only.
+        assert counters.rows_routed_success == n
+        assert counters.rows_routed_failure == 0
 
 
 # =============================================================================
@@ -671,7 +816,8 @@ class TestRunResultFieldProperties:
             rows_processed=10,
             rows_succeeded=8,
             rows_failed=1,
-            rows_routed=1,
+            rows_routed_success=1,
+            rows_routed_failure=0,
         )
         assert result.rows_quarantined == 0
         assert result.rows_forked == 0

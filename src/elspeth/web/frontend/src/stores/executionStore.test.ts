@@ -92,6 +92,8 @@ function makeRun(overrides: Partial<Run> & { error?: string | null } = {}): Run 
     status: "running",
     rows_processed: 0,
     rows_failed: 0,
+    rows_routed_success: 0,
+    rows_routed_failure: 0,
     started_at: "2026-04-26T05:31:57.000Z",
     finished_at: null,
     composition_version: 1,
@@ -162,6 +164,8 @@ describe("executionStore failed run events", () => {
       progress: {
         rows_processed: 0,
         rows_failed: 0,
+        rows_routed_success: 0,
+        rows_routed_failure: 0,
         recent_errors: [],
         status: "running",
       },

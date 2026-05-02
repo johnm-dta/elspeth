@@ -349,6 +349,10 @@ export interface Run {
   status: "pending" | "running" | "completed" | "failed" | "cancelled";
   rows_processed: number;
   rows_failed: number;
+  /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
+  rows_routed_success: number;
+  /** elspeth-5069612f3c — transform on_error DIVERT rows. */
+  rows_routed_failure: number;
   error: string | null;
   started_at: string;
   finished_at: string | null;
@@ -381,6 +385,10 @@ export interface RunEvent {
 export interface RunEventProgress {
   rows_processed: number;
   rows_failed: number;
+  /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
+  rows_routed_success: number;
+  /** elspeth-5069612f3c — transform on_error DIVERT rows. */
+  rows_routed_failure: number;
 }
 
 export interface RunEventError {
@@ -394,12 +402,20 @@ export interface RunEventCompleted {
   rows_succeeded: number;
   rows_failed: number;
   rows_quarantined: number;
+  /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
+  rows_routed_success: number;
+  /** elspeth-5069612f3c — transform on_error DIVERT rows. */
+  rows_routed_failure: number;
   landscape_run_id: string;
 }
 
 export interface RunEventCancelled {
   rows_processed: number;
   rows_failed: number;
+  /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
+  rows_routed_success: number;
+  /** elspeth-5069612f3c — transform on_error DIVERT rows. */
+  rows_routed_failure: number;
 }
 
 export interface RunEventFailed {
@@ -411,6 +427,10 @@ export interface RunEventFailed {
 export interface RunProgress {
   rows_processed: number;
   rows_failed: number;
+  /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
+  rows_routed_success: number;
+  /** elspeth-5069612f3c — transform on_error DIVERT rows. */
+  rows_routed_failure: number;
   recent_errors: RunEventError[];
   status: "running" | "completed" | "cancelled" | "failed";
 }

@@ -200,7 +200,8 @@ class RunRecord:
     rows_processed: int
     rows_succeeded: int
     rows_failed: int
-    rows_routed: int
+    rows_routed_success: int
+    rows_routed_failure: int
     rows_quarantined: int
     error: str | None
     landscape_run_id: str | None
@@ -371,7 +372,8 @@ class SessionServiceProtocol(Protocol):
         rows_processed: int | None = None,
         rows_succeeded: int | None = None,
         rows_failed: int | None = None,
-        rows_routed: int | None = None,
+        rows_routed_success: int | None = None,
+        rows_routed_failure: int | None = None,
         rows_quarantined: int | None = None,
     ) -> None:
         """Update a run's status and metadata.

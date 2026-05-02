@@ -584,7 +584,8 @@ class SessionServiceImpl:
             rows_processed=0,
             rows_succeeded=0,
             rows_failed=0,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=0,
             error=None,
             landscape_run_id=None,
@@ -627,7 +628,8 @@ class SessionServiceImpl:
         rows_processed: int | None = None,
         rows_succeeded: int | None = None,
         rows_failed: int | None = None,
-        rows_routed: int | None = None,
+        rows_routed_success: int | None = None,
+        rows_routed_failure: int | None = None,
         rows_quarantined: int | None = None,
     ) -> None:
         """Update a run's status and optional fields.
@@ -681,8 +683,10 @@ class SessionServiceImpl:
                     values["rows_succeeded"] = rows_succeeded
                 if rows_failed is not None:
                     values["rows_failed"] = rows_failed
-                if rows_routed is not None:
-                    values["rows_routed"] = rows_routed
+                if rows_routed_success is not None:
+                    values["rows_routed_success"] = rows_routed_success
+                if rows_routed_failure is not None:
+                    values["rows_routed_failure"] = rows_routed_failure
                 if rows_quarantined is not None:
                     values["rows_quarantined"] = rows_quarantined
 
@@ -907,7 +911,8 @@ class SessionServiceImpl:
                             rows_processed=row.rows_processed,
                             rows_succeeded=row.rows_succeeded,
                             rows_failed=row.rows_failed,
-                            rows_routed=row.rows_routed,
+                            rows_routed_success=row.rows_routed_success,
+                            rows_routed_failure=row.rows_routed_failure,
                             rows_quarantined=row.rows_quarantined,
                             error=row.error,
                             landscape_run_id=row.landscape_run_id,
@@ -1300,7 +1305,8 @@ class SessionServiceImpl:
             rows_processed=row.rows_processed,
             rows_succeeded=row.rows_succeeded,
             rows_failed=row.rows_failed,
-            rows_routed=row.rows_routed,
+            rows_routed_success=row.rows_routed_success,
+            rows_routed_failure=row.rows_routed_failure,
             rows_quarantined=row.rows_quarantined,
             error=row.error,
             landscape_run_id=row.landscape_run_id,

@@ -1,6 +1,9 @@
 # Superpowers brainstorming artifacts
 .superpowers/
 
+# Local working notes (session scratch, not part of the repo record)
+notes/
+
 # Composer MCP scratch folder (session state, test configs)
 .scratch/*
 !.scratch/.gitkeep

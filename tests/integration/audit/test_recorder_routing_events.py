@@ -436,9 +436,7 @@ def _fetch_single_outcome_for_sink(
     )
     with landscape_db.engine.connect() as conn:
         rows = conn.execute(stmt).mappings().all()
-    assert len(rows) == 1, (
-        f"expected one token_outcomes row for sink {sink_name!r}, got {rows}"
-    )
+    assert len(rows) == 1, f"expected one token_outcomes row for sink {sink_name!r}, got {rows}"
     return rows[0]
 
 
@@ -458,8 +456,7 @@ def _fetch_routing_modes_to_sink(
             .join(edges_table, routing_events_table.c.edge_id == edges_table.c.edge_id)
             .join(
                 nodes_table,
-                (edges_table.c.to_node_id == nodes_table.c.node_id)
-                & (node_states_table.c.run_id == nodes_table.c.run_id),
+                (edges_table.c.to_node_id == nodes_table.c.node_id) & (node_states_table.c.run_id == nodes_table.c.run_id),
             )
         )
         .where(node_states_table.c.run_id == run_id)
@@ -485,9 +482,7 @@ class TestRoutingEventDistinguishability:
     NOT pinned here.
     """
 
-    def test_gate_routed_token_records_routed_outcome_with_null_error_hash(
-        self, landscape_db: LandscapeDB, payload_store
-    ) -> None:
+    def test_gate_routed_token_records_routed_outcome_with_null_error_hash(self, landscape_db: LandscapeDB, payload_store) -> None:
         """A row routed via gate route_to_sink (intentional MOVE) must record:
         - token_outcomes.outcome == 'routed'
         - token_outcomes.error_hash IS NULL
@@ -537,9 +532,7 @@ class TestRoutingEventDistinguishability:
         )
         assert modes == [RoutingMode.DIVERT.value]
 
-    def test_explain_recovers_routing_intent_for_both_variants(
-        self, landscape_db: LandscapeDB, payload_store
-    ) -> None:
+    def test_explain_recovers_routing_intent_for_both_variants(self, landscape_db: LandscapeDB, payload_store) -> None:
         """The explain() function (the contractual audit-attributability surface)
         must distinguish the two producer-scoped variants single-hop. Run a
         mixed pipeline (one row gate-routed, one on_error-routed), call
@@ -590,9 +583,7 @@ class TestRoutingEventDistinguishability:
         assert re.fullmatch(r"[0-9a-f]{16}", error_lineage.outcome.error_hash)
         assert any(event.mode == RoutingMode.DIVERT for event in error_lineage.routing_events)
 
-    def test_token_outcome_unique_constraint_admits_routed_on_error(
-        self, landscape_db: LandscapeDB
-    ) -> None:
+    def test_token_outcome_unique_constraint_admits_routed_on_error(self, landscape_db: LandscapeDB) -> None:
         """The token_outcomes partial unique index (one terminal outcome per
         token, see docs/contracts/token-outcomes/00-token-outcome-contract.md)
         must admit ROUTED_ON_ERROR like any other terminal outcome.  Recording

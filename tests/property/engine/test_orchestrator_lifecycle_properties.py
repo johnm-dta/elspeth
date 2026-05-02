@@ -136,17 +136,9 @@ def completed_row_counter_shapes(draw: st.DrawFn) -> dict[str, int]:
     rows_diverted = draw(st.integers(min_value=0, max_value=10))
     rows_coalesce_failed = draw(st.integers(min_value=0, max_value=10))
     terminal_sum = (
-        rows_succeeded
-        + rows_failed
-        + rows_routed_success
-        + rows_routed_failure
-        + rows_quarantined
-        + rows_diverted
-        + rows_coalesce_failed
+        rows_succeeded + rows_failed + rows_routed_success + rows_routed_failure + rows_quarantined + rows_diverted + rows_coalesce_failed
     )
-    rows_processed = draw(
-        st.integers(min_value=terminal_sum, max_value=terminal_sum + 10)
-    )
+    rows_processed = draw(st.integers(min_value=terminal_sum, max_value=terminal_sum + 10))
     return {
         "rows_processed": rows_processed,
         "rows_succeeded": rows_succeeded,
@@ -752,19 +744,13 @@ class TestAccumulateRowOutcomesProperties:
         results: list[RowResult] = []
         results.extend(_make_row_result(RowOutcome.COMPLETED) for _ in range(completed))
         results.extend(_make_row_result(RowOutcome.FAILED) for _ in range(failed))
-        results.extend(
-            _make_row_result(RowOutcome.ROUTED, sink_name="alerts")
-            for _ in range(routed_success)
-        )
+        results.extend(_make_row_result(RowOutcome.ROUTED, sink_name="alerts") for _ in range(routed_success))
         # ROUTED_ON_ERROR routes to the same configured sink namespace as
         # ROUTED in this synthetic test (both ``default`` and ``alerts`` are
         # configured by the ``_run_accumulation`` helper).  Distinct sinks
         # are not required to exercise the conservation property — the
         # property is on the counter side, not the routing topology.
-        results.extend(
-            _make_row_result(RowOutcome.ROUTED_ON_ERROR, sink_name="alerts")
-            for _ in range(routed_failure)
-        )
+        results.extend(_make_row_result(RowOutcome.ROUTED_ON_ERROR, sink_name="alerts") for _ in range(routed_failure))
         results.extend(_make_row_result(RowOutcome.QUARANTINED) for _ in range(quarantined))
 
         counters, _ = self._run_accumulation(results)
@@ -781,10 +767,7 @@ class TestAccumulateRowOutcomesProperties:
             + counters.rows_routed_failure
             + counters.rows_quarantined
         )
-        assert (
-            total_increments
-            == completed + failed + routed_success + routed_failure + quarantined
-        )
+        assert total_increments == completed + failed + routed_success + routed_failure + quarantined
 
     @given(n=st.integers(min_value=1, max_value=10))
     @settings(max_examples=50)

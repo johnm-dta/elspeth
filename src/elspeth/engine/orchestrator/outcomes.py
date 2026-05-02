@@ -78,8 +78,7 @@ def _route_to_sink(
     """
     if sink_name not in pending_tokens:
         raise OrchestrationInvariantError(
-            f"Sink '{sink_name}' not in configured sinks. "
-            f"Available: {sorted(pending_tokens.keys())}. Token: {token}"
+            f"Sink '{sink_name}' not in configured sinks. Available: {sorted(pending_tokens.keys())}. Token: {token}"
         )
     # Offensive: ROUTED_ON_ERROR requires error_hash; ROUTED forbids it.
     # The PendingOutcome __post_init__ also enforces this via _FAILURE_OUTCOMES,
@@ -87,17 +86,13 @@ def _route_to_sink(
     # before they hit the dataclass invariant.
     if pending_outcome == RowOutcome.ROUTED_ON_ERROR and error_hash is None:
         raise OrchestrationInvariantError(
-            f"_route_to_sink: ROUTED_ON_ERROR requires error_hash, got None. "
-            f"Token: {token}, sink: {sink_name}"
+            f"_route_to_sink: ROUTED_ON_ERROR requires error_hash, got None. Token: {token}, sink: {sink_name}"
         )
     if pending_outcome == RowOutcome.ROUTED and error_hash is not None:
         raise OrchestrationInvariantError(
-            f"_route_to_sink: ROUTED (intentional MOVE) must not carry error_hash; "
-            f"got {error_hash!r}. Token: {token}, sink: {sink_name}"
+            f"_route_to_sink: ROUTED (intentional MOVE) must not carry error_hash; got {error_hash!r}. Token: {token}, sink: {sink_name}"
         )
-    pending_tokens[sink_name].append(
-        (token, PendingOutcome(pending_outcome, error_hash=error_hash))
-    )
+    pending_tokens[sink_name].append((token, PendingOutcome(pending_outcome, error_hash=error_hash)))
 
 
 def reconcile_sink_write_diversions(
@@ -258,14 +253,9 @@ def accumulate_row_outcomes(
                 # This guard must run before ANY counter or routed_destinations
                 # mutation, otherwise a malformed Tier-1 RowResult partially
                 # mutates audit counters before crashing.
-                raise OrchestrationInvariantError(
-                    f"ROUTED_ON_ERROR result missing error (FailureInfo). "
-                    f"Token: {result.token}"
-                )
+                raise OrchestrationInvariantError(f"ROUTED_ON_ERROR result missing error (FailureInfo). Token: {result.token}")
             sink_name = _require_sink_name(result)
-            error_hash = hashlib.sha256(
-                result.error.message.encode()
-            ).hexdigest()[:16]
+            error_hash = hashlib.sha256(result.error.message.encode()).hexdigest()[:16]
             counters.rows_routed_failure += 1
             counters.routed_destinations[sink_name] += 1
             _route_to_sink(

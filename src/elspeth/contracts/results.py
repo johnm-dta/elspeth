@@ -407,9 +407,7 @@ class RowResult:
             raise OrchestrationInvariantError("ROUTED outcome requires sink_name to be set")
         if self.outcome == RowOutcome.ROUTED_ON_ERROR:
             if self.sink_name is None:
-                raise OrchestrationInvariantError(
-                    "ROUTED_ON_ERROR outcome requires sink_name to be set"
-                )
+                raise OrchestrationInvariantError("ROUTED_ON_ERROR outcome requires sink_name to be set")
             if self.error is None:
                 raise OrchestrationInvariantError(
                     "ROUTED_ON_ERROR outcome requires error (FailureInfo) to be set — "
@@ -418,9 +416,7 @@ class RowResult:
                     "docs/contracts/token-outcomes/00-token-outcome-contract.md."
                 )
             if not isinstance(self.error, FailureInfo):
-                raise OrchestrationInvariantError(
-                    "ROUTED_ON_ERROR outcome requires error to be a FailureInfo instance"
-                )
+                raise OrchestrationInvariantError("ROUTED_ON_ERROR outcome requires error to be a FailureInfo instance")
         if self.outcome == RowOutcome.COALESCED and self.sink_name is None:
             raise OrchestrationInvariantError("COALESCED outcome requires sink_name to be set")
 

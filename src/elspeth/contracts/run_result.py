@@ -70,10 +70,7 @@ class RunResult:
         """
         success_indicator = self.rows_succeeded > 0 or self.rows_routed_success > 0
         failure_indicator = (
-            self.rows_failed > 0
-            or self.rows_quarantined > 0
-            or self.rows_coalesce_failed > 0
-            or self.rows_routed_failure > 0
+            self.rows_failed > 0 or self.rows_quarantined > 0 or self.rows_coalesce_failed > 0 or self.rows_routed_failure > 0
         )
 
         match (self.status, self.rows_processed, success_indicator, failure_indicator):
@@ -129,10 +126,7 @@ class RunResult:
             case (RunStatus.EMPTY, 0, False, False):
                 return
             case (RunStatus.EMPTY, p, _, _) if p > 0:
-                raise ValueError(
-                    f"RunResult: status=EMPTY requires rows_processed == 0, "
-                    f"got rows_processed={p}"
-                )
+                raise ValueError(f"RunResult: status=EMPTY requires rows_processed == 0, got rows_processed={p}")
             case (RunStatus.EMPTY, _, True, _):
                 raise ValueError(
                     f"RunResult: status=EMPTY requires no success indicator "
@@ -212,12 +206,7 @@ def derive_terminal_run_status(
     need INTERRUPTED or RUNNING set those values directly.
     """
     success_indicator = rows_succeeded > 0 or rows_routed_success > 0
-    failure_indicator = (
-        rows_failed > 0
-        or rows_quarantined > 0
-        or rows_coalesce_failed > 0
-        or rows_routed_failure > 0
-    )
+    failure_indicator = rows_failed > 0 or rows_quarantined > 0 or rows_coalesce_failed > 0 or rows_routed_failure > 0
     if rows_processed == 0 and not success_indicator:
         return RunStatus.FAILED if failure_indicator else RunStatus.EMPTY
     if not success_indicator:

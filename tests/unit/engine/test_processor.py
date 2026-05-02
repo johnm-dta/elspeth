@@ -4513,7 +4513,7 @@ class TestHandleTransformErrorStatusRoutedOnError:
 
         with pytest.raises(
             OrchestrationInvariantError,
-            match="ROUTED_ON_ERROR requires transform_result.reason",
+            match=r"ROUTED_ON_ERROR requires transform_result\.reason",
         ):
             processor._handle_transform_error_status(
                 transform_result=tr,
@@ -4542,7 +4542,7 @@ class TestHandleTransformErrorStatusRoutedOnError:
 
         with pytest.raises(
             OrchestrationInvariantError,
-            match="ROUTED_ON_ERROR requires transform_result.reason",
+            match=r"ROUTED_ON_ERROR requires transform_result\.reason",
         ):
             processor._handle_transform_error_status(
                 transform_result=tr,

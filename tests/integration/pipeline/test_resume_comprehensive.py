@@ -1502,9 +1502,7 @@ class TestResumeComprehensive:
 
         run_id = "resume-gate-routed-test"
         output_path = tmp_path / "gate_routed_output.csv"
-        run_id, graph = self._setup_failed_run(
-            db, payload_store, run_id, num_rows=5, checkpoint_at=4
-        )
+        run_id, graph = self._setup_failed_run(db, payload_store, run_id, num_rows=5, checkpoint_at=4)
 
         # Mark every row as gate-routed (RowOutcome.ROUTED, sink_name set,
         # error_hash NULL — the canonical pre-split-fix shape for
@@ -1609,10 +1607,10 @@ class TestResumeComprehensive:
         # Cross-check against Landscape: every token_outcomes row has the
         # routed shape (matches Step 9c's audit-distinguishability test).
         from elspeth.core.landscape.schema import token_outcomes_table
+
         with db.engine.connect() as conn:
             outcomes = conn.execute(
-                select(token_outcomes_table.c.outcome, token_outcomes_table.c.sink_name)
-                .where(token_outcomes_table.c.run_id == run_id)
+                select(token_outcomes_table.c.outcome, token_outcomes_table.c.sink_name).where(token_outcomes_table.c.run_id == run_id)
             ).fetchall()
         routed_outcomes = [o for o in outcomes if o.outcome == "routed"]
         assert len(routed_outcomes) == 5

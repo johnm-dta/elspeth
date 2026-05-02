@@ -28,13 +28,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 TEST_CSV = FIXTURES_DIR / "test_input.csv"
 
 # elspeth-5069612f3c — gate-routed reproducer CSV with the ``tier`` column.
-GATE_ROUTED_CSV_CONTENT = (
-    "id,tier\n"
-    "1,high\n"
-    "2,low\n"
-    "3,high\n"
-    "4,low\n"
-)
+GATE_ROUTED_CSV_CONTENT = "id,tier\n1,high\n2,low\n3,high\n4,low\n"
 
 
 @pytest.fixture

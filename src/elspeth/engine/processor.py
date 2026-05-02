@@ -2260,9 +2260,7 @@ class RowProcessor:
             # The QUARANTINED path tolerates an "unknown_error" fallback for
             # historical reasons; do NOT extend that fallback to ROUTED_ON_ERROR
             # below — see the offensive guard in the routed branch.
-            error_detail = (
-                str(transform_result.reason) if transform_result.reason else "unknown_error"
-            )
+            error_detail = str(transform_result.reason) if transform_result.reason else "unknown_error"
             quarantine_error_hash = hashlib.sha256(error_detail.encode()).hexdigest()[:16]
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),

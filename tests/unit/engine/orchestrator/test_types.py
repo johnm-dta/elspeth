@@ -166,9 +166,7 @@ class TestAggregationFlushResult:
         assert zero + result == result
 
     def test_to_dict_returns_plain_dict(self) -> None:
-        result = AggregationFlushResult(
-            rows_succeeded=5, rows_routed_success=2, rows_routed_failure=0, routed_destinations={"sink_a": 2}
-        )
+        result = AggregationFlushResult(rows_succeeded=5, rows_routed_success=2, rows_routed_failure=0, routed_destinations={"sink_a": 2})
         d = result.to_dict()
         assert isinstance(d, dict)
         assert isinstance(d["routed_destinations"], dict)

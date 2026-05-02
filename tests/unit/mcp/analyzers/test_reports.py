@@ -279,9 +279,7 @@ class TestOutcomeAnalysisIsTerminal:
         assert "error" not in result
         outcomes = result["outcome_distribution"]
         outcome_keys = {o["outcome"] for o in outcomes}
-        assert "ROUTED_ON_ERROR" in outcome_keys, (
-            "ROUTED_ON_ERROR must surface as its own outcome_distribution bucket"
-        )
+        assert "ROUTED_ON_ERROR" in outcome_keys, "ROUTED_ON_ERROR must surface as its own outcome_distribution bucket"
         # Legacy ROUTED bucket is preserved separately.
         assert "ROUTED" in outcome_keys
         routed_on_error = next(o for o in outcomes if o["outcome"] == "ROUTED_ON_ERROR")

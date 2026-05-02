@@ -418,7 +418,9 @@ class Orchestrator:
             if pending_exc is None:
                 raise
 
-    def _derive_resume_terminal_status_from_audit(self, factory: RecorderFactory, run_id: str) -> tuple[RunStatus, int, int, int, int, int, int]:
+    def _derive_resume_terminal_status_from_audit(
+        self, factory: RecorderFactory, run_id: str
+    ) -> tuple[RunStatus, int, int, int, int, int, int]:
         """Phase 2.2 (elspeth-0de989c56d) — recover the truthful terminal
         status of a run from the Landscape audit DB when the resume found
         no unprocessed rows.

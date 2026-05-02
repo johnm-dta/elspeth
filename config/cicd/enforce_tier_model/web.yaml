@@ -1337,7 +1337,7 @@ allow_hits:
   safety: Only RuntimeError caught (narrowed from bare Exception); logged with canonical exc_class; pipeline
     continues
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=00d7c0c1a8acdb50
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=47413837c09e6307
   owner: web-execution
   reason: GracefulShutdownError is an expected control-flow signal from orchestrator cancellation
   safety: Classified as cancelled; separated from BaseException failure path

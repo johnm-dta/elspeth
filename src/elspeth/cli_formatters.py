@@ -55,10 +55,10 @@ def create_console_formatters(prefix: str = "Run") -> dict[type, Callable[..., N
         }
         symbol = status_symbols[event.status]
         routed_summary = ""
-        if event.routed > 0:
+        if (event.routed_success + event.routed_failure) > 0:
             dest_parts = [f"{name}:{count}" for name, count in event.routed_destinations]
             dest_str = ", ".join(dest_parts) if dest_parts else ""
-            routed_summary = f" | →{event.routed:,} routed"
+            routed_summary = f" | →{event.routed_success + event.routed_failure:,} routed"
             if dest_str:
                 routed_summary += f" ({dest_str})"
         typer.echo(
@@ -138,7 +138,8 @@ def create_json_formatters() -> dict[type, Callable[..., None]]:
                     "succeeded": event.succeeded,
                     "failed": event.failed,
                     "quarantined": event.quarantined,
-                    "routed": event.routed,
+                    "routed_success": event.routed_success,
+                    "routed_failure": event.routed_failure,
                     "routed_destinations": dict(event.routed_destinations),
                     "duration_seconds": event.duration_seconds,
                     "exit_code": event.exit_code,

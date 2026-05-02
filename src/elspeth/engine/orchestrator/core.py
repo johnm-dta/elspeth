@@ -435,9 +435,10 @@ class Orchestrator:
 
         Returns:
             ``(terminal_status, rows_processed, rows_succeeded, rows_failed,
-            rows_quarantined)`` — the second through fifth elements feed
-            the local RunResult so its row counts match the chosen status
-            (otherwise the biconditional in
+            rows_routed_success, rows_routed_failure, rows_quarantined)`` —
+            the second through seventh elements feed the local RunResult so
+            its row counts match the chosen status (otherwise the
+            biconditional in
             :class:`elspeth.contracts.run_result.RunResult` would crash).
         """
         outcomes = factory.query.get_all_token_outcomes_for_run(run_id)
@@ -448,6 +449,8 @@ class Orchestrator:
         rows_quarantined = 0
         rows_coalesce_failed = 0
         rows_processed = 0
+        rows_routed_success = 0
+        rows_routed_failure = 0
         for outcome in outcomes:
             if not outcome.is_terminal:
                 continue
@@ -456,8 +459,14 @@ class Orchestrator:
                     rows_succeeded += 1
                     rows_processed += 1
                 case RowOutcome.ROUTED:
-                    # rows_routed: excluded from the predicate (DIVERT vs MOVE
-                    # ambiguity); still counts as processed.
+                    # Intentional gate MOVE — counts as a success indicator
+                    # in the predicate (rows_routed_success > 0).
+                    rows_routed_success += 1
+                    rows_processed += 1
+                case RowOutcome.ROUTED_ON_ERROR:
+                    # Transform on_error DIVERT — counts as a failure indicator
+                    # in the predicate (rows_routed_failure > 0).
+                    rows_routed_failure += 1
                     rows_processed += 1
                 case RowOutcome.FAILED:
                     rows_failed += 1
@@ -480,10 +489,20 @@ class Orchestrator:
             rows_processed=rows_processed,
             rows_succeeded=rows_succeeded,
             rows_failed=rows_failed,
+            rows_routed_success=rows_routed_success,
+            rows_routed_failure=rows_routed_failure,
             rows_quarantined=rows_quarantined,
             rows_coalesce_failed=rows_coalesce_failed,
         )
-        return terminal_status, rows_processed, rows_succeeded, rows_failed, rows_quarantined
+        return (
+            terminal_status,
+            rows_processed,
+            rows_succeeded,
+            rows_failed,
+            rows_routed_success,
+            rows_routed_failure,
+            rows_quarantined,
+        )
 
     def _cli_completion_for(self, status: RunStatus) -> tuple[RunCompletionStatus, int]:
         """Phase 2.2 (elspeth-0de989c56d) — map terminal RunStatus to the
@@ -549,7 +568,8 @@ class Orchestrator:
                 quarantined=shutdown_exc.rows_quarantined,
                 duration_seconds=total_duration,
                 exit_code=3,
-                routed=shutdown_exc.rows_routed,
+                routed_success=shutdown_exc.rows_routed_success,
+                routed_failure=shutdown_exc.rows_routed_failure,
                 routed_destinations=tuple(shutdown_exc.routed_destinations.items()),
             )
         )
@@ -575,7 +595,8 @@ class Orchestrator:
             rows_processed=0,
             rows_succeeded=0,
             rows_failed=0,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=0,
             rows_forked=0,
             rows_coalesced=0,
@@ -608,7 +629,8 @@ class Orchestrator:
                 quarantined=failed_result.rows_quarantined,
                 duration_seconds=total_duration,
                 exit_code=2,  # exit_code: 0=success, 1=partial, 2=total failure
-                routed=failed_result.rows_routed,
+                routed_success=failed_result.rows_routed_success,
+                routed_failure=failed_result.rows_routed_failure,
                 routed_destinations=tuple(failed_result.routed_destinations.items()),
             )
         )
@@ -1525,6 +1547,8 @@ class Orchestrator:
                 rows_processed=result.rows_processed,
                 rows_succeeded=result.rows_succeeded,
                 rows_failed=result.rows_failed,
+                rows_routed_success=result.rows_routed_success,
+                rows_routed_failure=result.rows_routed_failure,
                 rows_quarantined=result.rows_quarantined,
                 rows_coalesce_failed=result.rows_coalesce_failed,
             )
@@ -1576,7 +1600,8 @@ class Orchestrator:
                     quarantined=result.rows_quarantined,
                     duration_seconds=total_duration,
                     exit_code=exit_code,
-                    routed=result.rows_routed,
+                    routed_success=result.rows_routed_success,
+                    routed_failure=result.rows_routed_failure,
                     routed_destinations=tuple(result.routed_destinations.items()),
                 )
             )
@@ -1613,7 +1638,8 @@ class Orchestrator:
                             quarantined=result.rows_quarantined,
                             duration_seconds=total_duration,
                             exit_code=1,
-                            routed=result.rows_routed,
+                            routed_success=result.rows_routed_success,
+                            routed_failure=result.rows_routed_failure,
                             routed_destinations=tuple(result.routed_destinations.items()),
                         )
                     )
@@ -1645,7 +1671,8 @@ class Orchestrator:
                             quarantined=result.rows_quarantined,
                             duration_seconds=total_duration,
                             exit_code=1,
-                            routed=result.rows_routed,
+                            routed_success=result.rows_routed_success,
+                            routed_failure=result.rows_routed_failure,
                             routed_destinations=tuple(result.routed_destinations.items()),
                         )
                     )
@@ -2144,7 +2171,8 @@ class Orchestrator:
                 rows_succeeded=counters.rows_succeeded,
                 rows_failed=counters.rows_failed,
                 rows_quarantined=counters.rows_quarantined,
-                rows_routed=counters.rows_routed,
+                rows_routed_success=counters.rows_routed_success,
+                rows_routed_failure=counters.rows_routed_failure,
                 routed_destinations=dict(counters.routed_destinations),
             )
 
@@ -2416,8 +2444,10 @@ class Orchestrator:
             self._events.emit(
                 ProgressEvent(
                     rows_processed=counters.rows_processed,
-                    # Include routed rows in success count - they reached their destination
-                    rows_succeeded=counters.rows_succeeded + counters.rows_routed,
+                    # Include intentionally-routed rows (MOVE) in success count;
+                    # exclude on_error-routed rows (DIVERT) — those are
+                    # operator-visible failures.
+                    rows_succeeded=counters.rows_succeeded + counters.rows_routed_success,
                     rows_failed=counters.rows_failed,
                     rows_quarantined=counters.rows_quarantined,
                     elapsed_seconds=elapsed,
@@ -2970,7 +3000,10 @@ class Orchestrator:
                 self._events.emit(
                     ProgressEvent(
                         rows_processed=loop_ctx.counters.rows_processed,
-                        rows_succeeded=loop_ctx.counters.rows_succeeded + loop_ctx.counters.rows_routed,
+                        # Include intentionally-routed rows (MOVE) in success count;
+                        # exclude on_error-routed rows (DIVERT) — those are
+                        # operator-visible failures.
+                        rows_succeeded=loop_ctx.counters.rows_succeeded + loop_ctx.counters.rows_routed_success,
                         rows_failed=loop_ctx.counters.rows_failed,
                         rows_quarantined=loop_ctx.counters.rows_quarantined,
                         elapsed_seconds=elapsed,
@@ -3162,6 +3195,8 @@ class Orchestrator:
                 audit_rows_processed,
                 audit_rows_succeeded,
                 audit_rows_failed,
+                audit_rows_routed_success,
+                audit_rows_routed_failure,
                 audit_rows_quarantined,
             ) = self._derive_resume_terminal_status_from_audit(factory, run_id)
             factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
@@ -3191,7 +3226,8 @@ class Orchestrator:
                     quarantined=audit_rows_quarantined,
                     duration_seconds=0.0,
                     exit_code=exit_code,
-                    routed=0,
+                    routed_success=audit_rows_routed_success,
+                    routed_failure=audit_rows_routed_failure,
                     routed_destinations=(),
                 )
             )
@@ -3205,7 +3241,8 @@ class Orchestrator:
                 rows_processed=audit_rows_processed,
                 rows_succeeded=audit_rows_succeeded,
                 rows_failed=audit_rows_failed,
-                rows_routed=0,
+                rows_routed_success=audit_rows_routed_success,
+                rows_routed_failure=audit_rows_routed_failure,
                 rows_quarantined=audit_rows_quarantined,
                 routed_destinations={},
             )
@@ -3248,6 +3285,8 @@ class Orchestrator:
                 rows_processed=result.rows_processed,
                 rows_succeeded=result.rows_succeeded,
                 rows_failed=result.rows_failed,
+                rows_routed_success=result.rows_routed_success,
+                rows_routed_failure=result.rows_routed_failure,
                 rows_quarantined=result.rows_quarantined,
                 rows_coalesce_failed=result.rows_coalesce_failed,
             )
@@ -3279,7 +3318,8 @@ class Orchestrator:
                     quarantined=result.rows_quarantined,
                     duration_seconds=total_duration,
                     exit_code=exit_code,
-                    routed=result.rows_routed,
+                    routed_success=result.rows_routed_success,
+                    routed_failure=result.rows_routed_failure,
                     routed_destinations=tuple(result.routed_destinations.items()),
                 )
             )

@@ -126,7 +126,8 @@ def _build_terminal_run_event(current: RunStatusResponse) -> RunEvent:
                 rows_processed=current.rows_processed,
                 rows_succeeded=current.rows_succeeded,
                 rows_failed=current.rows_failed,
-                rows_routed=current.rows_routed,
+                rows_routed_success=current.rows_routed_success,
+                rows_routed_failure=current.rows_routed_failure,
                 rows_quarantined=current.rows_quarantined,
                 landscape_run_id=current.landscape_run_id,
             )
@@ -145,7 +146,8 @@ def _build_terminal_run_event(current: RunStatusResponse) -> RunEvent:
         payload = CancelledData(
             rows_processed=current.rows_processed,
             rows_failed=current.rows_failed,
-            rows_routed=current.rows_routed,
+            rows_routed_success=current.rows_routed_success,
+            rows_routed_failure=current.rows_routed_failure,
         )
     else:
         raise RuntimeError(f"_build_terminal_run_event called for non-terminal status {current.status!r}")
@@ -584,7 +586,8 @@ def create_execution_router() -> APIRouter:
             rows_processed=status.rows_processed,
             rows_succeeded=status.rows_succeeded,
             rows_failed=status.rows_failed,
-            rows_routed=status.rows_routed,
+            rows_routed_success=status.rows_routed_success,
+            rows_routed_failure=status.rows_routed_failure,
             rows_quarantined=status.rows_quarantined,
             landscape_run_id=status.landscape_run_id,
             error=status.error,

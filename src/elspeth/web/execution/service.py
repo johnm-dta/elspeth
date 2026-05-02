@@ -131,24 +131,26 @@ def _session_status_from_run_result_status(status: RunStatus) -> SessionRunStatu
 
 
 def _structural_failure_message(*, rows_processed: int) -> str:
-    """Phase 2.2 — synthetic structural error for FAILED-from-row-shape.
+    """elspeth-0de989c56d / elspeth-5069612f3c — synthetic structural error
+    for FAILED-from-row-shape after the rows_routed split.
 
-    The L3 ``RunRecord.__post_init__`` invariant requires a non-empty
-    ``error`` for ``status="failed"``.  When the engine returns
-    ``RunStatus.FAILED`` from a row-shape decision (no exception
-    propagated, but rows_succeeded==0), there is no exception message to
-    persist.  This helper produces a structural fact — operator-readable,
-    no candidate-secret material, no echoed user-row data — that names
-    the failure mode the API consumer sees.
+    The L3 RunRecord.__post_init__ invariant requires a non-empty error for
+    status='failed'. When the engine returns RunStatus.FAILED from a row-shape
+    decision (no exception propagated; no success indicator: rows_succeeded == 0
+    AND rows_routed_success == 0), this helper produces a structural fact —
+    operator-readable, no candidate-secret material, no echoed user-row data.
 
-    The shape is deliberately stable so the frontend can pattern-match
-    rather than parsing free prose; if a future change refines the
-    template (e.g., naming a specific failure indicator), the existing
-    consumers continue to discriminate against the prefix.
+    After elspeth-5069612f3c, gate-routed pipelines (rows_routed_success > 0)
+    no longer reach this code path — they classify as COMPLETED. This message
+    fires only when no row reached EITHER the success-counted terminal state
+    OR an intentional gate-routed sink, i.e. when every row failed terminally
+    or was diverted via on_error.
     """
     return (
-        f"No row reached the success path (rows_processed={rows_processed}, rows_succeeded=0). "
-        f"Inspect /diagnostics for per-row failure details."
+        f"No row reached a success path (rows_processed={rows_processed}, "
+        f"rows_succeeded=0, rows_routed_success=0). "
+        f"All rows either failed terminally or were routed via on_error to a "
+        f"failure sink. Inspect /diagnostics for per-row failure details."
     )
 
 
@@ -507,7 +509,8 @@ class ExecutionServiceImpl:
             rows_processed=run.rows_processed,
             rows_succeeded=run.rows_succeeded,
             rows_failed=run.rows_failed,
-            rows_routed=run.rows_routed,
+            rows_routed_success=run.rows_routed_success,
+            rows_routed_failure=run.rows_routed_failure,
             rows_quarantined=run.rows_quarantined,
             error=run.error,
             landscape_run_id=run.landscape_run_id,
@@ -634,7 +637,7 @@ class ExecutionServiceImpl:
                         run_id=run_id,
                         timestamp=datetime.now(tz=UTC),
                         event_type="cancelled",
-                        data=CancelledData(rows_processed=0, rows_failed=0, rows_routed=0),
+                        data=CancelledData(rows_processed=0, rows_failed=0, rows_routed_success=0, rows_routed_failure=0),
                     ),
                 )
                 return
@@ -655,7 +658,7 @@ class ExecutionServiceImpl:
                             run_id=run_id,
                             timestamp=datetime.now(tz=UTC),
                             event_type="cancelled",
-                            data=CancelledData(rows_processed=0, rows_failed=0, rows_routed=0),
+                            data=CancelledData(rows_processed=0, rows_failed=0, rows_routed_success=0, rows_routed_failure=0),
                         ),
                     )
                     return
@@ -859,7 +862,8 @@ class ExecutionServiceImpl:
                         rows_processed=result.rows_processed,
                         rows_succeeded=result.rows_succeeded,
                         rows_failed=result.rows_failed,
-                        rows_routed=result.rows_routed,
+                        rows_routed_success=result.rows_routed_success,
+                        rows_routed_failure=result.rows_routed_failure,
                         rows_quarantined=result.rows_quarantined,
                     )
                 )
@@ -883,7 +887,8 @@ class ExecutionServiceImpl:
                             data=CancelledData(
                                 rows_processed=result.rows_processed,
                                 rows_failed=result.rows_failed,
-                                rows_routed=result.rows_routed,
+                                rows_routed_success=result.rows_routed_success,
+                                rows_routed_failure=result.rows_routed_failure,
                             ),
                         ),
                     )
@@ -933,7 +938,8 @@ class ExecutionServiceImpl:
                             rows_processed=result.rows_processed,
                             rows_succeeded=result.rows_succeeded,
                             rows_failed=result.rows_failed,
-                            rows_routed=result.rows_routed,
+                            rows_routed_success=result.rows_routed_success,
+                            rows_routed_failure=result.rows_routed_failure,
                             rows_quarantined=result.rows_quarantined,
                             landscape_run_id=result.run_id,
                         ),
@@ -951,7 +957,8 @@ class ExecutionServiceImpl:
                     rows_processed=gse.rows_processed,
                     rows_succeeded=gse.rows_succeeded,
                     rows_failed=gse.rows_failed,
-                    rows_routed=gse.rows_routed,
+                    rows_routed_success=gse.rows_routed_success,
+                    rows_routed_failure=gse.rows_routed_failure,
                     rows_quarantined=gse.rows_quarantined,
                 )
             )
@@ -964,7 +971,8 @@ class ExecutionServiceImpl:
                     data=CancelledData(
                         rows_processed=gse.rows_processed,
                         rows_failed=gse.rows_failed,
-                        rows_routed=gse.rows_routed,
+                        rows_routed_success=gse.rows_routed_success,
+                        rows_routed_failure=gse.rows_routed_failure,
                     ),
                 ),
             )

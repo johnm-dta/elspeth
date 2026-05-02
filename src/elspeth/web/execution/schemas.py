@@ -110,44 +110,38 @@ def _validate_row_decomposition(
     rows_processed: int,
     rows_succeeded: int,
     rows_failed: int,
-    rows_routed: int,
+    rows_routed_success: int,
+    rows_routed_failure: int,
     rows_quarantined: int,
 ) -> None:
-    """Enforce rows_processed >= succeeded + failed + routed + quarantined.
+    """Enforce rows_processed >= succeeded + failed + routed_success + routed_failure + quarantined.
 
-    NARROW INVARIANT (elspeth-31d53c7493). The original equality
-    formulation (``processed == succeeded + failed + routed + quarantined``)
-    does not hold for any DAG with aggregation, fork, expansion, or
-    coalesce — source rows reach terminal states the formula does not
-    account for. A ``batch_stats`` aggregation pipeline absorbs source
-    rows into ``CONSUMED_IN_BATCH`` (no counter incremented in
-    ``engine/orchestrator/outcomes.py``), so a legitimate run reports
-    ``rows_processed > sum``.
+    elspeth-5069612f3c — rows_routed split into rows_routed_success (MOVE) and
+    rows_routed_failure (DIVERT). Both contribute to terminal-state counts.
 
-    The relaxed inequality preserves the half of the invariant we can
-    still defend at this layer: the orchestrator must never emit MORE
-    terminal-state counts than input rows ingested.  Over-counting is a
-    bookkeeping bug (e.g., a token's outcome recorded twice) and remains
-    a Tier 1 anomaly worth crashing on.
+    NARROW INVARIANT (elspeth-31d53c7493 carry-forward). The original equality
+    formulation does not hold for any DAG with aggregation, fork, expansion,
+    or coalesce — source rows reach terminal states the formula does not
+    account for. The relaxed inequality is preserved here.
 
-    The architecturally-correct formula — extending the schema to carry
-    rows_consumed_in_batch / rows_forked / rows_coalesced /
-    rows_expanded counters and re-deriving the orchestrator-side balance
-    equation across parent/child token relationships — is tracked in
-    elspeth-cf84eb1b52 (P0, blocks RC 5.0).  When that lands, this
-    inequality is replaced by the full balance.
-
-    Note: even this inequality does NOT hold for fork/coalesce pipelines
-    (a single input can produce multiple terminal child counts).  Those
-    shapes are not currently exposed via the composer, so the practical
-    surface for this narrow patch is aggregation pipelines.
+    The architecturally-correct formula (full DAG-aware balance) is tracked
+    in elspeth-cf84eb1b52. When that lands, this inequality is replaced by
+    the full balance.
     """
-    sum_terminal = rows_succeeded + rows_failed + rows_routed + rows_quarantined
+    sum_terminal = (
+        rows_succeeded
+        + rows_failed
+        + rows_routed_success
+        + rows_routed_failure
+        + rows_quarantined
+    )
     if rows_processed < sum_terminal:
         raise ValueError(
             f"Row count decomposition mismatch (over-counting): rows_processed={rows_processed} "
             f"< rows_succeeded({rows_succeeded}) + rows_failed({rows_failed}) "
-            f"+ rows_routed({rows_routed}) + rows_quarantined({rows_quarantined}) = {sum_terminal}. "
+            f"+ rows_routed_success({rows_routed_success}) "
+            f"+ rows_routed_failure({rows_routed_failure}) "
+            f"+ rows_quarantined({rows_quarantined}) = {sum_terminal}. "
             f"Tier 1 anomaly: orchestrator emitted more terminal-state counts than input rows. "
             f"See elspeth-cf84eb1b52 for the full DAG-aware balance equation."
         )
@@ -181,88 +175,99 @@ def _check_status_row_count_invariant(
     rows_processed: int,
     rows_succeeded: int,
     rows_failed: int,
+    rows_routed_success: int,
+    rows_routed_failure: int,
     rows_quarantined: int,
 ) -> None:
-    """Phase 2.2 (elspeth-0de989c56d) — Pydantic mirror of the L0 biconditional.
+    """elspeth-5069612f3c — Pydantic mirror of the L0 biconditional after the
+    rows_routed split.
 
-    Same presence-indicator predicate as
-    :class:`elspeth.contracts.run_result.RunResult` so neither the engine's
-    in-memory record nor the API response can serialize an inconsistent
-    status / row-count pair.
+    success_indicator = rows_succeeded > 0 OR rows_routed_success > 0
+    failure_indicator = rows_failed > 0 OR rows_quarantined > 0
+                        OR rows_routed_failure > 0
 
-    The Pydantic mirror does NOT see ``rows_coalesce_failed`` (the API
-    schema does not surface it) — failures are detected from
-    ``rows_failed`` and ``rows_quarantined`` only.  This is a deliberate
-    narrowing: a run with rows_coalesce_failed > 0 also carries rows_failed
-    counts (see ``handle_coalesce_timeouts`` in
-    ``engine/orchestrator/outcomes.py`` — every coalesce failure also
-    increments rows_failed by the count of consumed tokens), so the
-    failure indicator is preserved at the API layer.
+    The Pydantic mirror does NOT see rows_coalesce_failed (the API schema
+    does not surface it) — see the original docstring for the rationale;
+    every coalesce failure also increments rows_failed at the engine layer,
+    so the failure indicator is preserved.
 
-    Non-terminal (``running`` / ``pending``) and signal-bounded
-    (``cancelled``) statuses bypass the predicate.
+    Non-terminal (running / pending) and signal-bounded (cancelled) statuses
+    bypass the predicate.
     """
-    has_failures = rows_failed > 0 or rows_quarantined > 0
+    success_indicator = rows_succeeded > 0 or rows_routed_success > 0
+    failure_indicator = (
+        rows_failed > 0
+        or rows_quarantined > 0
+        or rows_routed_failure > 0
+    )
 
     if status in {"running", "pending", "cancelled"}:
         return
 
     if status == "completed":
-        # rows_processed == 0 AND rows_succeeded > 0 is the resume /
-        # coalesce-continuation shape — operationally COMPLETED.  Only
-        # reject COMPLETED when neither rows_processed nor rows_succeeded
-        # provides evidence that the run produced anything.
-        if rows_succeeded == 0:
+        if not success_indicator:
             raise ValueError(
-                f"status='completed' requires rows_succeeded > 0, got {rows_succeeded} "
+                f"status='completed' requires a success indicator "
+                f"(rows_succeeded > 0 or rows_routed_success > 0); "
+                f"got rows_succeeded={rows_succeeded}, "
+                f"rows_routed_success={rows_routed_success} "
                 f"(use status='empty' for ingested-zero-rows runs, "
-                f"'failed' when rows were processed but none succeeded)"
+                f"'failed' when rows were processed but none reached a success path)"
             )
-        if has_failures:
+        if failure_indicator:
             raise ValueError(
-                f"status='completed' requires no failures (rows_failed={rows_failed}, "
-                f"rows_quarantined={rows_quarantined}); use status='completed_with_failures'"
+                f"status='completed' requires no failures "
+                f"(rows_failed={rows_failed}, "
+                f"rows_quarantined={rows_quarantined}, "
+                f"rows_routed_failure={rows_routed_failure}); "
+                f"use status='completed_with_failures'"
             )
         return
 
     if status == "completed_with_failures":
-        if rows_succeeded == 0:
+        if not success_indicator:
             raise ValueError(
-                f"status='completed_with_failures' requires rows_succeeded > 0, "
-                f"got {rows_succeeded} (use status='failed' when no row succeeded)"
+                f"status='completed_with_failures' requires a success indicator "
+                f"(rows_succeeded > 0 or rows_routed_success > 0); "
+                f"got rows_succeeded={rows_succeeded}, "
+                f"rows_routed_success={rows_routed_success} "
+                f"(use status='failed' when no row reached a success path)"
             )
-        if not has_failures:
+        if not failure_indicator:
             raise ValueError(
                 f"status='completed_with_failures' requires at least one failure indicator "
-                f"(rows_failed > 0 or rows_quarantined > 0); got rows_failed={rows_failed}, "
-                f"rows_quarantined={rows_quarantined} (use status='completed' for clean runs)"
+                f"(rows_failed > 0 or rows_quarantined > 0 or rows_routed_failure > 0); "
+                f"got rows_failed={rows_failed}, rows_quarantined={rows_quarantined}, "
+                f"rows_routed_failure={rows_routed_failure} "
+                f"(use status='completed' for clean runs)"
             )
         return
 
     if status == "failed":
-        # ``failed`` has two origins (see RunResult._check_status_invariant):
-        # the predicate decided rows_succeeded==0, OR an exception bounded
-        # the run mid-flight with partial successes already counted.  The
-        # API surface tolerates either shape so exception-bounded runs
-        # serialize correctly; the operator-discriminating power vs.
-        # COMPLETED is preserved (predicate never picks FAILED when
-        # rows_succeeded > 0 on the success path).
-        return
+        return  # FAILED tolerates any shape (predicate-or-exception origin)
 
     if status == "empty":
         if rows_processed != 0:
-            raise ValueError(f"status='empty' requires rows_processed == 0, got {rows_processed}")
-        if rows_succeeded != 0:
-            raise ValueError(f"status='empty' requires rows_succeeded == 0, got {rows_succeeded}")
-        if has_failures:
             raise ValueError(
-                f"status='empty' requires no failures (rows_failed={rows_failed}, "
-                f"rows_quarantined={rows_quarantined}); use status='failed' when "
-                f"the run encountered failures with no successful rows"
+                f"status='empty' requires rows_processed == 0, got {rows_processed}"
+            )
+        if success_indicator:
+            raise ValueError(
+                f"status='empty' requires no success indicator "
+                f"(rows_succeeded={rows_succeeded}, "
+                f"rows_routed_success={rows_routed_success})"
+            )
+        if failure_indicator:
+            raise ValueError(
+                f"status='empty' requires no failures "
+                f"(rows_failed={rows_failed}, "
+                f"rows_quarantined={rows_quarantined}, "
+                f"rows_routed_failure={rows_routed_failure}); "
+                f"use status='failed' when the run encountered failures with no successful rows"
             )
         return
 
-    raise ValueError(f"unhandled status value {status!r} in row-count invariant check")
+    raise ValueError(f"Unknown status {status!r}")
 
 
 class CompletedData(_StrictResponse):
@@ -271,7 +276,8 @@ class CompletedData(_StrictResponse):
     rows_processed: int = Field(ge=0)
     rows_succeeded: int = Field(ge=0)
     rows_failed: int = Field(ge=0)
-    rows_routed: int = Field(default=0, ge=0)
+    rows_routed_success: int = Field(default=0, ge=0)
+    rows_routed_failure: int = Field(default=0, ge=0)
     rows_quarantined: int = Field(ge=0)
     landscape_run_id: str = Field(min_length=1)
 
@@ -281,7 +287,8 @@ class CompletedData(_StrictResponse):
             self.rows_processed,
             self.rows_succeeded,
             self.rows_failed,
-            self.rows_routed,
+            self.rows_routed_success,
+            self.rows_routed_failure,
             self.rows_quarantined,
         )
         return self
@@ -292,7 +299,8 @@ class CancelledData(_StrictResponse):
 
     rows_processed: int = Field(ge=0)
     rows_failed: int = Field(ge=0)
-    rows_routed: int = Field(default=0, ge=0)
+    rows_routed_success: int = Field(default=0, ge=0)
+    rows_routed_failure: int = Field(default=0, ge=0)
 
 
 class FailedData(_StrictResponse):
@@ -530,7 +538,8 @@ class RunStatusResponse(_StrictResponse):
     rows_processed: int = Field(ge=0)
     rows_succeeded: int = Field(ge=0)
     rows_failed: int = Field(ge=0)
-    rows_routed: int = Field(default=0, ge=0)
+    rows_routed_success: int = Field(default=0, ge=0)
+    rows_routed_failure: int = Field(default=0, ge=0)
     rows_quarantined: int = Field(ge=0)
     error: str | None
     landscape_run_id: str | None
@@ -560,7 +569,8 @@ class RunStatusResponse(_StrictResponse):
                 self.rows_processed,
                 self.rows_succeeded,
                 self.rows_failed,
-                self.rows_routed,
+                self.rows_routed_success,
+                self.rows_routed_failure,
                 self.rows_quarantined,
             )
             _require_terminal_run_fields(
@@ -575,6 +585,8 @@ class RunStatusResponse(_StrictResponse):
             self.rows_processed,
             self.rows_succeeded,
             self.rows_failed,
+            self.rows_routed_success,
+            self.rows_routed_failure,
             self.rows_quarantined,
         )
         return self
@@ -588,7 +600,8 @@ class RunResultsResponse(_StrictResponse):
     rows_processed: int = Field(ge=0)
     rows_succeeded: int = Field(ge=0)
     rows_failed: int = Field(ge=0)
-    rows_routed: int = Field(default=0, ge=0)
+    rows_routed_success: int = Field(default=0, ge=0)
+    rows_routed_failure: int = Field(default=0, ge=0)
     rows_quarantined: int = Field(ge=0)
     landscape_run_id: str | None
     error: str | None
@@ -600,7 +613,8 @@ class RunResultsResponse(_StrictResponse):
             self.rows_processed,
             self.rows_succeeded,
             self.rows_failed,
-            self.rows_routed,
+            self.rows_routed_success,
+            self.rows_routed_failure,
             self.rows_quarantined,
         )
         _require_terminal_run_fields(
@@ -614,6 +628,8 @@ class RunResultsResponse(_StrictResponse):
             self.rows_processed,
             self.rows_succeeded,
             self.rows_failed,
+            self.rows_routed_success,
+            self.rows_routed_failure,
             self.rows_quarantined,
         )
         return self

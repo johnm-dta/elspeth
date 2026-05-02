@@ -389,7 +389,11 @@ class TestBranchTransforms:
             payload_store=payload_store,
         )
 
-        assert run_result.status == RunStatus.COMPLETED
+        # elspeth-5069612f3c: transform on_error path is DIVERT
+        # (rows_routed_failure). path_b succeeds (success_indicator) and
+        # path_a's failed row routes to quarantine (failure_indicator) — the
+        # predicate now correctly returns COMPLETED_WITH_FAILURES.
+        assert run_result.status == RunStatus.COMPLETED_WITH_FAILURES
 
         # best_effort merge: only path_b data in output
         assert len(output_sink.results) == 1
@@ -445,7 +449,9 @@ class TestBranchTransforms:
             payload_store=payload_store,
         )
 
-        assert run_result.status == RunStatus.COMPLETED
+        # elspeth-5069612f3c: transform on_error DIVERT raises rows_routed_failure;
+        # path_b success + path_a quarantine routing -> COMPLETED_WITH_FAILURES.
+        assert run_result.status == RunStatus.COMPLETED_WITH_FAILURES
 
         # Each source row forks to both branches; path_a always fails.
         # 2 source rows x 1 fail per row = 2 quarantine entries
@@ -513,7 +519,9 @@ class TestBranchTransforms:
             payload_store=payload_store,
         )
 
-        assert run_result.status == RunStatus.COMPLETED
+        # elspeth-5069612f3c: transform on_error DIVERT raises rows_routed_failure;
+        # path_b success + path_a quarantine routing -> COMPLETED_WITH_FAILURES.
+        assert run_result.status == RunStatus.COMPLETED_WITH_FAILURES
 
         # Query the Landscape for coalesce node states
         # The coalesce should have recorded lost_branch_expected_fields for path_a

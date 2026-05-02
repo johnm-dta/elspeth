@@ -236,8 +236,10 @@ class TestExplicitSinkRouting:
             payload_store=payload_store,
         )
 
-        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
-        assert run_result.status == RunStatus.FAILED
+        # elspeth-5069612f3c: rows_routed split — gate route_to_sink is an
+        # intentional MOVE (rows_routed_success), so a gate-routed-only run
+        # is COMPLETED (success_indicator true, no failure_indicator).
+        assert run_result.status == RunStatus.COMPLETED
         assert run_result.rows_processed == 2
 
         # Merged results route to output sink via terminal gate

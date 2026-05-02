@@ -202,8 +202,9 @@ class TestOrchestrator:
         orchestrator = Orchestrator(landscape_db)
         run_result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
-        assert run_result.status == RunStatus.FAILED
+        # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
+        # (rows_routed_success). Gate-routed-only run -> COMPLETED.
+        assert run_result.status == RunStatus.COMPLETED
         # value=10 and value=30 go to default, value=100 goes to high
         assert len(default_sink.results) == 2
         assert len(high_sink.results) == 1
@@ -267,8 +268,9 @@ class TestOrchestrator:
             payload_store=payload_store,
         )
 
-        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
-        assert run_result.status == RunStatus.FAILED
+        # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
+        # (rows_routed_success). Gate-routed-only run -> COMPLETED.
+        assert run_result.status == RunStatus.COMPLETED
         assert run_result.rows_processed == 2
         assert len(output_sink.results) == 2
         assert len(source_sink.results) == 0
@@ -449,7 +451,9 @@ class TestOrchestratorEmptyPipeline:
         orchestrator = Orchestrator(landscape_db)
         run_result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
+        # All rows fail source validation and are quarantined: no
+        # success indicator, only failure indicator (rows_quarantined > 0)
+        # — predicate correctly returns FAILED.
         assert run_result.status == RunStatus.FAILED
         assert run_result.rows_processed == 2
         assert run_result.rows_quarantined == 2

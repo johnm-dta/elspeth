@@ -59,8 +59,9 @@ class TestMultiOutput:
         result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
         # -- Assert --
-        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
-        assert result.status == RunStatus.FAILED
+        # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
+        # (rows_routed_success). Gate-routed-only run -> COMPLETED.
+        assert result.status == RunStatus.COMPLETED
         assert result.rows_processed == 10
 
         # 5 rows with even ids (category A) -> sink_a
@@ -111,8 +112,9 @@ class TestMultiOutput:
         result = orchestrator.run(config, graph=graph, payload_store=payload_store)
 
         # -- Assert: audit trail --
-        # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
-        assert result.status == RunStatus.FAILED
+        # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
+        # (rows_routed_success). Gate-routed-only run -> COMPLETED.
+        assert result.status == RunStatus.COMPLETED
 
         with db.engine.connect() as conn:
             # All 5 source rows recorded

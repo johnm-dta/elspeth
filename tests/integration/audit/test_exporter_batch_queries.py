@@ -86,8 +86,9 @@ def _run_fork(
     )
 
     result = Orchestrator(db).run(config, graph=graph, payload_store=payload_store)
-    # Phase 2.2: status taxonomy now distinguishes this shape as FAILED.
-    assert result.status == RunStatus.FAILED
+    # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
+    # (rows_routed_success). Gate-routed-only run -> COMPLETED.
+    assert result.status == RunStatus.COMPLETED
     return result.run_id, db
 
 

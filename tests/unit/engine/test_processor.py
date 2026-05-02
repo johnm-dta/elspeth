@@ -1233,8 +1233,13 @@ class TestProcessRowSingleTransform:
         assert len(results) == 1
         assert results[0].outcome == RowOutcome.QUARANTINED
 
-    def test_transform_error_with_named_sink_returns_routed(self) -> None:
-        """Transform error with on_error='errors' → ROUTED to error sink."""
+    def test_transform_error_with_named_sink_returns_routed_on_error(self) -> None:
+        """Transform error with on_error='errors' → ROUTED_ON_ERROR (DIVERT) to error sink.
+
+        elspeth-5069612f3c: transform on_error path emits the dedicated
+        ROUTED_ON_ERROR outcome (rows_routed_failure), distinct from the
+        gate route_to_sink MOVE which uses ROUTED (rows_routed_success).
+        """
         transform = _make_mock_transform(on_error="errors")
         _db, factory, processor = self._setup(transform)
         source_row = _make_source_row()
@@ -1261,7 +1266,7 @@ class TestProcessRowSingleTransform:
             )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.ROUTED
+        assert results[0].outcome == RowOutcome.ROUTED_ON_ERROR
         assert results[0].sink_name == "errors"
 
     def test_max_retries_exceeded_returns_failed(self) -> None:

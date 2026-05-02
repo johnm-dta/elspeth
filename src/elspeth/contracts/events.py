@@ -126,8 +126,10 @@ class RunSummary:
     routing breakdown.
 
     Routing breakdown:
-    - routed: Total rows routed to non-default sinks (gates or error routing)
-    - routed_destinations: Count per destination sink {sink_name: count}
+    - routed_success: Rows routed via gate route_to_sink (intentional MOVE — success-side routing)
+    - routed_failure: Rows routed via transform on_error (DIVERT — failure-side routing)
+    - routed_destinations: Count per destination sink {sink_name: count}; the per-sink
+      breakdown is not split by routing intent — see ADR-004 for rationale.
     """
 
     run_id: str
@@ -138,7 +140,8 @@ class RunSummary:
     quarantined: int
     duration_seconds: float
     exit_code: int  # 0=success, 1=partial failure, 2=total failure
-    routed: int = 0  # Rows routed to non-default sinks
+    routed_success: int = 0  # Rows routed via gate route_to_sink (intentional MOVE)
+    routed_failure: int = 0  # Rows routed via transform on_error (DIVERT)
     routed_destinations: tuple[tuple[str, int], ...] = ()  # (sink_name, count) pairs
 
     def __post_init__(self) -> None:
@@ -147,7 +150,8 @@ class RunSummary:
         require_int(self.failed, "failed", min_value=0)
         require_int(self.quarantined, "quarantined", min_value=0)
         require_int(self.exit_code, "exit_code", min_value=0)
-        require_int(self.routed, "routed", min_value=0)
+        require_int(self.routed_success, "routed_success", min_value=0)
+        require_int(self.routed_failure, "routed_failure", min_value=0)
 
 
 # =============================================================================

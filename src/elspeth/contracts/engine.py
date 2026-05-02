@@ -62,10 +62,17 @@ class PendingOutcome:
     Quarantine outcomes are recorded after sink durability, not before.
     """
 
+    # Outcomes that require error_hash on PendingOutcome (the misleading
+    # legacy name "_FAILURE_OUTCOMES" is preserved for callsite stability;
+    # the actual semantic is "outcomes requiring error_hash"). ROUTED_ON_ERROR
+    # joins this set because it is the first outcome that both routes through
+    # the pending-sink pipeline AND requires error_hash for single-hop audit
+    # attributability — see docs/contracts/token-outcomes/00-token-outcome-contract.md.
     _FAILURE_OUTCOMES: ClassVar[frozenset[RowOutcome]] = frozenset(
         {
             RowOutcome.QUARANTINED,
             RowOutcome.FAILED,
+            RowOutcome.ROUTED_ON_ERROR,
         }
     )
 
@@ -75,9 +82,12 @@ class PendingOutcome:
     def __post_init__(self) -> None:
         """Validate outcome/error_hash consistency.
 
-        QUARANTINED and FAILED outcomes MUST have an error_hash — the audit
-        trail needs to reference the error record. Other outcomes must NOT
-        have one (an error_hash on COMPLETED would be nonsensical).
+        QUARANTINED, FAILED, and ROUTED_ON_ERROR outcomes MUST have an
+        error_hash — the audit trail needs to reference the error record.
+        ROUTED_ON_ERROR is unique among the three in that it ALSO writes
+        to a sink (via the pending pipeline); QUARANTINED and FAILED are
+        recorded synchronously without sink writes. Other outcomes must NOT
+        have an error_hash (an error_hash on COMPLETED would be nonsensical).
         """
         if self.outcome in self._FAILURE_OUTCOMES and (self.error_hash is None or not self.error_hash.strip()):
             raise ValueError(f"PendingOutcome with {self.outcome.name} outcome must have a non-empty error_hash")

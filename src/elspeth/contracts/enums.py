@@ -183,6 +183,7 @@ class RowOutcome(StrEnum):
     # Terminal outcomes
     COMPLETED = "completed"
     ROUTED = "routed"
+    ROUTED_ON_ERROR = "routed_on_error"
     FORKED = "forked"
     FAILED = "failed"
     QUARANTINED = "quarantined"

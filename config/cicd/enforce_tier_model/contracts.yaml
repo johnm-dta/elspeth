@@ -109,9 +109,9 @@ per_file_rules:
 - pattern: contracts/results.py
   rules:
   - R5
-  reason: SanitizedUrl type validation at Tier 3 boundary
+  reason: SanitizedUrl type validation at Tier 3 boundary; strict isinstance(error, FailureInfo) guard for ROUTED_ON_ERROR construction (elspeth-5069612f3c — single-hop audit attributability)
   expires: null
-  max_hits: 2
+  max_hits: 3
 - pattern: contracts/diversion.py
   rules:
   - R5
@@ -221,7 +221,7 @@ allow_hits:
   owner: architecture
   reason: Row-attributed source/sink boundary DTO — row_data must be a mapping before deep_freeze so declaration-contract adopters never receive arbitrary sequence/scalar payloads
   safety: Non-mapping values raise TypeError immediately; no coercion or fallback is attempted
-- key: contracts/run_result.py:R5:RunResult:__post_init__:fp=9b76d74a33629d87
+- key: contracts/run_result.py:R5:RunResult:__post_init__:fp=fac5bfd1b22037fa
   owner: architecture
   reason: Offensive guard — validates status is RunStatus enum at contract construction
   safety: TypeError raised immediately; prevents str from leaking through to consumers

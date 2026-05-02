@@ -728,7 +728,8 @@ class GracefulShutdownError(Exception):
         rows_succeeded: int = 0,
         rows_failed: int = 0,
         rows_quarantined: int = 0,
-        rows_routed: int = 0,
+        rows_routed_success: int = 0,
+        rows_routed_failure: int = 0,
         routed_destinations: dict[str, int] | None = None,
     ) -> None:
         self.rows_processed = rows_processed
@@ -736,7 +737,8 @@ class GracefulShutdownError(Exception):
         self.rows_succeeded = rows_succeeded
         self.rows_failed = rows_failed
         self.rows_quarantined = rows_quarantined
-        self.rows_routed = rows_routed
+        self.rows_routed_success = rows_routed_success
+        self.rows_routed_failure = rows_routed_failure
         self.routed_destinations: Mapping[str, int] = deep_freeze(dict(routed_destinations) if routed_destinations is not None else {})
         super().__init__(
             f"Pipeline interrupted after {rows_processed} rows (run_id={run_id}). Resume with: elspeth resume {run_id} --execute"

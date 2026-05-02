@@ -233,6 +233,20 @@ class DataFlowRepository:
                     "ROUTED outcome requires sink_name but got None. "
                     "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
                 )
+        elif outcome == RowOutcome.ROUTED_ON_ERROR:
+            if sink_name is None:
+                raise ValueError(
+                    "ROUTED_ON_ERROR outcome requires sink_name but got None. "
+                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
+                )
+            if error_hash is None:
+                raise ValueError(
+                    "ROUTED_ON_ERROR outcome requires error_hash but got None. "
+                    "Mirrors DIVERTED's contract — both outcomes are failure-handling "
+                    "redirects with an originating error that must be captured on the "
+                    "outcome record for single-hop audit attributability. "
+                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
+                )
         elif outcome == RowOutcome.FORKED:
             if fork_group_id is None:
                 raise ValueError(

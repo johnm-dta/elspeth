@@ -4458,3 +4458,128 @@ class TestFlushContextImmutability:
         # Mutating the original list must not affect the frozen context
         original_list.append(make_token_info(data={"value": 2}))
         assert len(fctx.buffered_tokens) == 1
+
+
+# =============================================================================
+# _handle_transform_error_status: ROUTED_ON_ERROR producer-site invariants
+# =============================================================================
+
+
+class TestHandleTransformErrorStatusRoutedOnError:
+    """Pin the no-fabricated-audit-data rule on the ROUTED_ON_ERROR producer site.
+
+    Plan elspeth-5069612f3c, Task 4 Step 1: when transform_result.reason is
+    falsy and the row is routed to an error sink (not "discard"), the producer
+    must crash with OrchestrationInvariantError BEFORE constructing FailureInfo
+    or the RowResult. Refusing to fabricate "unknown_error" is required to
+    avoid a deterministic error_hash collision across unrelated falsy-error
+    failures (Tier-1 audit fabrication rule).
+    """
+
+    def _setup(self) -> tuple[LandscapeDB, RecorderFactory, RowProcessor]:
+        db, factory = _make_factory()
+        processor = _make_processor(factory, retry_manager=None)
+        return db, factory, processor
+
+    def test_falsy_reason_with_error_sink_raises_invariant_error(self) -> None:
+        """Empty reason on ROUTED_ON_ERROR path must raise before any RowResult is built.
+
+        Construct a TransformResult with a valid reason to satisfy
+        __post_init__, then mutate `reason` to an empty dict (the producer-side
+        invariant must catch this even though TransformResult itself rejects
+        empty reasons at construction time — defense in depth at the routing
+        boundary).
+        """
+        _, _factory, processor = self._setup()
+        token = make_token_info(data={"value": 42})
+
+        # Build a valid error TransformResult, then forge a falsy reason to
+        # exercise the producer-side guard. TransformResult is not frozen, so
+        # direct attribute mutation is sufficient; we cannot use the factory
+        # method with an empty dict because TransformResult.__post_init__
+        # rejects it.
+        tr = TransformResult(
+            status="error",
+            row=None,
+            reason={"reason": "needs forging"},
+            rows=None,
+        )
+        tr.reason = {}  # falsy — triggers the offensive guard
+
+        with pytest.raises(
+            OrchestrationInvariantError,
+            match="ROUTED_ON_ERROR requires transform_result.reason",
+        ):
+            processor._handle_transform_error_status(
+                transform_result=tr,
+                current_token=token,
+                error_sink="error-sink",
+                child_items=[],
+            )
+
+    def test_none_reason_with_error_sink_raises_invariant_error(self) -> None:
+        """`reason=None` on the ROUTED_ON_ERROR path must also raise.
+
+        TransformResult.__post_init__ rejects status='error' with reason=None,
+        so we forge it post-construction. The producer-side guard must still
+        catch the case before any FailureInfo is created.
+        """
+        _, _factory, processor = self._setup()
+        token = make_token_info(data={"value": 42})
+
+        tr = TransformResult(
+            status="error",
+            row=None,
+            reason={"reason": "needs forging"},
+            rows=None,
+        )
+        tr.reason = None  # falsy — triggers the offensive guard
+
+        with pytest.raises(
+            OrchestrationInvariantError,
+            match="ROUTED_ON_ERROR requires transform_result.reason",
+        ):
+            processor._handle_transform_error_status(
+                transform_result=tr,
+                current_token=token,
+                error_sink="error-sink",
+                child_items=[],
+            )
+
+    def test_valid_reason_routed_on_error_emits_routed_on_error_with_failure(
+        self,
+    ) -> None:
+        """Non-falsy reason produces ROUTED_ON_ERROR with FailureInfo populated.
+
+        Verifies the new shape: outcome is ROUTED_ON_ERROR, sink_name is set,
+        and error.message is the str() of transform_result.reason. Pins that
+        we never use 'unknown_error' as message — error_hash must be derived
+        from the real upstream error.
+        """
+        from elspeth.contracts.results import FailureInfo
+
+        _, _factory, processor = self._setup()
+        token = make_token_info(data={"value": 42})
+        tr = TransformResult(
+            status="error",
+            row=None,
+            reason={"reason": "transform_failed_for_reasons"},
+            rows=None,
+        )
+
+        terminal = processor._handle_transform_error_status(
+            transform_result=tr,
+            current_token=token,
+            error_sink="error-sink",
+            child_items=[],
+        )
+        result = terminal.result
+        assert not isinstance(result, tuple)
+        assert result.outcome == RowOutcome.ROUTED_ON_ERROR
+        assert result.sink_name == "error-sink"
+        assert isinstance(result.error, FailureInfo)
+        assert result.error.exception_type == "TransformError"
+        # str({'reason': 'transform_failed_for_reasons'}) — the message is the
+        # str() of the whole reason dict, not literal "unknown_error".
+        assert "transform_failed_for_reasons" in result.error.message
+        assert result.error.message != "unknown_error"

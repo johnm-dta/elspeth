@@ -549,6 +549,11 @@ class TokenOutcomeLoader:
                 f"TokenOutcome {oid} has outcome={outcome.value!r} but sink_name is NULL — "
                 f"audit integrity violation (COMPLETED/ROUTED require sink_name)"
             )
+        if outcome == RowOutcome.ROUTED_ON_ERROR and row.sink_name is None:
+            raise AuditIntegrityError(
+                f"TokenOutcome {oid} has outcome={outcome.value!r} but sink_name is NULL — "
+                "audit integrity violation (ROUTED_ON_ERROR requires sink_name)"
+            )
         if outcome == RowOutcome.FORKED and row.fork_group_id is None:
             raise AuditIntegrityError(
                 f"TokenOutcome {oid} has outcome=FORKED but fork_group_id is NULL — "
@@ -568,9 +573,10 @@ class TokenOutcomeLoader:
             raise AuditIntegrityError(
                 f"TokenOutcome {oid} has outcome=DIVERTED but sink_name is NULL — audit integrity violation (DIVERTED requires sink_name)"
             )
-        if outcome == RowOutcome.DIVERTED and row.error_hash is None:
+        if outcome in (RowOutcome.DIVERTED, RowOutcome.ROUTED_ON_ERROR) and row.error_hash is None:
             raise AuditIntegrityError(
-                f"TokenOutcome {oid} has outcome=DIVERTED but error_hash is NULL — audit integrity violation (DIVERTED requires error_hash)"
+                f"TokenOutcome {oid} has outcome={outcome.value!r} but error_hash is NULL — "
+                f"audit integrity violation ({outcome.name} requires error_hash)"
             )
         if outcome in (RowOutcome.FAILED, RowOutcome.QUARANTINED) and row.error_hash is None:
             raise AuditIntegrityError(

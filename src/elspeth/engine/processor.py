@@ -2253,12 +2253,16 @@ class RowProcessor:
             child_items: Mutable list — coalesce notifications may append child work items.
 
         Returns:
-            _TransformTerminal with QUARANTINED or ROUTED outcome.
+            _TransformTerminal with QUARANTINED or ROUTED_ON_ERROR outcome.
         """
-        error_detail = str(transform_result.reason) if transform_result.reason else "unknown_error"
-
         if error_sink == "discard":
             # Intentionally discarded - QUARANTINED
+            # The QUARANTINED path tolerates an "unknown_error" fallback for
+            # historical reasons; do NOT extend that fallback to ROUTED_ON_ERROR
+            # below — see the offensive guard in the routed branch.
+            error_detail = (
+                str(transform_result.reason) if transform_result.reason else "unknown_error"
+            )
             quarantine_error_hash = hashlib.sha256(error_detail.encode()).hexdigest()[:16]
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
@@ -2282,19 +2286,38 @@ class RowProcessor:
                 return _TransformTerminal(result=(current_result, *sibling_results))
             return _TransformTerminal(result=current_result)
 
-        # Routed to error sink
-        # NOTE: Do NOT record ROUTED outcome here - the token hasn't been written yet.
+        # Routed to error sink — emit ROUTED_ON_ERROR (DIVERT semantics).
+        # NOTE: Do NOT record the outcome here - the token hasn't been written yet.
         # SinkExecutor.write() records the outcome AFTER sink durability is achieved.
+        #
+        # Offensive: refuse to fabricate Tier-1 audit data. If the upstream
+        # transform did not provide a reason, that is a producer bug; crashing
+        # here is correct because emitting `FailureInfo.message="unknown_error"`
+        # would create a deterministic error_hash collision across unrelated
+        # falsy-error failures and falsify the audit trail.
+        if not transform_result.reason:
+            raise OrchestrationInvariantError(
+                "ROUTED_ON_ERROR requires transform_result.reason; refusing to "
+                "fabricate FailureInfo.message='unknown_error' for audit hashing"
+            )
+        error_detail = str(transform_result.reason)
+
         sibling_results = self._notify_coalesce_of_lost_branch(
             current_token,
             f"error_routed:{error_detail}",
             child_items,
         )
+        # Capture the originating transform error so the audit trail records both
+        # sink_name and error_hash on the ROUTED_ON_ERROR outcome (mirror of DIVERTED's
+        # contract). The accumulator converts FailureInfo.message -> error_hash before
+        # the pending-sink record is handed to SinkExecutor for durable recording.
+        failure = FailureInfo(exception_type="TransformError", message=error_detail)
         current_result = RowResult(
             token=current_token,
             final_data=current_token.row_data,
-            outcome=RowOutcome.ROUTED,
+            outcome=RowOutcome.ROUTED_ON_ERROR,
             sink_name=error_sink,
+            error=failure,
         )
         if sibling_results:
             return _TransformTerminal(result=(current_result, *sibling_results))

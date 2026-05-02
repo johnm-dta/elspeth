@@ -1365,6 +1365,7 @@ class TestTokenOutcomeLoader:
     _OUTCOME_REQUIRED_FIELDS: ClassVar[dict[str, dict[str, object]]] = {
         "completed": {"sink_name": "output"},
         "routed": {"sink_name": "priority"},
+        "routed_on_error": {"sink_name": "failsink", "error_hash": "e" * 16},
         "forked": {"fork_group_id": "fg-1"},
         "failed": {"error_hash": "e" * 64},
         "quarantined": {"error_hash": "e" * 64},
@@ -1571,6 +1572,47 @@ class TestTokenOutcomeLoader:
         """DIVERTED outcome with NULL error_hash is audit corruption."""
         sa_row = self._make_outcome_row(outcome="diverted", is_terminal=1, sink_name="failsink", error_hash=None)
         with pytest.raises(AuditIntegrityError, match="DIVERTED requires error_hash"):
+            TokenOutcomeLoader().load(sa_row)
+
+    # Regression tests for elspeth-5069612f3c: ROUTED_ON_ERROR Tier 1 guards
+
+    def test_valid_load_routed_on_error(self) -> None:
+        """ROUTED_ON_ERROR outcome loads successfully with required fields."""
+        sa_row = self._make_outcome_row(
+            outcome="routed_on_error",
+            is_terminal=1,
+            sink_name="failsink",
+            error_hash="abc123",
+        )
+
+        result = TokenOutcomeLoader().load(sa_row)
+
+        assert result.outcome == RowOutcome.ROUTED_ON_ERROR
+        assert result.sink_name == "failsink"
+        assert result.error_hash == "abc123"
+
+    def test_routed_on_error_without_sink_name_raises(self) -> None:
+        """ROUTED_ON_ERROR outcome with NULL sink_name is audit corruption."""
+        sa_row = self._make_outcome_row(
+            outcome="routed_on_error",
+            is_terminal=1,
+            sink_name=None,
+            error_hash="abc123",
+        )
+
+        with pytest.raises(AuditIntegrityError, match="ROUTED_ON_ERROR requires sink_name"):
+            TokenOutcomeLoader().load(sa_row)
+
+    def test_routed_on_error_without_error_hash_raises(self) -> None:
+        """ROUTED_ON_ERROR outcome with NULL error_hash is audit corruption."""
+        sa_row = self._make_outcome_row(
+            outcome="routed_on_error",
+            is_terminal=1,
+            sink_name="failsink",
+            error_hash=None,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="ROUTED_ON_ERROR requires error_hash"):
             TokenOutcomeLoader().load(sa_row)
 
 

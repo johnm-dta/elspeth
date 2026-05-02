@@ -307,6 +307,48 @@ class TestSetSource:
         assert result.data is not None
         assert "foobar" in result.data["error"].lower()
 
+    def test_set_source_rejects_manual_blob_ref_in_options(self) -> None:
+        """Closes elspeth-07089fbaa3 (write defense, branch a).
+
+        set_source must not accept ``blob_ref`` in options because it
+        cannot enforce that the supplied ``path`` equals the bound blob's
+        canonical ``storage_path``.  The canonical write path for blob-
+        backed sources is ``set_source_from_blob``, which forces the path
+        to ``BlobRecord.storage_path``.  Without this rejection, a caller
+        (the LLM) could persist a wrong-shape path alongside a real
+        blob_ref, breaking runtime path resolution.
+
+        Bug-verification protocol (cf.
+        ``tests/integration/pipeline/test_composer_runtime_agreement.py``
+        module docstring lines 76-88): manually revert the
+        ``"blob_ref" in options`` check in ``_execute_set_source``
+        (src/elspeth/web/composer/tools.py) and confirm this test fails
+        with ``result.success is True``.  Then restore.  This guards
+        against the test passing both pre-fix and post-fix — a class of
+        test theatre otherwise undetectable until a future regression
+        slips through.
+        """
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "t1",
+                "options": {
+                    "blob_ref": "abc123",
+                    "path": "data/blobs/abc123/tickets.csv",
+                    "schema": {"mode": "observed"},
+                },
+                "on_validation_failure": "quarantine",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is False
+        assert result.updated_state.source is None
+        assert "set_source_from_blob" in result.data["error"]
+
 
 class TestVfDestinationAdvisory:
     """Advisory note when on_validation_failure references an unknown output.
@@ -4410,6 +4452,109 @@ class TestPatchSourceOptions:
         assert result.success is False
         assert "No source" in result.data["error"]
         assert result.updated_state.version == 1
+
+    def _blob_backed_state(self) -> CompositionState:
+        """Build a state with a blob-backed source directly.
+
+        Bypasses ``set_source`` (which now rejects manual ``blob_ref``
+        injection per elspeth-07089fbaa3) by constructing the
+        ``CompositionState`` and ``SourceSpec`` from the dataclass
+        primitives.  This is the post-fix shape produced by
+        ``set_source_from_blob`` at runtime.
+        """
+        return CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="t1",
+                options={
+                    "blob_ref": "abc123",
+                    "path": "/canon/abc123_x.csv",
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="quarantine",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+    def test_patch_source_options_rejects_path_patch_on_blob_backed_source(self) -> None:
+        """Closes elspeth-07089fbaa3 (write defense, branch b).
+
+        Once a source is bound to a blob via ``set_source_from_blob``, the
+        ``path`` is the blob's canonical ``storage_path`` and is not
+        patchable.  Allowing a ``path`` patch lets the LLM persist a path
+        that disagrees with the bound blob, breaking runtime path
+        resolution and composer/runtime agreement.  Re-binding to a
+        different blob requires ``set_source_from_blob`` (or
+        ``clear_source`` first), not a path patch.
+
+        Bug-verification protocol (cf.
+        ``tests/integration/pipeline/test_composer_runtime_agreement.py``
+        module docstring lines 76-88): manually revert the
+        ``if "blob_ref" in state.source.options:`` block in
+        ``_execute_patch_source_options`` (src/elspeth/web/composer/tools.py)
+        and confirm this test fails with ``result.success is True``.
+        Then restore.
+        """
+        state = self._blob_backed_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "patch_source_options",
+            {"patch": {"path": "/canon/abc123_x.csv"}},
+            state,
+            catalog,
+        )
+        assert result.success is False
+        assert "blob-backed source" in result.data["error"]
+        # Source unchanged
+        assert result.updated_state.source is not None
+        opts = deep_thaw(result.updated_state.source.options)
+        assert opts["path"] == "/canon/abc123_x.csv"
+
+    def test_patch_source_options_rejects_blob_ref_patch_on_blob_backed_source(self) -> None:
+        """Closes elspeth-07089fbaa3 (write defense, blob_ref re-bind via patch).
+
+        ``blob_ref`` is part of the immutable binding; replacing it via a
+        patch would silently re-target the source to a different blob
+        without re-deriving the canonical ``storage_path``.  Re-binding
+        requires ``set_source_from_blob``.
+        """
+        state = self._blob_backed_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "patch_source_options",
+            {"patch": {"blob_ref": "def456"}},
+            state,
+            catalog,
+        )
+        assert result.success is False
+        assert "blob-backed source" in result.data["error"]
+
+    def test_patch_source_options_allows_unrelated_keys_on_blob_backed_source(self) -> None:
+        """Closes elspeth-07089fbaa3 (write defense — narrow rejection).
+
+        The (path, blob_ref) lock must not over-reach: patches that touch
+        only schema/encoding/etc. on a blob-backed source remain valid,
+        because they don't break the blob binding.  Without this the
+        defense-in-depth would block legitimate plugin-option tuning.
+        """
+        state = self._blob_backed_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "patch_source_options",
+            {"patch": {"encoding": "utf-8"}},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        assert result.updated_state.source is not None
+        opts = deep_thaw(result.updated_state.source.options)
+        assert opts["encoding"] == "utf-8"
+        assert opts["path"] == "/canon/abc123_x.csv"
+        assert opts["blob_ref"] == "abc123"
 
 
 # ---------------------------------------------------------------------------

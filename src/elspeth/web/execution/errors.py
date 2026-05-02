@@ -34,3 +34,41 @@ class SemanticContractViolationError(ValueError):
         self.contracts = contracts
         message = "; ".join(entry.message for entry in entries)
         super().__init__(message)
+
+
+class BlobSourcePathMismatchError(Exception):
+    """Tier 1 audit-integrity violation — composer-stored blob source path
+    diverges from the referenced blob's canonical ``storage_path``.
+
+    Raised at /execute time when ``composition_states.source.options.path``
+    does not equal the canonical ``BlobRecord.storage_path`` for the bound
+    ``blob_ref``.  This is our own audit data (Tier 1 in the trust model);
+    a mismatch indicates a bug in composer persistence rather than user
+    input we should coerce.  Crash informatively so the operator sees a
+    structured error citing the divergence rather than a downstream
+    ``FileNotFoundError`` from the source plugin.
+
+    See elspeth-07089fbaa3 for the original defect that motivated the guard.
+    """
+
+    def __init__(
+        self,
+        *,
+        stored_path: str | None,
+        canonical_path: str,
+        blob_id: str,
+        session_id: str,
+    ) -> None:
+        self.stored_path = stored_path
+        self.canonical_path = canonical_path
+        self.blob_id = blob_id
+        self.session_id = session_id
+        super().__init__(
+            f"Composer-stored blob source path does not match canonical "
+            f"storage_path for blob {blob_id} (session {session_id}). "
+            f"stored={stored_path!r} canonical={canonical_path!r}. "
+            f"Expected canonical shape "
+            f"<data_dir>/blobs/<session_id>/<blob_id>_<filename>. "
+            f"This indicates a bug in composer persistence, not user input "
+            f"to coerce. See elspeth-07089fbaa3."
+        )

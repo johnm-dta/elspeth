@@ -76,6 +76,11 @@ def mock_settings() -> MagicMock:
     settings.get_landscape_url.return_value = "sqlite:///test_audit.db"
     settings.get_payload_store_path.return_value = Path("/tmp/test_payloads")
     settings.landscape_passphrase = None
+    # data_dir is consumed by the source/sink path allowlist and the
+    # blob source-path read guard.  Pin it to a known string so tests
+    # that exercise blob-backed sources can compute matching canonical
+    # paths (elspeth-07089fbaa3).
+    settings.data_dir = "/tmp/data"
     return settings
 
 
@@ -924,10 +929,11 @@ class TestCancelMechanism:
         session_id = uuid4()
         run_id = uuid4()
         blob_ref = str(uuid4())
+        canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_input.csv"
         mock_session_service.create_run.return_value = MagicMock(id=run_id)
 
         blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id))
+        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
 
         async def tracking_link(*args: Any, **kwargs: Any) -> None:
             # At the time blob linkage runs, the event MUST already exist
@@ -938,11 +944,13 @@ class TestCancelMechanism:
 
         # Set up state record with a source containing a blob_ref.
         # Use a real dict so state_from_record → deep_thaw works correctly.
+        # path must equal blob.storage_path to satisfy the Tier 1 read
+        # guard for blob-backed sources (elspeth-07089fbaa3).
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
             "on_success": "continue",
-            "options": {"blob_ref": blob_ref},
+            "options": {"blob_ref": blob_ref, "path": canonical_path},
             "on_validation_failure": "quarantine",
         }
 
@@ -960,19 +968,22 @@ class TestCancelMechanism:
         session_id = uuid4()
         run_id = uuid4()
         blob_ref = str(uuid4())
+        canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_input.csv"
         mock_session_service.create_run.return_value = MagicMock(id=run_id)
 
         blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id))
+        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
         blob_service.link_blob_to_run = AsyncMock(side_effect=RuntimeError("blob storage unavailable"))
         cast(Any, service)._blob_service = blob_service
 
         # Use a real dict so state_from_record → deep_thaw works correctly.
+        # path must equal blob.storage_path to satisfy the Tier 1 read
+        # guard for blob-backed sources (elspeth-07089fbaa3).
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
             "on_success": "continue",
-            "options": {"blob_ref": blob_ref},
+            "options": {"blob_ref": blob_ref, "path": canonical_path},
             "on_validation_failure": "quarantine",
         }
 
@@ -1426,19 +1437,22 @@ class TestBlobRefPreValidation:
         session_id = uuid4()
         run_id = uuid4()
         blob_ref = str(uuid4())
+        canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_input.csv"
         mock_session_service.create_run.return_value = MagicMock(id=run_id)
 
         blob_service = MagicMock()
         blob_service.link_blob_to_run = AsyncMock()
         # get_blob returns a record matching the executing session
-        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id))
+        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
         cast(Any, service)._blob_service = blob_service
 
+        # path must equal blob.storage_path to satisfy the Tier 1 read
+        # guard for blob-backed sources (elspeth-07089fbaa3).
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
             "on_success": "continue",
-            "options": {"blob_ref": blob_ref},
+            "options": {"blob_ref": blob_ref, "path": canonical_path},
             "on_validation_failure": "quarantine",
         }
 
@@ -1515,9 +1529,81 @@ class TestBlobOwnership:
         """Blob belonging to the same session passes ownership check."""
         session_id = uuid4()
         blob_ref = str(uuid4())
+        canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_input.csv"
 
         blob_service = MagicMock()
-        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id))
+        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
+        blob_service.link_blob_to_run = AsyncMock()
+        cast(Any, service)._blob_service = blob_service
+
+        # path must equal blob.storage_path to satisfy the Tier 1 read
+        # guard for blob-backed sources (elspeth-07089fbaa3).
+        state = mock_session_service.get_current_state.return_value
+        state.source = {
+            "plugin": "csv",
+            "on_success": "continue",
+            "options": {"blob_ref": blob_ref, "path": canonical_path},
+            "on_validation_failure": "quarantine",
+        }
+
+        with patch.object(service, "_run_pipeline"):
+            run_id = await service.execute(session_id=session_id)
+        assert isinstance(run_id, UUID)
+
+
+# ── Blob Source Path Read Guard (Tier 1, elspeth-07089fbaa3) ─────────
+
+
+class TestBlobSourcePathReadGuard:
+    """Closes elspeth-07089fbaa3 (runtime read guard).
+
+    The composer's write-side defenses make wrong-shape blob source paths
+    impossible to persist going forward, but the audit-integrity contract
+    also requires that runtime crash informatively if a previously-
+    persisted state row carries a path that disagrees with the canonical
+    ``BlobRecord.storage_path``.  Per CLAUDE.md "no defensive programming",
+    the runtime must not silently coerce or fall back to ``FileNotFoundError``.
+
+    Bug-verification protocol (cf.
+    ``tests/integration/pipeline/test_composer_runtime_agreement.py``
+    module docstring lines 76-88): manually revert the
+    ``if stored_path != canonical_path: raise BlobSourcePathMismatchError``
+    block in ``ExecutionServiceImpl._execute_locked`` and confirm the
+    mismatch test below fails with the canonical-path branch silently
+    accepting the divergent stored path.  Then restore.
+    """
+
+    @pytest.mark.asyncio
+    async def test_diverging_stored_path_raises_structured_error(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Tier 1: stored path != blob.storage_path crashes at execute time.
+
+        Reproduces the captured staging defect (session
+        588b94c8-919c-43ab-ae2c-8a3033de8109): the persisted
+        ``source.options.path`` does not match the canonical
+        ``BlobRecord.storage_path``.  The captured shape was
+        ``data/blobs/<bid>/<filename>`` (rejected first by the source
+        path allowlist after the legacy resolver was removed); this test
+        exercises the divergence case where the path is allowlist-valid
+        but still not the canonical one (e.g. a stale absolute path
+        pointing at a different file under ``data_dir/blobs/``).  The
+        guard fires before the run record is created so the session is
+        not poisoned with a pending run.
+        """
+        from elspeth.web.execution.errors import BlobSourcePathMismatchError
+
+        session_id = uuid4()
+        blob_ref = str(uuid4())
+        canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_input.csv"
+        # Allowlist-valid (under /tmp/data/blobs/) but not equal to
+        # canonical_path — the divergence the read guard targets.
+        diverging_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_OTHER.csv"
+
+        blob_service = MagicMock()
+        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
         blob_service.link_blob_to_run = AsyncMock()
         cast(Any, service)._blob_service = blob_service
 
@@ -1525,13 +1611,63 @@ class TestBlobOwnership:
         state.source = {
             "plugin": "csv",
             "on_success": "continue",
+            "options": {"blob_ref": blob_ref, "path": diverging_path},
+            "on_validation_failure": "quarantine",
+        }
+
+        with pytest.raises(BlobSourcePathMismatchError) as exc_info:
+            await service.execute(session_id=session_id)
+
+        assert exc_info.value.stored_path == diverging_path
+        assert exc_info.value.canonical_path == canonical_path
+        assert exc_info.value.blob_id == blob_ref
+        assert "elspeth-07089fbaa3" in str(exc_info.value)
+
+        # Critical: create_run was never called — the session is not
+        # poisoned with a pending run that the operator must clean up.
+        mock_session_service.create_run.assert_not_called()
+        # link_blob_to_run was never called either — guard fires before
+        # any side effects.
+        blob_service.link_blob_to_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_stored_path_raises_structured_error(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Tier 1: stored path is None for a blob-backed source crashes.
+
+        A composition state with ``blob_ref`` set but no ``path`` is
+        structurally invalid — the blob binding requires the canonical
+        path to be present.  This branch protects against a regression
+        where a future composer-side bug omits the path entirely while
+        still persisting the blob_ref.
+        """
+        from elspeth.web.execution.errors import BlobSourcePathMismatchError
+
+        session_id = uuid4()
+        blob_ref = str(uuid4())
+        canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_input.csv"
+
+        blob_service = MagicMock()
+        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
+        cast(Any, service)._blob_service = blob_service
+
+        state = mock_session_service.get_current_state.return_value
+        state.source = {
+            "plugin": "csv",
+            "on_success": "continue",
+            # No path key at all
             "options": {"blob_ref": blob_ref},
             "on_validation_failure": "quarantine",
         }
 
-        with patch.object(service, "_run_pipeline"):
-            run_id = await service.execute(session_id=session_id)
-        assert isinstance(run_id, UUID)
+        with pytest.raises(BlobSourcePathMismatchError) as exc_info:
+            await service.execute(session_id=session_id)
+
+        assert exc_info.value.stored_path is None
+        assert exc_info.value.canonical_path == canonical_path
 
 
 # ── One Active Run (B6) ───────────────────────────────────────────────

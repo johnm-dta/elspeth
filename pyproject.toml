@@ -89,6 +89,7 @@ dev = [
     # ChaosLLM test server
     "errorworks>=0.1.1",  # Chaos testing servers (ChaosLLM, ChaosWeb)
     "starlette>=0.45,<1",  # ASGI framework (needed for TestClient in fixtures)
+    "asgi-lifespan>=2.1,<3",  # FastAPI lifespan support for AsyncClient end-to-end tests
     # HTTP mocking
     "respx>=0.21,<1",  # httpx mocking for web scrape tests
 ]

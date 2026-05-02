@@ -31,7 +31,7 @@ from elspeth.web.blobs.protocol import BlobNotFoundError
 from elspeth.web.composer.protocol import ComposerService, ComposerServiceError
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.diagnostics import load_run_diagnostics_for_settings
-from elspeth.web.execution.errors import SemanticContractViolationError
+from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.protocol import ExecutionService, StateAccessError
 from elspeth.web.execution.schemas import (
@@ -332,9 +332,47 @@ def create_execution_router() -> APIRouter:
             # nonexistent-blob and cross-session-blob branches MUST
             # surface here as byte-identical 404 responses.  Before
             # this handler existed, nonexistent-blob propagated as a
-            # 500 while cross-session-blob returned a 404 — the HTTP
+            # 500 while cross-session-blob returned a 404 — the IDOR
             # status itself was a side channel.
             raise HTTPException(status_code=404, detail="Blob not found") from None
+        except BlobSourcePathMismatchError as exc:
+            # Tier 1 audit-integrity violation: composer-stored source
+            # path diverges from the canonical blob storage_path.  The
+            # exception carries both paths for operator triage; we log
+            # them server-side but redact them from the HTTP response
+            # because the path discloses internal storage layout to any
+            # caller (including the LLM agent driving the composer in
+            # an MCP context).  See elspeth-07089fbaa3.
+            # Per CLAUDE.md logging policy, slog is permitted for
+            # audit-system failures.  Tier 1 corruption of
+            # composition_states.source.options.path qualifies: the
+            # audit row exists but its content is structurally invalid,
+            # so neither audit (Landscape — not yet open for this run)
+            # nor operational telemetry can capture the divergence.
+            # slog is the only channel the operator can use to
+            # correlate the redacted HTTP body with the actual paths.
+            slog.error(
+                "blob_source_path_mismatch",
+                blob_id=exc.blob_id,
+                session_id=exc.session_id,
+                stored_path=exc.stored_path,
+                canonical_path=exc.canonical_path,
+                issue="elspeth-07089fbaa3",
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "kind": "blob_source_path_mismatch",
+                    "issue": "elspeth-07089fbaa3",
+                    "message": (
+                        "Composer-stored blob source path is not "
+                        "structurally valid for the bound blob.  This "
+                        "indicates a bug in composer persistence; the "
+                        "operator must investigate the captured "
+                        "composition state."
+                    ),
+                },
+            ) from exc
         except SemanticContractViolationError as exc:
             # Structured 422 with the same payload shape /validate
             # surfaces. Status 422 (Unprocessable Entity) — the

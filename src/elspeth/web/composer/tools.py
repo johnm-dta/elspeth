@@ -1557,8 +1557,23 @@ def _execute_set_source(
     if plugin_error is not None:
         return _failure_result(state, plugin_error)
 
-    # S2: Validate source path allowlist
+    # Reject manual blob_ref injection.  The canonical write path for a
+    # blob-backed source is set_source_from_blob, which forces the path to
+    # the blob's authoritative storage_path.  set_source with a hand-crafted
+    # blob_ref + path lets the caller persist a path that disagrees with the
+    # blob's canonical storage_path, breaking runtime resolution and
+    # composer/runtime agreement.  See elspeth-07089fbaa3.
     options = args.get("options", {})
+    if "blob_ref" in options:
+        return _failure_result(
+            state,
+            "Use set_source_from_blob to bind a blob to the source. "
+            "set_source must not be called with 'blob_ref' in options "
+            "because it cannot enforce that 'path' equals the blob's "
+            "canonical storage_path.",
+        )
+
+    # S2: Validate source path allowlist
     path_error = _validate_source_path(options, data_dir)
     if path_error is not None:
         return _failure_result(state, path_error)
@@ -3019,6 +3034,25 @@ def _execute_patch_source_options(
     patch = args["patch"]
     if not isinstance(patch, dict):
         return _failure_result(state, "patch must be an object.")
+
+    # Lock the (path, blob_ref) pair on blob-backed sources.  Once
+    # set_source_from_blob has bound a source to a blob, the path is the
+    # blob's canonical storage_path and is not patchable: any divergence
+    # breaks runtime path resolution and composer/runtime agreement.
+    # Replace the binding via a fresh set_source_from_blob (or
+    # clear_source) instead of patching it.  See elspeth-07089fbaa3.
+    if "blob_ref" in state.source.options:
+        forbidden_keys = {"path", "blob_ref"} & patch.keys()
+        if forbidden_keys:
+            return _failure_result(
+                state,
+                "Cannot patch "
+                f"{sorted(forbidden_keys)} on a blob-backed source. "
+                "The 'path' is bound to the referenced blob's canonical "
+                "storage_path. Re-bind via set_source_from_blob (or call "
+                "clear_source first) to change the underlying blob.",
+            )
+
     new_options = _apply_merge_patch(state.source.options, patch)
 
     # S2: Validate patched source paths against allowlist

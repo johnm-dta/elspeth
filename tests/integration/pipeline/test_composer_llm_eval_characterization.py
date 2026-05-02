@@ -298,17 +298,26 @@ def _make_pipeline_row(data: dict[str, Any]):
 
 def test_scenario_1b_blob_service_storage_path_validates_through_runtime_path_allowlist(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Protects the Scenario 1B/3 blob-path failure captured in the report."""
-    monkeypatch.chdir(tmp_path)
+    """Protects the Scenario 1B/3 blob-path failure captured in the report.
+
+    Originally characterized that a relative ``data/blobs/<sid>/<bid>_<filename>``
+    path would resolve via the legacy CWD branch in ``web/paths.py`` and pass
+    the runtime path allowlist.  After elspeth-07089fbaa3 closed the
+    composer-stored blob source path defect, the canonical contract is that
+    blob-backed source paths are absolute (``BlobRecord.storage_path``); the
+    legacy relative form is no longer accepted.  This test now pins the
+    *post-fix* contract: an absolute canonical path under the configured
+    ``data_dir`` validates cleanly through the runtime allowlist.
+    """
+    data_dir = tmp_path / "data"
     blob_id = "11111111-1111-4111-8111-111111111111"
-    relative_storage_path = f"data/blobs/{SCENARIO_1B_SESSION_ID}/{blob_id}_tickets.csv"
-    _write_scenario_csv(tmp_path / relative_storage_path)
+    canonical_storage_path = data_dir / "blobs" / SCENARIO_1B_SESSION_ID / f"{blob_id}_tickets.csv"
+    _write_scenario_csv(canonical_storage_path)
 
     state = _direct_source_state(
-        relative_storage_path,
-        "outputs/scenario_1b_summary.jsonl",
+        str(canonical_storage_path),
+        str(data_dir / "outputs" / "scenario_1b_summary.jsonl"),
         blob_ref=blob_id,
     )
 
@@ -317,7 +326,7 @@ def test_scenario_1b_blob_service_storage_path_validates_through_runtime_path_al
 
     runtime_result = validate_pipeline(
         state,
-        _web_settings(Path("data")),
+        _web_settings(data_dir),
         composer_yaml_generator,
     )
 
@@ -467,7 +476,17 @@ def test_known_secret_env_marker_cannot_bypass_unavailable_web_secret_contract(
 
 
 def test_scenario_3_get_pipeline_state_preserves_redacted_patched_blob_path_that_yaml_preserves(tmp_path: Path) -> None:
-    """Characterizes elspeth-0380d5119f using the composer patch and state tools."""
+    """Characterizes elspeth-0380d5119f redaction across get_pipeline_state and YAML.
+
+    Originally exercised ``patch_source_options`` to set the blob source
+    path; after elspeth-07089fbaa3 closed the composer-stored blob source
+    path defect, that flow is forbidden — patches against a blob-backed
+    source may not touch ``path`` or ``blob_ref`` because the binding is
+    immutable.  The redaction contract (LLM/HTTP surfaces see the sentinel;
+    YAML emission preserves the real path for the runtime) is now pinned
+    against an initial state that already carries the canonical path
+    (the post-fix shape produced by ``set_source_from_blob``).
+    """
     data_dir = tmp_path / "data"
     blob_id = "33333333-3333-4333-8333-333333333333"
     source_path = data_dir / "blobs" / SCENARIO_3_SESSION_ID / f"{blob_id}_tickets.csv"
@@ -478,7 +497,11 @@ def test_scenario_3_get_pipeline_state_preserves_redacted_patched_blob_path_that
         source=SourceSpec(
             plugin="csv",
             on_success="summary",
-            options={"blob_ref": blob_id, "schema": {"mode": "observed"}},
+            options={
+                "blob_ref": blob_id,
+                "path": str(source_path),
+                "schema": {"mode": "observed"},
+            },
             on_validation_failure="discard",
         ),
         nodes=(),
@@ -488,19 +511,25 @@ def test_scenario_3_get_pipeline_state_preserves_redacted_patched_blob_path_that
         version=1,
     )
 
-    patched = execute_tool(
+    # patch_source_options against a blob-backed source must reject any
+    # patch that touches the immutable (path, blob_ref) binding — see
+    # elspeth-07089fbaa3.  Re-binding requires set_source_from_blob.
+    rejected = execute_tool(
         "patch_source_options",
         {"patch": {"path": str(source_path)}},
         initial_state,
         _mock_catalog(),
         data_dir=str(data_dir),
     )
-    assert patched.success is True
+    assert rejected.success is False
+    assert "blob-backed source" in rejected.data["error"]
 
+    # The redaction contract still holds for canonical-path blob sources
+    # (the shape set_source_from_blob produces).
     introspection = execute_tool(
         "get_pipeline_state",
         {"component": "source"},
-        patched.updated_state,
+        initial_state,
         _mock_catalog(),
     )
     assert introspection.success is True
@@ -509,7 +538,7 @@ def test_scenario_3_get_pipeline_state_preserves_redacted_patched_blob_path_that
     assert introspected_source["options"]["blob_ref"] == blob_id
     assert str(source_path) not in json.dumps(introspection.to_dict()["data"])
 
-    yaml_doc = yaml.safe_load(composer_yaml_generator.generate_yaml(patched.updated_state))
+    yaml_doc = yaml.safe_load(composer_yaml_generator.generate_yaml(initial_state))
     assert yaml_doc["source"]["options"]["path"] == str(source_path)
 
 

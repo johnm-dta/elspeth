@@ -43,7 +43,7 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobNotFoundError, BlobQuotaExceededError, BlobServiceProtocol, BlobStateError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.errors import SemanticContractViolationError
+from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
 from elspeth.web.execution.preflight import build_validated_runtime_graph, resolve_runtime_yaml_paths
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.protocol import ExecutionService, StateAccessError, YamlGenerator
@@ -401,6 +401,27 @@ class ExecutionServiceImpl:
                 blob_record = await self._blob_service.get_blob(parsed_blob_id)
                 if blob_record.session_id != session_id:
                     raise BlobNotFoundError(blob_ref)
+
+                # Tier 1 read guard: composition_states.source.options.path
+                # is our own audit data and must equal the canonical blob
+                # storage_path.  A mismatch (or absence on a blob-backed
+                # source) indicates a bug in composer persistence — crash
+                # informatively rather than letting the source plugin 500
+                # with FileNotFoundError on a structurally invalid path.
+                # Offensive-programming pattern: membership check +
+                # indexing instead of .get() so the absence case raises
+                # the structured BlobSourcePathMismatchError rather than
+                # an opaque KeyError.  See elspeth-07089fbaa3.
+                source_options = composition_state.source.options
+                canonical_path = blob_record.storage_path
+                stored_path = source_options["path"] if "path" in source_options else None
+                if stored_path != canonical_path:
+                    raise BlobSourcePathMismatchError(
+                        stored_path=stored_path,
+                        canonical_path=canonical_path,
+                        blob_id=str(parsed_blob_id),
+                        session_id=str(session_id),
+                    )
 
         # B9 fix: create_run() generates its own UUID internally and returns
         # a RunRecord. Read the run_id back from the returned record so our

@@ -18,6 +18,7 @@ It is derived from:
 |---------|----------|-----------------|------------------|
 | COMPLETED | yes | sink_name | Orchestrator (after sink write) |
 | ROUTED | yes | sink_name | RowProcessor (gate or error sink) |
+| ROUTED_ON_ERROR | yes | sink_name, error_hash | RowProcessor (transform on_error reroute via DIVERT) |
 | FORKED | yes | fork_group_id | RowProcessor (after gate fork) |
 | FAILED | yes | error_hash | RowProcessor or CoalesceExecutor |
 | QUARANTINED | yes | error_hash | RowProcessor or Orchestrator (source quarantine) |

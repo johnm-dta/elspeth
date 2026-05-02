@@ -23,6 +23,43 @@ Maintain the audit database and payload store.
 
 ## Procedure
 
+### Rows-routed counter split deployment note (2026-05-02)
+
+The `rows_routed` counter split (`elspeth-5069612f3c`) is a runtime-state
+semantic migration even when the Landscape SQL schema does not change. Before
+the split, `token_outcomes.outcome='routed'` represented both gate
+`route_to_sink` MOVE rows and transform `on_error` DIVERT rows. After the
+split, new transform `on_error` rows are recorded as `routed_on_error`, so
+preserving an old Landscape audit database makes historical `routed` rows
+legacy ambiguous.
+
+Checkpoint files are also stale across this upgrade. They may contain serialized
+`RunResult`, `ExecutionCounters`, `AggregationFlushResult`, or progress payloads
+with the old single `rows_routed` shape. Delete the configured checkpoint
+files/directories before starting new code. Do not resume a pre-split checkpoint
+with post-split code.
+
+For dev, staging, and any pre-1.0 production deployment that accepts destructive
+pre-1.0 maintenance, stop the service, archive the current Landscape audit
+database and checkpoint directory if retention is required, then delete/recreate
+the Landscape audit database, sessions database, and checkpoint files/directories
+during the same deployment. Do not run new code against the old Landscape DB and
+then interpret pre-split `routed` rows as MOVE-only evidence.
+
+Two read surfaces cross a semantic boundary:
+
+- `ProgressEvent.rows_succeeded` before the split may include all routed rows in
+  the display-success count; after the split it excludes on_error-routed rows.
+- MCP `outcome_distribution["routed"]` before the split is legacy ambiguous;
+  after the split, transform on_error rows appear as `outcome_distribution["routed_on_error"]`.
+
+If an environment must preserve the old Landscape database, checkpoint archive,
+or generated audit/progress/MCP evidence, record an accepted audit limitation in
+the release notes: pre-split `token_outcomes.outcome='routed'`, pre-split
+`ProgressEvent.rows_succeeded`, and pre-split MCP `outcome_distribution["routed"]`
+require date/commit-context qualification before being used as audit evidence.
+This is an explicit limitation, not a migration shim.
+
 ### Step 1: Assess Current State
 
 **SQLite:**

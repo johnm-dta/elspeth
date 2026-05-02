@@ -26,6 +26,18 @@ We use a modified version of Michael Nygard's ADR template. See `000-template.md
 | [004](004-adr-explicit-sink-routing.md) | Explicit Sink Routing | 2026-02-09 | **Accepted** |
 | [005](005-adr-declarative-dag-wiring.md) | Declarative DAG Wiring | 2026-02-09 | **Accepted** |
 | [006](006-layer-dependency-remediation.md) | Layer Dependency Remediation | 2026-02-22 | **Accepted** |
+| [007](007-pass-through-contract-propagation.md) | Pass-Through Contract Propagation | - | **Accepted** |
+| [008](008-runtime-contract-cross-check.md) | Runtime Contract Cross-Check | - | **Accepted** |
+| [009](009-pass-through-pathway-fusion.md) | Pass-Through Pathway Fusion | - | **Accepted** |
+| [010](010-declaration-trust-framework.md) | Declaration Trust Framework | - | **Accepted** |
+| [011](011-declared-output-fields-contract.md) | Declared Output Fields Contract | - | **Accepted** |
+| [012](012-can-drop-rows-contract.md) | Can-Drop-Rows Contract | - | **Accepted** |
+| [013](013-declared-required-fields-contract.md) | Declared Required Fields Contract | - | **Accepted** |
+| [014](014-schema-config-mode-contract.md) | Schema Config Mode Contract | - | **Accepted** |
+| [015](015-creates-tokens-contract.md) | Creates-Tokens Contract | - | **Accepted** |
+| [016](016-source-guaranteed-fields-contract.md) | Source Guaranteed Fields Contract | - | **Accepted** |
+| [017](017-sink-required-fields-contract.md) | Sink Required Fields Contract | - | **Accepted** |
+| [018](018-producer-site-outcome-discrimination.md) | Producer-Site Outcome Discrimination | 2026-05-02 | **Accepted** |
 
 ## Status Definitions
 

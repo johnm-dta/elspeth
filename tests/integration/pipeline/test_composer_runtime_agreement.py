@@ -2724,7 +2724,7 @@ class TestComposerRuntimeRunCompletionAgreement:
         aggregation that emits 1 output row.  Source rows reach
         ``CONSUMED_IN_BATCH`` (no terminal-bucket counter).  Engine counts
         end up as ``rows_processed=6, rows_succeeded=1, rows_failed=0,
-        rows_routed=0, rows_quarantined=0`` — pre-fix the readback
+        rows_routed_success=0, rows_routed_failure=0, rows_quarantined=0`` — pre-fix the readback
         validator rejected this shape (sum-of-buckets=1 but rows_processed=6
         violates equality); post-fix the inequality accepts it.
         """
@@ -2801,7 +2801,13 @@ class TestComposerRuntimeRunCompletionAgreement:
         )
         # The inequality the fix made legitimate:
         #   rows_processed (6) > sum-of-four-buckets (1)
-        sum_of_buckets = run_result.rows_succeeded + run_result.rows_failed + run_result.rows_routed + run_result.rows_quarantined
+        sum_of_buckets = (
+            run_result.rows_succeeded
+            + run_result.rows_failed
+            + run_result.rows_routed_success
+            + run_result.rows_routed_failure
+            + run_result.rows_quarantined
+        )
         assert run_result.rows_processed > sum_of_buckets, (
             "Pre-fix-shape sanity check: this test exercises the "
             f"rows_processed > sum-of-buckets inequality (got {run_result.rows_processed} vs {sum_of_buckets}); "
@@ -2817,7 +2823,8 @@ class TestComposerRuntimeRunCompletionAgreement:
             rows_processed=run_result.rows_processed,
             rows_succeeded=run_result.rows_succeeded,
             rows_failed=run_result.rows_failed,
-            rows_routed=run_result.rows_routed,
+            rows_routed_success=run_result.rows_routed_success,
+            rows_routed_failure=run_result.rows_routed_failure,
             rows_quarantined=run_result.rows_quarantined,
             landscape_run_id=run_result.run_id,
         )

@@ -54,13 +54,15 @@ class TestGracefulShutdownError:
             rows_succeeded=80,
             rows_failed=10,
             rows_quarantined=5,
-            rows_routed=5,
+            rows_routed_success=5,
+            rows_routed_failure=0,
             routed_destinations={"archive": 3, "review": 2},
         )
         assert err.rows_succeeded == 80
         assert err.rows_failed == 10
         assert err.rows_quarantined == 5
-        assert err.rows_routed == 5
+        assert err.rows_routed_success == 5
+        assert err.rows_routed_failure == 0
         assert err.routed_destinations == {"archive": 3, "review": 2}
 
     def test_error_counters_default_to_zero(self) -> None:
@@ -69,7 +71,8 @@ class TestGracefulShutdownError:
         assert err.rows_succeeded == 0
         assert err.rows_failed == 0
         assert err.rows_quarantined == 0
-        assert err.rows_routed == 0
+        assert err.rows_routed_success == 0
+        assert err.rows_routed_failure == 0
         assert err.routed_destinations == {}
 
 

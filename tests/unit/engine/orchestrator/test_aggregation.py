@@ -629,7 +629,8 @@ class TestCheckAggregationTimeouts:
             agg_transform_lookup=lookup,
         )
 
-        assert result.rows_routed == 1
+        assert result.rows_routed_success == 1
+        assert result.rows_routed_failure == 0
         assert result.routed_destinations == {"risk_sink": 1}
         assert len(pending["risk_sink"]) == 1
 
@@ -967,7 +968,8 @@ class TestFlushRemainingAggregationBuffers:
             pending_tokens=pending,
         )
 
-        assert result.rows_routed == 1
+        assert result.rows_routed_success == 1
+        assert result.rows_routed_failure == 0
 
     def test_downstream_coalesced_tokens_counted(self) -> None:
         """COALESCED downstream outcome increments both counters."""

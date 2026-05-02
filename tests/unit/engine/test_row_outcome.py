@@ -7,13 +7,32 @@ RowOutcome enum contract tests are in tests/contracts/test_enums.py.
 from typing import ClassVar
 
 from elspeth.contracts import RowOutcome, RowResult, TokenInfo
+from elspeth.contracts.results import FailureInfo
 from elspeth.testing import make_pipeline_row
+
+
+def _error_for(outcome: RowOutcome) -> FailureInfo | None:
+    """ROUTED_ON_ERROR (elspeth-5069612f3c) requires a real FailureInfo on .error.
+
+    All other outcomes accept ``error=None`` per RowResult.__post_init__.
+    """
+    if outcome == RowOutcome.ROUTED_ON_ERROR:
+        return FailureInfo(
+            exception_type="ValueError",
+            message="upstream transform raised",
+        )
+    return None
 
 
 class TestRowResultOutcome:
     """Tests for RowResult.outcome as enum."""
 
-    _SINK_OUTCOMES: ClassVar[set[RowOutcome]] = {RowOutcome.COMPLETED, RowOutcome.ROUTED, RowOutcome.COALESCED}
+    _SINK_OUTCOMES: ClassVar[set[RowOutcome]] = {
+        RowOutcome.COMPLETED,
+        RowOutcome.ROUTED,
+        RowOutcome.ROUTED_ON_ERROR,
+        RowOutcome.COALESCED,
+    }
 
     def test_outcome_is_enum(self) -> None:
         """RowResult.outcome should be RowOutcome, not str."""
@@ -38,6 +57,7 @@ class TestRowResultOutcome:
                 final_data=make_pipeline_row({}),
                 outcome=outcome,
                 sink_name=sink_name,
+                error=_error_for(outcome),
             )
             assert result.outcome == outcome
             assert result.outcome is outcome
@@ -48,7 +68,13 @@ class TestRowResultOutcome:
 
         for outcome in RowOutcome:
             sink_name = "output" if outcome in self._SINK_OUTCOMES else None
-            result = RowResult(token=token, final_data=make_pipeline_row({}), outcome=outcome, sink_name=sink_name)
+            result = RowResult(
+                token=token,
+                final_data=make_pipeline_row({}),
+                outcome=outcome,
+                sink_name=sink_name,
+                error=_error_for(outcome),
+            )
             # Use 'is' to verify identity, not just value equality
             assert result.outcome is outcome
 
@@ -85,7 +111,13 @@ class TestRowResultOutcome:
 
         for outcome in (value for value in RowOutcome if value.is_terminal):
             sink_name = "output" if outcome in self._SINK_OUTCOMES else None
-            result = RowResult(token=token, final_data=make_pipeline_row({}), outcome=outcome, sink_name=sink_name)
+            result = RowResult(
+                token=token,
+                final_data=make_pipeline_row({}),
+                outcome=outcome,
+                sink_name=sink_name,
+                error=_error_for(outcome),
+            )
             assert result.outcome.is_terminal is True
 
     def test_buffered_outcome_is_not_terminal(self) -> None:

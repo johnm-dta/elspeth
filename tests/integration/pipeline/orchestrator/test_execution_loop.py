@@ -395,7 +395,8 @@ class TestRunSummaryEmission:
         assert summary.succeeded == 1
         assert summary.failed == 0
         assert summary.quarantined == 0
-        assert summary.routed == 0
+        assert summary.routed_success == 0
+        assert summary.routed_failure == 0
 
         finished = [e for e in telemetry.events if isinstance(e, RunFinished)]
         assert len(finished) == 1

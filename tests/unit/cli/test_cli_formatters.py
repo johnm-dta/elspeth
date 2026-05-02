@@ -25,7 +25,8 @@ class TestConsoleFormatters:
             quarantined=1,
             duration_seconds=1.5,
             exit_code=1,
-            routed=3,
+            routed_success=3,
+            routed_failure=0,
             routed_destinations=(("sink_a", 2), ("sink_b", 1)),
         )
 
@@ -48,7 +49,8 @@ class TestConsoleFormatters:
             quarantined=0,
             duration_seconds=2.0,
             exit_code=0,
-            routed=2,
+            routed_success=2,
+            routed_failure=0,
             routed_destinations=(),
         )
 
@@ -157,7 +159,8 @@ class TestJsonFormatters:
             quarantined=0,
             duration_seconds=0.0,
             exit_code=2,
-            routed=1,
+            routed_success=1,
+            routed_failure=0,
             routed_destinations=(("error_sink", 1),),
         )
 
@@ -173,7 +176,8 @@ class TestJsonFormatters:
             "succeeded": 0,
             "failed": 1,
             "quarantined": 0,
-            "routed": 1,
+            "routed_success": 1,
+            "routed_failure": 0,
             "routed_destinations": {"error_sink": 1},
             "duration_seconds": 0.0,
             "exit_code": 2,

@@ -343,7 +343,8 @@ class TestRunSummaryIntValidation:
             quarantined=0,
             duration_seconds=2.5,
             exit_code=1,
-            routed=3,
+            routed_success=3,
+            routed_failure=0,
         )
         assert summary.total_rows == 10
 

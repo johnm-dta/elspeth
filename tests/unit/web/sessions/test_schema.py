@@ -28,7 +28,9 @@ def test_initialize_session_schema_creates_current_schema_without_alembic_table(
     inspector = inspect(eng)
     assert set(inspector.get_table_names()) == set(metadata.tables)
     assert "alembic_version" not in inspector.get_table_names()
-    assert "rows_routed" in {column["name"] for column in inspector.get_columns("runs")}
+    run_columns = {column["name"] for column in inspector.get_columns("runs")}
+    assert "rows_routed_success" in run_columns
+    assert "rows_routed_failure" in run_columns
     assert "content_hash" in {column["name"] for column in inspector.get_columns("blobs")}
     assert "ck_blobs_ready_hash" in {check["name"] for check in inspector.get_check_constraints("blobs")}
 

@@ -639,13 +639,15 @@ class TestUpdateRunStatusExpanded:
             "completed",
             landscape_run_id="lscp-abc-123",
             rows_processed=100,
-            rows_routed=4,
+            rows_routed_success=4,
+            rows_routed_failure=0,
             rows_failed=3,
         )
         fetched = await service.get_run(run.id)
         assert fetched.landscape_run_id == "lscp-abc-123"
         assert fetched.rows_processed == 100
-        assert fetched.rows_routed == 4
+        assert fetched.rows_routed_success == 4
+        assert fetched.rows_routed_failure == 0
         assert fetched.rows_failed == 3
 
     @pytest.mark.asyncio

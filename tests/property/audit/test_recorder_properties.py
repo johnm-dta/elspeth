@@ -626,6 +626,11 @@ class TestTokenOutcomeProperties:
         [
             (RowOutcome.COMPLETED, "sink_name", {}),
             (RowOutcome.ROUTED, "sink_name", {}),
+            # ROUTED_ON_ERROR (elspeth-5069612f3c) requires BOTH sink_name AND error_hash.
+            # Missing sink_name fires first (ordered check in recorder).
+            (RowOutcome.ROUTED_ON_ERROR, "sink_name", {}),
+            # Missing error_hash when sink_name is provided.
+            (RowOutcome.ROUTED_ON_ERROR, "error_hash", {"sink_name": "failsink"}),
             (RowOutcome.FORKED, "fork_group_id", {}),
             (RowOutcome.FAILED, "error_hash", {}),
             (RowOutcome.QUARANTINED, "error_hash", {}),
@@ -674,6 +679,14 @@ class TestTokenOutcomeProperties:
         [
             (RowOutcome.COMPLETED, {"sink_name": "default"}),
             (RowOutcome.ROUTED, {"sink_name": "error_sink"}),
+            # ROUTED_ON_ERROR (elspeth-5069612f3c): both sink_name AND error_hash required.
+            (
+                RowOutcome.ROUTED_ON_ERROR,
+                {
+                    "sink_name": "failsink",
+                    "error_hash": stable_hash({"reason": "on_error"}),
+                },
+            ),
             (RowOutcome.FORKED, {"fork_group_id": "fork_group_1"}),
             (RowOutcome.FAILED, {"error_hash": stable_hash({"reason": "failure"})}),
             (RowOutcome.QUARANTINED, {"error_hash": stable_hash({"reason": "validation"})}),

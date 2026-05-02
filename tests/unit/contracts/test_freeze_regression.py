@@ -349,6 +349,28 @@ class TestPendingOutcomeClassVar:
         assert po.error_hash == "abc"
 
 
+def test_pending_outcome_routed_on_error_with_valid_hash_succeeds() -> None:
+    """ROUTED_ON_ERROR + non-empty error_hash is the contract-conforming shape."""
+    outcome = PendingOutcome(
+        outcome=RowOutcome.ROUTED_ON_ERROR,
+        error_hash="0123456789abcdef",
+    )
+    assert outcome.outcome == RowOutcome.ROUTED_ON_ERROR
+    assert outcome.error_hash == "0123456789abcdef"
+
+
+def test_pending_outcome_routed_on_error_without_hash_raises() -> None:
+    """ROUTED_ON_ERROR without error_hash violates the _FAILURE_OUTCOMES contract."""
+    with pytest.raises(ValueError, match="must have a non-empty error_hash"):
+        PendingOutcome(outcome=RowOutcome.ROUTED_ON_ERROR)
+
+
+def test_pending_outcome_routed_on_error_with_empty_hash_raises() -> None:
+    """Empty-string error_hash counts as missing per `__post_init__` whitespace check."""
+    with pytest.raises(ValueError, match="must have a non-empty error_hash"):
+        PendingOutcome(outcome=RowOutcome.ROUTED_ON_ERROR, error_hash="")
+
+
 # ── deep_freeze: set and frozenset branches ─────────────────────────────────
 
 

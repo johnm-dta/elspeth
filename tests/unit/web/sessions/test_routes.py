@@ -624,7 +624,8 @@ class TestSessionCRUDRoutes:
             rows_processed=3,
             rows_succeeded=0,
             rows_failed=1,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=2,
         )
 

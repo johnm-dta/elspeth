@@ -198,7 +198,8 @@ class TestT18CharacterizationExecuteRun:
         assert result.rows_quarantined == 2
         assert result.rows_succeeded == 3
         assert result.rows_failed == 0
-        assert result.rows_routed == 0
+        assert result.rows_routed_success == 0
+        assert result.rows_routed_failure == 0
         assert result.rows_forked == 0
 
     def test_sink_contents(self) -> None:

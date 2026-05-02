@@ -115,7 +115,8 @@ class TestAccumulateRowOutcomesRouted:
 
         accumulate_row_outcomes(results, counters, pending)
 
-        assert counters.rows_routed == 1
+        assert counters.rows_routed_success == 1
+        assert counters.rows_routed_failure == 0
 
     def test_routed_tracks_destination(self) -> None:
         counters = _make_counters()
@@ -148,6 +149,57 @@ class TestAccumulateRowOutcomesRouted:
 
         with pytest.raises(OrchestrationInvariantError, match="missing sink_name"):
             accumulate_row_outcomes(results, counters, pending)
+
+
+class TestAccumulateRowOutcomesRoutedOnError:
+    """Tests for ROUTED_ON_ERROR outcome handling — DIVERT path."""
+
+    def _make_routed_on_error_result(
+        self,
+        *,
+        sink_name: str = "error_sink",
+        token: TokenInfo | None = None,
+    ) -> Mock:
+        """ROUTED_ON_ERROR requires a real FailureInfo on .error."""
+        from elspeth.contracts.results import FailureInfo
+
+        result = Mock()
+        result.outcome = RowOutcome.ROUTED_ON_ERROR
+        result.token = token or make_token_info()
+        result.sink_name = sink_name
+        result.error = FailureInfo(
+            exception_type="ValueError",
+            message="upstream transform raised",
+        )
+        return result
+
+    def test_routed_on_error_increments_routed_failure_counter(self) -> None:
+        """ROUTED_ON_ERROR increments rows_routed_failure (NOT rows_routed_success)."""
+        counters = _make_counters()
+        pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {
+            "output": [],
+            "error_sink": [],
+        }
+        results = [self._make_routed_on_error_result(sink_name="error_sink")]
+
+        accumulate_row_outcomes(results, counters, pending)
+
+        assert counters.rows_routed_failure == 1
+        assert counters.rows_routed_success == 0
+
+    def test_routed_increments_routed_success_not_failure(self) -> None:
+        """ROUTED (MOVE path) increments rows_routed_success (NOT rows_routed_failure)."""
+        counters = _make_counters()
+        pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {
+            "output": [],
+            "risk_sink": [],
+        }
+        results = [_make_result(RowOutcome.ROUTED, sink_name="risk_sink")]
+
+        accumulate_row_outcomes(results, counters, pending)
+
+        assert counters.rows_routed_success == 1
+        assert counters.rows_routed_failure == 0
 
 
 class TestAccumulateRowOutcomesTerminal:
@@ -270,7 +322,8 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         succeeded: int = 0,
         failed: int = 0,
         quarantined: int = 0,
-        routed: int = 0,
+        routed_success: int = 0,
+        routed_failure: int = 0,
         forked: int = 0,
         coalesced: int = 0,
         expanded: int = 0,
@@ -280,7 +333,12 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         assert counters.rows_succeeded == succeeded, f"rows_succeeded: expected {succeeded}, got {counters.rows_succeeded}"
         assert counters.rows_failed == failed, f"rows_failed: expected {failed}, got {counters.rows_failed}"
         assert counters.rows_quarantined == quarantined, f"rows_quarantined: expected {quarantined}, got {counters.rows_quarantined}"
-        assert counters.rows_routed == routed, f"rows_routed: expected {routed}, got {counters.rows_routed}"
+        assert counters.rows_routed_success == routed_success, (
+            f"rows_routed_success: expected {routed_success}, got {counters.rows_routed_success}"
+        )
+        assert counters.rows_routed_failure == routed_failure, (
+            f"rows_routed_failure: expected {routed_failure}, got {counters.rows_routed_failure}"
+        )
         assert counters.rows_forked == forked, f"rows_forked: expected {forked}, got {counters.rows_forked}"
         assert counters.rows_coalesced == coalesced, f"rows_coalesced: expected {coalesced}, got {counters.rows_coalesced}"
         assert counters.rows_expanded == expanded, f"rows_expanded: expected {expanded}, got {counters.rows_expanded}"
@@ -297,7 +355,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         self._assert_counters(counters, succeeded=1)
         assert len(pending["output"]) == 1
 
-    def test_routed_only_increments_routed(self) -> None:
+    def test_routed_only_increments_routed_success(self) -> None:
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "risk": []}
         accumulate_row_outcomes(
@@ -305,7 +363,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
             counters,
             pending,
         )
-        self._assert_counters(counters, routed=1)
+        self._assert_counters(counters, routed_success=1)
         assert counters.routed_destinations["risk"] == 1
         assert len(pending["risk"]) == 1
         assert len(pending["output"]) == 0
@@ -565,7 +623,7 @@ class TestReconcileSinkWriteDiversions:
 
     def test_routed_diversion_decrements_routed_counters(self) -> None:
         counters = _make_counters()
-        counters.rows_routed = 1
+        counters.rows_routed_success = 1
         counters.routed_destinations["risk_sink"] = 1
 
         reconcile_sink_write_diversions(
@@ -575,7 +633,8 @@ class TestReconcileSinkWriteDiversions:
             diversion_count=1,
         )
 
-        assert counters.rows_routed == 0
+        assert counters.rows_routed_success == 0
+        assert counters.rows_routed_failure == 0
         assert counters.routed_destinations == {}
 
     def test_terminal_coalesced_diversion_preserves_coalesced_but_not_success(self) -> None:

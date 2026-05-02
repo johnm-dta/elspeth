@@ -279,7 +279,8 @@ class TestRunDiagnosticsEndpoint:
                 rows_processed=0,
                 rows_succeeded=0,
                 rows_failed=0,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
@@ -340,7 +341,8 @@ class TestRunDiagnosticsEndpoint:
                 rows_processed=0,
                 rows_succeeded=0,
                 rows_failed=0,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=str(run_id),
@@ -419,7 +421,8 @@ class TestRunDiagnosticsEndpoint:
                 rows_processed=0,
                 rows_succeeded=0,
                 rows_failed=0,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=str(run_id),
@@ -642,7 +645,8 @@ class TestWebSocketReconnectTier1Guards:
                 rows_processed=10,
                 rows_succeeded=10,
                 rows_failed=0,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
@@ -669,7 +673,8 @@ class TestWebSocketReconnectTier1Guards:
                 rows_processed=5,
                 rows_succeeded=0,
                 rows_failed=5,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
@@ -696,7 +701,8 @@ class TestWebSocketReconnectTier1Guards:
                 rows_processed=0,
                 rows_succeeded=0,
                 rows_failed=0,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
@@ -738,7 +744,8 @@ class TestWebSocketReconnectTier1Guards:
             rows_processed=100,
             rows_succeeded=80,
             rows_failed=20,
-            rows_routed=10,
+            rows_routed_success=10,
+            rows_routed_failure=0,
             rows_quarantined=10,  # 80+20+10+10 = 120 > 100 — over-counting Tier 1 bug
             error=None,
             landscape_run_id="lscape-1",
@@ -772,7 +779,8 @@ class TestRunStatusEndpoint:
                 rows_processed=10,
                 rows_succeeded=7,
                 rows_failed=1,
-                rows_routed=1,
+                rows_routed_success=1,
+                rows_routed_failure=0,
                 rows_quarantined=1,
                 error=None,
                 landscape_run_id="lscape-1",
@@ -785,7 +793,8 @@ class TestRunStatusEndpoint:
             body = resp.json()
             assert body["status"] == "completed_with_failures"
             assert body["rows_processed"] == 10
-            assert body["rows_routed"] == 1
+            assert body["rows_routed_success"] == 1
+            assert body["rows_routed_failure"] == 0
 
     @pytest.mark.asyncio
     async def test_running_status_with_landscape_id_skips_discard_summary_lookup(
@@ -804,7 +813,8 @@ class TestRunStatusEndpoint:
                 rows_processed=0,
                 rows_succeeded=0,
                 rows_failed=0,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=str(run_id),
@@ -905,7 +915,8 @@ class TestResultsEndpoint:
                 rows_processed=10,
                 rows_succeeded=7,
                 rows_failed=1,
-                rows_routed=1,
+                rows_routed_success=1,
+                rows_routed_failure=0,
                 rows_quarantined=1,
                 error=None,
                 landscape_run_id="lscape-1",
@@ -917,7 +928,8 @@ class TestResultsEndpoint:
             assert resp.status_code == 200
             body = resp.json()
             assert body["rows_processed"] == 10
-            assert body["rows_routed"] == 1
+            assert body["rows_routed_success"] == 1
+            assert body["rows_routed_failure"] == 0
             assert body["landscape_run_id"] == "lscape-1"
 
     @pytest.mark.asyncio
@@ -934,7 +946,8 @@ class TestResultsEndpoint:
                 rows_processed=10,
                 rows_succeeded=7,
                 rows_failed=1,
-                rows_routed=1,
+                rows_routed_success=1,
+                rows_routed_failure=0,
                 rows_quarantined=1,
                 error=None,
                 landscape_run_id="lscape-1",

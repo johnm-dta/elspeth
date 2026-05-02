@@ -206,7 +206,8 @@ class TestExecutionFlow:
             rows_processed=50,
             rows_succeeded=48,
             rows_failed=2,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=0,
             error=None,
             landscape_run_id=None,
@@ -214,7 +215,8 @@ class TestExecutionFlow:
         status = await service.get_status(run_id)
         assert status.status == "running"
         assert status.rows_processed == 50
-        assert status.rows_routed == 0
+        assert status.rows_routed_success == 0
+        assert status.rows_routed_failure == 0
 
 
 class TestWebRuntimeInfrastructure:
@@ -403,7 +405,8 @@ class TestB2ShutdownEvent:
         mock_result.rows_processed = 10
         mock_result.rows_succeeded = 10
         mock_result.rows_failed = 0
-        mock_result.rows_routed = 0
+        mock_result.rows_routed_success = 0
+        mock_result.rows_routed_failure = 0
         mock_result.rows_quarantined = 0
         mock_orch.run.return_value = mock_result
 
@@ -468,7 +471,8 @@ class TestB3Construction:
             rows_processed=10,
             rows_succeeded=10,
             rows_failed=0,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=0,
         )
 
@@ -700,7 +704,8 @@ class TestCancelMechanism:
             run_id="test-run-001",
             rows_succeeded=48,
             rows_failed=2,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=0,
         )
 
@@ -758,7 +763,8 @@ class TestCancelMechanism:
             run_id="test-run-gse",
             rows_succeeded=48,
             rows_failed=2,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=0,
         )
 
@@ -776,7 +782,8 @@ class TestCancelMechanism:
         assert gse_call.kwargs["rows_processed"] == 50
         assert gse_call.kwargs["rows_succeeded"] == 48
         assert gse_call.kwargs["rows_failed"] == 2
-        assert gse_call.kwargs["rows_routed"] == 0
+        assert gse_call.kwargs["rows_routed_success"] == 0
+        assert gse_call.kwargs["rows_routed_failure"] == 0
         assert gse_call.kwargs["rows_quarantined"] == 0
 
     @patch("elspeth.web.execution.service.Orchestrator")
@@ -815,7 +822,8 @@ class TestCancelMechanism:
         mock_result.rows_processed = 50
         mock_result.rows_succeeded = 48
         mock_result.rows_failed = 2
-        mock_result.rows_routed = 0
+        mock_result.rows_routed_success = 0
+        mock_result.rows_routed_failure = 0
         mock_result.rows_quarantined = 0
         mock_result.run_id = "landscape-late-cancel"
         mock_orch.run.return_value = mock_result
@@ -1124,7 +1132,8 @@ class TestCompletionPathExternalCancellation:
         mock_result.rows_processed = 100
         mock_result.rows_succeeded = 95
         mock_result.rows_failed = 5
-        mock_result.rows_routed = 0
+        mock_result.rows_routed_success = 0
+        mock_result.rows_routed_failure = 0
         mock_result.rows_quarantined = 0
         mock_result.run_id = "landscape-run-123"
         mock_orch.run.return_value = mock_result
@@ -1186,7 +1195,8 @@ class TestCompletionPathExternalCancellation:
         mock_result.rows_processed = 100
         mock_result.rows_succeeded = 95
         mock_result.rows_failed = 5
-        mock_result.rows_routed = 0
+        mock_result.rows_routed_success = 0
+        mock_result.rows_routed_failure = 0
         mock_result.rows_quarantined = 0
         mock_result.run_id = "landscape-run-789"
         mock_orch.run.return_value = mock_result
@@ -1251,7 +1261,8 @@ class TestCompletionPathExternalCancellation:
         mock_result.rows_processed = 7
         mock_result.rows_succeeded = 7
         mock_result.rows_failed = 0
-        mock_result.rows_routed = 0
+        mock_result.rows_routed_success = 0
+        mock_result.rows_routed_failure = 0
         mock_result.rows_quarantined = 0
         mock_result.run_id = "landscape-run-blob-cancel"
         mock_orch.run.return_value = mock_result
@@ -1313,7 +1324,8 @@ class TestCompletionPathExternalCancellation:
         mock_result.rows_processed = 10
         mock_result.rows_succeeded = 10
         mock_result.rows_failed = 0
-        mock_result.rows_routed = 0
+        mock_result.rows_routed_success = 0
+        mock_result.rows_routed_failure = 0
         mock_result.rows_quarantined = 0
         mock_result.run_id = "landscape-run-456"
         mock_orch.run.return_value = mock_result
@@ -2416,7 +2428,8 @@ class TestEdgeCompatibility:
             rows_processed=10,
             rows_succeeded=10,
             rows_failed=0,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=0,
         )
 
@@ -2622,7 +2635,8 @@ class TestTerminalOrderingInvariant:
         mock_result.rows_processed = 10
         mock_result.rows_succeeded = 9
         mock_result.rows_failed = 1
-        mock_result.rows_routed = 0
+        mock_result.rows_routed_success = 0
+        mock_result.rows_routed_failure = 0
         mock_result.rows_quarantined = 0
         mock_orch.run.return_value = mock_result
 
@@ -2689,7 +2703,8 @@ class TestTerminalOrderingInvariant:
         mock_result.rows_processed = 5
         mock_result.rows_succeeded = 5
         mock_result.rows_failed = 0
-        mock_result.rows_routed = 0
+        mock_result.rows_routed_success = 0
+        mock_result.rows_routed_failure = 0
         mock_result.rows_quarantined = 0
         mock_orch.run.return_value = mock_result
 

@@ -806,6 +806,18 @@ class TestGetRunSummary:
             ref=TokenRef(token_id=token2.token_id, run_id="dist-run"), outcome=RowOutcome.COMPLETED, sink_name="csv_sink"
         )
 
+        # Row 3: routed_on_error (DIVERT path) — elspeth-5069612f3c new outcome.
+        # MCP must surface ROUTED_ON_ERROR as its own outcome_distribution
+        # bucket; it does not collapse into the legacy "routed" bucket.
+        row3 = factory.data_flow.create_row("dist-run", "src", row_index=3, data={"i": 3})
+        token3 = factory.data_flow.create_token(row3.row_id)
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token3.token_id, run_id="dist-run"),
+            outcome=RowOutcome.ROUTED_ON_ERROR,
+            sink_name="csv_sink",
+            error_hash="c" * 64,
+        )
+
         factory.run_lifecycle.complete_run("dist-run", RunStatus.COMPLETED)
 
         result = get_run_summary(db, factory, "dist-run")
@@ -813,6 +825,10 @@ class TestGetRunSummary:
         assert "error" not in result
         assert result["outcome_distribution"]["completed"] == 2
         assert result["outcome_distribution"]["quarantined"] == 1
+        # MCP does NOT split historical "routed" rows; the runbook/ADR handles
+        # the upgrade-boundary limitation.  ROUTED_ON_ERROR is preserved as its
+        # own bucket key (not merged into "routed").
+        assert result["outcome_distribution"]["routed_on_error"] == 1
 
     def test_summary_avg_state_duration(self) -> None:
         """get_run_summary returns average node state duration."""

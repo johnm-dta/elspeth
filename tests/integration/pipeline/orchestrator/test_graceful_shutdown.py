@@ -495,7 +495,8 @@ class TestShutdownBreaksLoop:
         assert exc_info.value.rows_succeeded == 0
         assert exc_info.value.rows_failed == 0
         assert exc_info.value.rows_quarantined == 0
-        assert exc_info.value.rows_routed == 0
+        assert exc_info.value.rows_routed_success == 0
+        assert exc_info.value.rows_routed_failure == 0
         assert output_sink.results == []
 
 

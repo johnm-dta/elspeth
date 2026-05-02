@@ -526,11 +526,12 @@ class TestRowOutcomeEnumProperties:
         assert non_terminal == [RowOutcome.BUFFERED], f"Expected only BUFFERED to be non-terminal, but found: {non_terminal}"
 
     def test_terminal_outcomes_count(self) -> None:
-        """Property: There are exactly 10 terminal outcomes."""
+        """Property: There are exactly 11 terminal outcomes."""
         terminal = [o for o in RowOutcome if o.is_terminal]
         expected = [
             RowOutcome.COMPLETED,
             RowOutcome.ROUTED,
+            RowOutcome.ROUTED_ON_ERROR,
             RowOutcome.FORKED,
             RowOutcome.FAILED,
             RowOutcome.QUARANTINED,

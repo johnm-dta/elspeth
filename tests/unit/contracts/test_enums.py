@@ -13,6 +13,7 @@ class TestRowOutcome:
         terminal_outcomes = {
             RowOutcome.COMPLETED,
             RowOutcome.ROUTED,
+            RowOutcome.ROUTED_ON_ERROR,
             RowOutcome.FORKED,
             RowOutcome.FAILED,
             RowOutcome.QUARANTINED,

@@ -28,7 +28,8 @@ class TestRunResultValidation:
                 rows_processed=0,
                 rows_succeeded=0,
                 rows_failed=0,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
             )
 
     @pytest.mark.parametrize(
@@ -37,7 +38,8 @@ class TestRunResultValidation:
             "rows_processed",
             "rows_succeeded",
             "rows_failed",
-            "rows_routed",
+            "rows_routed_success",
+            "rows_routed_failure",
             "rows_quarantined",
             "rows_forked",
             "rows_coalesced",
@@ -55,7 +57,8 @@ class TestRunResultValidation:
             "rows_processed": 0,
             "rows_succeeded": 0,
             "rows_failed": 0,
-            "rows_routed": 0,
+            "rows_routed_success": 0,
+            "rows_routed_failure": 0,
             field: -1,
         }
         with pytest.raises(ValueError, match=field):
@@ -67,7 +70,8 @@ class TestRunResultValidation:
             "rows_processed",
             "rows_succeeded",
             "rows_failed",
-            "rows_routed",
+            "rows_routed_success",
+            "rows_routed_failure",
             "rows_quarantined",
             "rows_forked",
             "rows_coalesced",
@@ -85,7 +89,8 @@ class TestRunResultValidation:
             "rows_processed": 0,
             "rows_succeeded": 0,
             "rows_failed": 0,
-            "rows_routed": 0,
+            "rows_routed_success": 0,
+            "rows_routed_failure": 0,
             field: True,
         }
         with pytest.raises(TypeError):
@@ -97,7 +102,8 @@ class TestRunResultValidation:
             "rows_processed",
             "rows_succeeded",
             "rows_failed",
-            "rows_routed",
+            "rows_routed_success",
+            "rows_routed_failure",
         ],
     )
     def test_float_rejected(self, field: str) -> None:
@@ -108,7 +114,8 @@ class TestRunResultValidation:
             "rows_processed": 0,
             "rows_succeeded": 0,
             "rows_failed": 0,
-            "rows_routed": 0,
+            "rows_routed_success": 0,
+            "rows_routed_failure": 0,
             field: 1.5,
         }
         with pytest.raises(TypeError):
@@ -179,7 +186,8 @@ class TestRunResultFactory:
             rows_processed=100,
             rows_succeeded=0,
             rows_failed=100,
-            rows_routed=5,
+            rows_routed_success=5,
+            rows_routed_failure=0,
             rows_quarantined=2,
             rows_forked=3,
             rows_coalesced=1,
@@ -232,7 +240,8 @@ class TestRunResultStatusInvariant:
             "rows_processed": 0,
             "rows_succeeded": 0,
             "rows_failed": 0,
-            "rows_routed": 0,
+            "rows_routed_success": 0,
+            "rows_routed_failure": 0,
             "rows_quarantined": 0,
         }
         kwargs.update(overrides)
@@ -285,17 +294,6 @@ class TestRunResultStatusInvariant:
             rows_coalesce_failed=3,
         )
         assert result.status == RunStatus.COMPLETED_WITH_FAILURES
-
-    def test_failed_s1a_reproducer(self) -> None:
-        """S1A reproducer (notes/composer-llm-eval-2026-05-01.md):
-        rows_processed=6, rows_succeeded=0, rows_routed=6, rows_failed=0.
-
-        Every row took the on_error DIVERT to a user-named quarantine sink.
-        rows_routed is structurally ambiguous (DIVERT vs MOVE) so the
-        predicate excludes it; rows_succeeded == 0 maps to FAILED.
-        """
-        result = self._build(status=RunStatus.FAILED, rows_processed=6, rows_succeeded=0, rows_routed=6)
-        assert result.status == RunStatus.FAILED
 
     def test_failed_s1b_msg2_reproducer(self) -> None:
         """S1B msg2 reproducer: rows_succeeded=0, rows_failed=6, no on_error."""
@@ -392,7 +390,10 @@ class TestRunResultStatusInvariant:
             self._build(status=RunStatus.EMPTY, rows_processed=5, rows_succeeded=0)
 
     def test_empty_rejects_nonzero_succeeded(self) -> None:
-        with pytest.raises(ValueError, match=r"EMPTY.*rows_succeeded == 0"):
+        # Post-rows_routed-split (elspeth-5069612f3c): the EMPTY guard on
+        # success indicators now reads as "requires no success indicator"
+        # because rows_succeeded > 0 OR rows_routed_success > 0 both qualify.
+        with pytest.raises(ValueError, match=r"EMPTY.*requires no success indicator"):
             self._build(status=RunStatus.EMPTY, rows_processed=0, rows_succeeded=1)
 
     def test_empty_rejects_failures(self) -> None:

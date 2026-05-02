@@ -32,7 +32,8 @@ class TestAggregationFlushResult:
         result = AggregationFlushResult(
             rows_succeeded=1,
             rows_failed=2,
-            rows_routed=3,
+            rows_routed_success=3,
+            rows_routed_failure=0,
             rows_quarantined=4,
             rows_coalesced=5,
             rows_forked=6,
@@ -44,7 +45,8 @@ class TestAggregationFlushResult:
         # Each field must be accessible and have the correct value
         assert result.rows_succeeded == 1
         assert result.rows_failed == 2
-        assert result.rows_routed == 3
+        assert result.rows_routed_success == 3
+        assert result.rows_routed_failure == 0
         assert result.rows_quarantined == 4
         assert result.rows_coalesced == 5
         assert result.rows_forked == 6
@@ -65,7 +67,8 @@ class TestAggregationFlushResult:
 
         assert result.rows_succeeded == 0
         assert result.rows_failed == 0
-        assert result.rows_routed == 0
+        assert result.rows_routed_success == 0
+        assert result.rows_routed_failure == 0
         assert result.rows_quarantined == 0
         assert result.rows_coalesced == 0
         assert result.rows_forked == 0
@@ -78,7 +81,8 @@ class TestAggregationFlushResult:
         result_a = AggregationFlushResult(
             rows_succeeded=1,
             rows_failed=2,
-            rows_routed=3,
+            rows_routed_success=3,
+            rows_routed_failure=0,
             rows_quarantined=4,
             rows_coalesced=5,
             rows_forked=6,
@@ -89,7 +93,8 @@ class TestAggregationFlushResult:
         result_b = AggregationFlushResult(
             rows_succeeded=10,
             rows_failed=20,
-            rows_routed=30,
+            rows_routed_success=30,
+            rows_routed_failure=0,
             rows_quarantined=40,
             rows_coalesced=50,
             rows_forked=60,
@@ -102,7 +107,8 @@ class TestAggregationFlushResult:
 
         assert combined.rows_succeeded == 11
         assert combined.rows_failed == 22
-        assert combined.rows_routed == 33
+        assert combined.rows_routed_success == 33
+        assert combined.rows_routed_failure == 0
         assert combined.rows_quarantined == 44
         assert combined.rows_coalesced == 55
         assert combined.rows_forked == 66
@@ -115,7 +121,8 @@ class TestAggregationFlushResult:
         result_a = AggregationFlushResult(
             rows_succeeded=1,
             rows_failed=2,
-            rows_routed=3,
+            rows_routed_success=3,
+            rows_routed_failure=0,
             rows_quarantined=4,
             rows_coalesced=5,
             rows_forked=6,
@@ -126,7 +133,8 @@ class TestAggregationFlushResult:
         result_b = AggregationFlushResult(
             rows_succeeded=10,
             rows_failed=20,
-            rows_routed=30,
+            rows_routed_success=30,
+            rows_routed_failure=0,
             rows_quarantined=40,
             rows_coalesced=50,
             rows_forked=60,
@@ -142,7 +150,8 @@ class TestAggregationFlushResult:
         result = AggregationFlushResult(
             rows_succeeded=1,
             rows_failed=2,
-            rows_routed=3,
+            rows_routed_success=3,
+            rows_routed_failure=0,
             rows_quarantined=4,
             rows_coalesced=5,
             rows_forked=6,
@@ -157,7 +166,9 @@ class TestAggregationFlushResult:
         assert zero + result == result
 
     def test_to_dict_returns_plain_dict(self) -> None:
-        result = AggregationFlushResult(rows_succeeded=5, rows_routed=2, routed_destinations={"sink_a": 2})
+        result = AggregationFlushResult(
+            rows_succeeded=5, rows_routed_success=2, rows_routed_failure=0, routed_destinations={"sink_a": 2}
+        )
         d = result.to_dict()
         assert isinstance(d, dict)
         assert isinstance(d["routed_destinations"], dict)

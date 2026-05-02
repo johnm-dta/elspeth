@@ -320,7 +320,8 @@ class TestCompletedDataDecomposition:
                 rows_processed=100,
                 rows_succeeded=95,
                 rows_failed=5,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=3,  # 95 + 5 + 0 + 3 = 103 > 100
                 landscape_run_id="lscape-1",
             )
@@ -339,7 +340,8 @@ class TestCompletedDataDecomposition:
             rows_processed=6,
             rows_succeeded=2,
             rows_failed=0,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=0,
             landscape_run_id="lscape-batchstats",
         )
@@ -361,11 +363,13 @@ class TestCompletedDataDecomposition:
             rows_processed=100,
             rows_succeeded=90,
             rows_failed=3,
-            rows_routed=5,
+            rows_routed_success=5,
+            rows_routed_failure=0,
             rows_quarantined=2,
             landscape_run_id="lscape-1",
         )
-        assert data.rows_routed == 5
+        assert data.rows_routed_success == 5
+        assert data.rows_routed_failure == 0
 
 
 class TestRowCountConstraints:
@@ -746,7 +750,8 @@ class TestRunStatusDecomposition:
                 rows_processed=100,
                 rows_succeeded=95,
                 rows_failed=5,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=3,  # 95 + 5 + 0 + 3 = 103 > 100
                 error=None,
                 landscape_run_id="lscape-1",
@@ -765,7 +770,8 @@ class TestRunStatusDecomposition:
             rows_processed=6,
             rows_succeeded=2,
             rows_failed=0,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=0,
             error=None,
             landscape_run_id="lscape-batchstats",
@@ -783,7 +789,8 @@ class TestRunStatusDecomposition:
                 rows_processed=10,
                 rows_succeeded=8,
                 rows_failed=5,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,  # 8 + 5 = 13 > 10
                 error="pipeline crashed",
                 landscape_run_id=None,
@@ -799,7 +806,8 @@ class TestRunStatusDecomposition:
                 rows_processed=50,
                 rows_succeeded=30,
                 rows_failed=10,
-                rows_routed=20,
+                rows_routed_success=20,
+                rows_routed_failure=0,
                 rows_quarantined=5,  # 30 + 10 + 20 + 5 = 65 > 50
                 error=None,
                 landscape_run_id=None,
@@ -818,7 +826,8 @@ class TestRunStatusDecomposition:
             rows_processed=100,
             rows_succeeded=95,
             rows_failed=3,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=2,
             error=None,
             landscape_run_id="lscape-1",
@@ -835,12 +844,14 @@ class TestRunStatusDecomposition:
             rows_processed=100,
             rows_succeeded=90,
             rows_failed=3,
-            rows_routed=5,
+            rows_routed_success=5,
+            rows_routed_failure=0,
             rows_quarantined=2,
             error=None,
             landscape_run_id="lscape-1",
         )
-        assert resp.rows_routed == 5
+        assert resp.rows_routed_success == 5
+        assert resp.rows_routed_failure == 0
 
 
 class TestRunStatusTerminalInvariants:
@@ -856,7 +867,8 @@ class TestRunStatusTerminalInvariants:
                 rows_processed=1,
                 rows_succeeded=1,
                 rows_failed=0,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
@@ -872,7 +884,8 @@ class TestRunStatusTerminalInvariants:
                 rows_processed=1,
                 rows_succeeded=0,
                 rows_failed=1,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
@@ -888,7 +901,8 @@ class TestRunStatusTerminalInvariants:
                 rows_processed=0,
                 rows_succeeded=0,
                 rows_failed=0,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
@@ -910,7 +924,8 @@ class TestRunResultsDecomposition:
             rows_processed=100,
             rows_succeeded=95,
             rows_failed=3,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=2,
             landscape_run_id="lscape-1",
             error=None,
@@ -926,7 +941,8 @@ class TestRunResultsDecomposition:
                 rows_processed=100,
                 rows_succeeded=50,
                 rows_failed=20,
-                rows_routed=40,
+                rows_routed_success=40,
+                rows_routed_failure=0,
                 rows_quarantined=10,  # 50 + 20 + 40 + 10 = 120 > 100
                 landscape_run_id="lscape-1",
                 error=None,
@@ -944,7 +960,8 @@ class TestRunResultsDecomposition:
             rows_processed=6,
             rows_succeeded=2,
             rows_failed=0,
-            rows_routed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             rows_quarantined=0,
             landscape_run_id="lscape-batchstats",
             error=None,
@@ -961,7 +978,8 @@ class TestRunResultsDecomposition:
                 rows_processed=10,
                 rows_succeeded=8,
                 rows_failed=5,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,  # 8 + 5 = 13 > 10
                 landscape_run_id=None,
                 error="kaboom",
@@ -975,12 +993,14 @@ class TestRunResultsDecomposition:
             rows_processed=100,
             rows_succeeded=90,
             rows_failed=3,
-            rows_routed=5,
+            rows_routed_success=5,
+            rows_routed_failure=0,
             rows_quarantined=2,
             landscape_run_id="lscape-1",
             error=None,
         )
-        assert resp.rows_routed == 5
+        assert resp.rows_routed_success == 5
+        assert resp.rows_routed_failure == 0
 
 
 class TestRunResultsTerminalInvariants:
@@ -994,7 +1014,8 @@ class TestRunResultsTerminalInvariants:
                 rows_processed=1,
                 rows_succeeded=1,
                 rows_failed=0,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,
                 landscape_run_id=None,
                 error=None,
@@ -1008,7 +1029,8 @@ class TestRunResultsTerminalInvariants:
                 rows_processed=1,
                 rows_succeeded=0,
                 rows_failed=1,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_quarantined=0,
                 landscape_run_id=None,
                 error=None,
@@ -1064,7 +1086,8 @@ class TestRunStatusResponseStatusInvariant:
             "rows_processed": 10,
             "rows_succeeded": 10,
             "rows_failed": 0,
-            "rows_routed": 0,
+            "rows_routed_success": 0,
+            "rows_routed_failure": 0,
             "rows_quarantined": 0,
             "error": None,
             "landscape_run_id": "landscape-1",
@@ -1101,13 +1124,21 @@ class TestRunStatusResponseStatusInvariant:
         assert response.status == "failed"
 
     def test_failed_s1a_reproducer_legal(self) -> None:
-        """S1A reproducer at the API layer (rows_routed-only failure shape)."""
+        """S1A reproducer at the API layer — every row took the on_error DIVERT.
+
+        Post-rows_routed-split (elspeth-5069612f3c): the on_error path increments
+        rows_routed_failure (NOT rows_routed_success). The schema invariant now
+        treats rows_routed_failure as a structural failure indicator, so this
+        shape (zero success indicators + non-zero failure indicators) classifies
+        as ``failed`` for the right structural reason.
+        """
         response = self._build(
             status="failed",
             rows_processed=6,
             rows_succeeded=0,
             rows_failed=0,
-            rows_routed=6,
+            rows_routed_success=0,
+            rows_routed_failure=6,
             error="LLM transform diverted every row to on_error",
         )
         assert response.status == "failed"
@@ -1162,7 +1193,8 @@ class TestRunResultsResponseStatusInvariant:
             "rows_processed": 10,
             "rows_succeeded": 10,
             "rows_failed": 0,
-            "rows_routed": 0,
+            "rows_routed_success": 0,
+            "rows_routed_failure": 0,
             "rows_quarantined": 0,
             "landscape_run_id": "landscape-1",
             "error": None,
@@ -1247,4 +1279,29 @@ def test_validation_result_rejects_unknown_field():
             checks=[],
             errors=[],
             invented_extra_field="nope",  # type: ignore[call-arg]
+        )
+
+
+class TestRowsRoutedSplitPublicApiFieldStability:
+    """elspeth-5069612f3c — public-API field-name pinning for the rows_routed split.
+
+    The four response models exposed via the web API must publish ``rows_routed_success``
+    and ``rows_routed_failure`` (and NOT the legacy ``rows_routed``) in their
+    JSON schema. Any future field-rename slip would be caught by this test.
+    """
+
+    @pytest.mark.parametrize(
+        "model_cls",
+        [CompletedData, RunStatusResponse, RunResultsResponse, CancelledData],
+    )
+    def test_response_model_exposes_split_fields_in_json_schema(self, model_cls) -> None:
+        properties = model_cls.model_json_schema()["properties"]
+        assert "rows_routed_success" in properties, (
+            f"{model_cls.__name__} must expose rows_routed_success in its JSON schema"
+        )
+        assert "rows_routed_failure" in properties, (
+            f"{model_cls.__name__} must expose rows_routed_failure in its JSON schema"
+        )
+        assert "rows_routed" not in properties, (
+            f"{model_cls.__name__} must not expose the legacy rows_routed field"
         )

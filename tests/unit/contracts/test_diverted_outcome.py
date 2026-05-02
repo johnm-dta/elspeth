@@ -24,6 +24,7 @@ class TestRunResultDiverted:
                 rows_processed=10,
                 rows_succeeded=10,
                 rows_failed=0,
-                rows_routed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
                 rows_diverted=-1,
             )

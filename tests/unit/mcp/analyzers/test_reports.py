@@ -218,6 +218,76 @@ class TestOutcomeAnalysisIsTerminal:
         assert terminal["is_terminal"] is True
         assert non_terminal["is_terminal"] is False
 
+    def test_routed_on_error_outcome_preserved_in_distribution(self) -> None:
+        """ROUTED_ON_ERROR (elspeth-5069612f3c) is surfaced as its own bucket.
+
+        MCP does NOT split historical "routed" rows into success/failure
+        buckets — the runbook/ADR handles the upgrade-boundary limitation.
+        ROUTED_ON_ERROR rows pass through as the "routed_on_error" bucket
+        (terminal), separate from the legacy "routed" bucket.
+        """
+        # Mock terminal outcomes including ROUTED_ON_ERROR
+        outcome_row_completed = MagicMock()
+        outcome_row_completed.outcome = "COMPLETED"
+        outcome_row_completed.is_terminal = 1
+        outcome_row_completed.count = 5
+
+        outcome_row_routed = MagicMock()
+        outcome_row_routed.outcome = "ROUTED"
+        outcome_row_routed.is_terminal = 1
+        outcome_row_routed.count = 3
+
+        outcome_row_routed_on_error = MagicMock()
+        outcome_row_routed_on_error.outcome = "ROUTED_ON_ERROR"
+        outcome_row_routed_on_error.is_terminal = 1
+        outcome_row_routed_on_error.count = 2
+
+        mock_conn = MagicMock()
+        call_count = 0
+
+        def side_effect_execute(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            result = MagicMock()
+            if call_count == 1:
+                result.fetchall.return_value = [
+                    outcome_row_completed,
+                    outcome_row_routed,
+                    outcome_row_routed_on_error,
+                ]
+            elif call_count == 2:
+                result.fetchall.return_value = []
+            elif call_count in (3, 4):
+                result.scalar.return_value = 0
+            return result
+
+        mock_conn.execute = side_effect_execute
+
+        db = MagicMock()
+        db.connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        db.connection.return_value.__exit__ = MagicMock(return_value=False)
+
+        factory = MagicMock()
+        factory.run_lifecycle.get_run.return_value = MagicMock(
+            started_at=None,
+            completed_at=None,
+            status=MagicMock(value="completed"),
+        )
+
+        result = get_outcome_analysis(db, factory, "run-123")
+
+        assert "error" not in result
+        outcomes = result["outcome_distribution"]
+        outcome_keys = {o["outcome"] for o in outcomes}
+        assert "ROUTED_ON_ERROR" in outcome_keys, (
+            "ROUTED_ON_ERROR must surface as its own outcome_distribution bucket"
+        )
+        # Legacy ROUTED bucket is preserved separately.
+        assert "ROUTED" in outcome_keys
+        routed_on_error = next(o for o in outcomes if o["outcome"] == "ROUTED_ON_ERROR")
+        assert routed_on_error["count"] == 2
+        assert routed_on_error["is_terminal"] is True
+
 
 class TestHighVarianceZeroDuration:
     """Verify high_variance filter includes nodes with zero avg_ms.

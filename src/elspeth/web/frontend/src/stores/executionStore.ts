@@ -158,24 +158,41 @@ function applyRunEvent(
     status: deriveStatus(event),
   };
 
-  // Update the run in the list when terminal.
-  // "error" is non-terminal -- "completed", "cancelled", and "failed" are terminal.
+  // Update the run in the list on every event that carries fresh row counts.
+  //
+  // elspeth-0c076ad374 — `progress` events also patch the four row counters
+  // so the runs-list row stays in lockstep with the live ProgressView slot.
+  // `error` events are deliberately excluded: RunEventError carries no row
+  // counters, so the rowsProcessed/etc. above fall back to
+  // `state.progress?.* ?? 0`, which would clobber a real REST snapshot in
+  // the reconnect-before-first-progress case. Status / error detail /
+  // finished_at remain gated on terminal events to avoid out-of-order
+  // progress downgrading a `failed`/`completed` run back to `running`.
+  const isTerminal =
+    event.event_type === "completed" ||
+    event.event_type === "cancelled" ||
+    event.event_type === "failed";
+  const isProgress = event.event_type === "progress";
   let updatedRuns = state.runs;
-  if (event.event_type === "completed" || event.event_type === "cancelled" || event.event_type === "failed") {
+  if (isTerminal || isProgress) {
     updatedRuns = state.runs.map((r) =>
       r.id === event.run_id
         ? {
             ...r,
-            status: newProgress.status,
             rows_processed: rowsProcessed,
             rows_failed: rowsFailed,
             rows_routed_success: rowsRoutedSuccess,
             rows_routed_failure: rowsRoutedFailure,
-            error:
-              event.event_type === "failed"
-                ? (data as RunEventFailed).detail
-                : r.error,
-            finished_at: event.timestamp,
+            ...(isTerminal
+              ? {
+                  status: newProgress.status,
+                  error:
+                    event.event_type === "failed"
+                      ? (data as RunEventFailed).detail
+                      : r.error,
+                  finished_at: event.timestamp,
+                }
+              : {}),
           }
         : r,
     );

@@ -200,6 +200,179 @@ describe("executionStore failed run events", () => {
   });
 });
 
+describe("executionStore progress events advance runs list", () => {
+  // elspeth-0c076ad374 — pre-CR-3 the runs-list row counters froze at the
+  // REST snapshot until the terminal event arrived, while the live
+  // ProgressView ticked from state.progress. The fix patches state.runs[i]
+  // on `progress` events too, so both surfaces advance in lockstep.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+  });
+
+  it("advances state.runs[i] row counters on progress events", () => {
+    const close = vi.fn();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+      progress: {
+        rows_processed: 0,
+        rows_failed: 0,
+        rows_routed_success: 0,
+        rows_routed_failure: 0,
+        recent_errors: [],
+        status: "running",
+      },
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+    const handlers = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][2];
+
+    const firstProgress: RunEvent = {
+      run_id: "run-1",
+      timestamp: "2026-04-26T05:32:00.000Z",
+      event_type: "progress",
+      data: {
+        rows_processed: 50,
+        rows_failed: 1,
+        rows_routed_success: 7,
+        rows_routed_failure: 2,
+      },
+    };
+    handlers.onProgress(firstProgress, firstProgress.data);
+
+    let state = useExecutionStore.getState();
+    expect(state.runs[0]).toMatchObject({
+      id: "run-1",
+      status: "running",
+      rows_processed: 50,
+      rows_failed: 1,
+      rows_routed_success: 7,
+      rows_routed_failure: 2,
+      finished_at: null,
+    });
+    // ProgressView slot must continue to mirror the same counts.
+    expect(state.progress).toMatchObject({
+      rows_processed: 50,
+      rows_failed: 1,
+      rows_routed_success: 7,
+      rows_routed_failure: 2,
+    });
+
+    const secondProgress: RunEvent = {
+      run_id: "run-1",
+      timestamp: "2026-04-26T05:32:05.000Z",
+      event_type: "progress",
+      data: {
+        rows_processed: 120,
+        rows_failed: 3,
+        rows_routed_success: 18,
+        rows_routed_failure: 4,
+      },
+    };
+    handlers.onProgress(secondProgress, secondProgress.data);
+
+    state = useExecutionStore.getState();
+    expect(state.runs[0]).toMatchObject({
+      rows_processed: 120,
+      rows_failed: 3,
+      rows_routed_success: 18,
+      rows_routed_failure: 4,
+      finished_at: null,
+    });
+  });
+
+  it("leaves state.runs unchanged when progress arrives for an unknown run_id", () => {
+    const close = vi.fn();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    const otherRun = makeRun({
+      id: "run-other",
+      rows_processed: 42,
+      rows_failed: 1,
+      rows_routed_success: 3,
+      rows_routed_failure: 0,
+    });
+    useExecutionStore.setState({
+      runs: [otherRun],
+      activeRunId: "run-1",
+      progress: {
+        rows_processed: 0,
+        rows_failed: 0,
+        rows_routed_success: 0,
+        rows_routed_failure: 0,
+        recent_errors: [],
+        status: "running",
+      },
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+    const handlers = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][2];
+
+    const event: RunEvent = {
+      run_id: "run-1",
+      timestamp: "2026-04-26T05:32:00.000Z",
+      event_type: "progress",
+      data: {
+        rows_processed: 99,
+        rows_failed: 9,
+        rows_routed_success: 9,
+        rows_routed_failure: 9,
+      },
+    };
+    handlers.onProgress(event, event.data);
+
+    const state = useExecutionStore.getState();
+    expect(state.runs).toHaveLength(1);
+    expect(state.runs[0]).toEqual(otherRun);
+  });
+
+  it("does not zero state.runs[i] counters on error events with null progress", () => {
+    // Locks in a deliberate divergence from the issue's wording
+    // (elspeth-0c076ad374). RunEventError carries no row counters; if
+    // applyRunEvent patched runs[] on error events too, it would fall back
+    // to `state.progress?.* ?? 0` and clobber a real REST snapshot in the
+    // reconnect-before-first-progress case. Progress events are the only
+    // safe surface for live runs[] updates.
+    const close = vi.fn();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    const restSnapshot = makeRun({
+      rows_processed: 100,
+      rows_failed: 5,
+      rows_routed_success: 12,
+      rows_routed_failure: 3,
+    });
+    useExecutionStore.setState({
+      runs: [restSnapshot],
+      activeRunId: "run-1",
+      progress: null,
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+    const handlers = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][2];
+
+    const errorEvent: RunEvent = {
+      run_id: "run-1",
+      timestamp: "2026-04-26T05:32:00.000Z",
+      event_type: "error",
+      data: {
+        message: "Row-level transform exception",
+        node_id: "extract",
+        row_id: "row-7",
+      },
+    };
+    handlers.onError(errorEvent, errorEvent.data);
+
+    const state = useExecutionStore.getState();
+    expect(state.runs[0]).toMatchObject({
+      rows_processed: 100,
+      rows_failed: 5,
+      rows_routed_success: 12,
+      rows_routed_failure: 3,
+    });
+  });
+});
+
 describe("executionStore run diagnostics", () => {
   beforeEach(() => {
     vi.clearAllMocks();

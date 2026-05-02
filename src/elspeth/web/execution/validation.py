@@ -225,8 +225,15 @@ def validate_pipeline(
     5. build_runtime_graph(settings, bundle)
     6. graph.validate() + graph.validate_edge_compatibility()
 
-    Only catches: PydanticValidationError, FileNotFoundError, ValueError,
-    GraphValidationError. All other exceptions propagate (W18).
+    Catches and converts to structured ``ValidationResult(is_valid=False)``:
+    ``PydanticValidationError``, ``ValueError``, ``TypeError`` (settings load),
+    ``PluginNotFoundError``, ``PluginConfigError`` (plugin instantiation),
+    ``FileExistsError`` (file-sink path collision under ``fail_if_exists`` /
+    exhausted ``auto_increment`` — Tier 3 fs-boundary condition),
+    ``GraphValidationError`` (structural), ``RouteValidationError`` (route
+    target resolution). All other exceptions propagate (W18) — those are
+    Tier 1 invariant breaks that must surface as a 500 to the composer
+    failure-handling path.
 
     Args:
         state: CompositionState from the session.
@@ -589,6 +596,51 @@ def validate_pipeline(
                 component_type=comp_type,
                 message=detail,
                 suggestion=None,
+            )
+        )
+        checks.extend(_skipped_checks(_CHECK_PLUGINS))
+        return ValidationResult(
+            is_valid=False,
+            checks=checks,
+            errors=errors,
+            semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+        )
+    except FileExistsError as exc:
+        # File-sink collision raised by ``resolve_output_collision_path`` from
+        # within the sink ``__init__`` (json/csv sinks call it eagerly during
+        # plugin construction). Two raise sites in
+        # ``plugins/infrastructure/output_paths.py``:
+        #
+        # * line 48 — ``collision_policy="fail_if_exists"`` and the target path
+        #   already exists.
+        # * line 73 — ``collision_policy="auto_increment"`` and 9999 sibling
+        #   slots are all taken.
+        #
+        # Per CLAUDE.md trust tiers, the existing-file condition is a Tier 3
+        # boundary fact (external filesystem state), not a Tier 1 invariant
+        # break — convert to a structured validation result here so the
+        # composer ``/validate`` and ``/messages`` paths surface a 422-class
+        # diagnostic instead of an opaque 500 ``composer_plugin_error``. The
+        # exception does not carry sink-name attribution at this layer
+        # (sinks raise ``FileExistsError`` directly without wrapping); the
+        # message text contains the path, which is operator-actionable.
+        # Sink-name attribution is achievable architecturally by deferring
+        # the fs check until write-init time (filed separately) — out of
+        # scope here.
+        detail = str(exc)
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_PLUGINS,
+                passed=False,
+                detail=detail,
+            )
+        )
+        errors.append(
+            ValidationError(
+                component_id=None,
+                component_type="sink",
+                message=detail,
+                suggestion=("Set collision_policy='auto_increment' to pick a free sibling path automatically, or choose a different path."),
             )
         )
         checks.extend(_skipped_checks(_CHECK_PLUGINS))

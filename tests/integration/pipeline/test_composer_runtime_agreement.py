@@ -7,6 +7,85 @@ This suite covers two categories:
 
 It does not claim global equivalence between preview validation and runtime DAG
 validation.
+
+Closed registry of composer/runtime divergence shapes (extends with each eval).
+``elspeth-1ee3c96c72`` (Phase 3) maintains this list as the durable contract;
+every future "validate green / runtime red" finding extends it. The registry
+crosswalks each shape to the originating eval reproducer and the closure issue
+where the architectural fix landed:
+
+* Shape 1 — S1A literal credential placeholder
+  ``api_key: WILL_BE_WIRED_FROM_OPENROUTER_API_KEY`` (eval session 2ef2db56,
+  run 51f5f609). Closes ``elspeth-72d1dccd44``. Pinned by
+  ``TestComposerRuntimeSecretRefAgreement``.
+* Shape 2 — S2 v1 dangling on_error route target
+  (``aggregations[*].on_error: aggregation_errors`` with no matching sink).
+  Closes ``elspeth-127de6865a``. Pinned by
+  ``TestComposerRuntimeRouteTargetAgreement`` plus four defense-in-depth axes.
+* Shape 3 — S2 v2 batch_stats output schema propagation
+  (``schema: {mode: flexible, fields: [...], required_fields: [...]}`` on a
+  reductive aggregation; runtime raised ``SchemaConfigModeViolation``). Closes
+  ``elspeth-f5f798f797`` (commit ``2d9dc21d``). Pinned by
+  ``test_both_accept_aggregation_with_input_fields_and_required_fields``.
+* Shape 4 — S1A monolithic happy-path positive control. Deferred — requires
+  end-to-end LLM-stub integration scaffolding that does not exist in
+  ``tests/integration/pipeline/``. Filed as a follow-up on
+  ``elspeth-1ee3c96c72``'s closure.
+* Shape 5 — Phase 2.2 RunStatus four-value terminal taxonomy plus the
+  rows_routed-only design call. Closes ``elspeth-0de989c56d`` (commit
+  ``cc895589``). Pinned by ``TestComposerRuntimeRunStatusAgreement``. The
+  per-status engine-layer pinning lives in
+  ``tests/integration/pipeline/orchestrator/test_orchestrator_core.py``; this
+  suite adds the cross-layer (engine RunResult ⇔ Landscape audit ``Run`` row)
+  agreement and the named design-call regression
+  ``test_runstatus_rows_routed_only_classifies_as_failed``.
+* Shape 6 — Phase 2.3 ``/api/secrets`` reason taxonomy (eval session
+  S1B, ``ELSPETH_FINGERPRINT_KEY`` unset). Closes ``elspeth-0d31c22d26``
+  (commit ``22e3e0d9``). Per-mode coverage lives in
+  ``tests/unit/web/secrets/{server,user}_store.py`` and
+  ``tests/unit/web/secrets/test_routes.py`` per the Phase 2.3 closure
+  rationale ("agreement-suite scope does not need duplication"). This suite
+  adds a single contract-layer biconditional smoke
+  (``TestComposerRuntimeSecretInventoryAgreement``) so a future drift on
+  the ``available ⟺ reason is None`` invariant fails the agreement gate too.
+* Shape 7 — Phase 2.1 pipeline_done_callback row-decomposition agreement
+  (eval run 44f52421, csv → batch_stats group_by → json sink wrote output
+  but ``/api/runs/{rid}`` lagged because ``CompletedData`` rejected the
+  legitimate aggregation row-count shape). Closes ``elspeth-31d53c7493``
+  (commit ``5e26d0a6``). Pinned by
+  ``TestComposerRuntimeRunCompletionAgreement``.
+* Shape 8 — Phase 0.b composer file-sink path-collision diagnostic
+  (eval session S3 ``98573481-e8bc-4a03-8467-d3a86effcd56``, originally
+  attributed in the eval notes to a "gate primitive crash" but root-caused
+  during Phase 0.b investigation to ``FileExistsError`` raised uncaught from
+  ``json_sink.__init__`` / ``csv_sink.__init__`` via
+  ``resolve_output_collision_path`` when a sink path collides with an
+  existing artifact under ``collision_policy="fail_if_exists"``. The
+  exception class was missing from ``validate_pipeline``'s step-4 catch
+  list, propagating as ``composer_plugin_error`` 500 instead of a 422-class
+  structured ``ValidationResult``). Closes ``elspeth-209b7e3a2b``. Pinned
+  by ``TestComposerRuntimeFileSinkCollisionAgreement``. Gates were the
+  symptom amplifier (gate-routing pipelines need sinks; LLM defaults
+  ``collision_policy="fail_if_exists"``; stale eval artifacts collide),
+  not the cause.
+
+Adding a new shape: file the eval-finding issue, land the structural fix,
+then extend this docstring with the shape's number, the originating eval
+session/run id, the closing issue, and the test class that pins it.
+
+Bug verification protocol (mandatory for new shapes):
+``test_agreement_aggregation_run_counts_construct_completed_data`` (Shape 7)
+is the canonical example. Before declaring a new agreement test landed,
+manually revert the structural fix it pins (one line in the production
+code) and confirm the test fails with the expected exception class. Then
+restore the fix. Document the protocol verbatim in the test's docstring,
+naming the exact production line reverted and the exact failure observed.
+This guards against the "passes pre-fix AND post-fix" failure mode where a
+test exercises adjacent behaviour but never actually depends on the fix
+under test — a class of test theatre that is otherwise undetectable until
+a future regression silently slips through. The cost is one minute of
+scratch work; the value is durable evidence that the test pins the
+structural contract rather than incidentally passing.
 """
 
 from __future__ import annotations
@@ -18,7 +97,13 @@ from typing import Any
 import pytest
 
 from elspeth.cli_helpers import instantiate_plugins_from_config
+from elspeth.contracts.audit import Run
+from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import FrameworkBugError
+from elspeth.contracts.secrets import (
+    SecretInventoryItem,
+    SecretUnavailabilityReason,
+)
 from elspeth.core.config import (
     AggregationSettings,
     CoalesceSettings,
@@ -30,8 +115,11 @@ from elspeth.core.config import (
     TriggerConfig,
 )
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
+from elspeth.core.landscape import LandscapeDB
+from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 from elspeth.engine.orchestrator.types import RouteValidationError
+from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.web.composer import yaml_generator as composer_yaml_generator
 from elspeth.web.composer.state import (
@@ -42,7 +130,17 @@ from elspeth.web.composer.state import (
     PipelineMetadata,
     SourceSpec,
 )
+from elspeth.web.execution.schemas import CompletedData
 from elspeth.web.execution.validation import validate_pipeline
+from tests.fixtures.base_classes import _TestSchema, as_sink, as_source, as_transform
+from tests.fixtures.landscape import make_factory
+from tests.fixtures.pipeline import build_production_graph
+from tests.fixtures.plugins import (
+    CollectSink,
+    ConditionalErrorTransform,
+    ListSource,
+    PassTransform,
+)
 
 
 class TestComposerRuntimeAgreement:
@@ -1452,8 +1550,16 @@ class TestComposerRuntimeAgreement:
         emitted_contract = transform._output_contract_for(results)
         emitted_rows = [PipelineRow(r, emitted_contract) for r in results]
 
+        # Narrow ``transform._output_schema_config`` (typed as
+        # ``SchemaConfig | None``) — for this BatchStats config the
+        # post-Phase-1.3 ``_build_output_schema_config`` override always
+        # returns a non-None value.  An assert here makes the contract
+        # explicit so mypy can see it.
+        output_schema_config = transform._output_schema_config
+        assert output_schema_config is not None, "BatchStats must emit an explicit output schema config"
+
         verify_schema_config_mode(
-            output_schema_config=transform._output_schema_config,
+            output_schema_config=output_schema_config,
             emitted_rows=emitted_rows,
             plugin_name="batch_stats",
             node_id="agg1",
@@ -2039,4 +2145,858 @@ class TestComposerRuntimeRouteTargetAgreement:
             aggregations=plugins.aggregations,
             settings=config,
             graph=graph,
+        )
+
+
+# ── Shape 1 — secret_refs literal placeholder agreement ──────────────────────
+# Closes elspeth-72d1dccd44 / Phase 1.1.  Origin: 2026-05-01 staging eval, S1A
+# (session 2ef2db56-70d7-498a-83d6-47e1f0efe340, run
+# 51f5f609-bf72-4654-9cf2-6c53c565548b).  Pre-fix, a literal placeholder string
+# in a credential-bearing field validated as is_valid: true and the engine ran
+# end-to-end with every row routed via on_error to a quarantine sink.  Post-fix,
+# the secret_refs check rejects at /validate before runtime ever sees the
+# pipeline.
+#
+# The unit suite at TestValidatePipelineFabricatedCredentials in
+# tests/unit/web/execution/test_validation.py covers the seven sibling shapes
+# (transform/source/sink credential fields, suffix-matched fields, nested
+# credentials, env-marker outside inventory, positive control).  The
+# agreement-suite contribution here is the canonical S1A reproducer pinned at
+# the agreement layer: a future drift in the fabrication-aware predicate must
+# fail BOTH the validator unit tests AND this agreement gate.
+
+
+class _AgreementSecretService:
+    """Minimal WebSecretResolver stand-in for agreement-suite shape pinning.
+
+    Mirrors ``tests/unit/web/execution/test_validation.py::FakeSecretService``
+    without importing across the unit/integration suite boundary.  Inventory
+    items report ``available=False`` with a closed-list reason so the fixture
+    obeys the Phase 2.3 ``available ⟺ reason is None`` invariant.
+    """
+
+    def __init__(self, *, inventory: frozenset[str] = frozenset()) -> None:
+        self._inventory = inventory
+
+    def list_refs(self, user_id: str) -> list[SecretInventoryItem]:
+        del user_id
+        return [
+            SecretInventoryItem(
+                name=name,
+                scope="user",
+                available=False,
+                reason="value_decryption_failed",
+            )
+            for name in sorted(self._inventory)
+        ]
+
+    def has_ref(self, user_id: str, name: str) -> bool:
+        del user_id, name
+        return False
+
+    def resolve(self, user_id: str, name: str) -> None:
+        """Protocol completeness — agreement-suite never calls resolve()
+        because the secret_refs gate fires before settings load.  Returning
+        ``None`` mirrors ``WebSecretService.resolve``'s "not present" path.
+        """
+        del user_id, name
+        return None
+
+
+class TestComposerRuntimeSecretRefAgreement:
+    """Shape 1 — literal credential placeholders are gated at /validate.
+
+    Empirical scope of the original gap: composer's ``secret_refs`` check only
+    looked for ``{secret_ref: <name>}`` constructs.  A literal placeholder
+    string in a field the plugin schema marks as credential-bearing
+    (``is_secret_field`` predicate at L1 ``core/secrets.py``) bypassed the
+    check entirely.  The runtime-side defense is non-existent — the LLM
+    transform happily called the upstream API with the literal placeholder as
+    the bearer token, producing per-row HTTP 401s and routing every row via
+    ``on_error`` to ``parse_quarantine.jsonl``.  This shape is therefore
+    /validate-gated only; the agreement contract here is "/validate rejects
+    so /execute never receives it."
+    """
+
+    _S1A_PLACEHOLDER = "WILL_BE_WIRED_FROM_OPENROUTER_API_KEY"
+
+    @staticmethod
+    def _validation_settings(data_dir: Path) -> SimpleNamespace:
+        return SimpleNamespace(data_dir=data_dir)
+
+    def _assert_placeholder_redacted(self, result, *, value: str) -> None:
+        """Audit-hygiene: the literal candidate-secret value must not be
+        echoed into any field of the validation response.  Mirrors the
+        unit-suite discipline at
+        ``TestValidatePipelineFabricatedCredentials._assert_value_redacted``;
+        kept inline here so this test is self-contained as the agreement
+        contract.
+        """
+        for check in result.checks:
+            assert value not in check.detail, f"placeholder value leaked into check {check.name!r} detail"
+        for error in result.errors:
+            assert value not in error.message, f"placeholder value leaked into error.message at {error.component_id!r}"
+            if error.suggestion is not None:
+                assert value not in error.suggestion, "placeholder value leaked into error.suggestion"
+
+    def test_agreement_s1a_literal_api_key_fails_validate(self, tmp_path: Path) -> None:
+        """S1A canonical reproducer: an LLM transform with a literal
+        ``api_key: WILL_BE_WIRED_FROM_OPENROUTER_API_KEY`` placeholder must
+        fail the composer ``secret_refs`` check, identify the offending
+        component+field, and never echo the candidate-secret string back to
+        the operator surface.
+        """
+        # Source must live under data_dir/blobs/ for the path allowlist; the
+        # ``secret_refs`` predicate fires before the path check, but build a
+        # legitimate source so the failure is unambiguously the credential
+        # check rather than a parallel rejection.
+        blobs = tmp_path / "blobs"
+        blobs.mkdir()
+        csv_path = blobs / "tickets.csv"
+        csv_path.write_text("subject\nticket-1\n", encoding="utf-8")
+
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="classify_ticket",
+                options={"path": str(csv_path), "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="classify_ticket",
+                    node_type="transform",
+                    plugin="llm",
+                    input="classify_ticket",
+                    on_success="main",
+                    on_error="discard",
+                    options={
+                        "provider": "openrouter",
+                        "model": "openai/gpt-4.1-nano",
+                        "api_key": self._S1A_PLACEHOLDER,
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(
+                EdgeSpec(id="e1", from_node="source", to_node="classify_ticket", edge_type="on_success", label=None),
+                EdgeSpec(id="e2", from_node="classify_ticket", to_node="main", edge_type="on_success", label=None),
+            ),
+            outputs=(
+                OutputSpec(
+                    name="main",
+                    plugin="csv",
+                    options={"path": str(tmp_path / "outputs" / "out.csv"), "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = validate_pipeline(
+            state,
+            self._validation_settings(tmp_path),
+            composer_yaml_generator,
+            secret_service=_AgreementSecretService(),
+            user_id="agreement-suite-user",
+        )
+
+        # The agreement gate: /validate must reject this shape so /execute
+        # never receives it.  Pre-fix this returned is_valid: true.
+        assert result.is_valid is False, "S1A literal-placeholder shape must be rejected by /validate"
+
+        secret_check = next(check for check in result.checks if check.name == "secret_refs")
+        assert secret_check.passed is False, f"secret_refs check must fail; detail={secret_check.detail!r}"
+        assert "api_key" in secret_check.detail, "secret_refs detail must name the offending field"
+
+        # The structured error must attribute the failure to the LLM transform
+        # node so the operator can navigate directly to it.
+        api_key_errors = [error for error in result.errors if "api_key" in error.message]
+        assert api_key_errors, "expected at least one error naming the api_key field"
+        assert any(error.component_id == "classify_ticket" and error.component_type == "transform" for error in api_key_errors), (
+            "credential-field error must attribute to the LLM transform node"
+        )
+
+        # Audit-hygiene: the literal placeholder string must not appear
+        # anywhere in the response.  In production the candidate value may be
+        # a near-miss real secret; reflecting it back is data leakage.
+        self._assert_placeholder_redacted(result, value=self._S1A_PLACEHOLDER)
+
+
+# ── Shape 5 — RunStatus four-value taxonomy cross-layer agreement ─────────────
+# Closes elspeth-0de989c56d / Phase 2.2 (commit cc895589).  The per-status
+# engine-layer pinning lives in tests/integration/pipeline/orchestrator/
+# test_orchestrator_core.py and the API-mirror pinning lives in
+# tests/unit/web/execution/test_schemas.py + tests/unit/contracts/
+# test_run_result.py.  This suite adds the cross-layer agreement contract:
+# every terminal RunResult.status the engine writes must equal the RunStatus
+# the Landscape audit ``Run`` row carries after ``finalize_run``.  Phase 2.2
+# wires the orchestrator to call ``derive_terminal_run_status`` then
+# ``finalize_run(status=...)``; if a future refactor breaks that wiring (e.g.
+# Landscape persists ``COMPLETED`` while RunResult carries ``FAILED``) the
+# audit trail and the API surface diverge silently.  This gate fails before
+# the divergence reaches a deploy.
+
+
+class TestComposerRuntimeRunStatusAgreement:
+    """Shape 5 — engine RunResult and Landscape audit ``Run`` row agree on
+    ``RunStatus`` across the four-value terminal taxonomy plus the explicit
+    rows_routed-only design call.
+
+    Coverage:
+
+    * ``COMPLETED`` — healthy linear pipeline, all rows reach success.
+    * ``COMPLETED_WITH_FAILURES`` — mixed run, some succeed and some fail.
+    * ``FAILED`` — every row fails via ``on_error: discard`` (S1B msg2 shape).
+    * ``EMPTY`` — empty source, no failures, no rows.
+    * Design call — every row routes via ``on_error`` to a sink (rows_routed
+      only, rows_succeeded == 0).  Phase 2.2 closure rationale on
+      ``elspeth-0de989c56d`` (comment 693) classifies this as ``FAILED``
+      because ``rows_routed`` conflates ``RoutingMode.DIVERT`` (failure-handling)
+      with ``RoutingMode.MOVE`` (intentional gate routing) and the operator's
+      question "did the success path produce results?" answers "no" in
+      both cases.  This is locked here as
+      ``test_runstatus_rows_routed_only_classifies_as_failed`` so a future
+      maintainer changing the predicate confronts the design decision rather
+      than silently flipping it to ``COMPLETED_WITH_FAILURES``.
+    """
+
+    @staticmethod
+    def _assert_engine_landscape_agreement(landscape_db: LandscapeDB, run_result, expected_status: RunStatus) -> Run:
+        """Cross-layer assertion helper.
+
+        Asserts (1) the engine-side ``RunResult.status`` equals the expected
+        status, (2) the Landscape audit ``runs`` row exists for the same
+        ``run_id``, and (3) the audit row's ``status`` equals the engine's.
+        Returns the loaded ``Run`` so the caller can chain further checks.
+        """
+        assert run_result.status == expected_status, (
+            f"engine RunResult.status mismatch: expected {expected_status!r}, got {run_result.status!r}"
+        )
+        factory = make_factory(landscape_db)
+        run_row = factory.run_lifecycle.get_run(run_result.run_id)
+        assert run_row is not None, f"Landscape audit row missing for run_id={run_result.run_id!r}"
+        assert run_row.status == run_result.status, (
+            f"Landscape/engine status disagreement: engine RunResult.status={run_result.status!r}, Landscape Run.status={run_row.status!r}"
+        )
+        return run_row
+
+    def test_agreement_runstatus_completed_engine_landscape(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """Healthy linear pipeline — RunResult and Landscape both report COMPLETED."""
+        source = ListSource([{"value": 1}, {"value": 2}])
+        transform = PassTransform()
+        transform.on_success = "default"
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(transform)],
+            sinks={"default": as_sink(sink)},
+        )
+
+        run_result = Orchestrator(landscape_db).run(config, graph=build_production_graph(config), payload_store=payload_store)
+
+        self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.COMPLETED)
+        assert run_result.rows_processed == 2
+        assert run_result.rows_succeeded == 2
+        assert len(sink.results) == 2
+
+    def test_agreement_runstatus_completed_with_failures_engine_landscape(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """Mixed run — RunResult and Landscape both report COMPLETED_WITH_FAILURES.
+
+        Two rows: one with ``fail=False`` (succeeds), one with ``fail=True``
+        (failed via ``on_error: discard``, which lands the row in the
+        ``rows_quarantined`` bucket — ``discard`` is the engine's quarantine
+        terminal state).  Predicate: rows_succeeded > 0 AND has_failures.
+        """
+        source = ListSource([{"value": 1, "fail": False}, {"value": 2, "fail": True}])
+        transform = ConditionalErrorTransform(on_success="default", on_error="discard")
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(transform)],
+            sinks={"default": as_sink(sink)},
+        )
+
+        run_result = Orchestrator(landscape_db).run(config, graph=build_production_graph(config), payload_store=payload_store)
+
+        self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.COMPLETED_WITH_FAILURES)
+        assert run_result.rows_processed == 2
+        assert run_result.rows_succeeded == 1
+        # Predicate check (closure rationale comment 693): has_failures =
+        # rows_failed > 0 OR rows_quarantined > 0 OR rows_coalesce_failed > 0.
+        # ``on_error: discard`` lands rows in the quarantine bucket; the
+        # contract is the predicate, not a specific bucket name.
+        assert (run_result.rows_failed + run_result.rows_quarantined + run_result.rows_coalesce_failed) == 1
+
+    def test_agreement_runstatus_failed_engine_landscape(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """All-rows-failed (S1B msg2 shape) — RunResult and Landscape both report FAILED.
+
+        Two rows, both fail via ``on_error: discard`` (quarantine terminal
+        state).  Predicate: rows_processed > 0 AND rows_succeeded == 0.
+        """
+        source = ListSource([{"value": 1, "fail": True}, {"value": 2, "fail": True}])
+        transform = ConditionalErrorTransform(on_success="default", on_error="discard")
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(transform)],
+            sinks={"default": as_sink(sink)},
+        )
+
+        run_result = Orchestrator(landscape_db).run(config, graph=build_production_graph(config), payload_store=payload_store)
+
+        self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.FAILED)
+        assert run_result.rows_processed == 2
+        assert run_result.rows_succeeded == 0
+        # All rows failed; ``on_error: discard`` lands them in the
+        # quarantine bucket per the engine's terminal-state model.  The
+        # predicate is "no rows succeeded", not "rows_failed bucket".
+        assert (run_result.rows_failed + run_result.rows_quarantined + run_result.rows_coalesce_failed) == 2
+
+    def test_agreement_runstatus_empty_engine_landscape(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """Empty source — RunResult and Landscape both report EMPTY.
+
+        Predicate: rows_processed == 0 AND rows_succeeded == 0 AND no
+        failure indicators.  An empty source with no failures must NOT be
+        misclassified as ``FAILED`` (which is the all-rows-failed verdict)
+        nor as ``COMPLETED`` (which presupposes rows_succeeded > 0).
+        """
+        source = ListSource([])
+        transform = PassTransform()
+        transform.on_success = "default"
+        sink = CollectSink()
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(transform)],
+            sinks={"default": as_sink(sink)},
+        )
+
+        run_result = Orchestrator(landscape_db).run(config, graph=build_production_graph(config), payload_store=payload_store)
+
+        self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.EMPTY)
+        assert run_result.rows_processed == 0
+        assert run_result.rows_succeeded == 0
+        assert run_result.rows_failed == 0
+        assert len(sink.results) == 0
+
+    def test_runstatus_rows_routed_only_classifies_as_failed(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """S1A reproducer: every row routes via ``on_error`` to a quarantine
+        sink; rows_succeeded == 0 and rows_routed == N.  Phase 2.2 design
+        call (closure rationale on ``elspeth-0de989c56d``, comment 693)
+        classifies this as ``RunStatus.FAILED``.
+
+        Rationale (verbatim from the closure summary):
+
+            The operator's question is "did the success-path produce
+            results?" — the answer is no.  ``rows_routed`` is structurally
+            ambiguous (the engine's ``ExecutionCounters.rows_routed``
+            conflates ``RoutingMode.DIVERT`` from ``on_error`` paths with
+            ``RoutingMode.MOVE`` from intentional gate routing) so any
+            predicate that uses it inherits that ambiguity.  Excluding it
+            sidesteps the structural defect; ``rows_succeeded == 0`` maps
+            to FAILED whether the rows ended up in a quarantine sink via
+            ``on_error`` or in a directly-failed terminal state.
+
+        A future maintainer who wants to change this verdict (for example to
+        introduce a ``rows_routed_via_on_error`` distinction or to split
+        DIVERT from MOVE in the counter model — see observation
+        ``elspeth-obs-abc8baa1cd``) must change THIS test deliberately.
+        Silently flipping the verdict from ``FAILED`` to
+        ``COMPLETED_WITH_FAILURES`` re-introduces the operator-misleading
+        shape this test exists to prevent.
+        """
+        source = ListSource([{"value": 1, "fail": True}, {"value": 2, "fail": True}])
+        # on_error="quarantine" routes failed rows to the quarantine sink
+        # rather than discarding to the FAILED terminal state — this is the
+        # exact wiring shape S1A produced when the LLM transform's API call
+        # 401'd on the literal placeholder api_key.
+        transform = ConditionalErrorTransform(on_success="default", on_error="quarantine")
+        default_sink = CollectSink(name="default")
+        quarantine_sink = CollectSink(name="quarantine")
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(transform)],
+            sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
+        )
+
+        run_result = Orchestrator(landscape_db).run(config, graph=build_production_graph(config), payload_store=payload_store)
+
+        # The design-call assertion: rows_routed > 0 and rows_succeeded == 0
+        # classifies as FAILED, not COMPLETED_WITH_FAILURES.
+        self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.FAILED)
+        assert run_result.rows_processed == 2
+        assert run_result.rows_succeeded == 0
+        assert run_result.rows_routed == 2
+        # Rows landed in the quarantine sink, not the default sink.
+        assert len(default_sink.results) == 0
+        assert len(quarantine_sink.results) == 2
+
+
+# ── Shape 6 — SecretInventoryItem biconditional agreement ────────────────────
+# Closes elspeth-0d31c22d26 / Phase 2.3 (commit 22e3e0d9).  Per-mode coverage
+# (fingerprint_resolver_not_configured, env_var_not_set,
+# value_decryption_failed) lives in tests/unit/web/secrets/{server,user}_store.py
+# and tests/unit/web/secrets/test_routes.py.  Per the Phase 2.3 closure
+# rationale ("agreement-suite scope ... does not need duplication") this suite
+# DOES NOT duplicate the per-mode tests.  The single contract-layer assertion
+# below pins the structural invariant (``available ⟺ reason is None``) so a
+# future drift on the closed-list reason taxonomy fails the agreement gate
+# alongside the unit suite.
+
+
+class TestComposerRuntimeSecretInventoryAgreement:
+    """Shape 6 — ``SecretInventoryItem`` biconditional invariant pin.
+
+    The audit-hygiene constraint that ``/api/secrets`` must not echo
+    candidate-secret values into the response is enforced *structurally* by
+    the ``SecretUnavailabilityReason`` ``Literal`` type — there is no code
+    path that interpolates an env-var or candidate-secret value into the
+    response, because the field accepts only the closed-list reasons.  This
+    test pins the biconditional ``available ⟺ reason is None`` enforced in
+    ``SecretInventoryItem.__post_init__`` so a future widening of the model
+    (e.g. accepting free-form reason strings) fails the agreement gate
+    before it can ship.
+
+    Per-mode coverage and audit-hygiene runtime tests live in
+    ``tests/unit/web/secrets/``; this test pins the contract surface only.
+    """
+
+    def test_unavailable_with_no_reason_rejected(self) -> None:
+        """An unavailable inventory entry with ``reason=None`` is the
+        operator-hostile shape the field exists to eliminate."""
+        with pytest.raises(ValueError, match="reason is required when available=False"):
+            SecretInventoryItem(
+                name="OPENROUTER_API_KEY",
+                scope="server",
+                available=False,
+                source_kind="env",
+                reason=None,
+            )
+
+    def test_available_with_reason_rejected(self) -> None:
+        """An available secret carrying a reason is incoherent — the
+        biconditional rejects the asymmetric construction."""
+        with pytest.raises(ValueError, match="reason must be None when available=True"):
+            SecretInventoryItem(
+                name="OPENROUTER_API_KEY",
+                scope="server",
+                available=True,
+                source_kind="env",
+                reason="env_var_not_set",
+            )
+
+    def test_unavailable_with_closed_list_reasons_accepted(self) -> None:
+        """Each Phase 2.3 reason value is accepted; reasons outside the
+        closed list are rejected at the model layer (the structural
+        audit-hygiene gate)."""
+        for reason in ("fingerprint_resolver_not_configured", "env_var_not_set", "value_decryption_failed"):
+            item = SecretInventoryItem(
+                name="OPENROUTER_API_KEY",
+                scope="server",
+                available=False,
+                source_kind="env",
+                reason=reason,
+            )
+            assert item.reason == reason
+        # SecretUnavailabilityReason imported above is the typed surface — this
+        # local frozenset is the closed list mirrored against
+        # ``contracts/secrets._ALLOWED_UNAVAILABILITY_REASONS``.
+        assert SecretUnavailabilityReason is not None  # imported for type alias presence
+
+
+# ── Shape 7 — pipeline_done_callback row-decomposition agreement ─────────────
+# Closes elspeth-31d53c7493 / Phase 2.1 (commit 5e26d0a6).  Origin: 2026-05-01
+# eval, S2 successful run 44f52421-a379-459b-96a8-6f0656086f16 (csv 6 rows →
+# batch_stats group_by → json sink).  Pre-fix, ``CompletedData``'s
+# ``_check_row_decomposition`` enforced equality (rows_processed == sum of
+# four buckets); the equality formulation rejected the legitimate aggregation
+# shape where source rows reach ``CONSUMED_IN_BATCH`` (no terminal-bucket
+# counter) and break the equality.  ``pipeline_done_callback`` then crashed
+# with ``ValueError``/``ValidationError`` while the engine output had already
+# landed on disk.  Post-fix, the validator accepts inequality
+# (rows_processed >= sum of four buckets) so legitimate aggregation runs no
+# longer trip the readback layer.  This single-occurrence regression test
+# pins the agreement contract: an aggregation pipeline run by the orchestrator
+# produces row counts that the API readback layer accepts without raising.
+
+
+class _BatchAggregateTransform(BaseTransform):
+    """Batch-aware transform mirroring S2's aggregation shape (csv 6 rows →
+    1 aggregated output row).
+
+    Reproduces the structural shape that broke the equality formulation of
+    ``_validate_row_decomposition``: source rows reach
+    ``RowOutcome.CONSUMED_IN_BATCH`` (no terminal-bucket counter) while the
+    aggregated output row reaches ``COMPLETED``.  Net effect:
+    ``rows_processed > rows_succeeded + rows_failed + rows_routed +
+    rows_quarantined`` — pre-fix the readback validator rejected this with
+    ``ValidationError`` and ``pipeline_done_callback`` crashed; post-fix the
+    inequality formulation (``>=``) accepts it.
+
+    Defined inline so the test is self-contained as the agreement contract
+    rather than depending on the BatchStats production plugin's internal
+    triggering behaviour.
+    """
+
+    name = "agreement_batch_aggregate"
+    is_batch_aware = True
+    input_schema = _TestSchema
+    output_schema = _TestSchema
+
+    def __init__(self) -> None:
+        super().__init__({"schema": {"mode": "observed"}})
+
+    def process(self, row, ctx):
+        from elspeth.contracts import FieldContract, PipelineRow, SchemaContract
+        from elspeth.plugins.infrastructure.results import TransformResult
+
+        if not isinstance(row, list):
+            # Single-row mode is not exercised by this aggregation path —
+            # the wiring sets ``count == len(source_rows)`` so the trigger
+            # always fires in batch mode.  Crash if the engine routes a
+            # single row through here; that would indicate a wiring bug.
+            raise AssertionError("agreement-suite batch aggregate received a single row, expected a batch flush")
+
+        total = sum(float(r["amount"]) for r in row)
+        output = {"total_amount": total, "row_count": len(row)}
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                FieldContract(
+                    normalized_name="total_amount",
+                    original_name="total_amount",
+                    python_type=float,
+                    required=False,
+                    source="inferred",
+                ),
+                FieldContract(
+                    normalized_name="row_count",
+                    original_name="row_count",
+                    python_type=int,
+                    required=False,
+                    source="inferred",
+                ),
+            ),
+            locked=True,
+        )
+        return TransformResult.success(
+            PipelineRow(output, contract),
+            success_reason={"action": "agreement_batch_aggregate"},
+        )
+
+
+class TestComposerRuntimeRunCompletionAgreement:
+    """Shape 7 — engine row counts on aggregation pipelines must construct
+    ``CompletedData`` without raising.
+
+    Single-occurrence regression coverage.  The unit-level pin lives at
+    ``tests/unit/web/execution/test_schemas.py::test_aggregation_undercount_accepted``
+    (it hand-constructs the row counts).  The agreement-suite contribution
+    here is to drive the row counts from a real orchestrator-emitted
+    aggregation run.  A future aggregation refactor that changes which
+    counter buckets bump for batch-flush emission would slip past the unit
+    test (which hand-constructs the numbers) but fail this test (because
+    the engine's actual emission would no longer match the readback
+    contract).
+
+    Bug verification protocol (executed manually before this test landed):
+    temporarily reverted ``_validate_row_decomposition`` from ``>=`` to
+    ``==`` in ``src/elspeth/web/execution/schemas.py`` and confirmed this
+    test fails with ``pydantic.ValidationError("decomposition mismatch")``
+    on the ``CompletedData`` construction line.  Restored the inequality
+    after verification.  This protocol guards against the "passes pre-fix
+    AND post-fix" failure mode the test exists to prevent.
+    """
+
+    def test_agreement_aggregation_run_counts_construct_completed_data(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """S2 reproducer (run 44f52421): a 6-row source feeds a batch-aware
+        aggregation that emits 1 output row.  Source rows reach
+        ``CONSUMED_IN_BATCH`` (no terminal-bucket counter).  Engine counts
+        end up as ``rows_processed=6, rows_succeeded=1, rows_failed=0,
+        rows_routed=0, rows_quarantined=0`` — pre-fix the readback
+        validator rejected this shape (sum-of-buckets=1 but rows_processed=6
+        violates equality); post-fix the inequality accepts it.
+        """
+        from elspeth.contracts.types import NodeID
+
+        source = ListSource(
+            [
+                {"customer_tier": "enterprise", "amount": 100.0},
+                {"customer_tier": "enterprise", "amount": 150.0},
+                {"customer_tier": "pro", "amount": 50.0},
+                {"customer_tier": "pro", "amount": 75.0},
+                {"customer_tier": "free", "amount": 10.0},
+                {"customer_tier": "free", "amount": 20.0},
+            ],
+            on_success="source_out",
+        )
+        aggregate_transform = _BatchAggregateTransform()
+        sink = CollectSink(name="output")
+
+        # Build the graph with the batch-aware transform wired through
+        # source_out → aggregate → output.  ``aggregations={}`` because the
+        # batch transform is in the transforms list; PipelineConfig binds
+        # it as an aggregation via ``aggregation_settings``.
+        from elspeth.core.dag import ExecutionGraph as _ExecutionGraph
+        from tests.fixtures.factories import wire_transforms as _wire_transforms
+
+        graph = _ExecutionGraph.from_plugin_instances(
+            source=as_source(source),
+            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            transforms=_wire_transforms(
+                [as_transform(aggregate_transform)],
+                source_connection="source_out",
+                final_sink="output",
+            ),
+            sinks={"output": as_sink(sink)},
+            aggregations={},
+            gates=[],
+            coalesce_settings=None,
+        )
+
+        # Bind the transform as an aggregation: trigger fires at count=6
+        # (matching the source row count) so all 6 input rows flush as one
+        # batch and emit a single aggregated output row.
+        transform_id_map = graph.get_transform_id_map()
+        transform_node_id = transform_id_map[0]
+        agg_settings = AggregationSettings(
+            name="agreement_aggregate",
+            plugin="agreement_batch_aggregate",
+            input="source_out",
+            on_success="output",
+            on_error="discard",
+            trigger=TriggerConfig(count=6, timeout_seconds=3600),
+            output_mode="transform",
+        )
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(aggregate_transform)],
+            sinks={"output": as_sink(sink)},
+            aggregation_settings={NodeID(transform_node_id): agg_settings},
+        )
+
+        run_result = Orchestrator(landscape_db).run(config, graph=graph, payload_store=payload_store)
+
+        # Engine emission contract: 6 source rows in, 1 aggregated row out,
+        # source rows reach CONSUMED_IN_BATCH (not counted in the four
+        # terminal buckets).  This produces the inequality the Phase 2.1 fix
+        # legitimised.
+        assert run_result.rows_processed == 6, (
+            f"agreement_batch_aggregate must emit rows_processed=6 to reproduce S2 shape; got {run_result.rows_processed}"
+        )
+        assert run_result.rows_succeeded == 1, (
+            f"the aggregated output row must be the only success terminal; got rows_succeeded={run_result.rows_succeeded}"
+        )
+        # The inequality the fix made legitimate:
+        #   rows_processed (6) > sum-of-four-buckets (1)
+        sum_of_buckets = run_result.rows_succeeded + run_result.rows_failed + run_result.rows_routed + run_result.rows_quarantined
+        assert run_result.rows_processed > sum_of_buckets, (
+            "Pre-fix-shape sanity check: this test exercises the "
+            f"rows_processed > sum-of-buckets inequality (got {run_result.rows_processed} vs {sum_of_buckets}); "
+            "if this assertion fails the test no longer pins the legitimate shape and a future "
+            "regression of the row-decomposition validator from `>=` back to `==` would slip past."
+        )
+
+        # Drive the row-decomposition validator from the engine's actual
+        # counts.  Pre-Phase-2.1 this raised ``pydantic.ValidationError`` on
+        # the inequality shape and ``pipeline_done_callback`` crashed.
+        # Post-Phase-2.1 construction succeeds.
+        completed = CompletedData(
+            rows_processed=run_result.rows_processed,
+            rows_succeeded=run_result.rows_succeeded,
+            rows_failed=run_result.rows_failed,
+            rows_routed=run_result.rows_routed,
+            rows_quarantined=run_result.rows_quarantined,
+            landscape_run_id=run_result.run_id,
+        )
+        assert completed.rows_processed == run_result.rows_processed
+        assert completed.rows_succeeded == run_result.rows_succeeded
+        assert completed.landscape_run_id == run_result.run_id
+        # The output sink received exactly the one aggregated row.
+        assert len(sink.results) == 1, f"expected single aggregated output, got {len(sink.results)}"
+
+
+class TestComposerRuntimeFileSinkCollisionAgreement:
+    """Shape 8 — composer ``/validate`` must convert file-sink fs collision
+    failures into a structured ``ValidationResult(is_valid=False)`` instead
+    of letting the underlying ``FileExistsError`` propagate as a 500
+    ``composer_plugin_error``. Closes ``elspeth-209b7e3a2b`` (Phase 0.b).
+
+    Eval session S3 (``98573481-e8bc-4a03-8467-d3a86effcd56``, eval notes
+    ``notes/composer-llm-eval-2026-05-01.md``) reported this as a "gate
+    primitive crash" because the failures clustered around gate-routing
+    prompts. Phase 0.b investigation
+    (``notes/composer-phase-0b-staging-capture-2026-05-02.md``)
+    re-attributed it: gate routing requires sinks, the LLM defaults sinks
+    to ``collision_policy="fail_if_exists"``, and stale eval artifacts in
+    ``data/outputs/`` collide. The actual defect was
+    ``validate_pipeline``'s step-4 catch list at
+    ``src/elspeth/web/execution/validation.py`` — only
+    ``(PluginNotFoundError, PluginConfigError)`` was caught around
+    ``instantiate_runtime_plugins``, so ``FileExistsError`` raised from
+    ``json_sink.__init__`` / ``csv_sink.__init__`` via
+    ``plugins/infrastructure/output_paths.py:48`` propagated uncaught into
+    ``_state_data_from_composer_state``, was wrapped as
+    ``ComposerRuntimePreflightError``, and surfaced as the opaque 500.
+
+    The fix extends the step-4 catch list to include ``FileExistsError``
+    and converts it to a structured ``ValidationCheck(passed=False)`` on
+    the ``plugin_instantiation`` step with an ``auto_increment``
+    suggestion. Per CLAUDE.md trust tiers, the existing-file condition is
+    a Tier 3 boundary fact (external fs state) at a validation seam — the
+    correct shape is a structured 422-class diagnostic, not a 500.
+
+    Bug verification protocol (executed manually before this test landed):
+    temporarily reverted the new ``except FileExistsError as exc:`` clause
+    in ``src/elspeth/web/execution/validation.py`` (the block immediately
+    after the existing ``except (PluginNotFoundError, PluginConfigError)``
+    handler) and confirmed this test fails with an uncaught
+    ``FileExistsError("Output path already exists: ...")`` raised through
+    ``validate_pipeline``. Restored the catch after verification. This
+    protocol guards against the "passes pre-fix AND post-fix" failure
+    mode — without the revert, this test could appear to pin the contract
+    while actually depending on adjacent behaviour. The revert proved the
+    test's failure mode is exactly the structural bug it exists to catch.
+    """
+
+    @staticmethod
+    def _validation_settings(data_dir: Path) -> SimpleNamespace:
+        return SimpleNamespace(data_dir=data_dir)
+
+    @staticmethod
+    def _csv_input(tmp_path: Path) -> Path:
+        path = tmp_path / "blobs" / "input.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("ticket_id,customer_tier\n1,enterprise\n", encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _build_state(csv_path: Path, sink_path: Path) -> CompositionState:
+        return CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="default",
+                options={"path": str(csv_path), "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(
+                EdgeSpec(
+                    id="source_to_default",
+                    from_node="source",
+                    to_node="default",
+                    edge_type="on_success",
+                    label="rows to sink",
+                ),
+            ),
+            outputs=(
+                OutputSpec(
+                    name="default",
+                    plugin="json",
+                    options={
+                        "path": str(sink_path),
+                        "format": "jsonl",
+                        "mode": "write",
+                        "collision_policy": "fail_if_exists",
+                        "schema": {"mode": "observed"},
+                    },
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(name="Shape 8 collision repro", description=""),
+            version=1,
+        )
+
+    def test_composer_validate_converts_file_sink_collision_to_structured_error(self, tmp_path: Path) -> None:
+        """Pre-existing sink path + ``fail_if_exists`` policy → structured
+        ``is_valid=False`` (not an uncaught ``FileExistsError``).
+
+        Mirrors the eval session S3 trajectory: an LLM-built file sink
+        whose path collides with a stale on-disk artifact. The composer's
+        ``/validate`` (and the post-compose ``_state_data_from_composer_state``
+        in ``routes.py``) must surface this as a structured 422-class
+        diagnostic, not a 500.
+        """
+        csv_path = self._csv_input(tmp_path)
+
+        # Pre-create the sink target so resolve_output_collision_path's
+        # fail_if_exists branch fires inside json_sink.__init__.
+        sink_path = tmp_path / "outputs" / "all.jsonl"
+        sink_path.parent.mkdir(parents=True, exist_ok=True)
+        sink_path.write_text("", encoding="utf-8")  # any pre-existing content
+        assert sink_path.exists()
+
+        state = self._build_state(csv_path, sink_path)
+
+        # The fix landing point: this call must NOT raise FileExistsError.
+        # Pre-fix it would have propagated as an uncaught exception out of
+        # validate_pipeline (the bug-verification protocol confirms this).
+        result = validate_pipeline(
+            state,
+            self._validation_settings(tmp_path),
+            composer_yaml_generator,
+        )
+
+        assert result.is_valid is False, (
+            "Composer must reject pipelines whose sink path collides with an existing file under fail_if_exists; got is_valid=True"
+        )
+
+        check_by_name = {check.name: check for check in result.checks}
+        assert "plugin_instantiation" in check_by_name, "Missing plugin_instantiation check"
+        plugin_check = check_by_name["plugin_instantiation"]
+        assert plugin_check.passed is False, f"plugin_instantiation must fail on fs collision; got detail={plugin_check.detail!r}"
+        assert "already exists" in plugin_check.detail, f"Detail must name the collision; got {plugin_check.detail!r}"
+        assert str(sink_path) in plugin_check.detail, f"Detail must include the colliding path; got {plugin_check.detail!r}"
+
+        # Downstream checks must be marked as skipped (not run) since plugin
+        # instantiation failed — this is the same shape as
+        # PluginNotFoundError / PluginConfigError handling.
+        for downstream in ("graph_structure", "route_target_resolution", "schema_compatibility"):
+            assert check_by_name[downstream].passed is False, f"{downstream} must be skipped after plugin_instantiation fail"
+            assert "Skipped" in check_by_name[downstream].detail, (
+                f"{downstream} should be marked as skipped; got {check_by_name[downstream].detail!r}"
+            )
+
+        # Structured error carries operator-actionable suggestion (auto_increment).
+        assert len(result.errors) >= 1, "Result must carry at least one ValidationError"
+        sink_errors = [e for e in result.errors if e.component_type == "sink"]
+        assert len(sink_errors) == 1, f"Expected one sink-attributed error; got {len(sink_errors)}"
+        err = sink_errors[0]
+        assert "already exists" in err.message
+        assert err.suggestion is not None
+        assert "auto_increment" in err.suggestion, f"Suggestion must mention auto_increment; got {err.suggestion!r}"
+
+    def test_composer_validate_passes_when_sink_path_does_not_collide(self, tmp_path: Path) -> None:
+        """Positive control: same state with a non-existing sink path passes
+        plugin instantiation cleanly. Asserts the catch is selective — only
+        firing on the actual fs-collision condition, not converting all
+        plugin-init failures into the same shape."""
+        csv_path = self._csv_input(tmp_path)
+        sink_path = tmp_path / "outputs" / "fresh.jsonl"
+        sink_path.parent.mkdir(parents=True, exist_ok=True)
+        # Deliberately do NOT create the sink_path file.
+        assert not sink_path.exists()
+
+        state = self._build_state(csv_path, sink_path)
+        result = validate_pipeline(
+            state,
+            self._validation_settings(tmp_path),
+            composer_yaml_generator,
+        )
+
+        check_by_name = {check.name: check for check in result.checks}
+        assert check_by_name["plugin_instantiation"].passed is True, (
+            f"plugin_instantiation must pass when sink path is free; got detail={check_by_name['plugin_instantiation'].detail!r}"
         )

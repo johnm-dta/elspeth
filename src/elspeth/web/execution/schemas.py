@@ -128,13 +128,7 @@ def _validate_row_decomposition(
     in elspeth-cf84eb1b52. When that lands, this inequality is replaced by
     the full balance.
     """
-    sum_terminal = (
-        rows_succeeded
-        + rows_failed
-        + rows_routed_success
-        + rows_routed_failure
-        + rows_quarantined
-    )
+    sum_terminal = rows_succeeded + rows_failed + rows_routed_success + rows_routed_failure + rows_quarantined
     if rows_processed < sum_terminal:
         raise ValueError(
             f"Row count decomposition mismatch (over-counting): rows_processed={rows_processed} "
@@ -195,11 +189,7 @@ def _check_status_row_count_invariant(
     bypass the predicate.
     """
     success_indicator = rows_succeeded > 0 or rows_routed_success > 0
-    failure_indicator = (
-        rows_failed > 0
-        or rows_quarantined > 0
-        or rows_routed_failure > 0
-    )
+    failure_indicator = rows_failed > 0 or rows_quarantined > 0 or rows_routed_failure > 0
 
     if status in {"running", "pending", "cancelled"}:
         return
@@ -248,14 +238,10 @@ def _check_status_row_count_invariant(
 
     if status == "empty":
         if rows_processed != 0:
-            raise ValueError(
-                f"status='empty' requires rows_processed == 0, got {rows_processed}"
-            )
+            raise ValueError(f"status='empty' requires rows_processed == 0, got {rows_processed}")
         if success_indicator:
             raise ValueError(
-                f"status='empty' requires no success indicator "
-                f"(rows_succeeded={rows_succeeded}, "
-                f"rows_routed_success={rows_routed_success})"
+                f"status='empty' requires no success indicator (rows_succeeded={rows_succeeded}, rows_routed_success={rows_routed_success})"
             )
         if failure_indicator:
             raise ValueError(
@@ -271,8 +257,15 @@ def _check_status_row_count_invariant(
 
 
 class CompletedData(_StrictResponse):
-    """Payload for ``completed`` events (terminal)."""
+    """Payload for ``completed`` events (terminal).
 
+    The ``status`` field is the backend's authoritative classification of the
+    run outcome — frontends MUST NOT re-derive it from row counts (that would
+    duplicate the ``failure_indicator``/``success_indicator`` invariant in
+    ``_validate_row_decomposition`` and create dual-source-of-truth drift).
+    """
+
+    status: Literal["completed", "completed_with_failures", "empty"]
     rows_processed: int = Field(ge=0)
     rows_succeeded: int = Field(ge=0)
     rows_failed: int = Field(ge=0)
@@ -293,10 +286,28 @@ class CompletedData(_StrictResponse):
         )
         return self
 
+    @model_validator(mode="after")
+    def _check_status_consistency(self) -> Self:
+        # Mirror the L0 success_indicator/failure_indicator biconditional on
+        # the wire so the SSE event cannot drift from the run-status taxonomy.
+        # Reuses the canonical predicate at module scope — one source of truth
+        # for the classification rule.
+        _check_status_row_count_invariant(
+            self.status,
+            self.rows_processed,
+            self.rows_succeeded,
+            self.rows_failed,
+            self.rows_routed_success,
+            self.rows_routed_failure,
+            self.rows_quarantined,
+        )
+        return self
+
 
 class CancelledData(_StrictResponse):
     """Payload for ``cancelled`` events (terminal)."""
 
+    status: Literal["cancelled"] = "cancelled"
     rows_processed: int = Field(ge=0)
     rows_failed: int = Field(ge=0)
     rows_routed_success: int = Field(default=0, ge=0)
@@ -306,6 +317,7 @@ class CancelledData(_StrictResponse):
 class FailedData(_StrictResponse):
     """Payload for ``failed`` events (terminal)."""
 
+    status: Literal["failed"] = "failed"
     detail: str = Field(min_length=1)
     node_id: str | None
 

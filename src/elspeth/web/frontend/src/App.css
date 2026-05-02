@@ -95,6 +95,12 @@
   --color-status-completed:  #14b0ae;
   --color-status-failed:     #e85653;
   --color-status-cancelled:  #e38444;
+  /* Phase 2.2 (elspeth-0de989c56d): EMPTY uses a distinct neutral grey,
+     darker than --color-status-pending so the two non-success-but-clean
+     statuses are visually distinguishable.  COMPLETED_WITH_FAILURES
+     reuses --color-status-completed (teal) and signals "with caveats"
+     via the warning glyph rather than a different colour. */
+  --color-status-empty:      #888888;
 
   /* ── Surface variants ─────────────────────────────────────────────────── */
   --color-surface-raised:    #1a3d47;
@@ -563,6 +569,30 @@ summary:focus-visible {
 }
 .status-badge-cancelled::before {
   content: "\2014 "; /* — em dash */
+}
+
+/* Phase 2.2 (elspeth-0de989c56d): widened taxonomy.
+   - completed_with_failures: reuses --color-status-completed (teal) so the
+     run is visually grouped with successful runs, but the warning glyph
+     ⚠ signals "completed, with caveats."  No new color token needed.
+   - empty: a distinct neutral grey (separate from the teal-grey of pending)
+     paired with the empty-set glyph ∅ so an operator can tell at a glance
+     that the run produced zero rows.  Adds one new --color-status-empty
+     custom property to the root theme. */
+.status-badge-completed-with-failures {
+  background-color: rgba(20, 176, 174, 0.15);
+  color: var(--color-status-completed);
+}
+.status-badge-completed-with-failures::before {
+  content: "\26A0  "; /* ⚠ warning sign */
+}
+
+.status-badge-empty {
+  background-color: rgba(128, 128, 128, 0.15);
+  color: var(--color-status-empty);
+}
+.status-badge-empty::before {
+  content: "\2205  "; /* ∅ empty set */
 }
 
 /* ---------------------------------------------------------------------------

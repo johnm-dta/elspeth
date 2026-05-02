@@ -342,11 +342,52 @@ export interface DiscardSummary {
   sink_discards: number;
 }
 
+/**
+ * Single source of truth for the run-status taxonomy.
+ *
+ * Mirrors the backend `SessionRunStatus` Literal at
+ * `src/elspeth/web/sessions/protocol.py:31-32` and the corresponding
+ * `SESSION_RUN_STATUS_VALUES` / `SESSION_TERMINAL_RUN_STATUS_VALUES` frozensets.
+ *
+ * Phase 2.2 (elspeth-0de989c56d): the four-value operator-completion taxonomy
+ * (completed / completed_with_failures / failed / empty) plus cancelled gives
+ * the five-value terminal set; pending and running are non-terminal.
+ *
+ * Use `Record<RunStatus, T>` for badge/colour/label maps so adding a new
+ * status to the const tuple becomes a compile error in every consumer.
+ */
+export const RUN_STATUS_VALUES = [
+  "pending",
+  "running",
+  "completed",
+  "completed_with_failures",
+  "failed",
+  "empty",
+  "cancelled",
+] as const;
+export type RunStatus = (typeof RUN_STATUS_VALUES)[number];
+
+export const TERMINAL_RUN_STATUS_VALUES = [
+  "completed",
+  "completed_with_failures",
+  "failed",
+  "empty",
+  "cancelled",
+] as const;
+export type TerminalRunStatus = (typeof TERMINAL_RUN_STATUS_VALUES)[number];
+
+// Compile-time assertion: TerminalRunStatus must be a subset of RunStatus.
+// If a future widening adds a terminal value to TERMINAL_RUN_STATUS_VALUES
+// without adding it to RUN_STATUS_VALUES, this fails to compile.
+type _AssertTerminalSubset = TerminalRunStatus extends RunStatus ? true : never;
+const _terminalSubsetCheck: _AssertTerminalSubset = true;
+void _terminalSubsetCheck;
+
 /** An execution run. */
 export interface Run {
   id: string;
   session_id: string;
-  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  status: RunStatus;
   rows_processed: number;
   rows_failed: number;
   /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
@@ -398,6 +439,15 @@ export interface RunEventError {
 }
 
 export interface RunEventCompleted {
+  /**
+   * Phase 2.2 (elspeth-0de989c56d): backend-supplied operator-completion
+   * status. The SSE `event_type="completed"` envelope covers all three
+   * operator-completion values; the frontend MUST consume `data.status`
+   * verbatim rather than re-deriving from row counts (that would duplicate
+   * the L0 `failure_indicator` predicate and create dual-source-of-truth
+   * drift). Mirrors `CompletedData.status` at `web/execution/schemas.py`.
+   */
+  status: "completed" | "completed_with_failures" | "empty";
   rows_processed: number;
   rows_succeeded: number;
   rows_failed: number;
@@ -410,6 +460,7 @@ export interface RunEventCompleted {
 }
 
 export interface RunEventCancelled {
+  status: "cancelled";
   rows_processed: number;
   rows_failed: number;
   /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
@@ -419,6 +470,7 @@ export interface RunEventCancelled {
 }
 
 export interface RunEventFailed {
+  status: "failed";
   detail: string;
   node_id: string | null;
 }
@@ -432,7 +484,7 @@ export interface RunProgress {
   /** elspeth-5069612f3c — transform on_error DIVERT rows. */
   rows_routed_failure: number;
   recent_errors: RunEventError[];
-  status: "running" | "completed" | "cancelled" | "failed";
+  status: RunStatus;
 }
 
 export interface RunDiagnosticNodeState {

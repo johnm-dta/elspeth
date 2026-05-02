@@ -152,6 +152,7 @@ class TestRunEvent:
             timestamp=datetime.now(tz=UTC),
             event_type="completed",
             data=CompletedData(
+                status="completed_with_failures",
                 rows_processed=100,
                 rows_succeeded=95,
                 rows_failed=3,
@@ -254,6 +255,7 @@ class TestRunEventJsonRoundTrip:
             timestamp=datetime.now(tz=UTC),
             event_type="completed",
             data=CompletedData(
+                status="completed_with_failures",
                 rows_processed=100,
                 rows_succeeded=95,
                 rows_failed=3,
@@ -305,6 +307,7 @@ class TestCompletedDataDecomposition:
 
     def test_consistent_counts_accepted(self) -> None:
         data = CompletedData(
+            status="completed_with_failures",
             rows_processed=100,
             rows_succeeded=95,
             rows_failed=3,
@@ -317,6 +320,7 @@ class TestCompletedDataDecomposition:
         """Sum of terminal counts must not exceed rows_processed (over-counting bug)."""
         with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
             CompletedData(
+                status="completed_with_failures",
                 rows_processed=100,
                 rows_succeeded=95,
                 rows_failed=5,
@@ -337,6 +341,7 @@ class TestCompletedDataDecomposition:
         in elspeth-cf84eb1b52.
         """
         data = CompletedData(
+            status="completed",
             rows_processed=6,
             rows_succeeded=2,
             rows_failed=0,
@@ -350,6 +355,7 @@ class TestCompletedDataDecomposition:
 
     def test_zero_counts_accepted(self) -> None:
         data = CompletedData(
+            status="empty",
             rows_processed=0,
             rows_succeeded=0,
             rows_failed=0,
@@ -360,6 +366,7 @@ class TestCompletedDataDecomposition:
 
     def test_routed_rows_participate_in_decomposition(self) -> None:
         data = CompletedData(
+            status="completed_with_failures",
             rows_processed=100,
             rows_succeeded=90,
             rows_failed=3,
@@ -390,6 +397,7 @@ class TestRowCountConstraints:
     def test_negative_completed_rows_rejected(self) -> None:
         with pytest.raises(pydantic.ValidationError):
             CompletedData(
+                status="completed",
                 rows_processed=-1,
                 rows_succeeded=0,
                 rows_failed=0,
@@ -428,6 +436,7 @@ class TestCompletedDataLandscapeRunId:
     def test_empty_landscape_run_id_rejected(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="string_too_short"):
             CompletedData(
+                status="completed",
                 rows_processed=10,
                 rows_succeeded=10,
                 rows_failed=0,
@@ -521,6 +530,7 @@ class TestStrictCoercionRejected:
     def test_completed_data_rejects_string_int(self) -> None:
         with pytest.raises(pydantic.ValidationError):
             CompletedData(
+                status="completed_with_failures",
                 rows_processed="100",  # type: ignore[arg-type]
                 rows_succeeded=95,
                 rows_failed=3,
@@ -601,6 +611,7 @@ class TestExtraFieldsRejected:
     def test_completed_data_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
             CompletedData(
+                status="completed_with_failures",
                 rows_processed=100,
                 rows_succeeded=95,
                 rows_failed=3,
@@ -1296,12 +1307,156 @@ class TestRowsRoutedSplitPublicApiFieldStability:
     )
     def test_response_model_exposes_split_fields_in_json_schema(self, model_cls) -> None:
         properties = model_cls.model_json_schema()["properties"]
-        assert "rows_routed_success" in properties, (
-            f"{model_cls.__name__} must expose rows_routed_success in its JSON schema"
+        assert "rows_routed_success" in properties, f"{model_cls.__name__} must expose rows_routed_success in its JSON schema"
+        assert "rows_routed_failure" in properties, f"{model_cls.__name__} must expose rows_routed_failure in its JSON schema"
+        assert "rows_routed" not in properties, f"{model_cls.__name__} must not expose the legacy rows_routed field"
+
+
+class TestTerminalEventStatusDiscriminator:
+    """Phase 2.2 propagation: SSE terminal payloads carry ``status`` so the
+    frontend can render the widened taxonomy without re-implementing the
+    backend's ``failure_indicator`` predicate.
+
+    Without an explicit discriminator the frontend would have to redo the
+    ``success_indicator``/``failure_indicator`` classification from row counts,
+    duplicating the L0 invariant in ``_check_status_row_count_invariant`` and
+    creating exactly the dual-source-of-truth drift that
+    ``sessions/protocol.py:69-80`` exists to prevent.
+    """
+
+    def test_completed_data_accepts_completed_with_failures(self) -> None:
+        data = CompletedData(
+            status="completed_with_failures",
+            rows_processed=10,
+            rows_succeeded=7,
+            rows_failed=3,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            landscape_run_id="lscape-1",
         )
-        assert "rows_routed_failure" in properties, (
-            f"{model_cls.__name__} must expose rows_routed_failure in its JSON schema"
+        assert data.status == "completed_with_failures"
+
+    def test_completed_data_accepts_empty(self) -> None:
+        data = CompletedData(
+            status="empty",
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_quarantined=0,
+            landscape_run_id="lscape-empty",
         )
-        assert "rows_routed" not in properties, (
-            f"{model_cls.__name__} must not expose the legacy rows_routed field"
+        assert data.status == "empty"
+
+    def test_completed_data_rejects_failed_status(self) -> None:
+        """``CompletedData`` only accepts the operator-completion subset.
+
+        ``failed`` is a separate event_type with its own payload (FailedData)
+        — the ``Literal`` constraint on ``CompletedData.status`` keeps the
+        SSE event_type and status from drifting apart.
+        """
+        with pytest.raises(pydantic.ValidationError):
+            CompletedData(
+                status="failed",  # type: ignore[arg-type]
+                rows_processed=0,
+                rows_succeeded=0,
+                rows_failed=0,
+                rows_quarantined=0,
+                landscape_run_id="lscape-1",
+            )
+
+    def test_completed_data_rejects_running_status(self) -> None:
+        """Non-terminal statuses must not appear on a terminal SSE event."""
+        with pytest.raises(pydantic.ValidationError):
+            CompletedData(
+                status="running",  # type: ignore[arg-type]
+                rows_processed=0,
+                rows_succeeded=0,
+                rows_failed=0,
+                rows_quarantined=0,
+                landscape_run_id="lscape-1",
+            )
+
+    def test_completed_data_rejects_completed_with_no_success_indicator(self) -> None:
+        """status='completed' with zero success rows is a status/count mismatch.
+
+        Mirrors the L0 invariant: ``completed`` requires
+        ``rows_succeeded > 0 OR rows_routed_success > 0``.  This catches a
+        producer-side bug where the engine emits a clean-completion verdict
+        for a run that produced no success rows.
+        """
+        with pytest.raises(pydantic.ValidationError, match="success indicator"):
+            CompletedData(
+                status="completed",
+                rows_processed=5,
+                rows_succeeded=0,
+                rows_failed=0,
+                rows_quarantined=0,
+                landscape_run_id="lscape-1",
+            )
+
+    def test_completed_data_rejects_completed_with_failures_with_no_failure_indicator(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match="failure indicator"):
+            CompletedData(
+                status="completed_with_failures",
+                rows_processed=10,
+                rows_succeeded=10,
+                rows_failed=0,
+                rows_routed_failure=0,
+                rows_quarantined=0,
+                landscape_run_id="lscape-1",
+            )
+
+    def test_completed_data_rejects_empty_with_nonzero_rows_processed(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match="rows_processed == 0"):
+            CompletedData(
+                status="empty",
+                rows_processed=5,
+                rows_succeeded=0,
+                rows_failed=0,
+                rows_quarantined=0,
+                landscape_run_id="lscape-1",
+            )
+
+    def test_cancelled_data_status_defaults_to_cancelled(self) -> None:
+        """``CancelledData.status`` has a default — existing call sites that
+        don't pass it continue to work, and the wire payload is uniform with
+        ``CompletedData``/``FailedData``.
+        """
+        data = CancelledData(rows_processed=10, rows_failed=2)
+        assert data.status == "cancelled"
+
+    def test_cancelled_data_rejects_other_status(self) -> None:
+        with pytest.raises(pydantic.ValidationError):
+            CancelledData(status="completed", rows_processed=10, rows_failed=0)  # type: ignore[arg-type]
+
+    def test_failed_data_status_defaults_to_failed(self) -> None:
+        data = FailedData(detail="Pipeline crashed", node_id=None)
+        assert data.status == "failed"
+
+    def test_failed_data_rejects_other_status(self) -> None:
+        with pytest.raises(pydantic.ValidationError):
+            FailedData(status="completed", detail="x", node_id=None)  # type: ignore[arg-type]
+
+    def test_run_event_completed_carries_status_through_round_trip(self) -> None:
+        """Frontend consumes the SSE event as JSON — ``data.status`` must
+        survive serialization so the React store can read it without redoing
+        the row-count classification.
+        """
+        original = RunEvent(
+            run_id="run-cwf",
+            timestamp=datetime.now(tz=UTC),
+            event_type="completed",
+            data=CompletedData(
+                status="completed_with_failures",
+                rows_processed=10,
+                rows_succeeded=7,
+                rows_failed=3,
+                rows_quarantined=0,
+                landscape_run_id="lscape-cwf",
+            ),
         )
+        as_json = original.model_dump_json()
+        restored = RunEvent.model_validate_json(as_json)
+        assert isinstance(restored.data, CompletedData)
+        assert restored.data.status == "completed_with_failures"

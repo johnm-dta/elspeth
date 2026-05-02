@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.enums import RunStatus
 from elspeth.core.config import (
@@ -1346,6 +1347,336 @@ class TestCompletionPathExternalCancellation:
 
         with pytest.raises(ValueError, match="completed"):
             service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
+
+
+# ── Post-Completion Exception Recovery (elspeth-879f6de6bd) ───────────
+
+
+@pytest.mark.usefixtures("mock_pipeline_config_assembly")
+class TestPostCompletionExceptionRecovery:
+    """Defence-in-depth: when a BaseException fires AFTER ``update_run_status``
+    has already committed a terminal state, the recovery must not attempt an
+    illegal terminal→failed transition.
+
+    elspeth-879f6de6bd: ``LEGAL_RUN_TRANSITIONS`` makes all five terminal
+    statuses (``completed``, ``completed_with_failures``, ``failed``,
+    ``empty``, ``cancelled``) outgoing-empty.  The pre-fix recovery at
+    ``_run_pipeline``'s ``except BaseException`` handler attempted
+    ``update_run_status(status="failed", ...)`` unconditionally, raising
+    ``ValueError("Illegal run transition: 'completed' → 'failed'. Allowed: []")``
+    and losing the original exception in ``__context__``.
+
+    The fix consults ``get_run`` first; if the run is already terminal it
+    skips both the status update and the misleading ``failed`` SSE broadcast
+    (audit primacy: SSE must not contradict the audit row).
+    """
+
+    @staticmethod
+    def _make_completed_orchestrator(status: RunStatus = RunStatus.COMPLETED) -> MagicMock:
+        """Build an orchestrator stub whose ``run`` returns a terminal result.
+
+        Counts are status-aware so the SSE-payload status/count cross-consistency
+        validator (``CompletedData._check_status_consistency``) accepts the
+        result.  COMPLETED_WITH_FAILURES requires both a success and a failure
+        indicator; EMPTY requires zero rows; COMPLETED requires success only;
+        FAILED tolerates any shape.
+        """
+        mock_orch = MagicMock()
+        mock_result = MagicMock()
+        mock_result.status = status
+        if status == RunStatus.COMPLETED_WITH_FAILURES:
+            mock_result.rows_processed = 10
+            mock_result.rows_succeeded = 8
+            mock_result.rows_failed = 2
+            mock_result.rows_routed_success = 0
+            mock_result.rows_routed_failure = 0
+            mock_result.rows_quarantined = 0
+        elif status == RunStatus.EMPTY:
+            mock_result.rows_processed = 0
+            mock_result.rows_succeeded = 0
+            mock_result.rows_failed = 0
+            mock_result.rows_routed_success = 0
+            mock_result.rows_routed_failure = 0
+            mock_result.rows_quarantined = 0
+        else:
+            mock_result.rows_processed = 10
+            mock_result.rows_succeeded = 10
+            mock_result.rows_failed = 0
+            mock_result.rows_routed_success = 0
+            mock_result.rows_routed_failure = 0
+            mock_result.rows_quarantined = 0
+        mock_result.run_id = "landscape-run-postcompletion"
+        mock_orch.run.return_value = mock_result
+        return mock_orch
+
+    @staticmethod
+    def _wrap_broadcaster_to_raise(
+        service: ExecutionServiceImpl,
+        *,
+        on_event_type: str,
+        exc: BaseException,
+    ) -> list[tuple[str, Any]]:
+        """Replace the broadcaster with a spy that records all calls and raises
+        ``exc`` when the broadcast event_type matches ``on_event_type``.
+
+        Returns the list that will be appended to as broadcasts occur.  Tests
+        can assert on event_types after ``_run_pipeline`` returns.
+        """
+        original_broadcast = service._broadcaster.broadcast
+        broadcast_calls: list[tuple[str, Any]] = []
+
+        def crashing_broadcast(rid: str, event: Any) -> None:
+            broadcast_calls.append((rid, event))
+            if event.event_type == on_event_type:
+                raise exc
+            original_broadcast(rid, event)
+
+        service._broadcaster.broadcast = crashing_broadcast  # type: ignore[assignment]
+        return broadcast_calls
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.preflight.ExecutionGraph")
+    @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_post_completion_broadcast_crash_skips_failed_status_update(
+        self,
+        mock_payload: MagicMock,
+        mock_landscape: MagicMock,
+        mock_load: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_graph_cls: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Run completes; success-path ``broadcast("completed", ...)`` raises
+        ``RuntimeError``.  The recovery must NOT attempt a third
+        ``update_run_status(status="failed", ...)`` because the audit row is
+        already ``completed`` (illegal terminal→failed transition).
+        """
+        mock_bundle = MagicMock()
+        mock_bundle.aggregations = {}
+        mock_instantiate.return_value = mock_bundle
+        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+        mock_load.return_value = _mock_pipeline_settings()
+        mock_orch_cls.return_value = self._make_completed_orchestrator(RunStatus.COMPLETED)
+
+        # update_run_status is permissive (just records calls); the audit row
+        # is conceptually "completed" after the second call.  The recovery's
+        # third call (with status="failed") MUST NOT happen.
+        mock_session_service.get_run.return_value = MagicMock(status="completed")
+
+        broadcast_calls = self._wrap_broadcaster_to_raise(
+            service,
+            on_event_type="completed",
+            exc=RuntimeError("simulated SSE crash"),
+        )
+
+        run_id = str(uuid4())
+        with patch("elspeth.web.execution.service.slog") as mock_slog, pytest.raises(RuntimeError, match="simulated SSE crash"):
+            service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
+
+        # Exactly two status updates: "running" (line 650) and the terminal
+        # "completed" (line 857).  No third "failed" call.
+        statuses = [c.kwargs.get("status") for c in mock_session_service.update_run_status.call_args_list]
+        assert statuses == ["running", "completed"], f"Expected [running, completed], got {statuses}"
+
+        # The recovery must emit a structured signal so the post-terminal
+        # exception is observable.  Field names mirror surrounding handler
+        # slog calls (run_id, original_exc_class, exc_class_chain).
+        post_terminal_logs = [
+            c for c in mock_slog.error.call_args_list if c.args and c.args[0] == "post_terminal_exception_in_run_pipeline"
+        ]
+        assert len(post_terminal_logs) == 1, (
+            f"Expected one post_terminal_exception_in_run_pipeline log, got {len(post_terminal_logs)}: "
+            f"{[c.args[0] for c in mock_slog.error.call_args_list if c.args]}"
+        )
+        log_kwargs = post_terminal_logs[0].kwargs
+        assert log_kwargs["run_id"] == run_id
+        assert log_kwargs["terminal_status"] == "completed"
+        assert log_kwargs["original_exc_class"] == "RuntimeError"
+        # Chain walk mirrors _on_pipeline_done's contract: class names only,
+        # no str(exc) text (Tier-3 redaction).
+        assert log_kwargs["exc_class_chain"] == ["RuntimeError"]
+        assert "exc_msg" not in log_kwargs  # redaction discipline
+
+        # No "failed" SSE event must be emitted from the recovery — the run
+        # actually completed; broadcasting "failed" would diverge from audit.
+        recovery_failed_events = [event for (_, event) in broadcast_calls if event.event_type == "failed"]
+        assert recovery_failed_events == [], f"Recovery must not broadcast 'failed' when run is terminal; got: {recovery_failed_events}"
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.preflight.ExecutionGraph")
+    @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_post_completion_with_failures_also_skips_failed_status_update(
+        self,
+        mock_payload: MagicMock,
+        mock_landscape: MagicMock,
+        mock_load: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_graph_cls: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Regression catcher for the partial-tuple bug pattern.
+
+        Several call sites in the codebase use a hardcoded
+        ``("completed", "failed", "cancelled")`` tuple to detect terminality,
+        which omits ``completed_with_failures`` and ``empty``.  The fix MUST
+        use the full terminal set derived from ``LEGAL_RUN_TRANSITIONS`` /
+        ``SESSION_TERMINAL_RUN_STATUS_VALUES``.  This test proves the guard
+        fires for ``completed_with_failures`` — a state the partial tuple
+        would miss.
+        """
+        mock_bundle = MagicMock()
+        mock_bundle.aggregations = {}
+        mock_instantiate.return_value = mock_bundle
+        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+        mock_load.return_value = _mock_pipeline_settings()
+        mock_orch_cls.return_value = self._make_completed_orchestrator(RunStatus.COMPLETED_WITH_FAILURES)
+
+        mock_session_service.get_run.return_value = MagicMock(status="completed_with_failures")
+
+        self._wrap_broadcaster_to_raise(
+            service,
+            on_event_type="completed",
+            exc=RuntimeError("simulated SSE crash"),
+        )
+
+        run_id = str(uuid4())
+        with patch("elspeth.web.execution.service.slog") as mock_slog, pytest.raises(RuntimeError):
+            service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
+
+        statuses = [c.kwargs.get("status") for c in mock_session_service.update_run_status.call_args_list]
+        assert statuses == ["running", "completed_with_failures"], f"Expected [running, completed_with_failures], got {statuses}"
+
+        post_terminal_logs = [
+            c for c in mock_slog.error.call_args_list if c.args and c.args[0] == "post_terminal_exception_in_run_pipeline"
+        ]
+        assert len(post_terminal_logs) == 1
+        assert post_terminal_logs[0].kwargs["terminal_status"] == "completed_with_failures"
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.preflight.ExecutionGraph")
+    @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_post_completion_get_run_probe_failure_falls_through(
+        self,
+        mock_payload: MagicMock,
+        mock_landscape: MagicMock,
+        mock_load: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_graph_cls: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """When ``get_run`` itself raises during the recovery probe, fall
+        through to the existing best-effort recovery (attempt
+        ``update_run_status("failed", ...)``).
+
+        Documents a **known gap**: this test exercises the fall-through with
+        a permissive ``update_run_status`` mock that does NOT enforce
+        ``LEGAL_RUN_TRANSITIONS``.  In production, if the run is genuinely
+        terminal AND the probe fails AND ``update_run_status`` therefore
+        raises ``ValueError``, the original exception is still lost — same
+        as today's behaviour.  Closing that gap requires a larger design
+        change (fail-closed on probe failure, or post-hoc reconcile of the
+        ValueError) and is out of scope for elspeth-879f6de6bd.
+        """
+        mock_bundle = MagicMock()
+        mock_bundle.aggregations = {}
+        mock_instantiate.return_value = mock_bundle
+        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+        mock_load.return_value = _mock_pipeline_settings()
+        mock_orch_cls.return_value = self._make_completed_orchestrator(RunStatus.COMPLETED)
+
+        # Probe raises a generic SQLAlchemy-family-ish error.  Use the actual
+        # SQLAlchemyError to match the recovery's narrow catch.
+        mock_session_service.get_run.side_effect = SQLAlchemyError("simulated DB hiccup")
+
+        self._wrap_broadcaster_to_raise(
+            service,
+            on_event_type="completed",
+            exc=RuntimeError("simulated SSE crash"),
+        )
+
+        run_id = str(uuid4())
+        with patch("elspeth.web.execution.service.slog") as mock_slog, pytest.raises(RuntimeError, match="simulated SSE crash"):
+            service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
+
+        # The probe failure must surface as a structured log so it's observable.
+        probe_failed_logs = [c for c in mock_slog.error.call_args_list if c.args and c.args[0] == "post_exception_run_state_probe_failed"]
+        assert len(probe_failed_logs) == 1, f"Expected one post_exception_run_state_probe_failed log, got {len(probe_failed_logs)}"
+
+        # Fall-through: recovery DID attempt the failed update.  Three calls
+        # total: running, completed, failed.
+        statuses = [c.kwargs.get("status") for c in mock_session_service.update_run_status.call_args_list]
+        assert statuses == ["running", "completed", "failed"], (
+            f"Probe-failure path must fall through to update_run_status('failed', ...); got {statuses}"
+        )
+
+        # The post_terminal_exception_in_run_pipeline log must NOT have
+        # been emitted (we couldn't determine the run was terminal).
+        post_terminal_logs = [
+            c for c in mock_slog.error.call_args_list if c.args and c.args[0] == "post_terminal_exception_in_run_pipeline"
+        ]
+        assert post_terminal_logs == []
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.preflight.ExecutionGraph")
+    @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_running_state_exception_still_records_failed(
+        self,
+        mock_payload: MagicMock,
+        mock_landscape: MagicMock,
+        mock_load: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_graph_cls: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Negative control: when the orchestrator raises BEFORE the terminal
+        transition (run is still ``running``), the existing happy-path
+        recovery must still land — the new guard MUST NOT short-circuit
+        non-terminal states.
+        """
+        mock_bundle = MagicMock()
+        mock_bundle.aggregations = {}
+        mock_instantiate.return_value = mock_bundle
+        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+        mock_load.return_value = _mock_pipeline_settings()
+        mock_orch = MagicMock()
+        mock_orch.run.side_effect = RuntimeError("orchestrator blew up mid-run")
+        mock_orch_cls.return_value = mock_orch
+
+        # DB still holds "running" because we never reached the terminal
+        # transition.
+        mock_session_service.get_run.return_value = MagicMock(status="running")
+
+        run_id = str(uuid4())
+        with patch("elspeth.web.execution.service.slog") as mock_slog, pytest.raises(RuntimeError, match="orchestrator blew up"):
+            service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
+
+        statuses = [c.kwargs.get("status") for c in mock_session_service.update_run_status.call_args_list]
+        assert statuses == ["running", "failed"], f"Non-terminal path must still record failure; got {statuses}"
+
+        post_terminal_logs = [
+            c for c in mock_slog.error.call_args_list if c.args and c.args[0] == "post_terminal_exception_in_run_pipeline"
+        ]
+        assert post_terminal_logs == [], "Guard must NOT fire for non-terminal current status"
 
 
 # ── Liveness Registry ─────────────────────────────────────────────────
@@ -2887,3 +3218,86 @@ class TestResolveYamlPaths:
         yaml_str = "source:\n  plugin: csv\n"
         result = _resolve_yaml_paths(yaml_str, "/srv/data")
         assert "plugin: csv" in result
+
+
+# ── Phase 2.2 propagation: _partial_completion_message ───────────────
+
+
+class TestPartialCompletionMessage:
+    """Sibling to ``_structural_failure_message`` for COMPLETED_WITH_FAILURES.
+
+    Populated into ``RunRecord.error`` so the frontend can render failure
+    evidence for partial-success runs without re-implementing the L0
+    ``failure_indicator`` predicate.  The RunRecord invariant at
+    ``sessions/protocol.py:237-238`` permits ``error`` on any status; only
+    ``failed`` *requires* it.
+    """
+
+    def test_returns_non_empty_string(self) -> None:
+        from elspeth.web.execution.service import _partial_completion_message
+
+        msg = _partial_completion_message(
+            rows_succeeded=7,
+            rows_failed=3,
+            rows_routed_failure=1,
+            rows_quarantined=2,
+        )
+        assert msg
+        assert isinstance(msg, str)
+
+    def test_includes_all_count_fields(self) -> None:
+        """Operator must be able to read the failure breakdown without
+        opening /diagnostics.  The four counts are the entire per-run
+        failure-evidence surface in ``RunRecord``."""
+        from elspeth.web.execution.service import _partial_completion_message
+
+        msg = _partial_completion_message(
+            rows_succeeded=7,
+            rows_failed=3,
+            rows_routed_failure=1,
+            rows_quarantined=2,
+        )
+        assert "rows_succeeded=7" in msg
+        assert "rows_failed=3" in msg
+        assert "rows_routed_failure=1" in msg
+        assert "rows_quarantined=2" in msg
+
+    def test_points_at_diagnostics(self) -> None:
+        """Mirrors ``_structural_failure_message`` — the operator-actionable
+        next step is to inspect /diagnostics for per-row detail."""
+        from elspeth.web.execution.service import _partial_completion_message
+
+        msg = _partial_completion_message(
+            rows_succeeded=1,
+            rows_failed=1,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+        )
+        assert "/diagnostics" in msg
+
+    def test_deterministic_given_inputs(self) -> None:
+        """No timestamps, no random IDs — the message is a pure function of
+        its counts so audit-trail comparisons are stable."""
+        from elspeth.web.execution.service import _partial_completion_message
+
+        a = _partial_completion_message(rows_succeeded=5, rows_failed=2, rows_routed_failure=1, rows_quarantined=0)
+        b = _partial_completion_message(rows_succeeded=5, rows_failed=2, rows_routed_failure=1, rows_quarantined=0)
+        assert a == b
+
+    def test_does_not_echo_user_row_data(self) -> None:
+        """Same security posture as ``_structural_failure_message`` — the
+        message is structural facts only; no row keys, no LLM prompts, no
+        secret-resolution candidates."""
+        from elspeth.web.execution.service import _partial_completion_message
+
+        msg = _partial_completion_message(
+            rows_succeeded=1,
+            rows_failed=1,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+        )
+        # Sanity: only structural words.  If a future change inlines a row
+        # value, this assertion would fail loudly.
+        forbidden_substrings = ["row_id=", "key=", "value=", "prompt=", "secret"]
+        for forbidden in forbidden_substrings:
+            assert forbidden not in msg.lower(), f"_partial_completion_message must not include {forbidden!r} (row-data leak)"

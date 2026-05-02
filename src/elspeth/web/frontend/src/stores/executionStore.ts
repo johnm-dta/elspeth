@@ -22,6 +22,7 @@ import type {
   RunEventCompleted,
   RunEventCancelled,
   RunEventFailed,
+  RunStatus,
   ValidationResult,
   ApiError,
 } from "@/types/index";
@@ -64,6 +65,39 @@ interface ExecutionState {
 // The WebSocket connection handle is held outside Zustand state
 // because it's not serialisable and components don't need to read it.
 let wsConnection: WebSocketConnection | null = null;
+
+/**
+ * Derive the run status from a RunEvent.
+ *
+ * Phase 2.2 (elspeth-0de989c56d): for terminal events the backend now
+ * supplies an explicit `data.status` discriminator on each terminal payload.
+ * The frontend MUST consume it verbatim — re-deriving from row counts would
+ * duplicate the L0 `failure_indicator` predicate
+ * (`web/execution/schemas.py:_check_status_row_count_invariant`) and create
+ * dual-source-of-truth drift between backend and frontend classification.
+ *
+ * The exhaustiveness `assertNever` guard makes a future Phase 2.3 widening
+ * (a new RunEvent.event_type) a compile error here rather than a silent
+ * fall-through to "running".
+ */
+function deriveStatus(event: RunEvent): RunStatus {
+  switch (event.event_type) {
+    case "progress":
+    case "error":
+      // Non-terminal events: pipeline is still in flight.
+      return "running";
+    case "completed":
+      return (event.data as RunEventCompleted).status;
+    case "cancelled":
+      return (event.data as RunEventCancelled).status;
+    case "failed":
+      return (event.data as RunEventFailed).status;
+    default: {
+      const _exhaustive: never = event.event_type;
+      throw new Error(`Unhandled RunEvent.event_type: ${String(_exhaustive)}`);
+    }
+  }
+}
 
 /**
  * Apply a RunEvent to the current progress state.
@@ -121,15 +155,7 @@ function applyRunEvent(
     rows_routed_success: rowsRoutedSuccess,
     rows_routed_failure: rowsRoutedFailure,
     recent_errors: recentErrors,
-    // "error" is non-terminal (per-row exception) -- status stays "running"
-    status:
-      event.event_type === "completed"
-        ? "completed"
-        : event.event_type === "cancelled"
-          ? "cancelled"
-          : event.event_type === "failed"
-            ? "failed"
-            : "running",
+    status: deriveStatus(event),
   };
 
   // Update the run in the list when terminal.
@@ -140,7 +166,7 @@ function applyRunEvent(
       r.id === event.run_id
         ? {
             ...r,
-            status: newProgress.status as Run["status"],
+            status: newProgress.status,
             rows_processed: rowsProcessed,
             rows_failed: rowsFailed,
             rows_routed_success: rowsRoutedSuccess,

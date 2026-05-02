@@ -20,7 +20,7 @@ import time
 from collections.abc import Coroutine
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import Any, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
 import structlog
@@ -59,7 +59,12 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.sessions.converters import state_from_record
-from elspeth.web.sessions.protocol import RunAlreadyActiveError, SessionRunStatus, SessionServiceProtocol  # B1: canonical definition
+from elspeth.web.sessions.protocol import (
+    SESSION_TERMINAL_RUN_STATUS_VALUES,
+    RunAlreadyActiveError,
+    SessionRunStatus,
+    SessionServiceProtocol,
+)  # B1: canonical definition
 
 slog = structlog.get_logger()
 
@@ -151,6 +156,34 @@ def _structural_failure_message(*, rows_processed: int) -> str:
         f"rows_succeeded=0, rows_routed_success=0). "
         f"All rows either failed terminally or were routed via on_error to a "
         f"failure sink. Inspect /diagnostics for per-row failure details."
+    )
+
+
+def _partial_completion_message(
+    *,
+    rows_succeeded: int,
+    rows_failed: int,
+    rows_routed_failure: int,
+    rows_quarantined: int,
+) -> str:
+    """Operator-readable summary for COMPLETED_WITH_FAILURES runs.
+
+    Sibling to ``_structural_failure_message``: a structural fact, no
+    candidate-secret material, no echoed user-row data. Populated into
+    ``session_error`` so the frontend (and any other audit consumer) has a
+    single field to render for failure-like terminal runs without needing to
+    re-implement the L0 ``failure_indicator`` predicate.
+
+    The RunRecord invariant at sessions/protocol.py:237-238 requires a
+    non-empty ``error`` only for ``status='failed'`` — populating ``error``
+    on COMPLETED_WITH_FAILURES is permitted, and the schema validators
+    accept it (see tests/unit/web/execution/test_schemas.py:1156).
+    """
+    return (
+        f"Run completed with failures (rows_succeeded={rows_succeeded}, "
+        f"rows_failed={rows_failed}, rows_routed_failure={rows_routed_failure}, "
+        f"rows_quarantined={rows_quarantined}). "
+        f"Inspect /diagnostics for per-row failure details."
     )
 
 
@@ -853,6 +886,18 @@ class ExecutionServiceImpl:
             session_error: str | None = None
             if result.status == RunStatus.FAILED:
                 session_error = _structural_failure_message(rows_processed=result.rows_processed)
+            elif result.status == RunStatus.COMPLETED_WITH_FAILURES:
+                # Populate error with a structural summary so the frontend can
+                # render failure evidence for partial-success runs without
+                # duplicating the L0 failure_indicator predicate.  RunRecord
+                # invariant (sessions/protocol.py:237-238) permits error on
+                # any status; only FAILED *requires* it.
+                session_error = _partial_completion_message(
+                    rows_succeeded=result.rows_succeeded,
+                    rows_failed=result.rows_failed,
+                    rows_routed_failure=result.rows_routed_failure,
+                    rows_quarantined=result.rows_quarantined,
+                )
             try:
                 self._call_async(
                     self._session_service.update_run_status(
@@ -935,6 +980,24 @@ class ExecutionServiceImpl:
                         timestamp=datetime.now(tz=UTC),
                         event_type="completed",
                         data=CompletedData(
+                            # session_status is the engine-decided four-value
+                            # operator-completion classification (completed /
+                            # completed_with_failures / empty); pass it
+                            # verbatim so the SSE event carries the same
+                            # status the run-status DB row has.  Frontend
+                            # MUST NOT re-derive from row counts.
+                            #
+                            # cast is sound: in the else branch of
+                            # ``if result.status == RunStatus.FAILED`` we know
+                            # result.status ∈ {COMPLETED, COMPLETED_WITH_FAILURES,
+                            # EMPTY} (RUNNING/INTERRUPTED raise in the mapper),
+                            # so session_status ∈ {"completed",
+                            # "completed_with_failures", "empty"}.  Pydantic
+                            # offensively re-validates the narrow Literal.
+                            status=cast(
+                                Literal["completed", "completed_with_failures", "empty"],
+                                session_status,
+                            ),
                             rows_processed=result.rows_processed,
                             rows_succeeded=result.rows_succeeded,
                             rows_failed=result.rows_failed,
@@ -987,27 +1050,105 @@ class ExecutionServiceImpl:
 
             client_msg = _sanitize_error_for_client(exc)
 
-            # R6 fix: Skip _call_async for KeyboardInterrupt/SystemExit — the event
-            # loop is likely shutting down. Let orphan cleanup handle the status.
+            # elspeth-879f6de6bd: when an exception fires AFTER the success
+            # path has already committed a terminal status (post-completion
+            # broadcast crash, audit-write failure, telemetry exhaustion,
+            # OOM mid-finalize, etc.), update_run_status(status="failed", ...)
+            # raises ValueError because LEGAL_RUN_TRANSITIONS makes every
+            # terminal status outgoing-empty.  The pre-fix recovery let that
+            # ValueError escape, losing the original ``exc`` into __context__.
+            #
+            # Probe current run state first; if the audit row is already
+            # terminal, skip both the illegal status update AND the
+            # ``"failed"`` SSE broadcast (which would otherwise contradict
+            # the audit row's true terminal status — audit primacy).
+            #
+            # Probe is non-signal-only: signals (KeyboardInterrupt, SystemExit)
+            # mean the event loop is shutting down — async calls including
+            # get_run() are unsafe.  Signal-path broadcast preserves the R6/B7
+            # shape; if a signal fires mid-broadcast against a completed run
+            # the SSE may diverge from audit, but the event loop is closing
+            # and consumers likely won't receive the event regardless.  A
+            # narrower fix for that asymmetry is tracked separately if
+            # observed in the wild.
+            run_already_terminal = False
             if not isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                current_terminal_status: SessionRunStatus | None = None
                 try:
-                    self._call_async(self._session_service.update_run_status(run_uuid, status="failed", error=client_msg))
-                except (SQLAlchemyError, OSError) as status_err:
-                    # Narrow catch (canonical pattern, commits b8ba2214/127417cb):
-                    # SQLAlchemyError family + OSError only. Programmer bugs in
-                    # update_run_status must propagate so they don't masquerade
-                    # as a transient status-update failure.  exc_class only —
-                    # ``str(status_err)`` can surface SQL + bound parameters +
-                    # ``__cause__`` credentials, and ``client_msg`` is already
-                    # the sanitized form of ``exc`` (see _sanitize_error_for_client
-                    # above), so re-logging it as ``original_error`` gives no
-                    # extra triage surface beyond the class name.
+                    current_run = self._call_async(self._session_service.get_run(run_uuid))
+                    current_status = current_run.status
+                    if current_status in SESSION_TERMINAL_RUN_STATUS_VALUES:
+                        run_already_terminal = True
+                        current_terminal_status = current_status
+                except (SQLAlchemyError, OSError, ValueError) as probe_err:
+                    # Probe failure is part of the audit-recovery machinery
+                    # (slog is policy-correct here per logging-telemetry-policy:
+                    # this IS an audit-system-degradation case).  Fall through
+                    # to the existing best-effort recovery so we don't make
+                    # the probe-failure scenario worse than today.
                     slog.error(
-                        "run_status_update_failed_in_except",
+                        "post_exception_run_state_probe_failed",
                         run_id=run_id,
                         original_exc_class=type(exc).__name__,
-                        status_update_exc_class=type(status_err).__name__,
+                        probe_exc_class=type(probe_err).__name__,
                     )
+
+                if run_already_terminal:
+                    # Class-name-only chain walk mirrors _on_pipeline_done's
+                    # contract (lines below): pipeline exceptions may chain
+                    # SQLAlchemyError ([SQL: ...] / [parameters: ...]),
+                    # Tier-3 sanitizer output, or source-rendering fragments
+                    # via __cause__ / __context__.  Inline-duplicated rather
+                    # than extracted: only two call sites today, and CLAUDE.md
+                    # discourages refactor-for-the-sake-of-it.
+                    exc_class_chain: list[str] = []
+                    # Local name distinct from Pattern A's ``current`` (the
+                    # RunRecord at line 657) so mypy types it as
+                    # ``BaseException | None`` rather than ``RunRecord``.
+                    current_exc: BaseException | None = exc
+                    seen: set[int] = set()
+                    while current_exc is not None and len(exc_class_chain) < 5:
+                        if id(current_exc) in seen:
+                            break
+                        seen.add(id(current_exc))
+                        exc_class_chain.append(type(current_exc).__name__)
+                        current_exc = current_exc.__cause__ or current_exc.__context__
+                    # TODO(elspeth-879f6de6bd, follow-up observation): per
+                    # logging-telemetry-policy this is post-audit operational
+                    # noise (audit succeeded), so it ideally belongs in
+                    # telemetry rather than slog.  The telemetry surface
+                    # plumbed through _run_pipeline is per-run pipeline
+                    # telemetry from settings.telemetry, not operational
+                    # meta-telemetry; emitting here would require new
+                    # plumbing.  Using slog for parity with surrounding
+                    # handler code; observation filed for the broader
+                    # operational-telemetry plumbing.
+                    slog.error(
+                        "post_terminal_exception_in_run_pipeline",
+                        run_id=run_id,
+                        terminal_status=current_terminal_status,
+                        original_exc_class=type(exc).__name__,
+                        exc_class_chain=exc_class_chain,
+                    )
+                else:
+                    try:
+                        self._call_async(self._session_service.update_run_status(run_uuid, status="failed", error=client_msg))
+                    except (SQLAlchemyError, OSError) as status_err:
+                        # Narrow catch (canonical pattern, commits b8ba2214/127417cb):
+                        # SQLAlchemyError family + OSError only. Programmer bugs in
+                        # update_run_status must propagate so they don't masquerade
+                        # as a transient status-update failure.  exc_class only —
+                        # ``str(status_err)`` can surface SQL + bound parameters +
+                        # ``__cause__`` credentials, and ``client_msg`` is already
+                        # the sanitized form of ``exc`` (see _sanitize_error_for_client
+                        # above), so re-logging it as ``original_error`` gives no
+                        # extra triage surface beyond the class name.
+                        slog.error(
+                            "run_status_update_failed_in_except",
+                            run_id=run_id,
+                            original_exc_class=type(exc).__name__,
+                            status_update_exc_class=type(status_err).__name__,
+                        )
             else:
                 slog.warning(
                     "skipping_status_update_on_signal",
@@ -1015,15 +1156,22 @@ class ExecutionServiceImpl:
                     exc_type=type(exc).__name__,
                 )
 
-            self._broadcaster.broadcast(
-                run_id,
-                RunEvent(
-                    run_id=run_id,
-                    timestamp=datetime.now(tz=UTC),
-                    event_type="failed",
-                    data=FailedData(detail=client_msg, node_id=None),
-                ),
-            )
+            # Broadcast a "failed" SSE event ONLY when the audit row isn't
+            # already terminal.  Broadcasting "failed" against a "completed"
+            # audit row would tell SSE consumers the opposite of audit truth
+            # and violate the audit-primacy constraint in CLAUDE.md.
+            # Re-emitting the *correct* terminal SSE event for consumer
+            # continuity is a separate UX improvement.
+            if not run_already_terminal:
+                self._broadcaster.broadcast(
+                    run_id,
+                    RunEvent(
+                        run_id=run_id,
+                        timestamp=datetime.now(tz=UTC),
+                        event_type="failed",
+                        data=FailedData(detail=client_msg, node_id=None),
+                    ),
+                )
             raise
         finally:
             # Always clean up, regardless of success or failure

@@ -1275,38 +1275,38 @@ allow_hits:
     \ name leakage)"
   safety: Type dispatch for sanitization, not error suppression
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=ac10bee9d30b7f5f
+- key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=4f1ba76c129438f4
   owner: web-execution
   reason: Session may never have called execute(), so no lock exists in _session_locks. Cleanup is called
     on every session delete regardless. Matches ProgressBroadcaster.cleanup_run() pattern.
   safety: Missing key means session was never executed against; no cleanup needed
   expires: null
-- key: web/execution/service.py:R8:ExecutionServiceImpl:execute:fp=5b74dbaa82eafdbe
+- key: web/execution/service.py:R8:ExecutionServiceImpl:execute:fp=8c502b3c49198376
   owner: web-execution
   reason: Session lock map creates per-session lock lazily on first execution
   safety: Mutation is thread-safe; setdefault is atomic for dict
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=b8c86b87dff2bd88
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=257af5aadc0fae06
   owner: web-execution
   reason: "Optional keys in user-authored config \u2014 source options key may be absent"
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=d2710319788ff4d6
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=3c7b315e4e387b1a
   owner: web-execution
   reason: "Optional keys in user-authored config \u2014 source options key may be absent"
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=d3c597343f012807
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=ddef3061ff78b38d
   owner: web-execution
   reason: "Optional keys in user-authored config \u2014 source options key may be absent"
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=c443336c549c808b
+- key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=629cfef6ce895a60
   owner: web-execution
   reason: Idempotent shutdown-event cleanup on failure path
   safety: Pop is idempotent; except BaseException handler cleans up before re-raise
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=25da297831fe9e70
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=14bff830c0bf0c77
   owner: web-execution
   reason: "Best-effort run status cleanup on setup failure \u2014 must not mask original exception. Narrowed\
     \ from `except Exception` to `(SQLAlchemyError, OSError)` per canonical pattern b8ba2214/127417cb\
@@ -1314,57 +1314,72 @@ allow_hits:
     \ `__cause__` chains exposing DB URLs/credentials."
   safety: Logged with slog.error; original exception always re-raised
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:cancel:fp=4dba212c4393308a
+- key: web/execution/service.py:R1:ExecutionServiceImpl:cancel:fp=df73816445315530
   owner: web-execution
   reason: Check for live shutdown event before fallback handling
   safety: Returns None if absent; no silent default
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=2266f32be9f7b882
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=66582c64ceafa40a
   owner: web-execution
   reason: "Tier 3 \u2014 config from YAML deserialization may be non-dict"
   safety: Raises TypeError if not dict; no silent default
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_run_pipeline:fp=7869399a451f7d3d
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_run_pipeline:fp=b66c98d19bd3da4f
   owner: web-execution
   reason: "Scope-to-audit-source mapping \u2014 .get() on explicit mapping dict with crash-on-unknown\
     \ guard"
   safety: Unknown scope raises ValueError immediately; no silent default
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:_safe_broadcast:fp=80f5148ae94ec359
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:_safe_broadcast:fp=11e0f927fc325f23
   owner: web-execution
   reason: Progress broadcasting via call_soon_threadsafe raises RuntimeError when event loop is closed
     during shutdown
   safety: Only RuntimeError caught (narrowed from bare Exception); logged with canonical exc_class; pipeline
     continues
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=47413837c09e6307
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=6ddefac4a06d4721
   owner: web-execution
   reason: GracefulShutdownError is an expected control-flow signal from orchestrator cancellation
   safety: Classified as cancelled; separated from BaseException failure path
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=99bcd914cf3ab57e
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=4d82a7fc213f44fe
   owner: web-execution
-  reason: "Tier 3 \u2014 config from YAML deserialization may be non-dict"
-  safety: Raises TypeError if not dict; no silent default
+  reason: "Signal-exception classification (KeyboardInterrupt/SystemExit) inside the BaseException recovery
+    block \u2014 programmer signals must propagate; only normal exceptions are classified to the failed path
+    and routed through the post-completion run-state probe."
+  safety: KeyboardInterrupt/SystemExit re-raised by the surrounding handler; non-signal exceptions become
+    operator-visible structured failures
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=7479e85a0cedc9a1
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=af4245407c3c4a91
   owner: web-execution
-  reason: GracefulShutdownError is an expected control-flow signal from orchestrator cancellation
-  safety: Classified as cancelled; separated from BaseException failure path
+  reason: "elspeth-879f6de6bd post-completion run-state probe \u2014 catches (SQLAlchemyError, OSError, ValueError)
+    so transient probe failures (DB hiccup, filesystem race, validation drift on the get_run() read) do
+    not mask the original post-completion exception."
+  safety: Falls through to best-effort failed-status update; programmer bugs (TypeError/AttributeError/RuntimeError)
+    propagate
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:_run_pipeline:fp=3b96d1f6369a8bd2
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=7edaa7aa890d4d12
+  owner: web-execution
+  reason: "Canonical narrow-catch pattern (commits b8ba2214 / 127417cb) for the status update inside the
+    BaseException recovery handler \u2014 the elspeth-879f6de6bd refactor wrapped this block in the new terminal-state
+    guard, shifting the AST fingerprint."
+  safety: Catches (SQLAlchemyError, OSError) from update_run_status so transient DB or filesystem failures
+    do not mask the original pipeline exception; programmer bugs (TypeError, AttributeError, RuntimeError)
+    propagate
+  expires: null
+- key: web/execution/service.py:R9:ExecutionServiceImpl:_run_pipeline:fp=b6a7f873594b96df
   owner: web-execution
   reason: Final shutdown-event cleanup is intentionally idempotent
   safety: Pop is idempotent
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_finalize_output_blobs:fp=2664ac3053e8c2d8
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_finalize_output_blobs:fp=523b82041b63b241
   owner: web-execution
   reason: "Blob finalization before terminal broadcast \u2014 failure must not mask run outcome"
   safety: _FINALIZE_SUPPRESSED covers blob-domain exceptions (OSError, SQLAlchemyError, BlobNotFoundError,
     BlobQuotaExceededError, BlobStateError); RuntimeError deliberately excluded (too broad); programmer
     bugs propagate; partial failures logged from structured result
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_on_pipeline_done:fp=626f86242777a85a
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_on_pipeline_done:fp=1ead8972583211fb
   owner: web-execution
   reason: "Last-resort safety net \u2014 isinstance check excludes KeyboardInterrupt/SystemExit from diagnostic\
     \ logging"

@@ -178,6 +178,7 @@ describe("executionStore failed run events", () => {
       timestamp: "2026-04-26T05:31:58.000Z",
       event_type: "failed",
       data: {
+        status: "failed",
         detail: "Pipeline execution failed (FrameworkBugError)",
         node_id: null,
       },

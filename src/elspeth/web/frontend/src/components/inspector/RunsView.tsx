@@ -17,17 +17,38 @@ import { useEffect, useState } from "react";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { ProgressView } from "@/components/execution/ProgressView";
-import type { Run, RunDiagnostics, RunDiagnosticsWorkingView } from "@/types/index";
+import type { RunDiagnostics, RunDiagnosticsWorkingView, RunStatus } from "@/types/index";
 
 // ── Status badge CSS class mapping ───────────────────────────────────────────
-// Uses .status-badge + .status-badge-{status} classes from App.css
+// Uses .status-badge + .status-badge-{status} classes from App.css.
+//
+// The `Record<RunStatus, string>` type makes this map exhaustive: when a new
+// status is added to RUN_STATUS_VALUES (in types/index.ts), this entry must
+// be filled in or `tsc --noEmit` fails with TS2741. Mirrors the backend
+// single-source-of-truth pattern at sessions/protocol.py:35-36.
 
-const STATUS_BADGE_CLASSES: Record<Run["status"], string> = {
+const STATUS_BADGE_CLASSES: Record<RunStatus, string> = {
   pending: "status-badge status-badge-pending",
   running: "status-badge status-badge-running",
   completed: "status-badge status-badge-completed",
+  completed_with_failures: "status-badge status-badge-completed-with-failures",
   failed: "status-badge status-badge-failed",
+  empty: "status-badge status-badge-empty",
   cancelled: "status-badge status-badge-cancelled",
+};
+
+// Human-readable badge labels.  Same exhaustiveness guarantee as the class
+// map: a missing entry is a compile error.  Underscored identifiers like
+// `completed_with_failures` become "completed with failures" for display
+// (CSS then uppercases to "COMPLETED WITH FAILURES").
+const STATUS_DISPLAY_LABELS: Record<RunStatus, string> = {
+  pending: "pending",
+  running: "running",
+  completed: "completed",
+  completed_with_failures: "completed with failures",
+  failed: "failed",
+  empty: "empty",
+  cancelled: "cancelled",
 };
 
 // ── Duration formatting ──────────────────────────────────────────────────────
@@ -194,7 +215,7 @@ export function RunsView() {
               >
                 {/* Status badge: uses CSS class from App.css */}
                 <span className={STATUS_BADGE_CLASSES[run.status]}>
-                  {run.status}
+                  {STATUS_DISPLAY_LABELS[run.status]}
                 </span>
                 <span
                   style={{
@@ -226,6 +247,20 @@ export function RunsView() {
                     </span>
                   )}
                 </span>
+                {/* elspeth-5069612f3c (ADR-018) — rows_routed split. */}
+                {run.rows_routed_success > 0 && (
+                  <span title="Gate route_to_sink MOVE rows (intentional success-path routing)">
+                    {run.rows_routed_success.toLocaleString()} routed (success)
+                  </span>
+                )}
+                {run.rows_routed_failure > 0 && (
+                  <span
+                    title="Transform on_error DIVERT rows (failure-path routing)"
+                    style={{ color: "var(--color-warning)" }}
+                  >
+                    {run.rows_routed_failure.toLocaleString()} routed (failure)
+                  </span>
+                )}
                 {discardTotal > 0 && (
                   <span
                     title={discardTitle}
@@ -262,7 +297,23 @@ export function RunsView() {
                 </button>
               </div>
 
-              {run.status === "failed" && run.error && (
+              {/*
+                Failure-evidence alert.
+
+                Phase 2.2 (elspeth-0de989c56d): the gate uses the backend's
+                authoritative status classification rather than re-deriving
+                from row counts.  The backend always populates `error` for
+                failure-like terminal runs:
+                  - FAILED  → _structural_failure_message (no rows succeeded)
+                  - COMPLETED_WITH_FAILURES → _partial_completion_message
+                    (count summary; per-row detail lives behind "Inspect")
+                A count-based predicate would duplicate the L0
+                `failure_indicator` invariant (web/execution/schemas.py)
+                and would also miss FAILED-with-zero-counts (engine crash
+                before any rows processed).
+              */}
+              {(run.status === "failed" || run.status === "completed_with_failures") &&
+                run.error && (
                 <div
                   role="alert"
                   style={{

@@ -34,7 +34,12 @@ _EVENT_DATA: dict[str, Callable[[], _EventData]] = {
     "progress": lambda: ProgressData(rows_processed=10, rows_failed=0),
     "error": lambda: ErrorData(message="test error", node_id=None, row_id=None),
     "completed": lambda: CompletedData(
-        rows_processed=10, rows_succeeded=10, rows_failed=0, rows_quarantined=0, landscape_run_id="lscape-1"
+        status="completed",
+        rows_processed=10,
+        rows_succeeded=10,
+        rows_failed=0,
+        rows_quarantined=0,
+        landscape_run_id="lscape-1",
     ),
     "cancelled": lambda: CancelledData(rows_processed=10, rows_failed=0),
     "failed": lambda: FailedData(detail="test failure", node_id=None),

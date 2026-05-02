@@ -2860,7 +2860,11 @@ class TestComposerRuntimeRunCompletionAgreement:
         # counts.  Pre-Phase-2.1 this raised ``pydantic.ValidationError`` on
         # the inequality shape and ``pipeline_done_callback`` crashed.
         # Post-Phase-2.1 construction succeeds.
+        # Phase 2.2 (elspeth-0de989c56d): SSE payload carries the explicit
+        # status discriminator; this aggregation has rows_succeeded > 0 and
+        # no failures, so the engine classifies it as "completed".
         completed = CompletedData(
+            status="completed",
             rows_processed=run_result.rows_processed,
             rows_succeeded=run_result.rows_succeeded,
             rows_failed=run_result.rows_failed,

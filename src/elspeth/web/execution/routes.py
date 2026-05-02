@@ -48,7 +48,7 @@ from elspeth.web.execution.schemas import (
     RunStatusResponse,
     ValidationResult,
 )
-from elspeth.web.sessions.protocol import SessionServiceProtocol
+from elspeth.web.sessions.protocol import SessionServiceProtocol, TerminalSessionRunStatus
 
 slog = structlog.get_logger()
 
@@ -117,12 +117,25 @@ def _build_terminal_run_event(current: RunStatusResponse) -> RunEvent:
     ``current`` comes from our session database and is therefore Tier 1.
     Impossible terminal states must raise rather than degrade into
     partial client-visible payloads.
+
+    Phase 2.2 (elspeth-0de989c56d): the operator-completion subset
+    (``completed``, ``completed_with_failures``, ``empty``) all map to the
+    SSE ``event_type="completed"`` envelope; the operator-completion status
+    travels in the ``CompletedData.status`` discriminator so the frontend
+    can render the widened taxonomy without re-deriving from row counts.
     """
-    if current.status == "completed":
+    if current.status in ("completed", "completed_with_failures", "empty"):
         if current.landscape_run_id is None:
             raise RuntimeError(f"Completed run {current.run_id} has no landscape_run_id — Tier 1 anomaly (audit trail incomplete)")
+        # Cast is sound: the membership check above narrows to the
+        # operator-completion subset that CompletedData.status accepts.
+        completed_status = cast(
+            Literal["completed", "completed_with_failures", "empty"],
+            current.status,
+        )
         try:
             payload: CompletedData | FailedData | CancelledData = CompletedData(
+                status=completed_status,
                 rows_processed=current.rows_processed,
                 rows_succeeded=current.rows_succeeded,
                 rows_failed=current.rows_failed,
@@ -135,6 +148,7 @@ def _build_terminal_run_event(current: RunStatusResponse) -> RunEvent:
             raise RuntimeError(
                 f"Completed run {current.run_id} failed CompletedData validation — Tier 1 anomaly (audit trail inconsistent): {exc}"
             ) from exc
+        event_type: Literal["progress", "error", "completed", "cancelled", "failed"] = "completed"
     elif current.status == "failed":
         if current.error is None:
             raise RuntimeError(f"Failed run {current.run_id} has no error message — Tier 1 anomaly (error column NULL on terminal failure)")
@@ -142,6 +156,7 @@ def _build_terminal_run_event(current: RunStatusResponse) -> RunEvent:
             detail=current.error,
             node_id=None,
         )
+        event_type = "failed"
     elif current.status == "cancelled":
         payload = CancelledData(
             rows_processed=current.rows_processed,
@@ -149,16 +164,13 @@ def _build_terminal_run_event(current: RunStatusResponse) -> RunEvent:
             rows_routed_success=current.rows_routed_success,
             rows_routed_failure=current.rows_routed_failure,
         )
+        event_type = "cancelled"
     else:
         raise RuntimeError(f"_build_terminal_run_event called for non-terminal status {current.status!r}")
 
     timestamp = current.finished_at or current.started_at
     if timestamp is None:
         raise RuntimeError(f"Terminal run {current.run_id} has no timestamps — Tier 1 anomaly (both finished_at and started_at are NULL)")
-    event_type = cast(
-        Literal["progress", "error", "completed", "cancelled", "failed"],
-        current.status,
-    )
     return RunEvent(
         run_id=current.run_id,
         timestamp=timestamp,
@@ -579,7 +591,11 @@ def create_execution_router() -> APIRouter:
         # cast is safe because RUN_STATUS_NON_TERMINAL_VALUES is the exact
         # complement of RunResultsResponse's Literal values, enforced by a
         # module-load assertion in schemas.py.
-        terminal_status = cast(Literal["completed", "failed", "cancelled"], status.status)
+        # Phase 2.2 (elspeth-0de989c56d): cast to the canonical 5-value
+        # TerminalSessionRunStatus, not a hardcoded 3-value tuple — the
+        # latter would mislead readers into thinking the API still uses the
+        # narrow taxonomy after the widening.
+        terminal_status = cast(TerminalSessionRunStatus, status.status)
         return RunResultsResponse(
             run_id=status.run_id,
             status=terminal_status,

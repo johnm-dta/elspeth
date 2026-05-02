@@ -66,6 +66,18 @@ if frozenset(LEGAL_RUN_TRANSITIONS.keys()) != SESSION_RUN_STATUS_VALUES:
     )
 if any(not allowed.issubset(SESSION_RUN_STATUS_VALUES) for allowed in LEGAL_RUN_TRANSITIONS.values()):
     raise AssertionError("LEGAL_RUN_TRANSITIONS contains a target not present in SessionRunStatus")
+# elspeth-879f6de6bd: enforce that the empty-frozenset entries in
+# LEGAL_RUN_TRANSITIONS exactly match the TerminalSessionRunStatus Literal.
+# A drift here would silently re-introduce the recovery defect: a status
+# could be terminal in the state machine (no legal outgoing transition)
+# but absent from SESSION_TERMINAL_RUN_STATUS_VALUES (so the recovery
+# guard would miss it and attempt an illegal transition), or vice versa.
+_legal_transitions_terminal = frozenset(s for s, allowed in LEGAL_RUN_TRANSITIONS.items() if not allowed)
+if _legal_transitions_terminal != SESSION_TERMINAL_RUN_STATUS_VALUES:
+    raise AssertionError(
+        f"LEGAL_RUN_TRANSITIONS terminal entries {sorted(_legal_transitions_terminal)} "
+        f"must match TerminalSessionRunStatus {sorted(SESSION_TERMINAL_RUN_STATUS_VALUES)}"
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -22,8 +22,14 @@ export function ProgressView() {
 
   if (!progress || !activeRunId) return null;
 
+  // Phase 2.2 (elspeth-0de989c56d): the operator-completion subset
+  // (completed / completed_with_failures / empty) is also terminal — the
+  // older 3-value tuple ("completed", "cancelled", "failed") would leave the
+  // progress view appearing active for the two new terminal statuses.
   const isTerminal =
     progress.status === "completed" ||
+    progress.status === "completed_with_failures" ||
+    progress.status === "empty" ||
     progress.status === "cancelled" ||
     progress.status === "failed";
 
@@ -42,7 +48,9 @@ export function ProgressView() {
       {/* Status header with cancel button */}
       <div className="progress-status-header">
         <span className="progress-status-label">
-          {progress.status}
+          {/* Render underscored identifiers like ``completed_with_failures``
+              as space-separated for human reading; CSS handles uppercasing. */}
+          {progress.status.replace(/_/g, " ")}
         </span>
         {!isTerminal && (
           <button
@@ -80,12 +88,22 @@ export function ProgressView() {
           style={
             isTerminal
               ? {
+                  // Phase 2.2 colour mapping:
+                  //   completed                  → success (green)
+                  //   completed_with_failures    → warning (the run produced
+                  //                                output but had failures)
+                  //   empty                      → muted text (clean run that
+                  //                                consumed no rows)
+                  //   failed                     → error (red)
+                  //   cancelled                  → warning (orange)
                   backgroundColor:
                     progress.status === "completed"
                       ? "var(--color-success)"
                       : progress.status === "failed"
                         ? "var(--color-error)"
-                        : "var(--color-warning)",
+                        : progress.status === "empty"
+                          ? "var(--color-text-muted)"
+                          : "var(--color-warning)",
                 }
               : {}
           }

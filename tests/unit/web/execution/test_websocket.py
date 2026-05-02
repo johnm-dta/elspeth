@@ -252,6 +252,7 @@ class TestWebSocketTimeoutRecovery:
             timestamp=datetime.now(tz=UTC),
             event_type="completed",
             data=CompletedData(
+                status="completed",
                 rows_processed=1,
                 rows_succeeded=1,
                 rows_failed=0,

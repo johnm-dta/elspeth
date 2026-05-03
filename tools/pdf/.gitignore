@@ -1,5 +1,6 @@
-# Generated PDF intermediate (rebuilt by build-arch-pack.sh)
+# Generated PDF intermediates (rebuilt by build-*.sh on demand)
 elspeth-arch-pack.typ
+composer-evaluation-briefing-*.typ
 
 # Mermaid render scratch directory (cleaned by the EXIT trap on success;
 # may persist on partial failures and is regenerated each build).

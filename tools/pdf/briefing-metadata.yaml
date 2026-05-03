@@ -1,0 +1,40 @@
+title: "ELSPETH Composer — Evaluation Briefing"
+subtitle: "Hard-Mode Evaluation Findings, Verification of Fix, and Forward Trajectory"
+author: "John Morrissey, CTO Branch"
+date: "3 May 2026"
+version: "1.0.0"
+status: "DRAFT"
+
+# Template variables
+running-title: "ELSPETH Composer — Briefing"
+doc-id: "ELS-EB-2026-05-03"
+document-category: "Briefing"
+document-type: "SES briefing — composer hard-mode evaluation"
+classification: "OFFICIAL"
+
+# Codebase HEAD at the time of the evaluation.  Surfaced on the
+# title page's document-control table so the PDF is self-evidently
+# tied to a specific revision of the source tree.
+commit: "f3137ae8"
+
+scope-blurb: >-
+  This briefing reports the findings of a hard-mode evaluation of the
+  ELSPETH composer conducted on 2 May 2026 and the verification of the
+  predicted fix conducted on 3 May 2026.  The evaluation tested the
+  composer's behaviour under deliberately adversarial operator pressure
+  across nine scenarios (three personas × three task classes — happy-path,
+  edge-case, limit-probe).  The briefing covers the headline result,
+  per-scenario evidence, verification of the fix on the most refined of
+  the three engine-failed pipelines, talking points for further internal
+  conversations, and an appendix on what ELSPETH can do today and where
+  the platform is heading.
+
+# Organization branding (appears on cover page)
+org-name: "Foundryside"
+org-tagline: "Audit-Grade Engineering"
+
+# Revision history (newest first)
+revisions:
+  - version: "1.0.0"
+    date: "3 May 2026"
+    changes: "Initial issue.  Incorporates three rounds of independent peer review and a follow-up verification run on the Linda compliance pipeline (run ID 023eb897-3049-4ad5-a502-e9eb81a4faee)."

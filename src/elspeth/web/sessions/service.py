@@ -33,6 +33,7 @@ from elspeth.web.sessions.protocol import (
     ChatMessageRecord,
     CompositionStateData,
     CompositionStateRecord,
+    IllegalRunTransitionError,
     RunAlreadyActiveError,
     RunRecord,
     SessionRecord,
@@ -656,11 +657,14 @@ class SessionServiceImpl:
                 if current is None:
                     raise ValueError(f"Run not found: {run_id}")
 
-                # D3: Enforce legal transitions — direct access; KeyError = Tier 1 crash
+                # D3: Enforce legal transitions — direct access; KeyError = Tier 1 crash.
+                # Use the narrow subclass so the cancelled-race recovery in
+                # ExecutionService can match identity, not message.  See
+                # IllegalRunTransitionError docstring for the full rationale.
                 current_status = current.status
                 allowed = LEGAL_RUN_TRANSITIONS[current_status]
                 if status not in allowed:
-                    raise ValueError(f"Illegal run transition: {current_status!r} \u2192 {status!r}. Allowed: {sorted(allowed)}")
+                    raise IllegalRunTransitionError(current_status, status, allowed)
 
                 # D4: landscape_run_id is write-once
                 if landscape_run_id is not None and current.landscape_run_id is not None:

@@ -250,6 +250,31 @@ class InvalidForkTargetError(Exception):
         super().__init__(f"Can only fork from user messages, got role '{role}' for message {message_id}")
 
 
+class IllegalRunTransitionError(ValueError):
+    """Raised when ``update_run_status`` receives a transition forbidden by
+    ``LEGAL_RUN_TRANSITIONS``.
+
+    Subclasses ``ValueError`` for backwards-compatible reraise behaviour, but
+    callers performing cancelled-race recovery (``ExecutionService._run_pipeline``)
+    catch *this* class only — never the bare ``ValueError`` — so that the four
+    other Tier-1 invariant breaches raised by ``update_run_status``
+    (run-not-found, landscape_run_id overwrite, completed-without-landscape,
+    failed-without-error) propagate without traversing a get_run round-trip
+    that could mask the original fault.
+
+    Why a subclass of ValueError (not Exception): existing test fixtures and
+    one production call site at the run-lifecycle repository assert
+    ``pytest.raises(ValueError)`` on illegal transitions; subclassing keeps
+    those green while letting recovery code narrow on identity.
+    """
+
+    def __init__(self, current_status: str, target_status: str, allowed: frozenset[str]) -> None:
+        self.current_status = current_status
+        self.target_status = target_status
+        self.allowed = allowed
+        super().__init__(f"Illegal run transition: {current_status!r} → {target_status!r}. Allowed: {sorted(allowed)}")
+
+
 class RunAlreadyActiveError(Exception):
     """Raised when attempting to create a run while one is already active.
 

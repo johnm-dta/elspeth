@@ -482,11 +482,35 @@ class Orchestrator:
                     # row reached a sink (failsink), and rows_diverted is
                     # tracked separately on RunResult.
                     rows_processed += 1
-                case _:
-                    # Other terminal outcomes (FORKED, EXPANDED, CONSUMED_IN_BATCH)
-                    # are parent-token / aggregation accounting and don't
-                    # contribute to the success/failure tally.
+                case RowOutcome.FORKED | RowOutcome.EXPANDED | RowOutcome.CONSUMED_IN_BATCH:
+                    # Parent-token / aggregation accounting outcomes do not
+                    # contribute to the success/failure tally — the child
+                    # tokens (FORKED/EXPANDED) and the batch-result token
+                    # (CONSUMED_IN_BATCH) carry the row-level counters via
+                    # their own terminal outcomes.
                     pass
+                case RowOutcome.BUFFERED:
+                    # Unreachable: the ``if not outcome.is_terminal`` filter
+                    # at line 457 already skips BUFFERED.  Listed explicitly
+                    # to make the closed-set partition exhaustive at the
+                    # match level — a future change that removes the filter
+                    # must consciously decide BUFFERED's accounting here
+                    # rather than have it silently accepted by a wildcard.
+                    pass
+                case _:
+                    # Closed-set guard — every RowOutcome value is enumerated
+                    # above.  A future enum addition that doesn't update this
+                    # match block must fail loudly during resume rather than
+                    # silently miscount.  Mirror of the import-time
+                    # exhaustiveness assertion in contracts/enums.py:
+                    # _TERMINAL_ROW_OUTCOMES partition.
+                    raise AssertionError(
+                        "Unhandled RowOutcome in resume aggregation: "
+                        f"{outcome.outcome!r}. Add an explicit case above and "
+                        "decide its predicate accounting (success / failure / "
+                        "neutral) — see contracts/enums.py _TERMINAL_ROW_OUTCOMES "
+                        "for the full closed set."
+                    )
         terminal_status = derive_terminal_run_status(
             rows_processed=rows_processed,
             rows_succeeded=rows_succeeded,

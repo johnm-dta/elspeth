@@ -1614,3 +1614,191 @@ class TestResumeComprehensive:
             ).fetchall()
         routed_outcomes = [o for o in outcomes if o.outcome == "routed"]
         assert len(routed_outcomes) == 5
+
+    def test_resume_routed_on_error_pipeline_classifies_as_failed(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """Complement to ``test_resume_gate_routed_pipeline_classifies_as_completed``
+        — pin the resume code path's correct accumulation of
+        ``rows_routed_failure`` for the on_error DIVERT side of the
+        rows_routed split.
+
+        Why this test exists (and why the unit-level coverage is not
+        sufficient): ``_derive_resume_terminal_status_from_audit`` has two
+        symmetric match arms — ``RowOutcome.ROUTED`` (gate MOVE; counts
+        toward ``rows_routed_success``) and ``RowOutcome.ROUTED_ON_ERROR``
+        (transform on_error DIVERT; counts toward ``rows_routed_failure``).
+        A regression that swapped the two ``rows_routed_*`` increments in
+        the ROUTED_ON_ERROR arm would slip past the unit-level predicate
+        test (which exercises the predicate's success/failure shape on
+        synthetic counters but does not invoke the resume aggregation
+        site).  The gate-MOVE side has integration coverage above; this
+        test mirrors that coverage for the on_error side so a swap in the
+        match arm fails loudly at the resume layer.
+
+        Scenario (early-exit resume — every row already DIVERTED via
+        on_error before the pre-resume crash):
+        1. Failed run with 5 rows (0-4), reusing ``_setup_failed_run`` for
+           the persisted DAG.
+        2. Every row pre-marked as ``RowOutcome.ROUTED_ON_ERROR`` —
+           ``sink_name="error_sink"`` and ``error_hash`` set per the
+           outcome contract for DIVERT rows.
+        3. Resume's early-exit path reads existing terminal outcomes and
+           calls ``derive_terminal_run_status`` with the accumulated
+           counters.
+        4. Verify: ``result.status == RunStatus.FAILED`` — predicate
+           output for ``(rows_processed=5, rows_succeeded=0,
+           rows_routed_success=0, rows_routed_failure=5,
+           rows_failed=0, rows_quarantined=0)``.  Reasoning:
+           ``success_indicator = (rows_succeeded > 0) OR
+           (rows_routed_success > 0) = False`` and ``rows_processed > 0``
+           drives the ``not success_indicator -> FAILED`` arm of
+           ``derive_terminal_run_status``.
+        5. Verify: ``result.rows_routed_failure == 5`` — the resume-side
+           accumulator surfaces every ROUTED_ON_ERROR outcome via the
+           failure-side split counter.
+        6. Verify: ``result.rows_routed_success == 0`` — no MOVE rows.
+        7. Verify: ``result.rows_succeeded == 0`` and
+           ``result.rows_failed == 0`` — no on_success completions and no
+           FAILED outcomes (the DIVERT side is operationally distinct
+           from FAILED — the row reached an error sink).
+
+        Regression catcher: an inversion of the two ``rows_routed_*``
+        increments in ``_derive_resume_terminal_status_from_audit``'s
+        ``ROUTED_ON_ERROR`` arm would (a) miscount as
+        ``rows_routed_success=5`` and (b) flip the predicate to
+        ``RunStatus.COMPLETED``.  Both assertions fail under the swap.
+        """
+        db = resume_test_env["db"]
+        checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        recovery_mgr = resume_test_env["recovery_manager"]
+        payload_store = resume_test_env["payload_store"]
+        checkpoint_config = resume_test_env["checkpoint_config"]
+        tmp_path = resume_test_env["tmp_path"]
+
+        run_id = "resume-routed-on-error-test"
+        output_path = tmp_path / "routed_on_error_output.csv"
+        run_id, graph = self._setup_failed_run(db, payload_store, run_id, num_rows=5, checkpoint_at=4)
+
+        # Mark every row as on_error DIVERT (RowOutcome.ROUTED_ON_ERROR).
+        # Contract requires sink_name AND error_hash for this outcome
+        # (see data_flow_repository._validate_outcome_fields:236-249 and
+        # contracts/results.py:408-419).  The 16-char hex string mirrors
+        # the existing ROUTED_ON_ERROR fixture in
+        # tests/integration/audit/test_recorder_routing_events.py:617.
+        factory = make_factory(db)
+        for i in range(5):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=f"t{i}", run_id=run_id),
+                outcome=RowOutcome.ROUTED_ON_ERROR,
+                sink_name="error_sink",
+                error_hash="0123456789abcdef",
+            )
+
+        # Create checkpoint at the last row so resume's recovery path is
+        # exercised even though no rows remain to process.  Mirrors the
+        # gate-MOVE test setup.
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id="t4",
+            node_id="xform",
+            sequence_number=4,
+            graph=graph,
+        )
+
+        assert recovery_mgr.can_resume(run_id, graph).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        orchestrator = Orchestrator(
+            db,
+            checkpoint_manager=checkpoint_mgr,
+            checkpoint_config=checkpoint_config,
+        )
+
+        resume_schema = {"mode": "fixed", "fields": ["id: int", "value: str"]}
+        passthrough = PassThrough({"schema": resume_schema})
+        passthrough.on_error = "discard"
+        config = PipelineConfig(
+            source=_null_source("default"),
+            transforms=[passthrough],
+            sinks={
+                "default": inject_write_failure(
+                    CSVSink(
+                        {
+                            "path": str(output_path),
+                            "schema": resume_schema,
+                            "mode": "append",
+                        }
+                    )
+                )
+            },
+        )
+        resume_graph = ExecutionGraph()
+        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
+        resume_graph.add_node(
+            "xform",
+            node_type=NodeType.TRANSFORM,
+            plugin_name="passthrough",
+            config=resume_schema_config,
+        )
+        resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=resume_schema_config)
+        resume_graph.add_edge("src", "xform", label="continue")
+        resume_graph.add_edge("xform", "sink", label="continue")
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
+
+        # Pre-write the output file header so any append-mode interaction
+        # is consistent (no remaining rows will be processed; this is the
+        # early-exit path).  Mirrors the gate-MOVE test setup.
+        with open(output_path, "w") as f:
+            f.write("id,value\n")
+            for i in range(5):
+                f.write(f"{i},row-{i}\n")
+
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=resume_graph,
+            payload_store=payload_store,
+        )
+
+        # CORE ASSERTION — verify the resume-side accumulator + predicate
+        # together classify a fully-DIVERTED run as FAILED.  Predicate
+        # output derived from ``derive_terminal_run_status`` in
+        # contracts/run_result.py:180 — when ``rows_succeeded == 0`` AND
+        # ``rows_routed_success == 0``, ``success_indicator`` is False
+        # and the predicate returns FAILED for any non-zero
+        # ``rows_processed``.
+        assert result.status == RunStatus.FAILED, (
+            "Resume of fully-DIVERTED pipeline misclassified — expected "
+            f"FAILED, got {result.status!r}. The resume-side "
+            f"derive_terminal_run_status call must accumulate "
+            f"rows_routed_failure (NOT rows_routed_success) from the "
+            f"early-exit Landscape readback's ROUTED_ON_ERROR rows. "
+            f"result={result.to_dict()}"
+        )
+        assert result.rows_succeeded == 0  # No on_success success-path sink.
+        assert result.rows_routed_failure == 5  # All rows recorded as ROUTED_ON_ERROR.
+        assert result.rows_routed_success == 0  # No gate MOVE rows.
+        assert result.rows_failed == 0  # DIVERT is operationally distinct from FAILED.
+        assert result.rows_quarantined == 0  # No quarantine outcomes.
+
+        # Cross-check against Landscape: every token_outcomes row has the
+        # routed_on_error shape (audit-distinguishability mirror of the
+        # gate-MOVE cross-check above).
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        with db.engine.connect() as conn:
+            outcomes = conn.execute(
+                select(token_outcomes_table.c.outcome, token_outcomes_table.c.sink_name).where(token_outcomes_table.c.run_id == run_id)
+            ).fetchall()
+        routed_on_error_outcomes = [o for o in outcomes if o.outcome == "routed_on_error"]
+        assert len(routed_on_error_outcomes) == 5
+        # Every ROUTED_ON_ERROR row carries the error sink, distinct from
+        # the gate-MOVE shape (where ``sink_name`` matches the on_success
+        # destination).  This pins the audit-distinguishability invariant
+        # at the resume layer.
+        assert all(o.sink_name == "error_sink" for o in routed_on_error_outcomes)

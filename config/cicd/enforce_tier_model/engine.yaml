@@ -195,11 +195,6 @@ allow_hits:
     \ span emission"
   safety: "No runtime coupling \u2014 annotation-only import behind TYPE_CHECKING guard"
   expires: null
-- key: engine/batch_adapter.py:R9:RowWaiter:wait:fp=281637010027cfeb
-  owner: architecture
-  reason: Cleanup/pop with default - entry may not exist due to race between timeout and emit
-  safety: Documented TOCTOU race pattern - pop(None) is intentional cleanup of possibly-absent entry
-  expires: '2026-05-02'
 - key: engine/executors/gate.py:R1:GateExecutor:_record_routing:fp=38dabd7f2719bfd0
   owner: architecture
   reason: Optional edge_id lookup - edge map may not have all node combinations during routing

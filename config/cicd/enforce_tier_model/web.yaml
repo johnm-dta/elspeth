@@ -1430,19 +1430,20 @@ allow_hits:
   safety: KeyboardInterrupt/SystemExit re-raised by the surrounding handler; non-signal exceptions become
     operator-visible structured failures
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=af4245407c3c4a91
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=c6a02ba63e915cd4
   owner: web-execution
   reason: "elspeth-879f6de6bd post-completion run-state probe \u2014 catches (SQLAlchemyError, OSError, ValueError)
     so transient probe failures (DB hiccup, filesystem race, validation drift on the get_run() read) do
-    not mask the original post-completion exception."
+    not mask the original post-completion exception. Fingerprint shifted from af4245407c3c4a91 by
+    the I-4 audit-primacy fix that removed the post-terminal-exception slog block above this handler."
   safety: Falls through to best-effort failed-status update; programmer bugs (TypeError/AttributeError/RuntimeError)
     propagate
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=7edaa7aa890d4d12
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=250f57373c0d2341
   owner: web-execution
   reason: "Canonical narrow-catch pattern (commits b8ba2214 / 127417cb) for the status update inside the
-    BaseException recovery handler \u2014 the elspeth-879f6de6bd refactor wrapped this block in the new terminal-state
-    guard, shifting the AST fingerprint."
+    BaseException recovery handler. Fingerprint shifted from 7edaa7aa890d4d12 by the I-4 audit-primacy
+    fix that removed the post-terminal-exception slog block above this handler."
   safety: Catches (SQLAlchemyError, OSError) from update_run_status so transient DB or filesystem failures
     do not mask the original pipeline exception; programmer bugs (TypeError, AttributeError, RuntimeError)
     propagate

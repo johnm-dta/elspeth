@@ -81,7 +81,7 @@ def _route_to_sink(
             f"Sink '{sink_name}' not in configured sinks. Available: {sorted(pending_tokens.keys())}. Token: {token}"
         )
     # Offensive: ROUTED_ON_ERROR requires error_hash; ROUTED forbids it.
-    # The PendingOutcome __post_init__ also enforces this via _FAILURE_OUTCOMES,
+    # The PendingOutcome __post_init__ also enforces this via _REQUIRES_ERROR_HASH_OUTCOMES,
     # but a clearer error message at the routing site catches producer bugs
     # before they hit the dataclass invariant.
     if pending_outcome == RowOutcome.ROUTED_ON_ERROR and error_hash is None:

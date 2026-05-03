@@ -56,19 +56,24 @@ class PendingOutcome:
 
     Attributes:
         outcome: The terminal outcome (COMPLETED, ROUTED, QUARANTINED, etc.)
-        error_hash: Required for QUARANTINED/FAILED outcomes - hash of error details.
-                   For other outcomes, this is None.
+        error_hash: Required for QUARANTINED, FAILED, and ROUTED_ON_ERROR
+                   outcomes - hash of error details. For other outcomes,
+                   this is None. The required-error-hash set is enforced
+                   by ``_REQUIRES_ERROR_HASH_OUTCOMES`` below; keep this
+                   docstring and that set in sync.
 
     Quarantine outcomes are recorded after sink durability, not before.
     """
 
-    # Outcomes that require error_hash on PendingOutcome (the misleading
-    # legacy name "_FAILURE_OUTCOMES" is preserved for callsite stability;
-    # the actual semantic is "outcomes requiring error_hash"). ROUTED_ON_ERROR
+    # Outcomes that require ``error_hash`` on PendingOutcome.  ROUTED_ON_ERROR
     # joins this set because it is the first outcome that both routes through
     # the pending-sink pipeline AND requires error_hash for single-hop audit
     # attributability — see docs/contracts/token-outcomes/00-token-outcome-contract.md.
-    _FAILURE_OUTCOMES: ClassVar[frozenset[RowOutcome]] = frozenset(
+    # Note: ROUTED_ON_ERROR is operationally a *successful* sink write that
+    # captures an upstream transform error; it is not a "failure" in the
+    # rows_failed sense.  The set name reflects the audit-contract semantic
+    # ("requires error_hash") rather than the failure/success distinction.
+    _REQUIRES_ERROR_HASH_OUTCOMES: ClassVar[frozenset[RowOutcome]] = frozenset(
         {
             RowOutcome.QUARANTINED,
             RowOutcome.FAILED,
@@ -89,9 +94,9 @@ class PendingOutcome:
         recorded synchronously without sink writes. Other outcomes must NOT
         have an error_hash (an error_hash on COMPLETED would be nonsensical).
         """
-        if self.outcome in self._FAILURE_OUTCOMES and (self.error_hash is None or not self.error_hash.strip()):
+        if self.outcome in self._REQUIRES_ERROR_HASH_OUTCOMES and (self.error_hash is None or not self.error_hash.strip()):
             raise ValueError(f"PendingOutcome with {self.outcome.name} outcome must have a non-empty error_hash")
-        if self.outcome not in self._FAILURE_OUTCOMES and self.error_hash is not None:
+        if self.outcome not in self._REQUIRES_ERROR_HASH_OUTCOMES and self.error_hash is not None:
             raise ValueError(f"PendingOutcome with {self.outcome.name} outcome must not have error_hash")
 
 

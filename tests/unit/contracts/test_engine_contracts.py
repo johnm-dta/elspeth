@@ -122,12 +122,12 @@ class TestPendingOutcomePostInit:
         assert po.error_hash is None
 
     def test_routed_rejects_error_hash(self) -> None:
-        """ROUTED (MOVE) is not in _FAILURE_OUTCOMES — error_hash forbidden."""
+        """ROUTED (MOVE) is not in _REQUIRES_ERROR_HASH_OUTCOMES — error_hash forbidden."""
         with pytest.raises(ValueError, match="ROUTED outcome must not have error_hash"):
             PendingOutcome(outcome=RowOutcome.ROUTED, error_hash="abc123")
 
     def test_routed_on_error_requires_error_hash(self) -> None:
-        """ROUTED_ON_ERROR (DIVERT) joins _FAILURE_OUTCOMES — error_hash REQUIRED."""
+        """ROUTED_ON_ERROR (DIVERT) joins _REQUIRES_ERROR_HASH_OUTCOMES — error_hash REQUIRED."""
         with pytest.raises(ValueError, match="must have a non-empty error_hash"):
             PendingOutcome(outcome=RowOutcome.ROUTED_ON_ERROR, error_hash=None)
 

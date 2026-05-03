@@ -6,7 +6,7 @@ Each test verifies that a specific freeze bypass is closed:
 - BatchCheckpointState.template_errors: list elements inside tuple not coerced to tuples
 - HTTPCallResponse.body: non-dict Mapping types bypassed freeze guard
 - GracefulShutdownError.routed_destinations: MappingProxyType wrapped without copy
-- PendingOutcome._FAILURE_OUTCOMES: class-level frozenset (not per-instance set)
+- PendingOutcome._REQUIRES_ERROR_HASH_OUTCOMES: class-level frozenset (not per-instance set)
 - deep_freeze: arbitrary Mapping support (non-dict, non-MappingProxyType)
 """
 
@@ -327,20 +327,20 @@ class TestGracefulShutdownErrorCopyOnWrap:
         assert len(error.routed_destinations) == 0
 
 
-# ── PendingOutcome._FAILURE_OUTCOMES ────────────────────────────────────────
+# ── PendingOutcome._REQUIRES_ERROR_HASH_OUTCOMES ────────────────────────────
 
 
 class TestPendingOutcomeClassVar:
-    """Bug: _failure_outcomes set recreated on every construction."""
+    """Bug: requires-error-hash set recreated on every construction."""
 
-    def test_failure_outcomes_is_class_level(self) -> None:
-        assert isinstance(PendingOutcome._FAILURE_OUTCOMES, frozenset)
+    def test_requires_error_hash_outcomes_is_class_level(self) -> None:
+        assert isinstance(PendingOutcome._REQUIRES_ERROR_HASH_OUTCOMES, frozenset)
 
-    def test_failure_outcomes_shared_across_instances(self) -> None:
+    def test_requires_error_hash_outcomes_shared_across_instances(self) -> None:
         """Both instances must reference the same ClassVar frozenset object."""
         a = PendingOutcome(outcome=RowOutcome.COMPLETED)
         b = PendingOutcome(outcome=RowOutcome.ROUTED)
-        assert a._FAILURE_OUTCOMES is b._FAILURE_OUTCOMES
+        assert a._REQUIRES_ERROR_HASH_OUTCOMES is b._REQUIRES_ERROR_HASH_OUTCOMES
 
     def test_validation_still_works(self) -> None:
         with pytest.raises(ValueError, match="QUARANTINED outcome must have a non-empty error_hash"):
@@ -360,7 +360,7 @@ def test_pending_outcome_routed_on_error_with_valid_hash_succeeds() -> None:
 
 
 def test_pending_outcome_routed_on_error_without_hash_raises() -> None:
-    """ROUTED_ON_ERROR without error_hash violates the _FAILURE_OUTCOMES contract."""
+    """ROUTED_ON_ERROR without error_hash violates the _REQUIRES_ERROR_HASH_OUTCOMES contract."""
     with pytest.raises(ValueError, match="must have a non-empty error_hash"):
         PendingOutcome(outcome=RowOutcome.ROUTED_ON_ERROR)
 

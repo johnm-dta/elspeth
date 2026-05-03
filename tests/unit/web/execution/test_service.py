@@ -36,7 +36,7 @@ from elspeth.core.config import (
 )
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.service import ExecutionServiceImpl
-from elspeth.web.sessions.protocol import RunAlreadyActiveError
+from elspeth.web.sessions.protocol import IllegalRunTransitionError, RunAlreadyActiveError
 
 # ── Fixtures ───────────────────────────────────────────────────────────
 
@@ -868,7 +868,7 @@ class TestCancelMechanism:
         run_id = str(uuid4())
 
         # Simulate: update_run_status("running") raises because status is "cancelled"
-        mock_session_service.update_run_status.side_effect = ValueError("Illegal run transition: 'cancelled' → 'running'. Allowed: []")
+        mock_session_service.update_run_status.side_effect = IllegalRunTransitionError("cancelled", "running", frozenset())
         mock_session_service.get_run.return_value = MagicMock(status="cancelled")
 
         # Should NOT raise — graceful exit
@@ -921,11 +921,68 @@ class TestCancelMechanism:
         'already cancelled', _run_pipeline must re-raise (offensive programming)."""
         run_id = str(uuid4())
 
-        mock_session_service.update_run_status.side_effect = ValueError("Illegal run transition: 'completed' → 'running'. Allowed: []")
+        mock_session_service.update_run_status.side_effect = IllegalRunTransitionError("completed", "running", frozenset())
         mock_session_service.get_run.return_value = MagicMock(status="completed")
 
         with pytest.raises(ValueError, match="completed"):
             service._run_pipeline(run_id, "yaml", threading.Event())
+
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_running_transition_does_not_swallow_non_illegal_value_errors(
+        self,
+        mock_payload: MagicMock,
+        mock_landscape: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Tier-1 invariant: the four non-illegal-transition ValueError sites in
+        update_run_status (run-not-found, landscape_run_id overwrite,
+        completed-without-landscape, failed-without-error) must NOT be caught by
+        the cancelled-race recovery at the running-transition site (originally
+        684).  The only catchable class is IllegalRunTransitionError.
+
+        Discriminator (regression-resistant): under the *old* broad
+        ``except ValueError`` the cancelled-race recovery would (a) consult
+        get_run, (b) see status == "cancelled", (c) broadcast a "cancelled" SSE
+        event, and (d) ``return`` silently — masking the Tier-1 breach as a
+        normal cancellation.  The bare ValueError would never propagate.
+
+        Under the narrowed catch, the bare ValueError propagates verbatim
+        (preserving the original message), no "cancelled" SSE is emitted from
+        the cancelled-race path, and the only get_run call comes from the
+        downstream BaseException post-terminal recovery (separate audit-primacy
+        machinery — its get_run is correct and expected).
+
+        Without this test a future maintainer could re-widen
+        ``except IllegalRunTransitionError`` back to ``except ValueError`` and
+        the recovery-path tests would still pass.
+        """
+        run_id = str(uuid4())
+
+        sentinel_message = "landscape_run_id already set to 'sentinel-existing-id'; cannot overwrite"
+        mock_session_service.update_run_status.side_effect = ValueError(sentinel_message)
+        mock_session_service.get_run.return_value = MagicMock(status="cancelled")
+
+        broadcast_calls: list[tuple[str, Any]] = []
+        original_broadcast = service._broadcaster.broadcast
+
+        def spy_broadcast(rid: str, event: Any) -> None:
+            broadcast_calls.append((rid, event))
+            original_broadcast(rid, event)
+
+        service._broadcaster.broadcast = spy_broadcast  # type: ignore[assignment]
+
+        with pytest.raises(ValueError, match="sentinel-existing-id") as exc_info:
+            service._run_pipeline(run_id, "yaml", threading.Event())
+
+        # Discriminator #1: the propagating exception is bare ValueError, not the
+        # narrow subclass — proves the catch did not match.
+        assert not isinstance(exc_info.value, IllegalRunTransitionError)
+        # Discriminator #2: no "cancelled" SSE was broadcast.  Old broad-catch
+        # behaviour would emit one before silently returning.
+        cancelled_events = [event for (_, event) in broadcast_calls if event.event_type == "cancelled"]
+        assert cancelled_events == [], f"unexpected cancelled SSE — masking window re-opened: {cancelled_events}"
 
     @pytest.mark.asyncio
     async def test_shutdown_event_registered_before_blob_linkage(
@@ -1150,7 +1207,7 @@ class TestCompletionPathExternalCancellation:
             nonlocal call_count
             call_count += 1
             if call_count == 2:
-                raise ValueError("Illegal run transition: 'cancelled' → 'completed'. Allowed: []")
+                raise IllegalRunTransitionError("cancelled", "completed", frozenset())
 
         mock_session_service.update_run_status = AsyncMock(side_effect=status_side_effect)
         mock_session_service.get_run.return_value = MagicMock(status="cancelled")
@@ -1210,7 +1267,7 @@ class TestCompletionPathExternalCancellation:
             nonlocal call_count
             call_count += 1
             if call_count == 2:
-                raise ValueError("Illegal run transition: 'cancelled' → 'completed'. Allowed: []")
+                raise IllegalRunTransitionError("cancelled", "completed", frozenset())
 
         mock_session_service.update_run_status = AsyncMock(side_effect=status_side_effect)
         mock_session_service.get_run.return_value = MagicMock(status="cancelled")
@@ -1284,7 +1341,7 @@ class TestCompletionPathExternalCancellation:
 
         async def status_side_effect(*args: Any, **kwargs: Any) -> None:
             if kwargs.get("status") == "completed":
-                raise ValueError("Illegal run transition: 'cancelled' → 'completed'. Allowed: []")
+                raise IllegalRunTransitionError("cancelled", "completed", frozenset())
 
         mock_session_service.update_run_status = AsyncMock(side_effect=status_side_effect)
         mock_session_service.get_run.return_value = MagicMock(status="cancelled")
@@ -1339,7 +1396,7 @@ class TestCompletionPathExternalCancellation:
             nonlocal call_count
             call_count += 1
             if call_count == 2:
-                raise ValueError("Illegal run transition: 'completed' → 'completed'. Allowed: []")
+                raise IllegalRunTransitionError("completed", "completed", frozenset())
 
         mock_session_service.update_run_status = AsyncMock(side_effect=status_side_effect)
         # DB says "completed" (not "cancelled") — this should re-raise
@@ -1347,6 +1404,99 @@ class TestCompletionPathExternalCancellation:
 
         with pytest.raises(ValueError, match="completed"):
             service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.preflight.ExecutionGraph")
+    @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_completion_guard_does_not_swallow_non_illegal_value_errors(
+        self,
+        mock_payload: MagicMock,
+        mock_landscape: MagicMock,
+        mock_load: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_graph_cls: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Tier-1 invariant for the completion-transition catch (originally
+        ~915): a bare ValueError raised for a non-illegal-transition reason
+        (run-not-found, landscape_run_id overwrite, completed-without-landscape,
+        failed-without-error) must propagate verbatim and must NOT trigger the
+        cancelled-race silent-swallow path.
+
+        Discriminator (regression-resistant): under the old broad
+        ``except ValueError`` the cancelled-race recovery would (a) consult
+        get_run, (b) see status == "cancelled", (c) broadcast a "cancelled"
+        SSE event, and (d) ``return`` silently — masking the Tier-1 breach as
+        a normal cancellation.  The bare ValueError would never propagate.
+
+        Under the narrowed catch the bare ValueError propagates and no
+        "cancelled" SSE is emitted from the cancelled-race path.  (The
+        downstream BaseException post-terminal recovery may consult get_run
+        as part of separate audit-primacy machinery; that's expected and
+        correct, so we assert on broadcast shape rather than get_run call
+        count.)
+
+        Without this test a future widening of
+        ``except IllegalRunTransitionError`` back to ``except ValueError`` would
+        silently re-open the masking window identified by silent-failure-hunter
+        (H1) — and the existing recovery-path tests would still pass.
+        """
+        mock_bundle = MagicMock()
+        mock_bundle.aggregations = {}
+        mock_instantiate.return_value = mock_bundle
+        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+        mock_load.return_value = _mock_pipeline_settings()
+        mock_orch = MagicMock()
+        mock_orch_cls.return_value = mock_orch
+        mock_result = MagicMock()
+        mock_result.status = RunStatus.COMPLETED
+        mock_result.rows_processed = 10
+        mock_result.rows_succeeded = 10
+        mock_result.rows_failed = 0
+        mock_result.rows_routed_success = 0
+        mock_result.rows_routed_failure = 0
+        mock_result.rows_quarantined = 0
+        mock_result.run_id = "landscape-run-sentinel"
+        mock_orch.run.return_value = mock_result
+
+        run_id = str(uuid4())
+        call_count = 0
+        sentinel_message = "landscape_run_id already set to 'sentinel-existing-id'; cannot overwrite"
+
+        async def status_side_effect(*args: Any, **kwargs: Any) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                # Bare ValueError simulating one of the four non-illegal-transition
+                # invariant breaches in update_run_status.
+                raise ValueError(sentinel_message)
+
+        mock_session_service.update_run_status = AsyncMock(side_effect=status_side_effect)
+        mock_session_service.get_run = AsyncMock(return_value=MagicMock(status="cancelled"))
+
+        broadcast_calls: list[tuple[str, Any]] = []
+        original_broadcast = service._broadcaster.broadcast
+
+        def spy_broadcast(rid: str, event: Any) -> None:
+            broadcast_calls.append((rid, event))
+            original_broadcast(rid, event)
+
+        service._broadcaster.broadcast = spy_broadcast  # type: ignore[assignment]
+
+        with pytest.raises(ValueError, match="sentinel-existing-id") as exc_info:
+            service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
+
+        # Discriminator #1: bare ValueError, not the narrow subclass.
+        assert not isinstance(exc_info.value, IllegalRunTransitionError)
+        # Discriminator #2: no "cancelled" SSE — old broad-catch behaviour
+        # would emit one before silently returning.
+        cancelled_events = [event for (_, event) in broadcast_calls if event.event_type == "cancelled"]
+        assert cancelled_events == [], f"unexpected cancelled SSE — masking window re-opened: {cancelled_events}"
 
 
 # ── Post-Completion Exception Recovery (elspeth-879f6de6bd) ───────────
@@ -1483,24 +1633,30 @@ class TestPostCompletionExceptionRecovery:
         statuses = [c.kwargs.get("status") for c in mock_session_service.update_run_status.call_args_list]
         assert statuses == ["running", "completed"], f"Expected [running, completed], got {statuses}"
 
-        # The recovery must emit a structured signal so the post-terminal
-        # exception is observable.  Field names mirror surrounding handler
-        # slog calls (run_id, original_exc_class, exc_class_chain).
+        # Audit-primacy guarantees enforced at this site:
+        #   1. No third update_run_status (asserted above).
+        #   2. No "failed" SSE broadcast (asserted below) — would contradict
+        #      the audit row's true terminal status.
+        # Post-audit-exception observability is provided by two channels
+        # outside _run_pipeline (see service.py post-terminal-exception
+        # comment block):
+        #   - The audit ``runs`` row (status="completed" — verified by the
+        #     ``statuses`` assertion above by transitive proof).
+        #   - ``_on_pipeline_done``'s safety-net slog
+        #     (``pipeline_done_callback_exception``) — fires against the
+        #     re-raised exc once the Future completes.  Tested separately
+        #     in the _on_pipeline_done test class.
+        # This test must NOT pin a slog at the post-terminal-exception
+        # site itself: per ``logging-telemetry-policy`` the logger is
+        # not the correct surface for post-audit operational signal.
         post_terminal_logs = [
             c for c in mock_slog.error.call_args_list if c.args and c.args[0] == "post_terminal_exception_in_run_pipeline"
         ]
-        assert len(post_terminal_logs) == 1, (
-            f"Expected one post_terminal_exception_in_run_pipeline log, got {len(post_terminal_logs)}: "
-            f"{[c.args[0] for c in mock_slog.error.call_args_list if c.args]}"
+        assert post_terminal_logs == [], (
+            "post_terminal_exception_in_run_pipeline slog has been removed "
+            "(audit-primacy fix); the post-audit signal is captured by the "
+            "audit row + _on_pipeline_done safety-net log."
         )
-        log_kwargs = post_terminal_logs[0].kwargs
-        assert log_kwargs["run_id"] == run_id
-        assert log_kwargs["terminal_status"] == "completed"
-        assert log_kwargs["original_exc_class"] == "RuntimeError"
-        # Chain walk mirrors _on_pipeline_done's contract: class names only,
-        # no str(exc) text (Tier-3 redaction).
-        assert log_kwargs["exc_class_chain"] == ["RuntimeError"]
-        assert "exc_msg" not in log_kwargs  # redaction discipline
 
         # No "failed" SSE event must be emitted from the recovery — the run
         # actually completed; broadcasting "failed" would diverge from audit.
@@ -1556,11 +1712,15 @@ class TestPostCompletionExceptionRecovery:
         statuses = [c.kwargs.get("status") for c in mock_session_service.update_run_status.call_args_list]
         assert statuses == ["running", "completed_with_failures"], f"Expected [running, completed_with_failures], got {statuses}"
 
+        # Audit-primacy fix: the post-audit slog has been removed from
+        # this site.  See test_post_completion_broadcast_crash_skips_failed_status_update
+        # for the rationale; the assertion here pins the same invariant for
+        # the COMPLETED_WITH_FAILURES branch (the non-completed branch the
+        # partial-tuple bug pattern would have missed).
         post_terminal_logs = [
             c for c in mock_slog.error.call_args_list if c.args and c.args[0] == "post_terminal_exception_in_run_pipeline"
         ]
-        assert len(post_terminal_logs) == 1
-        assert post_terminal_logs[0].kwargs["terminal_status"] == "completed_with_failures"
+        assert post_terminal_logs == [], "post_terminal_exception_in_run_pipeline slog has been removed (audit-primacy fix)."
 
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
@@ -3057,7 +3217,7 @@ class TestTerminalOrderingInvariant:
         # orphan cleanup already set the DB status to "cancelled".
         async def _selective_update(run_id, *, status="", **kwargs):
             if status == "completed":
-                raise ValueError("Invalid transition: cancelled -> completed")
+                raise IllegalRunTransitionError("cancelled", "completed", frozenset())
             return None
 
         mock_session_service.update_run_status = AsyncMock(side_effect=_selective_update)

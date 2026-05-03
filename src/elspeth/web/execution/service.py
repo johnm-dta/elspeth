@@ -61,6 +61,7 @@ from elspeth.web.execution.schemas import (
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
+    IllegalRunTransitionError,
     RunAlreadyActiveError,
     SessionRunStatus,
     SessionServiceProtocol,
@@ -676,12 +677,12 @@ class ExecutionServiceImpl:
                 return
 
             # B8/C1: SessionService is async — bridge from background thread.
-            # Race defence: if cancel() updated DB to "cancelled" before we
-            # started, this transition raises ValueError. Detect that specific
-            # case and exit gracefully — the run was legitimately cancelled.
+            # Cancelled-race recovery: catch only the narrow subclass.  See
+            # IllegalRunTransitionError docstring for why bare ValueError must
+            # propagate (Tier-1 invariant breaches must not be masked).
             try:
                 self._call_async(self._session_service.update_run_status(run_uuid, status="running", landscape_run_id=run_id))
-            except ValueError:
+            except IllegalRunTransitionError:
                 current = self._call_async(self._session_service.get_run(run_uuid))
                 if current.status == "cancelled":
                     self._finalize_output_blobs(run_id, success=False)
@@ -898,6 +899,9 @@ class ExecutionServiceImpl:
                     rows_routed_failure=result.rows_routed_failure,
                     rows_quarantined=result.rows_quarantined,
                 )
+            # Cancelled-race recovery: catch only the narrow subclass.  See
+            # IllegalRunTransitionError docstring for why bare ValueError must
+            # propagate (Tier-1 invariant breaches must not be masked).
             try:
                 self._call_async(
                     self._session_service.update_run_status(
@@ -912,7 +916,7 @@ class ExecutionServiceImpl:
                         rows_quarantined=result.rows_quarantined,
                     )
                 )
-            except ValueError:
+            except IllegalRunTransitionError:
                 current = self._call_async(self._session_service.get_run(run_uuid))
                 if current.status == "cancelled":
                     slog.warning(
@@ -959,7 +963,15 @@ class ExecutionServiceImpl:
                 # Engine returned normally but no row reached success.  Emit
                 # the operator-visible failure event so the frontend can
                 # render the structural failure mode (S1A / S1B-msg2 shape).
-                # session_error is set above; reuse it as the WebSocket detail.
+                # session_error is unconditionally populated by the FAILED
+                # branch above; assert the structural invariant offensively
+                # rather than re-deriving silently via
+                # ``or _structural_failure_message(...)``.  A regenerated
+                # message would mask a structural inconsistency between
+                # the audit-side and SSE-side failure detail.
+                assert session_error is not None, (
+                    "Tier-1 invariant: session_error must be populated when result.status == RunStatus.FAILED (see the FAILED branch above)"
+                )
                 self._broadcaster.broadcast(
                     run_id,
                     RunEvent(
@@ -967,7 +979,7 @@ class ExecutionServiceImpl:
                         timestamp=datetime.now(tz=UTC),
                         event_type="failed",
                         data=FailedData(
-                            detail=session_error or _structural_failure_message(rows_processed=result.rows_processed),
+                            detail=session_error,
                             node_id=None,
                         ),
                     ),
@@ -1073,13 +1085,11 @@ class ExecutionServiceImpl:
             # observed in the wild.
             run_already_terminal = False
             if not isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                current_terminal_status: SessionRunStatus | None = None
                 try:
                     current_run = self._call_async(self._session_service.get_run(run_uuid))
                     current_status = current_run.status
                     if current_status in SESSION_TERMINAL_RUN_STATUS_VALUES:
                         run_already_terminal = True
-                        current_terminal_status = current_status
                 except (SQLAlchemyError, OSError, ValueError) as probe_err:
                     # Probe failure is part of the audit-recovery machinery
                     # (slog is policy-correct here per logging-telemetry-policy:
@@ -1094,42 +1104,33 @@ class ExecutionServiceImpl:
                     )
 
                 if run_already_terminal:
-                    # Class-name-only chain walk mirrors _on_pipeline_done's
-                    # contract (lines below): pipeline exceptions may chain
-                    # SQLAlchemyError ([SQL: ...] / [parameters: ...]),
-                    # Tier-3 sanitizer output, or source-rendering fragments
-                    # via __cause__ / __context__.  Inline-duplicated rather
-                    # than extracted: only two call sites today, and CLAUDE.md
-                    # discourages refactor-for-the-sake-of-it.
-                    exc_class_chain: list[str] = []
-                    # Local name distinct from Pattern A's ``current`` (the
-                    # RunRecord at line 657) so mypy types it as
-                    # ``BaseException | None`` rather than ``RunRecord``.
-                    current_exc: BaseException | None = exc
-                    seen: set[int] = set()
-                    while current_exc is not None and len(exc_class_chain) < 5:
-                        if id(current_exc) in seen:
-                            break
-                        seen.add(id(current_exc))
-                        exc_class_chain.append(type(current_exc).__name__)
-                        current_exc = current_exc.__cause__ or current_exc.__context__
-                    # TODO(elspeth-879f6de6bd, follow-up observation): per
-                    # logging-telemetry-policy this is post-audit operational
-                    # noise (audit succeeded), so it ideally belongs in
-                    # telemetry rather than slog.  The telemetry surface
-                    # plumbed through _run_pipeline is per-run pipeline
-                    # telemetry from settings.telemetry, not operational
-                    # meta-telemetry; emitting here would require new
-                    # plumbing.  Using slog for parity with surrounding
-                    # handler code; observation filed for the broader
-                    # operational-telemetry plumbing.
-                    slog.error(
-                        "post_terminal_exception_in_run_pipeline",
-                        run_id=run_id,
-                        terminal_status=current_terminal_status,
-                        original_exc_class=type(exc).__name__,
-                        exc_class_chain=exc_class_chain,
-                    )
+                    # Post-audit-terminal exception path.  The run already
+                    # transitioned to a terminal status before this exception
+                    # fired (e.g. broadcast crashed AFTER update_run_status
+                    # succeeded), so the audit DB carries the truthful
+                    # operator-visible outcome and there is nothing more to
+                    # record on the audit side.
+                    #
+                    # We deliberately do NOT slog here.  Per
+                    # ``logging-telemetry-policy`` the logger is not for
+                    # post-audit operational signal — the SRE-discoverable
+                    # surface for this scenario is already two existing
+                    # channels:
+                    #   1. The audit ``runs`` row (queryable by run_id) —
+                    #      carries the truthful terminal status the run
+                    #      reached before the post-audit exception.
+                    #   2. ``_on_pipeline_done``'s safety-net slog
+                    #      (``pipeline_done_callback_exception``) — fires
+                    #      against the re-raised ``exc`` once the Future
+                    #      completes, with the same class-name chain we
+                    #      would otherwise have walked here.
+                    # Together these give an SRE the post-audit signal
+                    # (correlate the two by run_id) without violating
+                    # audit primacy at this site.  Adding a third slog
+                    # at this site would be operational noise that
+                    # duplicates the safety-net log without contributing
+                    # signal beyond the audit row.
+                    pass
                 else:
                     try:
                         self._call_async(self._session_service.update_run_status(run_uuid, status="failed", error=client_msg))

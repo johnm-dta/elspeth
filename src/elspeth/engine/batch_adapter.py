@@ -119,9 +119,12 @@ class RowWaiter:
         token_id, state_id = self._key
         if not self._event.wait(timeout=timeout):
             # Clean up entry on timeout to prevent memory leak.
-            # The consolidated _WaiterEntry means one pop cleans up everything.
+            # Guarded delete: clear() can race with timeout during shutdown — the
+            # only path that removes entries we did not pop ourselves. Explicit
+            # membership check expresses the cleanup intent without R9's pop-default.
             with self._lock:
-                self._entries.pop(self._key, None)
+                if self._key in self._entries:
+                    del self._entries[self._key]
             raise TimeoutError(
                 f"No result received for token {token_id} (state {state_id}) within {timeout}s. "
                 f"This may indicate a hung transform, rate limit exhaustion, or "

@@ -1,7 +1,7 @@
 # ADR-019: Two-Axis Terminal Model — Lifecycle, Outcome, and Path
 
 **Date:** 2026-05-04
-**Status:** Proposed (round-2 acceptance reverted 2026-05-04 after round-3 panel review caught a load-bearing reasoning error in the round-2 mechanical test; sub-decision conclusions preserved, reasoning chain rebuilt — see "Round-2 Correction" subsection)
+**Status:** Accepted (re-accepted 2026-05-04 against round-3 corrected text; supersedes ADR-018; round-2 acceptance was reverted earlier 2026-05-04 after the round-3 panel caught a mechanical-test reasoning error — see "Round-2 Correction" subsection for the honest record)
 **Deciders:** ELSPETH maintainers
 **Tags:** contracts, audit, row-outcomes, public-api, supersedes-adr-018
 

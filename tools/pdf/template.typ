@@ -25,6 +25,44 @@
 #let c-warning = rgb("#7A3B00")   // DRAFT watermark / status chip
 
 // ─────────────────────────────────────────────────────────────
+// HEADLINE VERDICT PALETTE (cover findings panel)
+// ─────────────────────────────────────────────────────────────
+//
+// Each finding's `status` field selects an accent color, a pill
+// fill, and a pill label.  Centralising these here keeps the
+// cover panel's visual vocabulary consistent and easy to extend
+// when new status kinds appear.
+#let cover-status-color(s) = if s == "verified" {
+  rgb("#166534")
+} else if s == "fix-verified" {
+  rgb("#854D0E")
+} else if s == "gap" {
+  rgb("#7A3B00")
+} else {
+  rgb("#5A6370")
+}
+
+#let cover-status-pill-fill(s) = if s == "verified" {
+  rgb("#DCFCE7")
+} else if s == "fix-verified" {
+  rgb("#FEF3C7")
+} else if s == "gap" {
+  rgb("#FEE2E2")
+} else {
+  rgb("#F4F5F6")
+}
+
+#let cover-status-label(s) = if s == "verified" {
+  "Verified"
+} else if s == "fix-verified" {
+  "Fix verified"
+} else if s == "gap" {
+  "Gap"
+} else {
+  s
+}
+
+// ─────────────────────────────────────────────────────────────
 // DOCUMENT METADATA
 // ─────────────────────────────────────────────────────────────
 #set document(
@@ -130,6 +168,25 @@
     ]
   },
 )
+
+// ─────────────────────────────────────────────────────────────
+// RUN-IN HEADINGS (LEAD-INS)
+// ─────────────────────────────────────────────────────────────
+//
+// `#leadin[...]` is invoked by leadins.lua for paragraphs whose
+// first inline span is a Strong ending in a period or em-dash —
+// the structural anchor pattern used throughout the briefing
+// ("**Headline result.** The composer's behaviour…").  Rendered
+// in small caps + navy + tracking, the lead-in reads as a section
+// label embedded in the prose, distinct from ordinary inline bold
+// (which stays plain bold serif).
+#let leadin(body) = text(
+  font: ("Libertinus Serif", "DejaVu Serif"),
+  size: 9.5pt,
+  weight: "bold",
+  fill: rgb("#1E3A5F"),
+  tracking: 0.4pt,
+)[#smallcaps[#body]]
 
 // ─────────────────────────────────────────────────────────────
 // HEADING STYLES
@@ -507,18 +564,21 @@
 // Page margin: top=2.6cm, left=2.8cm, right=2.2cm.  A4 = 210×297mm.
 
 // ── Top navy bleed band ───────────────────────────────────────
+// Height chosen to accommodate up to two lines of 25pt title text
+// without the wrapped second line falling under the teal accent
+// stripe (the previous 5.5cm clipped 2-line titles).
 #place(
   top + left,
   dx: -2.8cm,
   dy: -2.6cm,
-  rect(width: 21cm, height: 5.5cm, fill: c-navy)
+  rect(width: 21cm, height: 6.0cm, fill: c-navy)
 )
 
 // ── Teal accent stripe immediately below the navy band ────────
 #place(
   top + left,
   dx: -2.8cm,
-  dy: -2.6cm + 5.5cm,
+  dy: -2.6cm + 6.0cm,
   rect(width: 21cm, height: 6pt, fill: c-teal)
 )
 
@@ -565,11 +625,18 @@ $if(org-name)$
 $endif$
 
 // ── Title text over the navy band ─────────────────────────────
+//
+// `par(justify: false)` overrides the document-wide justification
+// so a long title isn't gap-justified across the line ("ELSPETH
+// Composer    —    Evaluation"); titles wrap naturally if they
+// exceed the 16.5cm block width.  Tighter `leading` keeps a
+// 2-line title within the navy band's visible area.
 #place(
   top + left,
   dy: 0.5cm,
   block(width: 16.5cm)[
     #set text(font: "TeX Gyre Heros")
+    #set par(justify: false, leading: 0.45em)
     #text(
       size: 7.5pt,
       fill: rgb("#7FAFD4"),
@@ -586,16 +653,23 @@ $endif$
   ]
 )
 
-// Spacer to clear the bleed band
-#v(2.9cm + 6pt + 1.2cm)
+// Spacer to clear the bleed band (navy band + teal stripe + room
+// for the subtitle to start cleanly below the rule).
+#v(3.4cm + 6pt + 1.2cm)
 
 // ── Subtitle ──────────────────────────────────────────────────
-#text(
-  font: "TeX Gyre Heros",
-  size: 13.5pt,
-  fill: c-navy,
-  weight: "bold",
-)[$subtitle$]
+// Display type — disable justify + hyphenation so a short headline
+// phrase doesn't gap-justify or hyphenate ("Trajec-tory").
+#block(width: 100%)[
+  #set par(justify: false, leading: 0.5em)
+  #set text(hyphenate: false)
+  #text(
+    font: "TeX Gyre Heros",
+    size: 13.5pt,
+    fill: c-navy,
+    weight: "bold",
+  )[$subtitle$]
+]
 
 #v(0.5cm)
 
@@ -607,7 +681,7 @@ $endif$
 #table(
   columns: (130pt, 1fr),
   stroke: none,
-  inset: (x: 12pt, y: 7pt),
+  inset: (x: 12pt, y: 6pt),
   fill: (col, row) => if row == 0 { c-navy } else if calc.odd(row) { c-shade } else { white },
   table.cell(colspan: 2)[
     #text(
@@ -634,23 +708,96 @@ $endif$
   $endif$
 )
 
-#v(0.8cm)
+#v(0.55cm)
 
 // ── Scope blurb ───────────────────────────────────────────────
+//
+// Set in the body serif at 10pt (rather than 9pt grey sans) — this
+// is the elevator-pitch paragraph for the briefing, not fine-print.
+// Italic kept to differentiate from chapter prose and to signal
+// "abstract / framing" by typographic convention.
 #block(
   stroke: (left: 3pt + c-teal),
-  inset: (left: 14pt, right: 8pt, top: 8pt, bottom: 8pt),
+  inset: (left: 14pt, right: 12pt, top: 10pt, bottom: 10pt),
   fill: rgb("#EEF2F7"),
   radius: (right: 3pt),
   width: 100%,
 )[
-  #set text(font: "TeX Gyre Heros", size: 9pt, fill: c-muted)
+  #set text(
+    font: ("Libertinus Serif", "DejaVu Serif"),
+    size: 10pt,
+    fill: c-navy,
+    style: "italic",
+  )
+  #set par(leading: 0.62em, spacing: 0.7em, justify: true)
   $scope-blurb$
 ]
 
+// ── Headline verdict cards (if provided) ─────────────────────
+//
+// Three-card horizontal panel that delivers the briefing's
+// verdict at-a-glance.  Wording lives in the metadata YAML and
+// should be lifted directly from the briefing's executive summary
+// — a verdict panel that paraphrases is worse than no panel.
+$if(findings)$
+#v(0.4cm)
+#text(
+  font: "TeX Gyre Heros",
+  size: 8pt,
+  fill: c-muted,
+  weight: "bold",
+  tracking: 1pt,
+)[#upper[Headline verdict]]
+#v(0.2cm)
+#grid(
+  columns: (1fr, 1fr, 1fr),
+  column-gutter: 8pt,
+  $for(findings)$
+  block(
+    fill: rgb("#F8FAFC"),
+    stroke: (left: 2.5pt + cover-status-color("$findings.status$")),
+    inset: (x: 10pt, y: 9pt),
+    radius: (right: 2pt),
+    width: 100%,
+  )[
+    #box(
+      fill: cover-status-pill-fill("$findings.status$"),
+      inset: (x: 5pt, y: 1.5pt),
+      radius: 2pt,
+    )[
+      #text(
+        size: 6.5pt,
+        font: "TeX Gyre Heros",
+        weight: "bold",
+        tracking: 0.7pt,
+        fill: cover-status-color("$findings.status$"),
+      )[#upper[#cover-status-label("$findings.status$")]]
+    ]
+    #v(5pt)
+    #text(
+      font: "TeX Gyre Heros",
+      size: 9.5pt,
+      fill: c-navy,
+      weight: "bold",
+    )[$findings.title$]
+    #v(3pt)
+    #block[
+      #set par(leading: 0.55em, justify: false)
+      #set text(
+        size: 7.8pt,
+        fill: c-muted,
+        style: "italic",
+      )
+      $findings.note$
+    ]
+  ],
+  $endfor$
+)
+$endif$
+
 // ── Revision history (if provided) ───────────────────────────
 $if(revisions)$
-#v(0.6cm)
+#v(0.4cm)
 #text(
   font: "TeX Gyre Heros",
   size: 8pt,
@@ -658,7 +805,7 @@ $if(revisions)$
   weight: "bold",
   tracking: 1pt,
 )[#upper[Revision History]]
-#v(0.25cm)
+#v(0.18cm)
 #table(
   columns: (70pt, 85pt, 1fr),
   stroke: none,
@@ -706,24 +853,25 @@ $endif$
 #v(1cm)
 
 // ─────────────────────────────────────────────────────────────
-// LIST OF TABLES
+// LIST OF TABLES (suppressed entirely when no entries carry a
+// caption — an uncaptioned LoT lists "Table 1 … Table N" with no
+// information, which is worse than not listing at all)
 // ─────────────────────────────────────────────────────────────
-#block(width: 100%)[
-  #text(
-    font: "TeX Gyre Heros",
-    size: 11pt,
-    weight: "bold",
-    fill: c-navy,
-  )[List of Tables]
-  #v(2pt)
-  #line(length: 50pt, stroke: 2pt + c-teal)
-]
-
-#v(0.35cm)
-
 #context {
   let tables = query(figure.where(kind: table))
-  if tables.len() > 0 {
+  let captioned = tables.filter(fig => fig.caption != none)
+  if captioned.len() > 0 {
+    block(width: 100%)[
+      #text(
+        font: "TeX Gyre Heros",
+        size: 11pt,
+        weight: "bold",
+        fill: c-navy,
+      )[List of Tables]
+      #v(2pt)
+      #line(length: 50pt, stroke: 2pt + c-teal)
+    ]
+    v(0.35cm)
     for (i, fig) in tables.enumerate() {
       let pg = counter(page).at(fig.location()).first()
       let caption-text = if fig.caption != none { fig.caption.body } else { [] }
@@ -744,36 +892,33 @@ $endif$
       linebreak()
       v(1.5pt, weak: true)
     }
-  } else {
-    text(font: "TeX Gyre Heros", size: 9pt, fill: c-muted, style: "italic")[No tables in this document.]
-  }
 
-  if tables.len() > 40 {
-    pagebreak()
-  } else {
-    v(1cm)
+    if tables.len() > 40 {
+      pagebreak()
+    } else {
+      v(1cm)
+    }
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-// LIST OF FIGURES
+// LIST OF FIGURES (suppressed entirely when no figures exist —
+// a "No figures in this document" placeholder wastes a half-page)
 // ─────────────────────────────────────────────────────────────
-#block(width: 100%)[
-  #text(
-    font: "TeX Gyre Heros",
-    size: 11pt,
-    weight: "bold",
-    fill: c-navy,
-  )[List of Figures]
-  #v(2pt)
-  #line(length: 50pt, stroke: 2pt + c-teal)
-]
-
-#v(0.35cm)
-
 #context {
   let figures = query(figure.where(kind: image))
   if figures.len() > 0 {
+    block(width: 100%)[
+      #text(
+        font: "TeX Gyre Heros",
+        size: 11pt,
+        weight: "bold",
+        fill: c-navy,
+      )[List of Figures]
+      #v(2pt)
+      #line(length: 50pt, stroke: 2pt + c-teal)
+    ]
+    v(0.35cm)
     for (i, fig) in figures.enumerate() {
       let pg = counter(page).at(fig.location()).first()
       let caption-text = if fig.caption != none { fig.caption.body } else { [] }
@@ -796,8 +941,6 @@ $endif$
         )
       ]
     }
-  } else {
-    text(font: "TeX Gyre Heros", size: 9pt, fill: c-muted, style: "italic")[No figures in this document.]
   }
 }
 

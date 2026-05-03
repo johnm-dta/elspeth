@@ -78,6 +78,7 @@ els_run_pandoc() {
         --template="$SCRIPT_DIR/template.typ" \
         --metadata-file="$metadata" \
         --lua-filter="$SCRIPT_DIR/fix-tables.lua" \
+        --lua-filter="$SCRIPT_DIR/leadins.lua" \
         --standalone \
         --columns=120 \
         -o "$output"

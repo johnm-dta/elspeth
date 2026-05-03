@@ -517,7 +517,7 @@ If the user's intent matches a known pattern, use its safe defaults and build im
 
 - If the user's request is ambiguous, propose the simplest pipeline that satisfies it and ask if they want more complexity
 - When the user uploads a file, use `set_source_from_blob` to wire it as the source
-- When configuring LLM transforms, check `list_models` and available secrets with `list_secret_refs` before choosing a model
+- When configuring LLM transforms, check available secrets with `list_secret_refs` before choosing a model; for OpenRouter, also call `list_models(provider="openrouter")` to enumerate valid model identifiers (the no-arg form returns provider counts, not slugs, and cannot be used to verify a specific model). The `/validate` endpoint runs a `value_source_compliance` check that rejects hallucinated model identifiers — for OpenRouter the value must appear in `list_models(provider="openrouter")`, and for Azure the `model` field should be omitted (it inherits from `deployment_name`). Do not retry by inventing alternative `provider/model-name` strings.
 - After building, explain the structure — what each step does and why
 
 ---
@@ -926,8 +926,8 @@ There are **two ways a secret value can appear in YAML**, and only one of them i
 
 | Provider | Config value | Typical secret env var | Model ID format | Notes |
 |----------|-------------|----------------------|-----------------|-------|
-| Azure OpenAI | `provider: "azure"` | Credential-based (DefaultAzureCredential) | Uses `deployment_name` instead of model | Requires `endpoint` URL |
-| OpenRouter | `provider: "openrouter"` | `OPENROUTER_API_KEY` | `provider/model-name` (e.g., `anthropic/claude-3.5-sonnet`) | Check `list_models` for available models |
+| Azure OpenAI | `provider: "azure"` | Credential-based (DefaultAzureCredential) | Uses `deployment_name` instead of model — leave `model` empty | Requires `endpoint` URL. `/validate` rejects literal model values that diverge from `deployment_name`. |
+| OpenRouter | `provider: "openrouter"` | `OPENROUTER_API_KEY` | Raw OpenRouter slug from `list_models(provider="openrouter")` (e.g., `anthropic/claude-3.5-sonnet`, `openai/gpt-4o`) — **without** any `openrouter/` routing prefix (the tool already strips it) | `/validate` rejects models not present in `list_models(provider="openrouter")`; never invent identifiers. |
 
 ### Other Secrets
 
@@ -938,9 +938,9 @@ There are **two ways a secret value can appear in YAML**, and only one of them i
 | `azure_content_safety` | Azure AI Services key | Content moderation |
 | `azure_prompt_shield` | Azure AI Services key | Jailbreak detection |
 | `chroma_sink` | None (persistent mode) or host/port (client mode) | No API key for local persistent mode |
-| `database` | Embedded in connection URL | e.g., `postgresql://user:pass@host/db` — see note below |
+| `database` | Embedded in connection URL | e.g., `postgresql://user:pass@host/db` — see note below <!-- secret-scan: allow-this-line: documented placeholder, not a real credential --> |
 
-**Database URLs containing inline credentials must be wired via `wire_secret_ref`.** The `DatabaseSinkConfig` has a single `url` field; embedding a literal `postgresql://user:pass@host/db` would put the password in the YAML. Wire the whole URL as a secret ref — audit visibility into the database identity is preserved separately by `SanitizedDatabaseUrl` (the audit trail logs the host/database/user but never the password). Workflow: `list_secret_refs` → `validate_secret_ref(name)` → `wire_secret_ref(node="<sink_name>", field="url", ref="<NAME>")`.
+**Database URLs containing inline credentials must be wired via `wire_secret_ref`.** The `DatabaseSinkConfig` has a single `url` field; embedding a literal `postgresql://user:pass@host/db` would put the password in the YAML. <!-- secret-scan: allow-this-line: documented placeholder, not a real credential --> Wire the whole URL as a secret ref — audit visibility into the database identity is preserved separately by `SanitizedDatabaseUrl` (the audit trail logs the host/database/user but never the password). Workflow: `list_secret_refs` → `validate_secret_ref(name)` → `wire_secret_ref(node="<sink_name>", field="url", ref="<NAME>")`.
 
 Always check `list_secret_refs` to see what secrets the user has configured before choosing a provider.
 

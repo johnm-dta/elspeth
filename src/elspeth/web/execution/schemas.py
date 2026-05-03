@@ -92,17 +92,31 @@ class ProgressData(_StrictResponse):
     ``CompletedData`` / ``CancelledData`` / TS ``RunEventProgress`` shape
     exactly.
 
-    Note: the ``_validate_row_decomposition`` invariant is deliberately NOT
-    enforced here. Non-terminal counts are allowed transient inconsistency
-    while the orchestrator is mid-flight (a row may be marked processed
-    before being categorised) — matching the rationale on
-    ``RunStatusResponse._check_row_decomposition`` for non-terminal states.
+    All six counter fields are REQUIRED with no defaults.  The engine's
+    ``ProgressEvent`` (contracts/cli.py) always carries real counter values
+    at emission time; defaulting any of them to ``0`` on the wire would
+    fabricate "we don't know" as "definitely zero" — violating the CLAUDE.md
+    fabrication test.  Mid-run, an operator must be able to distinguish
+    "no rows have succeeded yet" from "the field was never populated".
+
+    The sum-invariant
+        rows_succeeded + rows_failed + rows_routed_success
+            + rows_routed_failure + rows_quarantined  <=  rows_processed
+    is intentionally NOT enforced here.  Non-terminal counts are allowed
+    transient inconsistency while the orchestrator is mid-flight: a row may
+    be marked processed before being categorised into one of the five
+    terminal-state buckets.  Naming the unenforced sum here keeps the
+    relaxation discoverable rather than implicit.  See
+    ``RunStatusResponse._check_row_decomposition`` for the matching
+    rationale on non-terminal status responses.
     """
 
     rows_processed: int = Field(ge=0)
+    rows_succeeded: int = Field(ge=0)
     rows_failed: int = Field(ge=0)
-    rows_routed_success: int = Field(default=0, ge=0)
-    rows_routed_failure: int = Field(default=0, ge=0)
+    rows_quarantined: int = Field(ge=0)
+    rows_routed_success: int = Field(ge=0)
+    rows_routed_failure: int = Field(ge=0)
 
 
 class ErrorData(_StrictResponse):
@@ -320,13 +334,25 @@ class CompletedData(_StrictResponse):
 
 
 class CancelledData(_StrictResponse):
-    """Payload for ``cancelled`` events (terminal)."""
+    """Payload for ``cancelled`` events (terminal).
+
+    All six counter fields are REQUIRED with no defaults — same fabrication
+    rationale as ``ProgressData``.  At cancellation time the engine carries
+    every counter via the ``GracefulShutdownError`` (or ``RunResult``) that
+    drove the cancellation; emission paths that pre-date pipeline start
+    (early-cancel before any row has been seen) populate every field with
+    a literal ``0``, which is then a documented producer assertion rather
+    than a default-shimmed silence.  Cancelled is terminal; transient
+    inconsistency is not a concern here.
+    """
 
     status: Literal["cancelled"] = "cancelled"
     rows_processed: int = Field(ge=0)
+    rows_succeeded: int = Field(ge=0)
     rows_failed: int = Field(ge=0)
-    rows_routed_success: int = Field(default=0, ge=0)
-    rows_routed_failure: int = Field(default=0, ge=0)
+    rows_quarantined: int = Field(ge=0)
+    rows_routed_success: int = Field(ge=0)
+    rows_routed_failure: int = Field(ge=0)
 
 
 class FailedData(_StrictResponse):

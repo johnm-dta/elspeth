@@ -36,7 +36,52 @@ secondary field.
 `RowOutcome` variants name the producer/audit circumstance. Aggregate row
 counters that feed run-status predicates name the predicate role.
 
-For this PR, that means:
+The current canonical mapping is recorded below so a future producer can
+apply the rule mechanically rather than re-deriving it from prose. Sources
+of truth: live accumulator at
+`engine/orchestrator/outcomes.py::accumulate_row_outcomes`, resume
+aggregation at `engine/orchestrator/core.py` (the `match` over
+`outcome.outcome`), and the predicate definitions on
+`contracts/run_result.py::RunResult` (`success_indicator` / `failure_indicator`).
+
+| `RowOutcome` variant | Aggregate counter(s) incremented | Predicate role |
+| --- | --- | --- |
+| `COMPLETED` | `rows_succeeded` | success indicator |
+| `ROUTED` | `rows_routed_success` (+ `routed_destinations[sink]`) | success indicator |
+| `ROUTED_ON_ERROR` | `rows_routed_failure` (+ `routed_destinations[sink]`) | failure indicator |
+| `DROPPED_BY_FILTER` | `rows_succeeded` | success indicator |
+| `COALESCED` | `rows_succeeded`, `rows_coalesced` | success indicator (via `rows_succeeded`); `rows_coalesced` is structural |
+| `FAILED` | `rows_failed` | failure indicator |
+| `QUARANTINED` | `rows_quarantined` | failure indicator |
+| `DIVERTED` | `rows_diverted` (incremented in `SinkExecutor` at the sink-write boundary; the row-outcome accumulator raises if it ever sees `DIVERTED`) | structural — sink-write fallback recorded for visibility, not a predicate input |
+| `FORKED` | `rows_forked` | structural — parent-token bookkeeping; child tokens carry their own terminal outcomes |
+| `EXPANDED` | `rows_expanded` | structural — parent-token bookkeeping; child tokens carry their own terminal outcomes |
+| `CONSUMED_IN_BATCH` | (deferred — counted at batch flush via the batch-result token's terminal outcome) | structural — no producer-site counter; the flush-time outcome carries the predicate role |
+| `BUFFERED` (non-terminal) | `rows_buffered` | structural — non-terminal hold; final outcome is reassigned at flush time |
+
+`rows_coalesce_failed` is a failure-indicator counter that is **not** mapped
+to a single `RowOutcome` variant. It is incremented at coalesce-flush time
+when a barrier fails quorum (`outcomes.py::flush_coalesce_pending` and the
+inline coalesce flush), and the consumed tokens additionally bump
+`rows_failed`. Future producer-site outcomes that need similar quorum-fail
+accounting must add their own structural counter and register it in the
+`failure_indicator` predicate at the same time.
+
+**Resume nuance.** The "Aggregate counter(s) incremented" column reflects
+the in-flight live-accumulator path. The resume-time aggregation in
+`engine/orchestrator/core.py::_derive_resume_terminal_status_from_audit`
+deliberately restores **only the predicate-input counters** needed to feed
+the biconditional in `contracts/run_result.py::RunResult`
+(`rows_succeeded`, `rows_routed_success`, `rows_failed`, `rows_quarantined`,
+`rows_routed_failure`, `rows_coalesce_failed`, `rows_processed`). Structural
+counters (`rows_coalesced`, `rows_forked`, `rows_expanded`, `rows_buffered`,
+`rows_diverted`) are not re-derived from `token_outcomes` on the
+all-rows-already-processed branch and reflect only activity in the resumed
+segment. Future producers that introduce a structural counter must decide
+explicitly whether resume-time restoration is required and, if so, extend
+the audit-replay aggregation alongside the producer site.
+
+For this PR (`elspeth-5069612f3c`), the rule shows up as:
 
 - `RowOutcome.ROUTED` means intentional gate MOVE and contributes to
   `rows_routed_success`.
@@ -49,6 +94,15 @@ answers "how does this aggregate bucket contribute to the run-status
 predicate?" Future ADRs must not cite this decision as "make every
 outcome/counter pair have the same word"; the pattern is producer-site
 outcome discrimination plus predicate-role aggregate naming.
+
+When adding a new `RowOutcome` variant: add a row to the table above, decide
+its counter (existing predicate-role counter, new counter feeding an existing
+predicate, or new structural counter), and update both the live accumulator
+and the resume aggregation in the same change. The closed-set partition
+assertion at `contracts/enums.py` (`_TERMINAL_ROW_OUTCOMES` /
+`_NON_TERMINAL_ROW_OUTCOMES`) and the `case _:` exhaustiveness guards in both
+accumulators will fail loudly at import or replay time if any of these steps
+is skipped.
 
 ### Public API Naming
 

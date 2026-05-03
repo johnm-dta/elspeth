@@ -247,6 +247,24 @@ export function RunsView() {
                     </span>
                   )}
                 </span>
+                {/* S-8 (rows_succeeded / rows_quarantined visibility) — mid-run
+                    operators must be able to distinguish a clean-success run
+                    from a quarantine-heavy run; the wire payload now carries
+                    both counters on every progress / completed / cancelled
+                    event. */}
+                {run.rows_succeeded > 0 && (
+                  <span title="Rows that completed via the success-sink path">
+                    {run.rows_succeeded.toLocaleString()} succeeded
+                  </span>
+                )}
+                {run.rows_quarantined > 0 && (
+                  <span
+                    title="Rows quarantined for investigation"
+                    style={{ color: "var(--color-warning)" }}
+                  >
+                    {run.rows_quarantined.toLocaleString()} quarantined
+                  </span>
+                )}
                 {/* elspeth-5069612f3c (ADR-018) — rows_routed split. */}
                 {run.rows_routed_success > 0 && (
                   <span title="Gate route_to_sink MOVE rows (intentional success-path routing)">

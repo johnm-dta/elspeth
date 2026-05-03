@@ -3710,6 +3710,55 @@ class TestSchemaContractValidation:
         assert agg_contract.consumer_requires == ("value",)
         assert agg_contract.satisfied is False
 
+    def test_aggregation_non_mapping_wrapper_options_surface_as_validation_error(self) -> None:
+        """A non-Mapping ``options.options`` wrapper value surfaces as a high-severity
+        ValidationEntry, not a silent fallback to the flat outer options.
+
+        Pins the S-6 behavioral improvement: the inline duplication previously here
+        silently fell through to the outer options when ``node.options["options"]``
+        existed but was not a Mapping. The canonical helper
+        ``get_aggregation_contract_options`` raises ValueError on that shape, and the
+        ``_check_schema_contracts`` call site converts the error into a blocking
+        ``ValidationEntry`` so misconfigured wrappers cannot bypass locked-input
+        membership checks.
+        """
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                on_success="agg1",
+                options={"schema": {"mode": "fixed", "fields": ["line: str"]}},
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="agg1",
+                node_type="aggregation",
+                plugin="batch_stats",
+                input="agg1",
+                on_success="main",
+                on_error=None,
+                options={"options": "not-a-mapping"},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_output(self._make_output())
+        state = state.with_edge(self._make_edge("e1", "source", "agg1"))
+
+        result = state.validate()
+
+        assert not result.is_valid
+        wrapper_errors = [e for e in result.errors if e.component == "node:agg1" and "Invalid contract config" in e.message]
+        assert wrapper_errors, (
+            "Expected a high-severity 'Invalid contract config' error on node:agg1 "
+            f"for the non-Mapping wrapper, got: {[(e.component, e.message) for e in result.errors]}"
+        )
+        assert any(e.severity == "high" for e in wrapper_errors)
+
     def test_coalesce_producer_emits_skip_warning(self) -> None:
         """Coalesce producers stay unresolved until runtime validation."""
         state = self._empty_state()

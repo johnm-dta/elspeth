@@ -17,7 +17,7 @@ It is derived from:
 | Outcome | Terminal | Required fields | Primary recorder |
 |---------|----------|-----------------|------------------|
 | COMPLETED | yes | sink_name | Orchestrator (after sink write) |
-| ROUTED | yes | sink_name | RowProcessor (gate or error sink) |
+| ROUTED | yes | sink_name | RowProcessor (gate route_to_sink, MOVE only) |
 | ROUTED_ON_ERROR | yes | sink_name, error_hash | RowProcessor (transform on_error reroute via DIVERT) |
 | FORKED | yes | fork_group_id | RowProcessor (after gate fork) |
 | FAILED | yes | error_hash | RowProcessor or CoalesceExecutor |

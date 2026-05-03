@@ -383,13 +383,23 @@ type _AssertTerminalSubset = TerminalRunStatus extends RunStatus ? true : never;
 const _terminalSubsetCheck: _AssertTerminalSubset = true;
 void _terminalSubsetCheck;
 
-/** An execution run. */
+/** An execution run.
+ *
+ * Mirrors ``RunStatusResponse`` / ``RunResultsResponse`` at
+ * ``web/execution/schemas.py``.  All six row counters are required —
+ * the wire already serves them, and the same fabrication-test rationale
+ * that drives ``ProgressData`` applies here: an operator inspecting a
+ * historical run record must be able to distinguish "no rows succeeded"
+ * from "the field is missing".
+ */
 export interface Run {
   id: string;
   session_id: string;
   status: RunStatus;
   rows_processed: number;
+  rows_succeeded: number;
   rows_failed: number;
+  rows_quarantined: number;
   /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
   rows_routed_success: number;
   /** elspeth-5069612f3c — transform on_error DIVERT rows. */
@@ -425,7 +435,19 @@ export interface RunEvent {
 
 export interface RunEventProgress {
   rows_processed: number;
+  /**
+   * Required wire field.  Defaulting to 0 would fabricate "we don't know
+   * how many rows succeeded" as "zero rows succeeded" — violating the
+   * CLAUDE.md fabrication test.  Backend ProgressData requires this.
+   */
+  rows_succeeded: number;
   rows_failed: number;
+  /**
+   * Required wire field — same fabrication-test rationale as
+   * ``rows_succeeded``.  An operator mid-run must be able to distinguish
+   * "0% quarantined" from "the field is missing".
+   */
+  rows_quarantined: number;
   /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
   rows_routed_success: number;
   /** elspeth-5069612f3c — transform on_error DIVERT rows. */
@@ -462,7 +484,19 @@ export interface RunEventCompleted {
 export interface RunEventCancelled {
   status: "cancelled";
   rows_processed: number;
+  /**
+   * Required wire field — same fabrication-test rationale as
+   * ``RunEventProgress.rows_succeeded``.  An operator inspecting a
+   * cancelled run must be able to distinguish "no rows succeeded
+   * before cancellation" from "the field is missing".
+   */
+  rows_succeeded: number;
   rows_failed: number;
+  /**
+   * Required wire field — same fabrication-test rationale as
+   * ``RunEventProgress.rows_quarantined``.
+   */
+  rows_quarantined: number;
   /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
   rows_routed_success: number;
   /** elspeth-5069612f3c — transform on_error DIVERT rows. */
@@ -475,10 +509,19 @@ export interface RunEventFailed {
   node_id: string | null;
 }
 
-/** Live progress state derived from RunEvents. */
+/** Live progress state derived from RunEvents.
+ *
+ * Mirrors the wire shape of ``RunEventProgress`` plus the recent-error
+ * ring buffer.  ``rows_succeeded`` and ``rows_quarantined`` are required
+ * because the wire payload now requires them — the reducer cannot
+ * fabricate a 0 default without violating the same fabrication-test
+ * rationale that drives the backend schema.
+ */
 export interface RunProgress {
   rows_processed: number;
+  rows_succeeded: number;
   rows_failed: number;
+  rows_quarantined: number;
   /** elspeth-5069612f3c — gate route_to_sink MOVE rows. */
   rows_routed_success: number;
   /** elspeth-5069612f3c — transform on_error DIVERT rows. */

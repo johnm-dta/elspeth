@@ -160,7 +160,9 @@ def _build_terminal_run_event(current: RunStatusResponse) -> RunEvent:
     elif current.status == "cancelled":
         payload = CancelledData(
             rows_processed=current.rows_processed,
+            rows_succeeded=current.rows_succeeded,
             rows_failed=current.rows_failed,
+            rows_quarantined=current.rows_quarantined,
             rows_routed_success=current.rows_routed_success,
             rows_routed_failure=current.rows_routed_failure,
         )

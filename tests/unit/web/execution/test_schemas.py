@@ -132,7 +132,9 @@ class TestRunEvent:
                 run_id="run-123",
                 timestamp=datetime.now(tz=UTC),
                 event_type="unknown",  # type: ignore[arg-type]  # deliberate bad value for Pydantic to reject
-                data=ProgressData(rows_processed=0, rows_failed=0),
+                data=ProgressData(
+                    rows_processed=0, rows_succeeded=0, rows_failed=0, rows_quarantined=0, rows_routed_success=0, rows_routed_failure=0
+                ),
             )
 
     def test_progress_event_valid(self) -> None:
@@ -142,14 +144,18 @@ class TestRunEvent:
             event_type="progress",
             data=ProgressData(
                 rows_processed=10,
+                rows_succeeded=4,
                 rows_failed=2,
+                rows_quarantined=0,
                 rows_routed_success=3,
                 rows_routed_failure=1,
             ),
         )
         assert isinstance(event.data, ProgressData)
         assert event.data.rows_processed == 10
+        assert event.data.rows_succeeded == 4
         assert event.data.rows_failed == 2
+        assert event.data.rows_quarantined == 0
         assert event.data.rows_routed_success == 3
         assert event.data.rows_routed_failure == 1
 
@@ -192,10 +198,19 @@ class TestRunEvent:
             run_id="run-1",
             timestamp=datetime.now(tz=UTC),
             event_type="cancelled",
-            data=CancelledData(rows_processed=50, rows_failed=1),
+            data=CancelledData(
+                rows_processed=50,
+                rows_succeeded=45,
+                rows_failed=1,
+                rows_quarantined=2,
+                rows_routed_success=1,
+                rows_routed_failure=1,
+            ),
         )
         assert isinstance(event.data, CancelledData)
         assert event.data.rows_processed == 50
+        assert event.data.rows_succeeded == 45
+        assert event.data.rows_quarantined == 2
 
     def test_failed_event_valid(self) -> None:
         event = RunEvent(
@@ -238,7 +253,12 @@ class TestRunEvent:
             )
 
     def test_cancelled_requires_row_counts(self) -> None:
-        """CancelledData must include rows_processed and rows_failed."""
+        """CancelledData must include all six row counters — fabrication test.
+
+        S-8: defaulting any counter to ``0`` would fabricate "we don't know"
+        as "definitely zero".  Constructing with only one counter must crash
+        on the five missing required fields.
+        """
         with pytest.raises(pydantic.ValidationError):
             RunEvent(
                 run_id="run-1",
@@ -265,7 +285,14 @@ class TestRunEventJsonRoundTrip:
             run_id="run-1",
             timestamp=datetime.now(tz=UTC),
             event_type="progress",
-            data=ProgressData(rows_processed=50, rows_failed=3),
+            data=ProgressData(
+                rows_processed=50,
+                rows_succeeded=47,
+                rows_failed=3,
+                rows_quarantined=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+            ),
         )
         restored = self._round_trip(original)
         assert restored.event_type == "progress"
@@ -300,11 +327,20 @@ class TestRunEventJsonRoundTrip:
             run_id="run-1",
             timestamp=datetime.now(tz=UTC),
             event_type="cancelled",
-            data=CancelledData(rows_processed=10, rows_failed=1),
+            data=CancelledData(
+                rows_processed=10,
+                rows_succeeded=8,
+                rows_failed=1,
+                rows_quarantined=1,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+            ),
         )
         restored = self._round_trip(original)
         assert restored.event_type == "cancelled"
         assert isinstance(restored.data, CancelledData)
+        assert restored.data.rows_succeeded == 8
+        assert restored.data.rows_quarantined == 1
 
     def test_failed_round_trip(self) -> None:
         original = RunEvent(
@@ -407,15 +443,22 @@ class TestRowCountConstraints:
 
     def test_negative_rows_processed_rejected(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            ProgressData(rows_processed=-1, rows_failed=0)
+            ProgressData(rows_processed=-1, rows_succeeded=0, rows_failed=0, rows_quarantined=0)
 
     def test_negative_rows_failed_rejected(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            ProgressData(rows_processed=0, rows_failed=-1)
+            ProgressData(rows_processed=0, rows_succeeded=0, rows_failed=-1, rows_quarantined=0)
 
     def test_negative_cancelled_rows_rejected(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            CancelledData(rows_processed=-1, rows_failed=0)
+            CancelledData(
+                rows_processed=-1,
+                rows_succeeded=0,
+                rows_failed=0,
+                rows_quarantined=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+            )
 
     def test_negative_completed_rows_rejected(self) -> None:
         with pytest.raises(pydantic.ValidationError):
@@ -548,7 +591,7 @@ class TestStrictCoercionRejected:
 
     def test_progress_data_rejects_string_int(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            ProgressData(rows_processed="10", rows_failed=0)  # type: ignore[arg-type]
+            ProgressData(rows_processed="10", rows_succeeded=0, rows_failed=0, rows_quarantined=0)  # type: ignore[arg-type]
 
     def test_completed_data_rejects_string_int(self) -> None:
         with pytest.raises(pydantic.ValidationError):
@@ -563,7 +606,14 @@ class TestStrictCoercionRejected:
 
     def test_cancelled_data_rejects_string_int(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            CancelledData(rows_processed="50", rows_failed=1)  # type: ignore[arg-type]
+            CancelledData(
+                rows_processed="50",  # type: ignore[arg-type]
+                rows_succeeded=45,
+                rows_failed=1,
+                rows_quarantined=2,
+                rows_routed_success=1,
+                rows_routed_failure=1,
+            )
 
     def test_error_data_rejects_int_as_string(self) -> None:
         """node_id is str|None — an int should not be coerced to str."""
@@ -629,7 +679,7 @@ class TestExtraFieldsRejected:
 
     def test_progress_data_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
-            ProgressData(rows_processed=10, rows_failed=0, percent=50.0)  # type: ignore[call-arg]
+            ProgressData(rows_processed=10, rows_succeeded=10, rows_failed=0, rows_quarantined=0, percent=50.0)  # type: ignore[call-arg]
 
     def test_completed_data_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
@@ -649,13 +699,23 @@ class TestExtraFieldsRejected:
                 run_id="run-1",
                 timestamp=datetime.now(tz=UTC),
                 event_type="progress",
-                data=ProgressData(rows_processed=10, rows_failed=0),
+                data=ProgressData(
+                    rows_processed=10, rows_succeeded=10, rows_failed=0, rows_quarantined=0, rows_routed_success=0, rows_routed_failure=0
+                ),
                 session_id="s-1",  # type: ignore[call-arg]
             )
 
     def test_cancelled_data_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
-            CancelledData(rows_processed=10, rows_failed=0, reason="timeout")  # type: ignore[call-arg]
+            CancelledData(
+                rows_processed=10,
+                rows_succeeded=8,
+                rows_failed=0,
+                rows_quarantined=2,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+                reason="timeout",  # type: ignore[call-arg]
+            )
 
     def test_failed_data_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
@@ -708,7 +768,9 @@ class TestRunEventTimestampCoercion:
             run_id="run-1",
             timestamp=datetime.now(tz=UTC),
             event_type="progress",
-            data=ProgressData(rows_processed=0, rows_failed=0),
+            data=ProgressData(
+                rows_processed=0, rows_succeeded=0, rows_failed=0, rows_quarantined=0, rows_routed_success=0, rows_routed_failure=0
+            ),
         )
         assert isinstance(event.timestamp, datetime)
 
@@ -718,7 +780,14 @@ class TestRunEventTimestampCoercion:
             "run_id": "run-1",
             "timestamp": "2026-04-15T10:00:00+00:00",
             "event_type": "progress",
-            "data": {"rows_processed": 0, "rows_failed": 0},
+            "data": {
+                "rows_processed": 0,
+                "rows_succeeded": 0,
+                "rows_failed": 0,
+                "rows_quarantined": 0,
+                "rows_routed_success": 0,
+                "rows_routed_failure": 0,
+            },
         }
         event = RunEvent.model_validate(raw)
         assert isinstance(event.timestamp, datetime)
@@ -730,7 +799,9 @@ class TestRunEventTimestampCoercion:
                 run_id="run-1",
                 timestamp=1713254400,
                 event_type="progress",
-                data=ProgressData(rows_processed=0, rows_failed=0),
+                data=ProgressData(
+                    rows_processed=0, rows_succeeded=0, rows_failed=0, rows_quarantined=0, rows_routed_success=0, rows_routed_failure=0
+                ),
             )
 
 
@@ -1446,12 +1517,27 @@ class TestTerminalEventStatusDiscriminator:
         don't pass it continue to work, and the wire payload is uniform with
         ``CompletedData``/``FailedData``.
         """
-        data = CancelledData(rows_processed=10, rows_failed=2)
+        data = CancelledData(
+            rows_processed=10,
+            rows_succeeded=6,
+            rows_failed=2,
+            rows_quarantined=2,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+        )
         assert data.status == "cancelled"
 
     def test_cancelled_data_rejects_other_status(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            CancelledData(status="completed", rows_processed=10, rows_failed=0)  # type: ignore[arg-type]
+            CancelledData(
+                status="completed",  # type: ignore[arg-type]
+                rows_processed=10,
+                rows_succeeded=10,
+                rows_failed=0,
+                rows_quarantined=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+            )
 
     def test_failed_data_status_defaults_to_failed(self) -> None:
         data = FailedData(detail="Pipeline crashed", node_id=None)
@@ -1483,3 +1569,120 @@ class TestTerminalEventStatusDiscriminator:
         restored = RunEvent.model_validate_json(as_json)
         assert isinstance(restored.data, CompletedData)
         assert restored.data.status == "completed_with_failures"
+
+
+class TestS8FabricationGuard:
+    """S-8: ProgressData and CancelledData require all six counters explicitly.
+
+    Per CLAUDE.md fabrication test, defaulting an absent count to ``0`` makes
+    "we don't know" indistinguishable from "definitely zero".  The engine's
+    ``ProgressEvent`` (contracts/cli.py) already populates every counter on
+    every emission; making the wire schema require them too closes the
+    producer-drift door at the consumer layer.
+    """
+
+    _PROGRESS_REQUIRED_FIELDS = (
+        "rows_processed",
+        "rows_succeeded",
+        "rows_failed",
+        "rows_quarantined",
+        "rows_routed_success",
+        "rows_routed_failure",
+    )
+
+    _CANCELLED_REQUIRED_FIELDS = _PROGRESS_REQUIRED_FIELDS
+
+    @pytest.mark.parametrize("missing_field", _PROGRESS_REQUIRED_FIELDS)
+    def test_progress_data_requires_all_six_counters(self, missing_field: str) -> None:
+        """Every counter must be supplied — omitting any one crashes."""
+        kwargs: dict[str, int] = dict.fromkeys(self._PROGRESS_REQUIRED_FIELDS, 1)
+        del kwargs[missing_field]
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            ProgressData(**kwargs)  # type: ignore[arg-type]
+        assert missing_field in str(exc_info.value)
+
+    def test_progress_data_no_default_zero(self) -> None:
+        """Constructing with only rows_processed must crash on five missing fields.
+
+        Pre-fix: the four routed/categorical defaults silently filled in 0.
+        Post-fix: only rows_processed is supplied; ProgressData crashes.
+        """
+        with pytest.raises(pydantic.ValidationError):
+            ProgressData(rows_processed=10)  # type: ignore[call-arg]
+
+    def test_progress_data_relaxed_sum_invariant(self) -> None:
+        """Mid-flight transient inconsistency is allowed.
+
+        ProgressData may emit ``rows_processed=10`` while every terminal
+        bucket reads 0 — this represents a moment between row ingestion and
+        categorisation.  The sum-invariant
+        (succeeded+failed+quarantined+routed_success+routed_failure
+        <= processed) is documented in the docstring as NOT enforced here.
+        """
+        data = ProgressData(
+            rows_processed=10,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_quarantined=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+        )
+        assert data.rows_processed == 10
+
+    def test_progress_event_json_roundtrip_strict(self) -> None:
+        """Reconnect-replay path: dict → RunEvent.model_validate.
+
+        Pins the ``_resolve_data_from_event_type`` before-validator
+        (schemas.py).  This path is what WebSocket reconnect deserialisation
+        uses; it must accept the full six-counter shape and preserve every
+        value.
+        """
+        payload = {
+            "run_id": "r-1",
+            "timestamp": "2026-05-03T12:00:00+00:00",
+            "event_type": "progress",
+            "data": {
+                "rows_processed": 100,
+                "rows_succeeded": 80,
+                "rows_failed": 5,
+                "rows_quarantined": 10,
+                "rows_routed_success": 3,
+                "rows_routed_failure": 2,
+            },
+        }
+        event = RunEvent.model_validate(payload)
+        assert isinstance(event.data, ProgressData)
+        assert event.data.rows_succeeded == 80
+        assert event.data.rows_quarantined == 10
+        assert event.data.rows_routed_success == 3
+        assert event.data.rows_routed_failure == 2
+
+    def test_progress_event_json_roundtrip_partial_rejected(self) -> None:
+        """Reconnect-replay path: partial data dict must crash.
+
+        If a buffered or stale event from the pre-fix wire shape arrives
+        post-deploy, ``model_validate`` must reject it rather than silently
+        substituting 0 for the missing counters.  Pins the regression door.
+        """
+        payload = {
+            "run_id": "r-1",
+            "timestamp": "2026-05-03T12:00:00+00:00",
+            "event_type": "progress",
+            "data": {
+                "rows_processed": 100,
+                "rows_failed": 5,
+                "rows_routed_success": 3,
+                "rows_routed_failure": 2,
+            },
+        }
+        with pytest.raises(pydantic.ValidationError):
+            RunEvent.model_validate(payload)
+
+    @pytest.mark.parametrize("missing_field", _CANCELLED_REQUIRED_FIELDS)
+    def test_cancelled_data_requires_all_six_counters(self, missing_field: str) -> None:
+        """CancelledData mirrors the ProgressData fabrication contract."""
+        kwargs: dict[str, int] = dict.fromkeys(self._CANCELLED_REQUIRED_FIELDS, 1)
+        del kwargs[missing_field]
+        with pytest.raises(pydantic.ValidationError) as exc_info:
+            CancelledData(**kwargs)  # type: ignore[arg-type]
+        assert missing_field in str(exc_info.value)

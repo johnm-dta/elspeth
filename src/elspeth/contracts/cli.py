@@ -15,10 +15,13 @@ class ProgressEvent:
 
     elspeth-5069612f3c — ``rows_routed`` is split into MOVE (intentional gate
     ``route_to_sink``) and DIVERT (transform ``on_error`` reroute) buckets so
-    the in-flight progress signal mirrors the terminal-state taxonomy. Both
-    fields default to 0 so external constructors continue to work; the engine
-    emitters at ``orchestrator/core.py`` MUST pass real counter values — see
-    the docstring on those call sites.
+    the in-flight progress signal mirrors the terminal-state taxonomy. All
+    counters are REQUIRED at construction time: per CLAUDE.md fabrication
+    test, defaulting an absent value to ``0`` would make "we don't know"
+    indistinguishable from "definitely zero" on the wire. The engine
+    emitters at ``orchestrator/core.py`` already populate every field on
+    every emission; making them required crashes any future drift loudly
+    at the producer site rather than silently substituting ``0`` downstream.
 
     Attributes:
         rows_processed: Total rows processed so far.
@@ -35,8 +38,8 @@ class ProgressEvent:
     rows_failed: int
     rows_quarantined: int
     elapsed_seconds: float
-    rows_routed_success: int = 0
-    rows_routed_failure: int = 0
+    rows_routed_success: int
+    rows_routed_failure: int
 
 
 class ExecutionResult(TypedDict):

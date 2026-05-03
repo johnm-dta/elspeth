@@ -351,17 +351,6 @@ allow_hits:
     and preview falls back to raw declared schema guarantees (or frozenset() for known pass-through plugins,
     which then forces Stage 1 rejection) instead of crashing or fabricating a stronger contract
   expires: null
-- key: web/composer/state.py:R5:_consumer_locked_input_set:fp=7d0eebc7f1756de1
-  owner: web-composer
-  reason: "_consumer_locked_input_set inspects aggregation wrapper-shaped options for a nested options
-    mapping carrying the input contract. The isinstance check mirrors the existing _declared_input_fields_option
-    pattern (also allowlisted) \u2014 the same Tier-3 LLM/user-supplied options shape with an optional nested
-    mapping. The nested-mapping branch is taken only when the value is actually a Mapping; otherwise the
-    flat top-level options are used."
-  safety: Non-mapping wrapper values fall through to the flat options path; existing schema-contract
-    validation rejects malformed wrapper options as blocking ValidationEntry results, so the locked-input
-    membership check never operates on adversarial shapes that bypass the type narrowing
-  expires: null
 - key: web/composer/state.py:R1:_check_schema_contracts:_producer_emit_set:fp=903c7ec6f6e51cef
   owner: web-composer
   reason: "_producer_emit_set looks up a producer's NodeSpec in node_by_id; sources have producer_id ==
@@ -1403,7 +1392,7 @@ allow_hits:
   safety: Only RuntimeError caught (narrowed from bare Exception); logged with canonical exc_class; pipeline
     continues
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=6ddefac4a06d4721
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=d8a9bc13f4a27828
   owner: web-execution
   reason: GracefulShutdownError is an expected control-flow signal from orchestrator cancellation
   safety: Classified as cancelled; separated from BaseException failure path
@@ -1416,14 +1405,19 @@ allow_hits:
   safety: KeyboardInterrupt/SystemExit re-raised by the surrounding handler; non-signal exceptions become
     operator-visible structured failures
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=c6a02ba63e915cd4
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=d874483f7939fafb
   owner: web-execution
-  reason: "elspeth-879f6de6bd post-completion run-state probe \u2014 catches (SQLAlchemyError, OSError, ValueError)
-    so transient probe failures (DB hiccup, filesystem race, validation drift on the get_run() read) do
-    not mask the original post-completion exception. Fingerprint shifted from af4245407c3c4a91 by
-    the I-4 audit-primacy fix that removed the post-terminal-exception slog block above this handler."
-  safety: Falls through to best-effort failed-status update; programmer bugs (TypeError/AttributeError/RuntimeError)
-    propagate
+  reason: "elspeth-879f6de6bd post-completion run-state probe \u2014 catches (SQLAlchemyError, OSError) only,
+    so transient audit-system degradation (DB hiccup, filesystem race) on the get_run() read does not mask
+    the original post-completion exception. ValueError is deliberately NOT caught: per the inline source
+    rationale (web/execution/service.py:1094-1114), the ValueErrors get_run() can raise (\"Run not found\",
+    malformed UUID, non-UTC datetimes via _ensure_utc) are all Tier-1 audit-data corruption and MUST crash
+    immediately per CLAUDE.md tier model rather than be silently absorbed. Fingerprint shifted from
+    c6a02ba63e915cd4 when the catch tuple was narrowed from (SQLAlchemyError, OSError, ValueError) to
+    (SQLAlchemyError, OSError); previous fingerprint shift was af4245407c3c4a91 \u2192 c6a02ba63e915cd4 by the
+    I-4 audit-primacy fix that removed the post-terminal-exception slog block above this handler."
+  safety: Falls through to best-effort failed-status update on absorbed exceptions; ValueError surfaces
+    Tier-1 audit corruption as required; programmer bugs (TypeError/AttributeError/RuntimeError) propagate
   expires: null
 - key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=250f57373c0d2341
   owner: web-execution

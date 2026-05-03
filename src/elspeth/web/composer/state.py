@@ -22,6 +22,7 @@ from elspeth.contracts.guarantee_propagation import compose_propagation
 from elspeth.contracts.plugin_semantics import SemanticEdgeContract
 from elspeth.contracts.schema import (
     SchemaConfig,
+    get_aggregation_contract_options,
     get_raw_node_required_fields,
     get_raw_producer_guaranteed_fields,
     get_raw_schema_config,
@@ -526,16 +527,16 @@ def _consumer_locked_input_set(node: NodeSpec) -> frozenset[str] | None:
     """Return the consumer node's accepted-input set when input is locked.
 
     Aggregation nodes carry their contract under either flat ``options`` or a
-    nested ``options.options`` wrapper (see ``_get_aggregation_contract_options``);
-    surface the same alias resolution so locked-input detection works for both
-    shapes uniformly.
+    nested ``options.options`` wrapper; resolve via ``get_aggregation_contract_options``
+    so locked-input detection uses the same alias resolution as the rest of
+    the contract pipeline. The augmented owner string the helper returns is
+    discarded so the caller's existing error-message wording is preserved.
     """
+    owner = f"node:{node.id}"
     if node.node_type == "aggregation":
-        contract_options = node.options
-        if "options" in node.options and isinstance(node.options["options"], Mapping):
-            contract_options = node.options["options"]
-        return _locked_input_field_set(contract_options, owner=f"node:{node.id}")
-    return _locked_input_field_set(node.options, owner=f"node:{node.id}")
+        contract_options, _ = get_aggregation_contract_options(node.options, owner=owner)
+        return _locked_input_field_set(contract_options, owner=owner)
+    return _locked_input_field_set(node.options, owner=owner)
 
 
 def _sink_locked_input_set(output: OutputSpec) -> frozenset[str] | None:

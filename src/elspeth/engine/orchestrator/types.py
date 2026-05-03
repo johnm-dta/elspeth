@@ -104,8 +104,8 @@ class PipelineConfig:
 class AggregationFlushResult:
     """Result of flushing aggregation buffers.
 
-    Replaces the 9-element tuple return type with named fields for clarity
-    and type safety. Using frozen dataclass prevents accidental mutation.
+    Replaces a wide tuple return type with named fields for clarity and
+    type safety. Using frozen dataclass prevents accidental mutation.
     """
 
     rows_succeeded: int = 0
@@ -166,7 +166,7 @@ class AggregationFlushResult:
 class ExecutionCounters:
     """Mutable counters accumulated during pipeline execution.
 
-    Replaces the 11 loose counter variables + routed_destinations Counter
+    Replaces the loose counter variables + routed_destinations Counter
     that were duplicated in both _execute_run() and _process_resumed_rows().
 
     Mutable (not frozen) because counters are incremented row-by-row during
@@ -191,7 +191,7 @@ class ExecutionCounters:
     def accumulate_flush_result(self, result: AggregationFlushResult) -> None:
         """Merge an AggregationFlushResult into these counters.
 
-        Replaces the 9 manual additions that appeared after every
+        Replaces the manual per-counter additions that appeared after every
         check_aggregation_timeouts() and flush_remaining_aggregation_buffers() call.
         """
         self.rows_succeeded += result.rows_succeeded

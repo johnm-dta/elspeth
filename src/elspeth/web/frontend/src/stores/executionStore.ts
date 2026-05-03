@@ -131,11 +131,22 @@ function applyRunEvent(
       : [...(state.progress?.recent_errors ?? [])];
   const recentErrors = newErrors.slice(0, MAX_RECENT_ERRORS);
 
-  // Extract row counts from data payload (progress, completed, cancelled all have them)
+  // Extract row counts from data payload.  Progress / completed / cancelled
+  // events all now carry the full six-counter taxonomy; error / failed
+  // events do not, so those branches preserve the prior progress state via
+  // the `?? 0` fallback (a legitimate event-discriminant fallback, NOT a
+  // producer-drift fabrication shim — the wire payload either carries the
+  // field or the event-type contract says it cannot).
   const rowsProcessed =
     "rows_processed" in data ? (data as RunEventProgress).rows_processed : (state.progress?.rows_processed ?? 0);
+  const rowsSucceeded =
+    "rows_succeeded" in data ? (data as RunEventProgress).rows_succeeded : (state.progress?.rows_succeeded ?? 0);
   const rowsFailed =
     "rows_failed" in data ? (data as RunEventProgress).rows_failed : (state.progress?.rows_failed ?? 0);
+  const rowsQuarantined =
+    "rows_quarantined" in data
+      ? (data as RunEventProgress).rows_quarantined
+      : (state.progress?.rows_quarantined ?? 0);
   // elspeth-5069612f3c — preserve the rows_routed split from progress /
   // completed / cancelled payloads (failed terminal events do not carry
   // these counters today, so the previous progress values are kept on
@@ -151,7 +162,9 @@ function applyRunEvent(
 
   const newProgress: RunProgress = {
     rows_processed: rowsProcessed,
+    rows_succeeded: rowsSucceeded,
     rows_failed: rowsFailed,
+    rows_quarantined: rowsQuarantined,
     rows_routed_success: rowsRoutedSuccess,
     rows_routed_failure: rowsRoutedFailure,
     recent_errors: recentErrors,
@@ -180,7 +193,9 @@ function applyRunEvent(
         ? {
             ...r,
             rows_processed: rowsProcessed,
+            rows_succeeded: rowsSucceeded,
             rows_failed: rowsFailed,
+            rows_quarantined: rowsQuarantined,
             rows_routed_success: rowsRoutedSuccess,
             rows_routed_failure: rowsRoutedFailure,
             ...(isTerminal
@@ -252,7 +267,9 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         isExecuting: false,
         progress: {
           rows_processed: 0,
+          rows_succeeded: 0,
           rows_failed: 0,
+          rows_quarantined: 0,
           rows_routed_success: 0,
           rows_routed_failure: 0,
           recent_errors: [],

@@ -31,7 +31,14 @@ _EventData = ProgressData | ErrorData | CompletedData | CancelledData | FailedDa
 # widening to the _StrictResponse base; also ensures the lambdas stay in
 # lockstep with RunEvent's discriminated union.
 _EVENT_DATA: dict[str, Callable[[], _EventData]] = {
-    "progress": lambda: ProgressData(rows_processed=10, rows_failed=0),
+    "progress": lambda: ProgressData(
+        rows_processed=10,
+        rows_succeeded=10,
+        rows_failed=0,
+        rows_quarantined=0,
+        rows_routed_success=0,
+        rows_routed_failure=0,
+    ),
     "error": lambda: ErrorData(message="test error", node_id=None, row_id=None),
     "completed": lambda: CompletedData(
         status="completed",
@@ -41,7 +48,14 @@ _EVENT_DATA: dict[str, Callable[[], _EventData]] = {
         rows_quarantined=0,
         landscape_run_id="lscape-1",
     ),
-    "cancelled": lambda: CancelledData(rows_processed=10, rows_failed=0),
+    "cancelled": lambda: CancelledData(
+        rows_processed=10,
+        rows_succeeded=10,
+        rows_failed=0,
+        rows_quarantined=0,
+        rows_routed_success=0,
+        rows_routed_failure=0,
+    ),
     "failed": lambda: FailedData(detail="test failure", node_id=None),
 }
 
@@ -194,7 +208,14 @@ class TestProgressBroadcasterThreadSafety:
                 run_id="run-1",
                 timestamp=datetime.now(tz=UTC),
                 event_type="progress",
-                data=ProgressData(rows_processed=i, rows_failed=0),
+                data=ProgressData(
+                    rows_processed=i,
+                    rows_succeeded=i,
+                    rows_failed=0,
+                    rows_quarantined=0,
+                    rows_routed_success=0,
+                    rows_routed_failure=0,
+                ),
             )
             for i in range(5)
         ]
@@ -341,7 +362,14 @@ class TestProgressBroadcasterCallbackBacklogBound:
                     run_id="run-1",
                     timestamp=datetime.now(tz=UTC),
                     event_type="progress",
-                    data=ProgressData(rows_processed=i, rows_failed=0),
+                    data=ProgressData(
+                        rows_processed=i,
+                        rows_succeeded=i,
+                        rows_failed=0,
+                        rows_quarantined=0,
+                        rows_routed_success=0,
+                        rows_routed_failure=0,
+                    ),
                 ),
             )
 
@@ -374,7 +402,14 @@ class TestProgressBroadcasterCallbackBacklogBound:
                     run_id="run-1",
                     timestamp=datetime.now(tz=UTC),
                     event_type="progress",
-                    data=ProgressData(rows_processed=i, rows_failed=0),
+                    data=ProgressData(
+                        rows_processed=i,
+                        rows_succeeded=i,
+                        rows_failed=0,
+                        rows_quarantined=0,
+                        rows_routed_success=0,
+                        rows_routed_failure=0,
+                    ),
                 ),
             )
 
@@ -405,7 +440,14 @@ class TestProgressBroadcasterCallbackBacklogBound:
                 run_id="run-1",
                 timestamp=datetime.now(tz=UTC),
                 event_type="progress",
-                data=ProgressData(rows_processed=i, rows_failed=0),
+                data=ProgressData(
+                    rows_processed=i,
+                    rows_succeeded=i,
+                    rows_failed=0,
+                    rows_quarantined=0,
+                    rows_routed_success=0,
+                    rows_routed_failure=0,
+                ),
             )
             for i in range(5)
         ]

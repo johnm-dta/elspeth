@@ -199,7 +199,9 @@ class TestWebSocketTimeoutRecovery:
             event_type="progress",
             data=ProgressData(
                 rows_processed=2,
+                rows_succeeded=0,
                 rows_failed=0,
+                rows_quarantined=0,
                 rows_routed_success=3,
                 rows_routed_failure=1,
             ),

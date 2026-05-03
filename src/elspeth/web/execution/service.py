@@ -671,7 +671,14 @@ class ExecutionServiceImpl:
                         run_id=run_id,
                         timestamp=datetime.now(tz=UTC),
                         event_type="cancelled",
-                        data=CancelledData(rows_processed=0, rows_failed=0, rows_routed_success=0, rows_routed_failure=0),
+                        data=CancelledData(
+                            rows_processed=0,
+                            rows_succeeded=0,
+                            rows_failed=0,
+                            rows_quarantined=0,
+                            rows_routed_success=0,
+                            rows_routed_failure=0,
+                        ),
                     ),
                 )
                 return
@@ -692,7 +699,14 @@ class ExecutionServiceImpl:
                             run_id=run_id,
                             timestamp=datetime.now(tz=UTC),
                             event_type="cancelled",
-                            data=CancelledData(rows_processed=0, rows_failed=0, rows_routed_success=0, rows_routed_failure=0),
+                            data=CancelledData(
+                                rows_processed=0,
+                                rows_succeeded=0,
+                                rows_failed=0,
+                                rows_quarantined=0,
+                                rows_routed_success=0,
+                                rows_routed_failure=0,
+                            ),
                         ),
                     )
                     return
@@ -935,7 +949,9 @@ class ExecutionServiceImpl:
                             event_type="cancelled",
                             data=CancelledData(
                                 rows_processed=result.rows_processed,
+                                rows_succeeded=result.rows_succeeded,
                                 rows_failed=result.rows_failed,
+                                rows_quarantined=result.rows_quarantined,
                                 rows_routed_success=result.rows_routed_success,
                                 rows_routed_failure=result.rows_routed_failure,
                             ),
@@ -1045,7 +1061,9 @@ class ExecutionServiceImpl:
                     event_type="cancelled",
                     data=CancelledData(
                         rows_processed=gse.rows_processed,
+                        rows_succeeded=gse.rows_succeeded,
                         rows_failed=gse.rows_failed,
+                        rows_quarantined=gse.rows_quarantined,
                         rows_routed_success=gse.rows_routed_success,
                         rows_routed_failure=gse.rows_routed_failure,
                     ),
@@ -1090,12 +1108,28 @@ class ExecutionServiceImpl:
                     current_status = current_run.status
                     if current_status in SESSION_TERMINAL_RUN_STATUS_VALUES:
                         run_already_terminal = True
-                except (SQLAlchemyError, OSError, ValueError) as probe_err:
-                    # Probe failure is part of the audit-recovery machinery
-                    # (slog is policy-correct here per logging-telemetry-policy:
-                    # this IS an audit-system-degradation case).  Fall through
-                    # to the existing best-effort recovery so we don't make
-                    # the probe-failure scenario worse than today.
+                except (SQLAlchemyError, OSError) as probe_err:
+                    # Narrow catch — mirrors the sibling pattern at the
+                    # ``update_run_status`` recovery below (commits
+                    # b8ba2214/127417cb).  Audit-system *degradation*
+                    # (SQLAlchemyError, OSError) falls through to the
+                    # best-effort recovery so we don't make the probe-failure
+                    # scenario worse than today; slog here is policy-correct
+                    # per logging-telemetry-policy because this IS an
+                    # audit-system-degradation case.
+                    #
+                    # ValueError is deliberately NOT caught.  The ValueErrors
+                    # ``get_run`` can raise — "Run not found" (the row vanished
+                    # mid-run), ``UUID(row.id)`` malformed, non-UTC datetimes
+                    # via ``_ensure_utc`` — are all Tier 1 audit-data
+                    # corruption.  Per CLAUDE.md tier model, Tier 1 invariant
+                    # violations MUST crash immediately; absorbing them here
+                    # would silently log audit corruption while the recovery
+                    # path falls through to ``update_run_status`` which would
+                    # encounter the same corruption anyway.  ``RunRecord``'s
+                    # explicit invariant breaches surface as
+                    # ``AuditIntegrityError(Exception)`` (not ValueError) and
+                    # are likewise — correctly — uncaught here.
                     slog.error(
                         "post_exception_run_state_probe_failed",
                         run_id=run_id,
@@ -1297,6 +1331,10 @@ class ExecutionServiceImpl:
         are plumbed verbatim from the engine ProgressEvent so the streaming
         wire payload mirrors the terminal CompletedData/CancelledData shape
         and matches the TS ``RunEventProgress`` interface.
+
+        ``rows_succeeded`` / ``rows_quarantined`` are plumbed verbatim from
+        the engine ProgressEvent. ProgressData requires both fields — see
+        the schema docstring for the fabrication-test rationale.
         """
         return RunEvent(
             run_id=run_id,
@@ -1304,7 +1342,9 @@ class ExecutionServiceImpl:
             event_type="progress",
             data=ProgressData(
                 rows_processed=progress.rows_processed,
+                rows_succeeded=progress.rows_succeeded,
                 rows_failed=progress.rows_failed,
+                rows_quarantined=progress.rows_quarantined,
                 rows_routed_success=progress.rows_routed_success,
                 rows_routed_failure=progress.rows_routed_failure,
             ),

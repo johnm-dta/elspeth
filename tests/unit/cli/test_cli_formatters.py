@@ -115,6 +115,8 @@ class TestConsoleFormatters:
             rows_succeeded=20,
             rows_failed=3,
             rows_quarantined=2,
+            rows_routed_success=0,
+            rows_routed_failure=0,
             elapsed_seconds=0.0,
         )
 

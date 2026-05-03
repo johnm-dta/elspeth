@@ -48,17 +48,13 @@ then interpret pre-split `routed` rows as MOVE-only evidence.
 
 Two read surfaces cross a semantic boundary:
 
-- `ProgressEvent.rows_succeeded` before the rows_routed split may include all
-  routed rows in the display-success count. The first post-split increment
-  excluded only on_error-routed rows (the engine still folded MOVE-routed
-  rows into ``rows_succeeded`` for the streaming progress event). The CR-3
-  wire-shape fix removes that residual fold entirely: ``rows_succeeded`` now
-  reports only success-sink rows, and ``rows_routed_success`` /
-  ``rows_routed_failure`` are first-class fields on the streaming progress
-  payload (``web/execution/schemas.py::ProgressData`` and the engine
-  ``contracts/cli.py::ProgressEvent``). Pre-fix progress events therefore
-  carry an inflated ``rows_succeeded`` value relative to post-fix events —
-  qualify any historical streaming-progress evidence by commit context.
+- `ProgressEvent.rows_succeeded` before the rows_routed split is inflated:
+  routed rows are folded into the display-success count. After the split,
+  ``rows_succeeded`` reports only success-sink rows, and
+  ``rows_routed_success`` / ``rows_routed_failure`` are first-class fields on
+  the streaming progress payload (``web/execution/schemas.py::ProgressData``
+  and the engine ``contracts/cli.py::ProgressEvent``). Qualify any historical
+  streaming-progress evidence by commit context.
 - MCP `outcome_distribution["routed"]` before the split is legacy ambiguous;
   after the split, transform on_error rows appear as `outcome_distribution["routed_on_error"]`.
 

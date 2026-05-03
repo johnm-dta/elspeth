@@ -737,12 +737,20 @@ def get_raw_schema_config(
     return parse_raw_schema_config(_get_raw_schema_value(options), owner=owner)
 
 
-def _get_aggregation_contract_options(
+def get_aggregation_contract_options(
     options: Mapping[str, Any],
     *,
     owner: str,
 ) -> tuple[Mapping[str, Any], str]:
-    """Return the mapping that carries an aggregation's input contract."""
+    """Return the mapping that carries an aggregation's input contract.
+
+    Aggregation nodes accept their input contract under either flat
+    ``options`` or a nested ``options.options`` wrapper. This helper is the
+    single source of truth for that alias resolution; callers in
+    ``contracts/schema.py`` and ``web/composer/state.py`` rely on it.
+    Raises ``ValueError`` when ``options["options"]`` exists but is not a
+    ``Mapping`` — that is a misconfiguration, not a recoverable shape.
+    """
     if "options" not in options:
         return options, owner
 
@@ -819,7 +827,7 @@ def get_raw_node_required_fields(
     contract_options = options
     contract_owner = owner
     if node_type == "aggregation":
-        contract_options, contract_owner = _get_aggregation_contract_options(options, owner=owner)
+        contract_options, contract_owner = get_aggregation_contract_options(options, owner=owner)
         if contract_options is not options and "required_input_fields" in contract_options:
             required_input = _parse_raw_required_input_fields(
                 contract_options["required_input_fields"],

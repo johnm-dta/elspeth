@@ -36,7 +36,11 @@ from elspeth.core.config import (
 )
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.service import ExecutionServiceImpl
-from elspeth.web.sessions.protocol import IllegalRunTransitionError, RunAlreadyActiveError
+from elspeth.web.sessions.protocol import (
+    LEGAL_RUN_TRANSITIONS,
+    IllegalRunTransitionError,
+    RunAlreadyActiveError,
+)
 
 # ── Fixtures ───────────────────────────────────────────────────────────
 
@@ -1791,6 +1795,195 @@ class TestPostCompletionExceptionRecovery:
         ]
         assert post_terminal_logs == []
 
+    @pytest.mark.xfail(
+        strict=False,
+        reason=(
+            "elspeth-879f6de6bd known gap (sister to "
+            "test_post_completion_get_run_probe_failure_falls_through). When the "
+            "post-completion probe fails (SQLAlchemyError) AND the audit row is "
+            "genuinely terminal, the recovery's fall-through "
+            "update_run_status('failed', ...) call hits LEGAL_RUN_TRANSITIONS in "
+            "production and raises IllegalRunTransitionError. The narrow "
+            "``except (SQLAlchemyError, OSError)`` around that recovery "
+            "update_run_status call catches only those two; "
+            "IllegalRunTransitionError (a ValueError subclass) escapes and "
+            "shadows the original SSE-crash RuntimeError into __context__. "
+            "Closing the gap requires either fail-closed-on-probe semantics or "
+            "absorbing IllegalRunTransitionError in the recovery's narrow catch. "
+            "When fixed, this test xpasses and the marker can be removed."
+        ),
+    )
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.preflight.ExecutionGraph")
+    @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_post_completion_probe_failure_with_legal_transitions_preserves_original_exception(
+        self,
+        mock_payload: MagicMock,
+        mock_landscape: MagicMock,
+        mock_load: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_graph_cls: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Lock the residual data-loss path into the test surface (pr-test-analyzer IG-2).
+
+        Sister to ``test_post_completion_get_run_probe_failure_falls_through``,
+        but wires real ``LEGAL_RUN_TRANSITIONS`` semantics into the
+        ``update_run_status`` mock so the gap acknowledged in the production
+        comment block on the post-exception probe (``run_already_terminal``
+        false-on-probe-failure) is actually exercised by the test surface —
+        not just documented in prose.
+
+        Scenario:
+          1. Pipeline runs to completion → ``update_run_status('completed', ...)``
+             commits the audit row.
+          2. Success-path ``broadcast('completed', ...)`` raises ``RuntimeError``.
+          3. Recovery probes ``get_run`` → SQLAlchemyError (probe failure).
+          4. ``run_already_terminal`` stays ``False`` (probe couldn't determine).
+          5. Recovery falls through to ``update_run_status('failed', ...)`` against
+             a row whose true status is ``completed``.
+          6. Real ``LEGAL_RUN_TRANSITIONS`` mock raises
+             ``IllegalRunTransitionError`` (matching production
+             ``SessionService.update_run_status``'s transition guard).
+          7. Production recovery's narrow ``except (SQLAlchemyError, OSError)``
+             does NOT catch the ``ValueError`` subclass; it propagates and
+             shadows the original ``RuntimeError``.
+
+        Correct behaviour: the ``RuntimeError("simulated SSE crash")`` is the
+        operationally-relevant signal and MUST be the surfacing exception —
+        the ``IllegalRunTransitionError`` is an artefact of a recovery attempt
+        that should never have been made against an already-terminal row.
+        """
+        mock_bundle = MagicMock()
+        mock_bundle.aggregations = {}
+        mock_instantiate.return_value = mock_bundle
+        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+        mock_load.return_value = _mock_pipeline_settings()
+        mock_orch_cls.return_value = self._make_completed_orchestrator(RunStatus.COMPLETED)
+
+        # Stateful mock that mirrors SessionService.update_run_status's
+        # transition validation (sessions/service.py:665-667). Driven by the
+        # real ``LEGAL_RUN_TRANSITIONS`` table so the test stays in lockstep
+        # with the production validator without duplicating its terminal-set
+        # closure.
+        audit_row_status: dict[str, str] = {"current": "pending"}
+
+        def _legal_transitions_update(_run_id: Any, *, status: str, **__: Any) -> None:
+            current = audit_row_status["current"]
+            allowed = LEGAL_RUN_TRANSITIONS[current]
+            if status not in allowed:
+                raise IllegalRunTransitionError(current, status, allowed)
+            audit_row_status["current"] = status
+
+        mock_session_service.update_run_status.side_effect = _legal_transitions_update
+
+        # Probe fails — same as the sibling test.  Drives the recovery into
+        # the fall-through branch where the residual data-loss occurs.
+        mock_session_service.get_run.side_effect = SQLAlchemyError("simulated DB hiccup")
+
+        self._wrap_broadcaster_to_raise(
+            service,
+            on_event_type="completed",
+            exc=RuntimeError("simulated SSE crash"),
+        )
+
+        run_id = str(uuid4())
+        # Correct behaviour (asserted): the SSE-crash RuntimeError surfaces.
+        # Today's broken behaviour (xfail): IllegalRunTransitionError surfaces
+        # instead, with the original RuntimeError demoted to __context__.
+        with pytest.raises(RuntimeError, match="simulated SSE crash"):
+            service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.preflight.ExecutionGraph")
+    @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_post_completion_get_run_probe_value_error_propagates(
+        self,
+        mock_payload: MagicMock,
+        mock_landscape: MagicMock,
+        mock_load: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_graph_cls: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """ValueError from the post-exception ``get_run`` probe must propagate,
+        not be absorbed.
+
+        Audit-primacy contract (CLAUDE.md tier model): ``get_run`` can raise
+        ``ValueError`` only via Tier 1 audit-data corruption — "Run not found"
+        (the row vanished mid-run), malformed UUID columns, or non-UTC
+        ``started_at`` / ``finished_at``.  All three are Tier 1 invariant
+        violations that MUST crash immediately.
+
+        Pre-fix behaviour absorbed ValueError in the probe catch alongside
+        ``SQLAlchemyError``/``OSError`` and fell through to the best-effort
+        ``update_run_status`` recovery, which would re-encounter the same
+        corruption.  The narrow catch (mirroring the sibling pattern at the
+        ``update_run_status`` recovery — commits b8ba2214/127417cb) keeps
+        Tier 1 corruption visible at the call site.
+
+        This test pins that contract so future re-widening of the catch is
+        caught at review time.
+        """
+        mock_bundle = MagicMock()
+        mock_bundle.aggregations = {}
+        mock_instantiate.return_value = mock_bundle
+        mock_graph_cls.from_plugin_instances.return_value = MagicMock()
+        mock_load.return_value = _mock_pipeline_settings()
+        mock_orch_cls.return_value = self._make_completed_orchestrator(RunStatus.COMPLETED)
+
+        # Probe raises ValueError — the canonical Tier 1 signal from get_run
+        # ("Run not found", malformed UUID, or non-UTC datetime).  All three
+        # share this exception class and must surface, not be absorbed.
+        mock_session_service.get_run.side_effect = ValueError("Run not found: simulated Tier 1 corruption")
+
+        self._wrap_broadcaster_to_raise(
+            service,
+            on_event_type="completed",
+            exc=RuntimeError("simulated SSE crash"),
+        )
+
+        run_id = str(uuid4())
+        # The visible exception MUST be the probe's ValueError (Tier 1
+        # corruption surfaces as itself).  The original RuntimeError is
+        # preserved on ``__context__`` by Python's normal exception chaining.
+        with patch("elspeth.web.execution.service.slog") as mock_slog, pytest.raises(ValueError, match="Run not found") as exc_info:
+            service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
+
+        # Exception chain pins the original cause — the probe ValueError
+        # is raised while handling the RuntimeError, so __context__ MUST
+        # carry the original SSE crash.  Without this, debugging the
+        # post-completion exception gets harder, not easier.
+        assert isinstance(exc_info.value.__context__, RuntimeError)
+        assert "simulated SSE crash" in str(exc_info.value.__context__)
+
+        # Probe-failure slog MUST NOT fire — the ValueError exits the try
+        # block via propagation, not through the narrow except.  If a future
+        # change re-widens the catch to include ValueError, this assertion
+        # will fail and surface the regression.
+        probe_failed_logs = [c for c in mock_slog.error.call_args_list if c.args and c.args[0] == "post_exception_run_state_probe_failed"]
+        assert probe_failed_logs == [], (
+            "ValueError from get_run must propagate (Tier 1 corruption); "
+            f"probe-failed slog should not fire, got {len(probe_failed_logs)} call(s)."
+        )
+
+        # The fall-through update_run_status("failed", ...) MUST NOT have
+        # been called — control left the BaseException handler before the
+        # recovery branch.  Only the "running" and "completed" updates from
+        # the happy path are present.
+        statuses = [c.kwargs.get("status") for c in mock_session_service.update_run_status.call_args_list]
+        assert statuses == ["running", "completed"], f"ValueError-propagation path must skip the recovery update_run_status; got {statuses}"
+
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
@@ -2236,8 +2429,15 @@ class TestEventBusBridge:
 
         assert run_event.event_type == "progress"
         assert isinstance(run_event.data, ProgressData)
+        # S-8: assert every counter passes through with its real producer
+        # value.  Non-zero values in every slot guard against a future
+        # producer that hardcodes any single counter to 0 (which Pydantic
+        # cannot detect — making the upstream ProgressEvent require all six
+        # is the structural defense, this assertion is the test surface).
         assert run_event.data.rows_processed == 100
+        assert run_event.data.rows_succeeded == 92
         assert run_event.data.rows_failed == 5
+        assert run_event.data.rows_quarantined == 3
         assert run_event.data.rows_routed_success == 7
         assert run_event.data.rows_routed_failure == 2
         assert run_event.run_id == "run-123"

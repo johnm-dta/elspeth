@@ -600,8 +600,91 @@ async def run_server(catalog: CatalogService, scratch_dir: Path) -> None:
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
+# ---------------------------------------------------------------------------
+# WORKAROUND — Linux-only kernel guard against orphan busy-spin.
+# Tracked by filigree issue elspeth-7f99eba6ef. See _install_parent_death_signal_workaround
+# docstring for full diagnosis and deletion criteria.
+# ---------------------------------------------------------------------------
+def _install_parent_death_signal_workaround() -> None:
+    """Kernel-level guarantee that this process dies when its parent dies.
+
+    WORKAROUND for an upstream bug in ``mcp.server.stdio.stdio_server`` (the
+    official MCP Python SDK). When the controlling Claude Code session
+    terminates abnormally (crash, SIGKILL, suspend-without-resume), the
+    SDK's stdio read coroutine fails to detect parent-pipe EOF and instead
+    busy-spins on empty reads. Observed in production: a single orphaned
+    pair burned ~120% CPU for 9 days before discovery (~10.8 core-days of
+    waste). Diagnosis trace: ``~/.claude/plans/can-you-investigate-why-mighty-sphinx.md``.
+
+    This function uses Linux's ``prctl(PR_SET_PDEATHSIG, SIGTERM)`` so the
+    kernel sends SIGTERM to this process when its parent dies, regardless
+    of what the SDK's read loop does. The follow-up ``getppid() == 1``
+    check covers the race window between process start and the prctl call:
+    if the parent died before we registered, PDEATHSIG cannot fire (it
+    requires a parent transition we already missed), so we exit immediately.
+
+    NOT A FIX — this is belt-and-braces only. The underlying SDK bug
+    affects every platform; this guard only protects Linux. Non-Linux
+    platforms (macOS, Windows, BSD) remain vulnerable and need either an
+    SDK upgrade or a portable watchdog (e.g. periodic ``getppid()`` poll).
+
+    REVIEW SCHEDULE — filigree issue ``elspeth-7f99eba6ef`` tracks the
+    deletion criteria. Re-evaluate at every MCP SDK upgrade. Delete this
+    function and its caller in ``main()`` when:
+
+    1. The pinned MCP SDK version handles stdin EOF correctly in
+       ``stdio_server()``.
+    2. A behavioural test confirms unclean parent-kill produces clean
+       child exit *without* this workaround.
+
+    Sibling vulnerability: ``filigree-mcp`` (separate codebase, same SDK)
+    has the identical bug and needs its own fix; this workaround does not
+    cover it.
+    """
+    import ctypes
+    import ctypes.util
+    import os
+    import signal
+    import sys
+
+    if sys.platform != "linux":
+        return  # Non-Linux: no portable equivalent here. See review issue.
+
+    libc_name = ctypes.util.find_library("c")
+    if libc_name is None:
+        # No discoverable libc on a Linux system — exotic/embedded build.
+        # Skip the guard rather than crash; the workaround is non-essential.
+        return
+    libc = ctypes.CDLL(libc_name, use_errno=True)
+
+    # PR_SET_PDEATHSIG: see ``man 2 prctl``. Constant is stable kernel ABI.
+    pr_set_pdeathsig = 1
+    rc = libc.prctl(pr_set_pdeathsig, signal.SIGTERM, 0, 0, 0)
+    if rc != 0:
+        # prctl(PR_SET_PDEATHSIG, ...) is documented as never failing for
+        # valid arguments. A non-zero return here means we passed something
+        # the kernel rejected — that's a bug in this function, not a runtime
+        # condition to absorb. Crash with the errno preserved.
+        errno = ctypes.get_errno()
+        raise OSError(
+            errno,
+            f"prctl(PR_SET_PDEATHSIG, SIGTERM) failed: {os.strerror(errno)}",
+        )
+
+    # Race-window cleanup: if the parent died between fork/exec and the
+    # prctl call above, PDEATHSIG will not fire because the parent
+    # transition already happened. Exit immediately rather than wait for
+    # a signal that will never arrive.
+    if os.getppid() == 1:
+        sys.exit(0)
+
+
 def main() -> None:
     """CLI entry point for elspeth-composer MCP server."""
+    # WORKAROUND first — see _install_parent_death_signal_workaround
+    # docstring and filigree issue elspeth-7f99eba6ef.
+    _install_parent_death_signal_workaround()
+
     parser = argparse.ArgumentParser(
         description="ELSPETH Composer MCP Server",
     )

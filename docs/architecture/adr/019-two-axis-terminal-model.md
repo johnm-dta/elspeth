@@ -1,7 +1,7 @@
 # ADR-019: Two-Axis Terminal Model — Lifecycle, Outcome, and Path
 
 **Date:** 2026-05-04
-**Status:** Proposed
+**Status:** Accepted (panel-reviewed 2026-05-04, all sub-decisions resolved)
 **Deciders:** ELSPETH maintainers
 **Tags:** contracts, audit, row-outcomes, public-api, supersedes-adr-018
 
@@ -24,12 +24,17 @@ what's the point in COMPLETED?" — exposes that `RowOutcome` is doing two jobs:
 ADR-018 collapses these two axes into one enum. The collapse forces three
 recurring smells:
 
-- **Bifurcated success predicate.** `contracts/run_result.py:208`:
-  `success_indicator = rows_succeeded > 0 OR rows_routed_success > 0`. The OR is
-  there because routed-and-sunk rows are not in `rows_succeeded` even though
-  they durably succeeded. Path A (RC5-UX, shipped) made `RowOutcome.ROUTED`
-  bump both counters to fix the operator-facing "0 succeeded | →N routed"
-  display. The bifurcation in the predicate is the residue.
+- **Vestigial bifurcated success predicate.** `contracts/run_result.py:208`:
+  `success_indicator = rows_succeeded > 0 OR rows_routed_success > 0`. The OR
+  is no longer load-bearing — Path A (RC5-UX, shipped) made `RowOutcome.ROUTED`
+  bump both counters in both the live accumulator (`outcomes.py:251-265`) and
+  the resume aggregation (`core.py:463-476`), so `rows_succeeded > 0` alone is
+  sufficient under the current shipped code. The OR remains as defence-in-depth
+  residue from before Path A. ADR-019 makes the OR removable *by construction*
+  rather than by counter-symmetry convention: under the two-axis model,
+  `success_indicator = rows_succeeded > 0` derives directly from
+  `outcome=SUCCESS`, and the predicate stops needing the attribution counter
+  as a fallback.
 - **`COALESCED` already does what `ROUTED` doesn't.** `outcomes.py:310-314`
   routes coalesced rows with `RowOutcome.COMPLETED` as their audit terminal,
   recording the coalesce fact via the structural counter `rows_coalesced`. ADR-
@@ -93,40 +98,39 @@ mapping table below.
 
 ### Mapping table (current `RowOutcome` → new model)
 
-| Current `RowOutcome` | `completed` | `outcome` | `path` | Predicate counter(s) |
-| --- | --- | --- | --- | --- |
-| `COMPLETED` | `True` | `SUCCESS` | `DEFAULT_FLOW` | `rows_succeeded` |
-| `ROUTED` | `True` | `SUCCESS` | `GATE_ROUTED` | `rows_succeeded`, `rows_routed_success` |
-| `ROUTED_ON_ERROR` | `True` | `FAILURE` | `ON_ERROR_ROUTED` | `rows_failed`, `rows_routed_failure` |
-| `DROPPED_BY_FILTER` | `True` | `SUCCESS` | `FILTER_DROPPED` | `rows_succeeded` |
-| `COALESCED` | `True` | `SUCCESS` | `COALESCED` | `rows_succeeded`, `rows_coalesced` (structural) |
-| `FAILED` | `True` | `FAILURE` | `UNROUTED` | `rows_failed` |
-| `QUARANTINED` | `True` | `FAILURE` | `QUARANTINED_AT_SOURCE` | `rows_quarantined`, `rows_failed` |
-| `DIVERTED` (failsink) | `True` | `TRANSIENT` | `SINK_FALLBACK_TO_FAILSINK` | `rows_diverted` (structural) |
-| `DIVERTED` (discard) | `True` | `FAILURE`¹ | `SINK_DISCARDED`¹ | `rows_failed`, `rows_diverted`¹ |
-| `FORKED` | `True` | `TRANSIENT` | `FORK_PARENT` | `rows_forked` (structural) |
-| `EXPANDED` | `True` | `TRANSIENT` | `EXPAND_PARENT` | `rows_expanded` (structural) |
-| `CONSUMED_IN_BATCH` | `True` | `TRANSIENT` | `BATCH_CONSUMED` | (deferred — counted at flush) |
-| `BUFFERED` | `False` | `NULL` | `BUFFERED` | `rows_buffered` (structural, non-terminal) |
+| Current `RowOutcome` | `completed` | `outcome` | `path` | Predicate counter(s) | Resume re-derive? |
+| --- | --- | --- | --- | --- | --- |
+| `COMPLETED` | `True` | `SUCCESS` | `DEFAULT_FLOW` | `rows_succeeded` | Yes |
+| `ROUTED` | `True` | `SUCCESS` | `GATE_ROUTED` | `rows_succeeded`, `rows_routed_success` | Yes |
+| `ROUTED_ON_ERROR` | `True` | `FAILURE` | `ON_ERROR_ROUTED` | `rows_failed`, `rows_routed_failure` | Yes |
+| `DROPPED_BY_FILTER` | `True` | `SUCCESS` | `FILTER_DROPPED` | `rows_succeeded` | Yes |
+| `COALESCED` | `True` | `SUCCESS` | `COALESCED` | `rows_succeeded`, `rows_coalesced` (structural) | Predicate only (`rows_coalesced` not re-derived) |
+| `FAILED` | `True` | `FAILURE` | `UNROUTED` | `rows_failed` | Yes |
+| `QUARANTINED` | `True` | `FAILURE` | `QUARANTINED_AT_SOURCE` | `rows_quarantined`, `rows_failed` | Yes |
+| `DIVERTED` (failsink) | `True` | `TRANSIENT` | `SINK_FALLBACK_TO_FAILSINK` | `rows_diverted` (structural) | No |
+| `DIVERTED` (discard) | `True` | `FAILURE` | `SINK_DISCARDED` | `rows_failed`, `rows_diverted` (structural) | Predicate only (`rows_diverted` not re-derived) |
+| `FORKED` | `True` | `TRANSIENT` | `FORK_PARENT` | `rows_forked` (structural) | No |
+| `EXPANDED` | `True` | `TRANSIENT` | `EXPAND_PARENT` | `rows_expanded` (structural) | No |
+| `CONSUMED_IN_BATCH` | `True` | `TRANSIENT` | `BATCH_CONSUMED` | (deferred — counted at flush) | N/A — flush-time outcome carries the predicate role |
+| `BUFFERED` | `False` | `NULL` | `BUFFERED` | `rows_buffered` (structural, non-terminal) | No |
 
-> ¹ **Discard-mode `DIVERTED` classification is a panel-review decision.**
-> Today, `RowOutcome.DIVERTED` is a single enum value used for two materially
-> different cases. Failsink mode (`engine/executors/sink.py:952`,
-> `sink_name=failsink_name`) writes a `DIVERTED` token_outcome alongside a
-> successful failsink token_outcome for the same `token_id` — the failsink
-> record carries the lifecycle answer, so the `DIVERTED` record is
-> bookkeeping (genuinely transient). Discard mode
+> **Note on `DIVERTED` two-flavor split.** `RowOutcome.DIVERTED` is a single
+> enum value today used for two materially different cases. **Failsink mode**
+> (`engine/executors/sink.py:952`, `sink_name=failsink_name`) writes a
+> `DIVERTED` token_outcome alongside a successful failsink token_outcome for
+> the same `token_id` — the failsink record carries the lifecycle answer, so
+> the `DIVERTED` record is bookkeeping (genuinely transient). **Discard mode**
 > (`engine/executors/sink.py:998`, `sink_name="__discard__"`) writes only the
-> `DIVERTED` record — the row reached no destination and the `DIVERTED`
-> record IS the permanent audit answer. ADR-018 line 56 implicitly classed
-> both flavors as non-predicate-input. ADR-019 proposes that discard-mode
-> `DIVERTED` becomes a predicate input (`outcome=FAILURE`,
-> `path=SINK_DISCARDED`, increments `rows_failed`) on the grounds that a row
-> that reached no destination is a failed lifecycle. The panel may dispute
-> this — the alternative is keeping discard-mode classified as
-> `(TRANSIENT, SINK_DISCARDED)` and not a predicate input, preserving ADR-018's
-> classification at the cost of leaving discarded rows out of the failure
-> indicator. See "Open Questions" item 5.
+> `DIVERTED` record alongside `NodeStateStatus.FAILED` (`sink.py:991`); no
+> paired record exists, so the `DIVERTED` record IS the permanent audit
+> answer for the row. ADR-018 line 56 implicitly classed both flavors as
+> non-predicate-input. ADR-019 corrects this: discard-mode is `(FAILURE,
+> SINK_DISCARDED)` and a predicate input (panel-resolved 2026-05-04). The
+> `TRANSIENT` invariant — "the lifecycle answer lives on a different token" —
+> holds for failsink-mode but is false for discard-mode (no other token
+> exists), and the engine itself already classifies discard at the node-state
+> layer as `FAILED`. This is a deliberate semantic correction; see
+> Consequences/Negative for the user-visible behavior change.
 
 The bifurcated success predicate at `contracts/run_result.py:208` becomes:
 
@@ -177,18 +181,27 @@ predicates. The closed-set assertion at module-import time enforces the
 partition: every new `TerminalPath` value must be classified as predicate
 input (with a counter) or structural (without one).
 
-**`TRANSIENT` (an outcome value) vs "structural counter" (a counter
-classification) are related but distinct.** A `TRANSIENT` token typically
-increments a structural counter (`rows_forked`, `rows_expanded`,
-`rows_diverted` on the failsink-mode side, `rows_buffered` for the
-non-terminal case). But not every structural counter is incremented by a
-`TRANSIENT` token: `rows_coalesced` is a structural counter and the
-`COALESCED` row's outcome is `SUCCESS`, not `TRANSIENT`. The vocabulary
-inherits from ADR-018's predicate-role table: "structural" describes
-*counters* that record activity for visibility without contributing to the
-run-status biconditional; "transient" describes the *token's nature* — its
-audit record is bookkeeping while the actual lifecycle answer lives on a
-different token.
+### `TRANSIENT` outcome vs "structural counter" — related but distinct
+
+`TRANSIENT` (an outcome value) and "structural counter" (a counter
+classification) are related but distinct, and conflating them is the
+load-bearing future-reader trap. A `TRANSIENT` token typically increments a
+structural counter (`rows_forked`, `rows_expanded`, `rows_diverted` on the
+failsink-mode side, `rows_buffered` for the non-terminal case). But not every
+structural counter is incremented by a `TRANSIENT` token: `rows_coalesced` is
+a structural counter and the `COALESCED` row's outcome is `SUCCESS`, not
+`TRANSIENT`. The vocabulary inherits from ADR-018's predicate-role table:
+"structural" describes *counters* that record activity for visibility without
+contributing to the run-status biconditional; "transient" describes the
+*token's nature* — its audit record is bookkeeping while the actual lifecycle
+answer lives on a different token.
+
+The mechanical test for `TRANSIENT` is: **does another `token_outcomes`
+record (or batch-result token) exist that carries this row's lifecycle
+answer?** If yes, this token is `TRANSIENT`. If no, this token IS the
+lifecycle answer and must be `SUCCESS` or `FAILURE`. This test is what
+classifies failsink-mode `DIVERTED` (paired record exists → TRANSIENT) and
+discard-mode `DIVERTED` (no paired record → FAILURE) into different cells.
 
 ### Public API field-name preservation
 
@@ -222,9 +235,31 @@ ELSPETH's "delete the DB on schema change" policy
 (`MEMORY.md::project_db_migration_policy`) applies. There is no in-place
 migration: operators discard old `audit.db` and `sessions.db` files when ADR-019
 ships. The recorder, wire schemas, frontend counter readers, and integration
-tests flip in a single coordinated commit. Tests asserting `outcome ==
-RowOutcome.X` (~72 hits across `src/` and `tests/` per a panel-1 grep) update
-to assert the new field pair in the same commit.
+tests flip together. Migration surface (verified by `grep -rn 'RowOutcome\.'
+src/ tests/`): **779 total references across 81 files (13 in `src/`, 68 in
+`tests/`)**, of which **143 are `outcome == RowOutcome` test assertions** that
+must flip to assert the new field pair. This is too large for a single
+coordinated commit; the implementation rolls out as a sequenced PR series with
+the closed-set partition assertion gating each stage:
+
+1. **Contract layer** (`contracts/enums.py`): introduce `TerminalOutcome` and
+   `TerminalPath`, retain `RowOutcome` temporarily as a derivable view over
+   the new fields. Closed-set assertion runs over the new mapping.
+2. **Recorder + repository** (`core/landscape/`): migrate the audit-row
+   read/write to `(completed, outcome, path)`. Tier 1 cross-checks update
+   per the invariant-translation table in Implementation Notes.
+3. **Producers + accumulator** (`engine/orchestrator/`, `engine/executors/`):
+   producer sites emit `(outcome, path)` pairs; accumulator reads from the
+   new fields.
+4. **Test migration** (`tests/`): the 143 assertion sites flip to the new
+   field pair. The temporary `RowOutcome` derivable view is removed.
+5. **Final sweep**: delete the temporary `RowOutcome` view; closed-set
+   assertion is now the only enforcement of the partition.
+
+The "delete the DB" policy (`MEMORY.md::project_db_migration_policy`)
+contains the data-side migration: operators discard old `audit.db` and
+`sessions.db` between stages 1 and 5. No in-place migration; no schema
+versioning.
 
 ## Consequences
 
@@ -254,10 +289,26 @@ to assert the new field pair in the same commit.
   (e.g., MCP analyzer queries grouping by outcome distribution) read two
   columns instead of one. SQL filters that previously matched a single
   `RowOutcome` value now match a (outcome, path) pair.
-- **Migration surface is large.** Recorder, repository load/store, resume
-  aggregation, ~20+ integration tests, the closed-set partition assertion,
-  and the explain() lineage report all flip in the same commit. The "delete
-  the DB" policy contains the data side; the code side is real work.
+- **Migration surface is large.** 779 `RowOutcome.X` references across 81
+  files (143 test assertions); recorder, repository load/store, resume
+  aggregation, the closed-set partition assertion, and the explain() lineage
+  report all participate. The "delete the DB" policy contains the data side;
+  the code side is a sequenced 5-stage rollout (see "Migration policy"
+  section), not a single commit.
+- **Discard-sink behavior change (deliberate).** Pipelines using discard
+  sinks (`sink_name="__discard__"`, `engine/executors/sink.py:998`) currently
+  produce no failure indicator for discarded rows — discarded rows increment
+  `rows_diverted` (structural) but neither `rows_succeeded` nor `rows_failed`.
+  Under ADR-019, discard-mode `DIVERTED` becomes `(FAILURE, SINK_DISCARDED)`
+  and increments `rows_failed`, flipping `failure_indicator` for any run
+  with discarded rows. Run status changes from `COMPLETED` to
+  `COMPLETED_WITH_FAILURES` (or `FAILED` if all rows discard) for affected
+  pipelines. This is the right correction (a row that reached no destination
+  is a failed lifecycle, and the engine already classes discard as
+  `NodeStateStatus.FAILED` at `sink.py:991` — the token-outcome layer was
+  silently disagreeing with the node-state layer). Operators relying on
+  discard as silent housekeeping must reconfigure or accept the new run-
+  status semantics.
 - **Three outcome values, not two.** The user's natural mental model
   ("success or failure") admits a `TRANSIENT` middle ground for parent-token
   bookkeeping. This is a justified deviation (see "Why `TRANSIENT` exists"
@@ -340,49 +391,55 @@ separate decision if operators ever need it; `UNROUTED` is the honest
 representation of "the engine had nowhere to route this failure" until that
 config burden is taken on.
 
-## Open Questions for the Maintainer
+## Sub-decisions Resolved by Panel Review (2026-05-04)
 
-These are deliberate sub-decisions ADR-019 does not pre-empt. Each affects
-implementation but not the core model. Resolve before moving the ADR to
-Accepted.
+The five sub-decisions enumerated below were originally tabled as "Open
+Questions for the Maintainer." A three-agent review panel
+(`axiom-solution-architect:solution-design-reviewer`,
+`axiom-system-architect:architecture-critic`,
+`yzmir-systems-thinking:pattern-recognizer`) reviewed ADR-019 against primary
+source on 2026-05-04 and resolved all five **unanimously**. The verdicts are
+recorded here as the binding interpretation of the mapping table above; if a
+future reader disagrees, an ADR-020 amendment is the vehicle, not local
+re-litigation.
 
-1. **Should `QUARANTINED` and `FAILED` share a single `path=UNROUTED` value,
-   or stay separate (`QUARANTINED_AT_SOURCE` vs `UNROUTED`)?** ADR-019 keeps
-   them separate because the source-side coercion failure (Tier 3 boundary,
-   CLAUDE.md "Trust Flow") is distinct from a transform-time unrouted
-   failure. If the operator UI never distinguishes them, collapsing is
-   defensible.
+1. **`QUARANTINED` path naming.** **Verdict: distinct (`QUARANTINED_AT_SOURCE`
+   vs `UNROUTED`).** Source-side coercion failure is a Tier 3 trust-boundary
+   outcome (CLAUDE.md "Three-Tier Trust Model"); transform-time unrouted
+   failure is a Tier 2 outcome. Collapsing them erases the trust-tier
+   provenance an auditor needs to distinguish "the input failed" from "our
+   routing config has a gap." Operator-UI argument for collapsing is L9
+   (parameter) and does not drive an L6 (information-structure) decision.
 
-2. **Does `DROPPED_BY_FILTER` belong as `SUCCESS` or `TRANSIENT`?** ADR-018
-   line 52 puts it in `rows_succeeded`. ADR-019 follows that. But a transform
-   that intentionally emits zero rows is arguably transient (the row never
-   "succeeded" — it was dropped). The current classification is preserved for
-   continuity; revisit if the predicate role feels wrong.
+2. **`DROPPED_BY_FILTER`.** **Verdict: `outcome=SUCCESS, path=FILTER_DROPPED`.**
+   The transform's intent was to drop the row — the row succeeded at being
+   filtered. There is no paired token carrying a separate lifecycle answer,
+   so the `TRANSIENT` invariant ("the lifecycle answer lives on a different
+   token") does not apply. Preserves ADR-018 line 52's classification.
 
-3. **Should `completed` be a materialized column or a derived view?**
-   Materializing is the recommendation (query ergonomics, mirrors existing
-   `is_terminal` column at `model_loaders.py:539`). Deriving (`completed = outcome
-   IS NOT NULL`) is cheaper but loses ergonomics. Tier 1 cross-check covers
-   either choice.
+3. **`completed`: materialized column.** Mirrors the existing `is_terminal`
+   column at `model_loaders.py:539`; the Tier 1 cross-check pattern (compare
+   stored bool to derived bool, raise on mismatch) is the audit-integrity
+   mechanism the project already runs. Deriving (`outcome IS NOT NULL`)
+   removes the integrity gate to save a column — wrong cost-benefit in a
+   system where the audit trail is the legal record.
 
-4. **Should the wire-schema counter rename happen in a follow-on ADR-020?**
-   Recommendation: yes, separately. ADR-019 is large enough; the wire-schema
-   stability promise from ADR-018 line 109-114 is its own conversation.
+4. **Counter rename: defer to ADR-020.** ADR-018 line 109-114 made an
+   explicit wire-schema stability promise. Bundling counter renames into
+   ADR-019 expands blast radius without adding correctness; separating them
+   keeps each ADR's revert path clean.
 
-5. **How does discard-mode `DIVERTED` classify in the two-axis model?**
-   Failsink-mode `DIVERTED` (`engine/executors/sink.py:952`) is unambiguous:
-   the failsink record carries the lifecycle answer, so the original-sink
-   `DIVERTED` record is `(TRANSIENT, SINK_FALLBACK_TO_FAILSINK)` and not a
-   predicate input. Discard-mode `DIVERTED` (`engine/executors/sink.py:998`,
-   `sink_name="__discard__"`) is the only audit trace for a row that reached
-   no destination. ADR-019 proposes `(FAILURE, SINK_DISCARDED)`, increments
-   `rows_failed`, on the grounds that a row that reached no destination is a
-   failed lifecycle. Alternative: preserve ADR-018 line 56's classification
-   as non-predicate-input (`(TRANSIENT, SINK_DISCARDED)`, increments
-   `rows_diverted` only). The ADR-019 recommendation changes run-status
-   behavior vs Path A: discarded rows would now flip the failure indicator,
-   which they currently do not. Panel-review item; the synthesizer's verdict
-   determines which classification ships in the mapping table.
+5. **Discard-mode `DIVERTED`: `(FAILURE, SINK_DISCARDED)`, predicate input.**
+   `sink.py:998` writes only the `DIVERTED` record alongside
+   `NodeStateStatus.FAILED` (line 991). No paired token carries a separate
+   lifecycle answer, so the `TRANSIENT` invariant fails for discard-mode.
+   Classifying as `TRANSIENT` would assert the audit-row layer disagrees
+   with the node-state layer about whether the row failed — a Tier 1
+   inconsistency. ADR-018 line 56's blanket "non-predicate-input"
+   classification was a single-flavor decision based on the dominant
+   failsink case; ADR-019 corrects an under-specified classification. See
+   Consequences/Negative for the user-visible run-status change for
+   pipelines using discard sinks.
 
 ## Related Decisions
 
@@ -401,8 +458,28 @@ The implementation surface, in order of dependency:
    delete `RowOutcome` and `_TERMINAL_ROW_OUTCOMES` / `_NON_TERMINAL_ROW_OUTCOMES`,
    add the new closed-set assertion over the mapping table.
 2. `core/landscape/data_flow_repository.py` and `core/landscape/model_loaders.py`:
-   migrate the audit-row read/write to two columns plus `completed` bool.
-   Tier 1 cross-checks update.
+   migrate the audit-row read/write to `(completed, outcome, path)` plus
+   the existing supporting columns (`sink_name`, `error_hash`, `fork_group_id`,
+   `join_group_id`, etc.). Tier 1 cross-checks update per the
+   invariant-translation table below. Every existing per-`RowOutcome` guard
+   at `model_loaders.py:547-580` must be re-expressed in (outcome, path)
+   terms in the same stage:
+
+   | Existing guard (`model_loaders.py`) | New (outcome, path) guard |
+   | --- | --- |
+   | `COMPLETED requires sink_name` | `(SUCCESS, DEFAULT_FLOW)` requires `sink_name` |
+   | `ROUTED requires sink_name` | `(SUCCESS, GATE_ROUTED)` requires `sink_name` |
+   | `ROUTED_ON_ERROR requires sink_name AND error_hash` | `(FAILURE, ON_ERROR_ROUTED)` requires `sink_name` AND `error_hash` |
+   | `FORKED requires fork_group_id` | `(TRANSIENT, FORK_PARENT)` requires `fork_group_id` |
+   | `EXPANDED requires fork_group_id` | `(TRANSIENT, EXPAND_PARENT)` requires `fork_group_id` |
+   | `COALESCED requires join_group_id AND sink_name` | `(SUCCESS, COALESCED)` requires `join_group_id` AND `sink_name` |
+   | `QUARANTINED requires quarantine_reason` | `(FAILURE, QUARANTINED_AT_SOURCE)` requires `quarantine_reason` |
+   | `DIVERTED requires sink_name AND error_hash` (failsink) | `(TRANSIENT, SINK_FALLBACK_TO_FAILSINK)` requires `sink_name` AND `error_hash` |
+   | (DIVERTED / discard mode, currently same guard as failsink) | `(FAILURE, SINK_DISCARDED)` requires `sink_name="__discard__"` AND `error_hash` |
+   | `is_terminal` cross-check (`model_loaders.py:539`) | `completed XOR (outcome IS NULL)` cross-check |
+
+   Producers must populate the new columns at write time; the cross-check
+   guards crash on inconsistency rather than coercing.
 3. `engine/orchestrator/outcomes.py`: replace the per-`RowOutcome` branches in
    `accumulate_row_outcomes` with a (outcome, path) match. Counter logic is
    unchanged in shape but reads from the new fields.

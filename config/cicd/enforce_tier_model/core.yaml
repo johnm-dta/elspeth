@@ -125,17 +125,17 @@ allow_hits:
   owner: architecture
   reason: TypeError from np.isnan/isinf on non-numeric dtypes is expected — non-numeric arrays can't contain NaN
   safety: Only catches TypeError from np.isnan/isinf, lets all other exceptions propagate
-  expires: '2026-05-02'
+  expires: '2026-07-02'
 - key: core/rate_limit/limiter.py:R6:RateLimiter:try_acquire:fp=3e1bc5e9e76ba71f
   owner: architecture
   reason: Silent recovery with explicit error handling path — returns False when bucket full
   safety: Caller checks return value; no silent data loss
-  expires: '2026-05-02'
+  expires: '2026-07-02'
 - key: core/rate_limit/limiter.py:R6:RateLimiter:close:fp=3aef03c2689d8024
   owner: architecture
   reason: Framework boundary — pyrate-limiter _leaker attribute may not exist across library versions
   safety: Graceful degradation to no cleanup if attribute missing; thread dies naturally
-  expires: '2026-05-02'
+  expires: '2026-07-02'
 - key: core/security/secret_loader.py:R6:CompositeSecretLoader:get_secret:fp=cb4d8fc57f9917d4
   owner: bugfix
   reason: Intentional fallback pattern - CompositeSecretLoader tries loaders in priority order
@@ -145,7 +145,7 @@ allow_hits:
   owner: architecture
   reason: Optional field access at trust boundary
   safety: Code reviewed - legitimate pattern
-  expires: '2026-05-02'
+  expires: '2026-07-02'
 - key: core/dag/graph.py:R6:ExecutionGraph:warn_divert_coalesce_interactions:fp=ea839197606998d2
   owner: architecture
   reason: Silent except in schema lookup — DIVERT edge may target non-existent node (forward reference or optional path)

@@ -26,8 +26,9 @@ Helper architecture
 
 This module owns the per-dispatch audit envelope (`_DispatchAudit`,
 `_begin_dispatch`, `_finish_*`) AND the structural enforcement helper
-:func:`dispatch_with_audit`. The helper guarantees "audit fires before
-return on every path" structurally — mirroring the ``try/finally``
+:func:`dispatch_with_audit`. The helper guarantees "exactly one
+``recorder.record(...)`` per dispatch, fires in ``finally`` regardless
+of which path was taken" — structurally mirroring the ``try/finally``
 shape used by ``composer_mcp/server.py:call_tool`` and
 ``AuditedLLMClient.chat_completion``. Pulling these helpers out of
 ``service.py`` and into a single module makes the contract a structural
@@ -39,6 +40,7 @@ Layer: L3 (application). Imports L0 (contracts.composer_audit), L1
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -381,61 +383,71 @@ async def dispatch_with_audit(
 ) -> DispatchOutcome:
     """Run a tool dispatch under the audit envelope.
 
-    Structural guarantee: the recorder records exactly one
-    :class:`ComposerToolInvocation` before this coroutine returns or
-    raises, on every path. This is the structural counterpart of the
-    procedural per-branch ``recorder.record(...)`` calls that the
-    earlier ``_compose_loop`` shape relied on; replacing seven
-    procedural call sites with one structural helper removes the
-    audit-hole class of bugs that the panel review (B1, B2)
-    identified.
+    Structural guarantee: this helper performs **exactly one**
+    ``recorder.record(...)`` call per dispatch, in a ``finally`` clause
+    that runs regardless of which path the dispatch took — including
+    ``BaseException`` subclasses (``asyncio.CancelledError``,
+    ``SystemExit``, ``KeyboardInterrupt``, ``GeneratorExit``) that the
+    typed except handlers do not catch. This mirrors the
+    ``try/finally`` shape used by ``composer_mcp/server.py:call_tool``
+    and ``AuditedLLMClient.chat_completion``: every code path that
+    enters the dispatch envelope leaves an audit record before
+    propagating.
 
     Paths
     -----
     SUCCESS
-        ``do_dispatch`` returned a value. Build a SUCCESS invocation
-        via :func:`finish_success` (which itself wraps
-        ``canonical_json`` in a sentinel-fallback try/except so a
-        non-finite float in the result cannot bypass audit). Record
-        and return :class:`DispatchOutcome`.
+        ``do_dispatch`` returned a value. The success branch records
+        the post-dispatch state version, and the ``finally`` clause
+        builds the SUCCESS invocation via :func:`finish_success` (which
+        itself wraps ``canonical_json`` in a sentinel-fallback
+        try/except so a non-finite float in the result cannot bypass
+        audit). Returns :class:`DispatchOutcome`.
 
     ARG_ERROR
-        ``do_dispatch`` raised :class:`ToolArgumentError`. Build an
-        ARG_ERROR invocation via :func:`finish_arg_error` with
+        ``do_dispatch`` raised :class:`ToolArgumentError`. The except
+        block captures the exception and the structured
         ``error_payload`` from ``arg_error_payload_factory`` (which the
-        caller uses to also produce the LLM-facing tool message). Record
-        and re-raise so the caller's ``except ToolArgumentError`` block
-        runs the LLM-message-append branch unchanged.
+        caller uses to also produce the LLM-facing tool message); the
+        ``finally`` clause records ARG_ERROR via
+        :func:`finish_arg_error` and the exception re-raises so the
+        caller's ``except ToolArgumentError`` block runs the
+        LLM-message-append branch unchanged.
 
     PLUGIN_CRASH (narrow re-raise)
         ``do_dispatch`` raised one of
         ``(AssertionError, MemoryError, RecursionError, SystemError)``.
-        These were previously re-raised WITHOUT an audit record because
-        the original implementation worried about poisoned-memory work.
-        That worry was misjudged: the audit envelope was already opened
-        (``audit`` is a frozen dataclass of pre-captured scalars), and
-        constructing a :class:`ComposerToolInvocation` from those
-        scalars plus ``type(exc).__name__`` is also pure scalar work.
-        Record :class:`ComposerToolStatus.PLUGIN_CRASH` first, then
-        re-raise so the caller's ``except (AssertionError, ...)`` block
-        propagates the exception out of ``_compose_loop`` unchanged.
-        Closes blocker B2 from the panel review (2026-05-04).
+        These were originally re-raised WITHOUT an audit record because
+        the implementer worried about poisoned-memory work. That worry
+        was misjudged: the audit envelope is already populated with
+        pre-captured scalars (``audit`` is frozen), and constructing
+        a :class:`ComposerToolInvocation` from those scalars plus
+        ``type(exc).__name__`` is pure scalar work. The except block
+        captures the exception; the ``finally`` clause records
+        :class:`ComposerToolStatus.PLUGIN_CRASH` before the exception
+        propagates. Closes blocker B2 from the panel review (2026-05-04).
 
     PLUGIN_CRASH (general)
-        ``do_dispatch`` raised any other ``Exception`` subclass. Build
-        a PLUGIN_CRASH invocation via :func:`finish_plugin_crash` and
-        re-raise so the caller's ``except Exception`` block can wrap
-        with :meth:`ComposerPluginCrashError.capture`.
+        ``do_dispatch`` raised any other ``Exception`` subclass. Same
+        pattern: capture in except, record in ``finally``, propagate
+        so the caller's ``except Exception`` block can wrap with
+        :meth:`ComposerPluginCrashError.capture`.
 
-    Why ``BaseException`` is NOT caught generically
-    -----------------------------------------------
-    ``SystemExit``/``KeyboardInterrupt``/``GeneratorExit`` propagate
-    through this helper without recording — they signal interpreter
-    shutdown, not plugin behaviour. The dispatch attempt that triggered
-    them is not "audited as PLUGIN_CRASH" because the interpreter is
-    going away; the audit invariant ("if it's not recorded, it didn't
-    happen") only meaningfully applies to outcomes the interpreter is
-    around to record.
+    PLUGIN_CRASH (BaseException)
+        ``do_dispatch`` raised an exception that does NOT inherit from
+        ``Exception`` — most importantly :class:`asyncio.CancelledError`,
+        which fires when an ASGI client disconnects mid-dispatch. The
+        typed except handlers above do not catch it (CancelledError
+        inherits ``BaseException`` directly). The ``finally`` clause
+        detects the propagating exception via :func:`sys.exc_info`,
+        records it as PLUGIN_CRASH (so the audit trail captures the
+        dispatch attempt the client cancelled), and lets the exception
+        continue propagating. This applies equally to ``SystemExit``,
+        ``KeyboardInterrupt``, and ``GeneratorExit``. The audit
+        invariant — "if it's not recorded, it didn't happen" — now
+        holds even at interpreter-shutdown boundaries; the in-memory
+        list append is safe even if the persistence layer never gets
+        the chance to flush.
 
     Args:
         recorder: the active :class:`ComposerToolRecorder` (typically a
@@ -460,53 +472,116 @@ async def dispatch_with_audit(
         ``AssertionError``/``MemoryError``/``RecursionError``/``SystemError``:
             re-raised after recording PLUGIN_CRASH.
         ``Exception`` (other classes): re-raised after recording PLUGIN_CRASH.
+        ``asyncio.CancelledError`` and other ``BaseException`` subclasses
+            (``SystemExit``, ``KeyboardInterrupt``, ``GeneratorExit``):
+            propagate after the ``finally`` clause records PLUGIN_CRASH
+            via :func:`sys.exc_info`.
     """
+    # Outcome variables — populated by the success branch / except
+    # blocks, consumed by the finally clause. The four-status discriminant
+    # ensures the finally block records exactly one invocation per path
+    # taken; ``status is None`` after finally entry means an unanticipated
+    # ``BaseException`` propagated past the typed handlers and the
+    # finally block must reconstruct the exception via ``sys.exc_info``.
+    status: ComposerToolStatus | None = None
+    success_result: Any = None
+    success_version_after: int | None = None
+    arg_error_exc: ToolArgumentError | None = None
+    arg_error_payload: Mapping[str, Any] | None = None
+    crash_exc: BaseException | None = None
     try:
-        result = await do_dispatch()
-    except ToolArgumentError as exc:
-        # ARG_ERROR dispatch site — handler raised at the Tier-3 boundary.
-        # The redaction discipline (class-name + safe args[0]) is enforced
-        # by ToolArgumentError's safe-by-construction message: see the
-        # ToolArgumentError docstring in protocol.py.
-        safe_message = exc.args[0] if exc.args else "tool argument error"
-        error_payload = arg_error_payload_factory(exc)
-        recorder.record(
-            finish_arg_error(
-                audit,
-                error_class="ToolArgumentError",
-                error_message=str(safe_message),
-                error_payload=error_payload,
-            )
-        )
-        raise
-    except (AssertionError, MemoryError, RecursionError, SystemError) as narrow_exc:
-        # Narrow re-raise — record before propagating. The audit envelope
-        # is already populated with pre-captured scalars; building the
-        # invocation does not touch poisoned memory or invariant-broken
-        # state. Closes B2: the prior bare ``raise`` here exited the
-        # compose loop with an unrecorded dispatch — an audit hole on
-        # the most invariant-critical class of failure.
-        recorder.record(finish_plugin_crash(audit, exc=narrow_exc))
-        raise
-    except Exception as plugin_exc:
-        # General PLUGIN_CRASH path — caller wraps with
-        # ComposerPluginCrashError.capture(...) which threads the
-        # recorder buffer through to the route handler.
-        recorder.record(finish_plugin_crash(audit, exc=plugin_exc))
-        raise
+        try:
+            result = await do_dispatch()
+        except ToolArgumentError as exc:
+            # ARG_ERROR dispatch site — handler raised at the Tier-3
+            # boundary. The redaction discipline (class-name + safe
+            # args[0]) is enforced by ToolArgumentError's
+            # safe-by-construction message: see the ToolArgumentError
+            # docstring in protocol.py. Capture here; record in finally.
+            status = ComposerToolStatus.ARG_ERROR
+            arg_error_exc = exc
+            arg_error_payload = arg_error_payload_factory(exc)
+            raise
+        except (AssertionError, MemoryError, RecursionError, SystemError) as narrow_exc:
+            # Narrow re-raise — capture for finally. The audit envelope
+            # is already populated with pre-captured scalars; building
+            # the invocation does not touch poisoned memory or
+            # invariant-broken state. Closes B2: the prior bare
+            # ``raise`` here exited the compose loop with an unrecorded
+            # dispatch — an audit hole on the most invariant-critical
+            # class of failure.
+            status = ComposerToolStatus.PLUGIN_CRASH
+            crash_exc = narrow_exc
+            raise
+        except Exception as plugin_exc:
+            # General PLUGIN_CRASH path — caller wraps with
+            # ComposerPluginCrashError.capture(...) which threads the
+            # recorder buffer through to the route handler.
+            status = ComposerToolStatus.PLUGIN_CRASH
+            crash_exc = plugin_exc
+            raise
 
-    # SUCCESS path. finish_success itself wraps canonical_json /
-    # stable_hash in a sentinel-fallback try/except (B1 fix), so a
-    # non-finite float in result cannot skip the audit record.
-    version_after = version_after_provider(result)
-    recorder.record(
-        finish_success(
-            audit,
-            result_payload=_result_to_audit_payload(result),
-            version_after=version_after,
-        )
-    )
-    return DispatchOutcome(result=result, version_after=version_after)
+        # SUCCESS path. The final recorder.record(...) lives in
+        # ``finally`` for structural symmetry; here we only capture the
+        # handler result and post-dispatch version. ``finish_success``
+        # itself wraps canonical_json / stable_hash in a
+        # sentinel-fallback try/except (B1 fix), so a non-finite float
+        # in result cannot skip the audit record.
+        success_result = result
+        success_version_after = version_after_provider(result)
+        status = ComposerToolStatus.SUCCESS
+        return DispatchOutcome(result=result, version_after=success_version_after)
+    finally:
+        # Single record point — fires on every exit, including
+        # BaseException subclasses (CancelledError, SystemExit,
+        # KeyboardInterrupt, GeneratorExit) that the typed except
+        # handlers above do not catch. ``status`` is ``None`` exactly
+        # when such an exception is propagating; we reconstruct it via
+        # sys.exc_info() and record PLUGIN_CRASH so the audit row lands
+        # before the exception leaves the helper.
+        if status is None:
+            current_exc = sys.exc_info()[1]
+            # Offensive guard: status==None with no propagating
+            # exception is structurally impossible — every successful
+            # path assigns SUCCESS before the return statement
+            # evaluates the finally block. If we reach this branch
+            # without an exception, an audit row would be dropped
+            # silently — fail loudly instead.
+            if current_exc is None:
+                raise RuntimeError(
+                    "dispatch_with_audit: finally entered with status=None and no propagating exception — audit invariant violated"
+                )
+            recorder.record(finish_plugin_crash(audit, exc=current_exc))
+        elif status is ComposerToolStatus.SUCCESS:
+            # success_version_after was assigned alongside status.
+            # Offensive guard: the dataclass requires ``int`` here, so
+            # a None would crash on construction; mypy prefers the
+            # explicit narrow.
+            if success_version_after is None:
+                raise RuntimeError("dispatch_with_audit: SUCCESS status with no version_after captured")
+            recorder.record(
+                finish_success(
+                    audit,
+                    result_payload=_result_to_audit_payload(success_result),
+                    version_after=success_version_after,
+                )
+            )
+        elif status is ComposerToolStatus.ARG_ERROR:
+            if arg_error_exc is None:
+                raise RuntimeError("dispatch_with_audit: ARG_ERROR status with no captured exception")
+            safe_message = arg_error_exc.args[0] if arg_error_exc.args else "tool argument error"
+            recorder.record(
+                finish_arg_error(
+                    audit,
+                    error_class="ToolArgumentError",
+                    error_message=str(safe_message),
+                    error_payload=arg_error_payload,
+                )
+            )
+        else:  # ComposerToolStatus.PLUGIN_CRASH (typed handlers)
+            if crash_exc is None:
+                raise RuntimeError("dispatch_with_audit: PLUGIN_CRASH status with no captured exception")
+            recorder.record(finish_plugin_crash(audit, exc=crash_exc))
 
 
 def _result_to_audit_payload(result: Any) -> Mapping[str, Any]:

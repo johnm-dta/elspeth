@@ -768,7 +768,7 @@ allow_hits:
   safety: Logged via slog.error with class name only and session_id correlation; audit gap is observable on read-back by comparing
     tool-row count against the parent assistant message's reported tool_invocations count.
   expires: null
-- key: web/composer/audit.py:R5:begin_dispatch:fp=b664460c303a3fbf
+- key: web/composer/audit.py:R5:begin_dispatch:fp=089d9c433103755a
   owner: composer-audit
   reason: Typed-union narrowing inside the audit envelope helper — begin_dispatch accepts Mapping[str, Any] | str (parsed
     dict from successful json.loads, or raw string from the JSON-decode-failure branch). isinstance(arguments, str) selects
@@ -777,7 +777,7 @@ allow_hits:
   safety: Both branches build a canonical_json + stable_hash payload; no defensive access of attributes; no silent fallback.
     The dispatch site documents which call pattern is allowed.
   expires: null
-- key: web/composer/audit.py:R6:finish_success:fp=67a15e0bfe0531c4
+- key: web/composer/audit.py:R6:finish_success:fp=3517d7cf6953b4c2
   owner: composer-audit
   reason: Sentinel-canonical fallback for canonical_json failures on the SUCCESS path. Closes panel-review blocker B1 — a
     non-finite float in the tool result would otherwise raise from inside finish_success and bypass the recorder.record(...)
@@ -790,7 +790,7 @@ allow_hits:
     handler returned a result and the state was already advanced. The _canonicalization_error key is an internal sentinel
     name reserved by the audit subsystem (composer_mcp/server.py and web/composer/audit.py — single source of truth).
   expires: null
-- key: web/composer/audit.py:R5:_result_to_audit_payload:fp=d6cbcf2e37b28f11
+- key: web/composer/audit.py:R5:_result_to_audit_payload:fp=a9de8e9980851cfd
   owner: composer-audit
   reason: Coerce a tool-handler result into a canonicalizable Mapping. The compose loop's handler returns a ToolResult
     dataclass with a to_dict() method; the helper is callback-driven and does not import the concrete type. Tests pass
@@ -799,7 +799,7 @@ allow_hits:
   safety: Anything that is neither a Mapping nor exposes to_dict() crashes loud via the AttributeError below. The
     isinstance(Mapping) check fast-paths the test/dict case; the ``result.to_dict`` path serves the production case.
   expires: null
-- key: web/composer/audit.py:R5:_result_to_audit_payload:fp=e40d7cd36d02d43c
+- key: web/composer/audit.py:R5:_result_to_audit_payload:fp=3b4c837a561eaac8
   owner: composer-audit
   reason: Offensive guard — verify ``result.to_dict()`` actually returned a Mapping before passing it to canonical_json.
     A handler whose to_dict() drifted to return a list/tuple/scalar would silently corrupt the audit row; the explicit

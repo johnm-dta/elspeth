@@ -22,6 +22,7 @@ discipline stays consistent — no new test infrastructure is invented.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -470,3 +471,91 @@ async def test_compose_loop_records_success_when_canonical_json_fails() -> None:
     # Pin the version-after capture: the success path completed; the
     # state advanced; the audit row carries the post-mutation version.
     assert inv.version_after == 2
+
+
+@pytest.mark.asyncio
+async def test_dispatch_records_plugin_crash_on_cancelled_error() -> None:
+    """Reviewer fix: ``CancelledError`` MUST be audited before propagation.
+
+    ``asyncio.CancelledError`` inherits from ``BaseException`` (not
+    ``Exception``), so the typed handlers inside
+    :func:`elspeth.web.composer.audit.dispatch_with_audit` —
+    ``except ToolArgumentError``, the narrow PLUGIN_CRASH tuple, the
+    generic ``except Exception`` — never catch it. With the original
+    try/except shape the helper would return early on success and
+    every except branch would record-then-raise; ``CancelledError``
+    flowed through all three handlers unrecorded, leaving an audit
+    hole whenever an ASGI client disconnected mid-dispatch.
+
+    The ``try/finally`` shape closes the hole: the ``finally`` clause
+    runs on every exit (including BaseException propagation),
+    reconstructs the propagating exception via :func:`sys.exc_info`,
+    and records ``PLUGIN_CRASH`` before the helper unwinds.
+
+    Production-realistic path: the test injects
+    ``asyncio.CancelledError`` into the ``execute_tool`` worker call
+    (``run_sync_in_worker(execute_tool, ...)``) — the same site where
+    cancellation would surface in production when the event loop
+    cancels the request task because the client closed the connection.
+
+    Asserts:
+
+    - ``CancelledError`` propagates out of ``compose()`` (NOT wrapped
+      in ``ComposerPluginCrashError`` — the typed handlers never
+      caught it, so neither does any wrap site).
+    - The recorder captured exactly one invocation with
+      ``status=PLUGIN_CRASH``, ``error_class="CancelledError"``,
+      ``version_after=None``.
+    """
+    catalog = _mock_catalog()
+    settings = _make_settings()
+    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    state = _empty_state()
+
+    turn = _make_llm_response(
+        tool_calls=[
+            {
+                "id": "call_cancelled",
+                "name": "set_metadata",
+                "arguments": {"patch": {"name": "Client disconnect"}},
+            }
+        ],
+    )
+
+    # Same recorder-spy pattern as the AssertionError test: the
+    # CancelledError path bypasses ComposerPluginCrashError.capture
+    # (the `except Exception` handler in service.py is not active for
+    # BaseException subclasses), so we read the buffer directly via
+    # the BufferingRecorder spy.
+    captured_recorder: dict[str, Any] = {}
+    real_buffering_recorder = __import__("elspeth.web.composer.audit", fromlist=["BufferingRecorder"]).BufferingRecorder
+
+    class _SpyRecorder(real_buffering_recorder):  # type: ignore[misc, valid-type]
+        def __init__(self) -> None:
+            super().__init__()
+            captured_recorder["instance"] = self
+
+    with (
+        patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        patch(
+            "elspeth.web.composer.service.execute_tool",
+            side_effect=asyncio.CancelledError(),
+        ),
+        patch("elspeth.web.composer.service.BufferingRecorder", _SpyRecorder),
+    ):
+        mock_llm.return_value = turn
+        with pytest.raises(asyncio.CancelledError):
+            await service.compose("Trigger client disconnect", [], state)
+
+    spy = captured_recorder["instance"]
+    invocations = spy.invocations
+    assert len(invocations) == 1, f"Expected exactly one PLUGIN_CRASH audit row for the cancelled dispatch; got {len(invocations)}"
+    inv = invocations[0]
+    assert inv.status == ComposerToolStatus.PLUGIN_CRASH
+    assert inv.tool_call_id == "call_cancelled"
+    assert inv.error_class == "CancelledError"
+    # Redaction discipline: error_message is class-name only.
+    assert inv.error_message == "CancelledError"
+    # Dispatch did not complete — version_after must be None to
+    # satisfy the Tier-1 verifier invariant.
+    assert inv.version_after is None

@@ -31,6 +31,28 @@ repos:
 
   - repo: local
     hooks:
+      # Secret-pattern scan — refuses the commit if a credential-shaped string
+      # slips into the staged content of THIS commit. Lives at scripts/git-hooks/
+      # so it's also runnable as a standalone .git/hooks/pre-commit if desired.
+      # Per-line bypass: append "# secret-scan: allow-this-line" to a matched line
+      # if it's a documented placeholder the script can't tell apart from the real thing.
+      - id: secret-scan
+        name: Secret-pattern scan (refuses commit if credential-shaped strings detected)
+        entry: scripts/git-hooks/pre-commit-secret-scan.sh
+        language: system
+        # pass_filenames: false because the local .git/hooks/pre-commit invokes
+        # `pre-commit run --all-files` (see header in that file: avoids the
+        # stash/unstash mechanism that has caused unstaged-work loss).  All
+        # other hooks compensate via pass_filenames: false + fixed-directory
+        # scanning.  This script is designed for staged-files-only operation;
+        # with no args it falls back to
+        # `git diff --cached --name-only --diff-filter=AM`, which is exactly
+        # the scope we want — newly-added/modified content per commit, not the
+        # whole repo (which would force per-line allow markers on every
+        # documented placeholder URL).
+        pass_filenames: false
+        always_run: true
+
       - id: mypy
         name: mypy
         entry: .venv/bin/mypy src/elspeth

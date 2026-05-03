@@ -1,8 +1,33 @@
 # Superpowers brainstorming artifacts
 .superpowers/
 
-# Local working notes (session scratch, not part of the repo record)
-notes/
+# notes/ — previously gitignored as session scratch; unignored 2026-05-03
+# after a content audit confirmed no credentials, tokens, PII, or other
+# sensitive material in the existing files. Going forward, treat notes/
+# as a tracked record of evaluation work, session reports, and remediation
+# plans — not a credential dumping ground. If you need to capture transient
+# secrets, write them to /tmp/ or to a path explicitly added to .gitignore.
+
+# Credential-shaped filenames — refused regardless of directory.
+# Defence-in-depth so an accidental jwt.txt or .env can't slip into a tracked
+# location. Filename patterns catch ~80% of leaks; the per-commit content
+# scan at scripts/git-hooks/pre-commit-secret-scan.sh catches most of the rest.
+**/jwt.txt
+**/jwt-*.txt
+**/jwt_*.txt
+**/*.api_key
+**/*.access_token
+**/*.bearer_token
+**/login.json
+**/login_*.json
+**/*.pem
+**/*.p12
+**/*.pfx
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.template
+!**/.env.sample
 
 # Composer MCP scratch folder (session state, test configs)
 .scratch/*
@@ -199,3 +224,4 @@ deploy/
 # Build-artefact PDFs from tools/pdf/ (regeneratable; exceed
 # the pre-commit large-file threshold).
 docs/assets/*.pdf
+.claude/scheduled_tasks.lock

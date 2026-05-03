@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -127,6 +128,80 @@ async def test_audit_records_in_order_across_session() -> None:
         ComposerToolStatus.SUCCESS,
         ComposerToolStatus.ARG_ERROR,
     ]
+
+
+@pytest.mark.asyncio
+async def test_plugin_crash_path_records_before_reraise() -> None:
+    """W3 fix: PLUGIN_CRASH must record before the exception propagates.
+
+    The MCP ``call_tool`` handler wraps ``_dispatch_tool`` in a
+    ``try/except Exception`` that captures ``status = PLUGIN_CRASH``,
+    ``error_class = type(exc).__name__``, ``error_message =
+    type(exc).__name__`` (class-name only — pins the redaction
+    discipline against future drift that would echo ``str(exc)``)
+    and re-raises. The outer ``finally`` then writes the invocation
+    record before the exception leaves the coroutine.
+
+    Note on the propagation seam: the MCP SDK's ``call_tool`` request
+    handler wraps tool exceptions into a ``CallToolResult(isError=True)``
+    response at the protocol-transport layer. So the user-visible
+    behaviour is ``isError=True`` content rather than a propagating
+    Python exception — but the audit invariant is independent of the
+    transport's framing. The ``finally`` block inside the inner
+    ``call_tool`` decorator runs on the exception path BEFORE the
+    transport layer converts it. This test asserts the audit row
+    landed regardless of how the MCP transport surfaced the failure.
+
+    This test was missing from the initial slice — the module
+    docstring claimed all three paths were covered but only SUCCESS
+    and ARG_ERROR had tests. Closes Python-engineer review W3.
+    """
+    catalog = create_catalog_service()
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(catalog, scratch, recorder=probe)
+        # Patch the dispatcher seam to raise a plain RuntimeError —
+        # the canonical "plugin bug" shape per CLAUDE.md "Plugin
+        # Ownership". Anything other than ToolArgumentError /
+        # (ValueError, KeyError, TypeError) flows through the
+        # PLUGIN_CRASH except branch.
+        with patch(
+            "elspeth.composer_mcp.server._dispatch_tool",
+            side_effect=RuntimeError("synthetic plugin bug"),
+        ):
+            response = await _call_handler(
+                server.request_handlers,
+                "new_session",
+                {"name": "CrashTest"},
+            )
+
+    # Transport-layer framing: the MCP SDK converts the propagating
+    # RuntimePLUGIN_CRASH into an ``isError=True`` CallToolResult
+    # AFTER the inner handler's ``finally`` ran. The audit row was
+    # already written.
+    call_result = response.root
+    assert call_result.isError is True
+
+    assert len(probe.invocations) == 1
+    inv = probe.invocations[0]
+    assert inv.status == ComposerToolStatus.PLUGIN_CRASH
+    assert inv.tool_name == "new_session"
+    assert inv.error_class == "RuntimeError"
+    # Class-name-only echo — pins the redaction discipline. A future
+    # regression that switched to ``str(exc)`` would echo the
+    # operator-readable "synthetic plugin bug" message into the
+    # audit trail; this assertion catches that.
+    assert inv.error_message == "RuntimeError"
+    # PLUGIN_CRASH ⇒ version_after is None (the dispatch did not
+    # complete; the SUCCESS reset path inside the finally only fires
+    # for status == SUCCESS).
+    assert inv.version_after is None
+    # No result_canonical or result_hash on the crash path — the LLM
+    # never saw a tool result, so the audit row faithfully records
+    # "no result was produced".
+    assert inv.result_canonical is None
+    assert inv.result_hash is None
 
 
 @pytest.mark.asyncio

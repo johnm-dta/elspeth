@@ -572,7 +572,7 @@ def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[s
     the session record retains the dispatch trail. They are not prior LLM
     dialogue turns: replaying them without the in-loop assistant tool-call
     request that produced them creates orphan OpenAI tool messages. Keep them
-    in storage/API responses, but exclude them from prompt history.
+    in storage, but exclude them from prompt history and normal chat responses.
     """
     return [{"role": message.role, "content": _composer_history_content(message)} for message in _composer_conversation_messages(messages)]
 
@@ -2369,8 +2369,13 @@ def create_session_router() -> APIRouter:
         """Get conversation history for a session."""
         session = await _verify_session_ownership(session_id, user, request)
         service = request.app.state.session_service
-        messages = await service.get_messages(session.id, limit=limit, offset=offset)
-        return [_message_response(m) for m in messages]
+        # Fetch before slicing so hidden audit rows cannot skew normal-chat
+        # pagination. The service remains the durable audit store; this route
+        # is the user-facing conversation channel.
+        messages = await service.get_messages(session.id, limit=None)
+        conversation_messages = _composer_conversation_messages(messages)
+        paged_messages = conversation_messages[offset : offset + limit]
+        return [_message_response(m) for m in paged_messages]
 
     @router.get(
         "/{session_id}/runs",

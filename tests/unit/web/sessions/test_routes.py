@@ -1470,6 +1470,38 @@ class TestMessageRoutes:
             }
         ]
 
+    def test_get_messages_hides_audit_tool_rows_from_chat_response(self, tmp_path) -> None:
+        app, service = _make_app(tmp_path)
+        app.state.composer_service = _make_composer_mock()
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Chat"})
+        session_id = uuid.UUID(resp.json()["id"])
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
+            loop.run_until_complete(
+                service.add_message(
+                    session_id,
+                    "tool",
+                    '{"success": true}',
+                    tool_calls=_audit_tool_calls("call-1"),
+                )
+            )
+            loop.run_until_complete(service.add_message(session_id, "assistant", "I updated the pipeline."))
+            persisted = loop.run_until_complete(service.get_messages(session_id, limit=None))
+        finally:
+            loop.close()
+
+        assert [message.role for message in persisted] == ["user", "tool", "assistant"]
+
+        msgs_resp = client.get(f"/api/sessions/{session_id}/messages")
+        assert msgs_resp.status_code == 200
+        messages = msgs_resp.json()
+        assert [message["role"] for message in messages] == ["user", "assistant"]
+        assert all(message["content"] != '{"success": true}' for message in messages)
+
     @pytest.mark.asyncio
     async def test_send_message_serializes_concurrent_requests_per_session(self, tmp_path) -> None:
         """Concurrent sends must not compose against an in-flight partial transcript."""

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -18,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from opentelemetry import metrics
 from sqlalchemy.exc import SQLAlchemyError
 
+from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
@@ -29,6 +31,7 @@ from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobQuotaExceededError, BlobServiceProtocol
 from elspeth.web.composer import yaml_generator
+from elspeth.web.composer.audit import audit_envelope
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
     ComposerProgressRegistry,
@@ -615,6 +618,80 @@ async def _runtime_preflight_for_state(
     )
 
 
+async def _persist_tool_invocations(
+    service: SessionServiceProtocol,
+    session_id: UUID,
+    tool_invocations: tuple[ComposerToolInvocation, ...],
+    composition_state_id: UUID | None,
+) -> None:
+    """Persist per-tool-call audit records as ``role=tool`` chat messages.
+
+    Each :class:`ComposerToolInvocation` lands as one ``role=tool`` row whose
+    ``tool_calls`` JSON column carries the audit envelope under a ``_kind``
+    discriminator (see :func:`elspeth.web.composer.audit.audit_envelope`).
+
+    ``content`` shape per status:
+
+    - SUCCESS or ARG_ERROR with payload: ``invocation.result_canonical`` —
+      this is what the LLM saw on the tool path. Auditors can replay
+      verbatim.
+    - PLUGIN_CRASH (no payload): synthetic JSON with ``error_class`` only.
+      The LLM never saw a result on this path; the tool row records that
+      a crash occurred at this position in the dispatch sequence.
+
+    ``composition_state_id`` is the post-compose state id when this turn
+    advanced state, else ``None``. All tool rows from one turn share this
+    id; the per-call audit envelope's ``version_before``/``version_after``
+    captures the per-call state delta.
+
+    Audit primacy: a SQLAlchemy failure here MUST NOT mask the calling
+    handler's primary outcome (the assistant message has already been
+    written, the partial-state row has already been written). The narrow
+    catch matches the discipline used in ``_handle_*_error`` helpers —
+    log with class name only and continue. The tool-row gap is observable
+    via the per-message ``tool_calls`` count vs.
+    ``ComposerResult.tool_invocations`` length on read-back.
+    """
+    for invocation in tool_invocations:
+        if invocation.status == ComposerToolStatus.PLUGIN_CRASH:
+            content = json.dumps(
+                {
+                    "error_class": invocation.error_class,
+                    "error_message": invocation.error_message,
+                }
+            )
+        elif invocation.result_canonical is not None:
+            content = invocation.result_canonical
+        else:
+            # ARG_ERROR with no captured payload — fall back to error class.
+            content = json.dumps(
+                {
+                    "error_class": invocation.error_class,
+                    "error_message": invocation.error_message,
+                }
+            )
+        try:
+            await service.add_message(
+                session_id,
+                "tool",
+                content,
+                tool_calls=[audit_envelope(invocation)],
+                composition_state_id=composition_state_id,
+            )
+        except SQLAlchemyError as save_err:
+            slog.error(
+                "composer_tool_invocation_persist_failed",
+                session_id=str(session_id),
+                tool_call_id=invocation.tool_call_id,
+                tool_name=invocation.tool_name,
+                exc_class=type(save_err).__name__,
+            )
+            # Continue — the goal is to preserve as much of the audit
+            # trail as possible. Logging this as a structured event lets
+            # operators detect partial-trail persistence by comparing
+            # event counts to the assistant's reported tool_invocations.
+
+
 async def _state_data_from_composer_state(
     state: CompositionState,
     *,
@@ -793,6 +870,7 @@ async def _handle_convergence_error(
         # names the next practical action for each class" criterion.
         "recovery_text": progress.likely_next,
     }
+    persisted_state_id: UUID | None = None
     if exc.partial_state is not None:
         # Persistence guard: DB write failure should not upgrade the
         # response from 422 (convergence error) to 500 (internal).
@@ -815,7 +893,8 @@ async def _handle_convergence_error(
                 initial_version=None,
                 telemetry_source="convergence",
             )
-            await service.save_composition_state(session_id, state_data)
+            partial_record = await service.save_composition_state(session_id, state_data)
+            persisted_state_id = partial_record.id
             state_d = exc.partial_state.to_dict()
             response_body["partial_state"] = redact_source_storage_path(state_d)
         except SQLAlchemyError as save_err:
@@ -842,6 +921,18 @@ async def _handle_convergence_error(
             # same material the ``exc_info`` omission was protecting.
             response_body["partial_state_save_error"] = type(save_err).__name__
 
+    # Persist the per-tool-call audit trail regardless of whether
+    # partial_state was set. tool_invocations is populated even when the
+    # convergence happened before any state mutation (e.g. budget hit on
+    # discovery-only turns), so failed runs without state changes still
+    # leave a record of what the LLM tried.
+    if exc.tool_invocations:
+        await _persist_tool_invocations(
+            service,
+            session_id,
+            exc.tool_invocations,
+            persisted_state_id,
+        )
     return response_body
 
 
@@ -904,6 +995,7 @@ async def _handle_plugin_crash(
         ),
     }
 
+    persisted_state_id_pc: UUID | None = None
     if exc.partial_state is not None:
         # Persistence guard: DB write failure MUST NOT mask the original
         # plugin crash (response stays as the 500 below, the save failure
@@ -927,7 +1019,8 @@ async def _handle_plugin_crash(
                 initial_version=None,
                 telemetry_source="plugin_crash",
             )
-            await service.save_composition_state(session_id, state_data)
+            partial_record = await service.save_composition_state(session_id, state_data)
+            persisted_state_id_pc = partial_record.id
         except SQLAlchemyError as save_err:
             # Full SQLAlchemyError family — a narrow ``IntegrityError``
             # catch would let ``OperationalError`` / ``ProgrammingError`` /
@@ -965,6 +1058,17 @@ async def _handle_plugin_crash(
         exc_class=exc.exc_class,
     )
 
+    # Persist the per-tool-call audit trail. The crashing call itself
+    # is the LAST entry in tool_invocations with status=PLUGIN_CRASH;
+    # earlier entries are the calls that successfully ran before the
+    # plugin bug fired.
+    if exc.tool_invocations:
+        await _persist_tool_invocations(
+            service,
+            session_id,
+            exc.tool_invocations,
+            persisted_state_id_pc,
+        )
     return response_body
 
 
@@ -1106,6 +1210,7 @@ async def _handle_runtime_preflight_failure(
         ),
     }
 
+    persisted_state_id_rpf: UUID | None = None
     if exc.partial_state is not None:
         # Persistence guard: DB write failure MUST NOT mask the original
         # runtime-preflight failure (response stays as the 500 below; the
@@ -1129,7 +1234,8 @@ async def _handle_runtime_preflight_failure(
                 initial_version=None,
                 telemetry_source="runtime_preflight",
             )
-            await service.save_composition_state(session_id, state_data)
+            partial_record = await service.save_composition_state(session_id, state_data)
+            persisted_state_id_rpf = partial_record.id
         except SQLAlchemyError as save_err:
             # See sibling helpers for redaction rationale (exc_info
             # omitted; class name only on the response body).
@@ -1160,6 +1266,18 @@ async def _handle_runtime_preflight_failure(
             exception_class=exc.exc_class,
         )
 
+    # Persist the per-tool-call audit trail. Path-1 raises before any
+    # tool call ran (cached preflight), so tool_invocations is empty there;
+    # Path-2 raises after the compose loop returned, so tool_invocations
+    # carries the entire turn. The unconditional call handles both via
+    # the empty-tuple early-return inside _persist_tool_invocations.
+    if exc.tool_invocations:
+        await _persist_tool_invocations(
+            service,
+            session_id,
+            exc.tool_invocations,
+            persisted_state_id_rpf,
+        )
     return response_body
 
 
@@ -1753,6 +1871,17 @@ def create_session_router() -> APIRouter:
                     composition_state_id=post_compose_state_id,
                     raw_content=result.raw_assistant_content,
                 )
+                # 6b. Persist per-tool-call audit trail. Each ComposerToolInvocation
+                # lands as one role=tool chat message linked to the post-compose
+                # state id (when version advanced) so the audit trail records
+                # which tool calls produced this state.
+                if result.tool_invocations:
+                    await _persist_tool_invocations(
+                        service,
+                        session.id,
+                        result.tool_invocations,
+                        post_compose_state_id,
+                    )
                 await _publish_progress(
                     progress_registry,
                     session_id=str(session.id),
@@ -2156,6 +2285,14 @@ def create_session_router() -> APIRouter:
                     composition_state_id=post_compose_state_id,
                     raw_content=result.raw_assistant_content,
                 )
+                # Per-tool-call audit trail (recompose path; symmetric with send_message).
+                if result.tool_invocations:
+                    await _persist_tool_invocations(
+                        service,
+                        session.id,
+                        result.tool_invocations,
+                        post_compose_state_id,
+                    )
                 await _publish_progress(
                     progress_registry,
                     session_id=str(session.id),

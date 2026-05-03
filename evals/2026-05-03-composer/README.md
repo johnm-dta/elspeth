@@ -8,7 +8,7 @@ This folder contains the raw evidence files for two composer evals run on the sa
 2026-05-03-composer/
 ├── README.md                 (this file — index)
 ├── basic/                    Basic-mode eval evidence (LLM-driver, well-formed prompts)
-│   ├── REPORT.md             working copy of the basic-mode eval (mirror of notes/composer-llm-eval-2026-05-03.md)
+│   ├── REPORT.md             working copy of the basic-mode eval (mirror of notes/composer-eval-basic-2026-05-03.md)
 │   ├── tickets.csv           the test CSV used across S2/S3/S3'/S4
 │   ├── openapi.json          OpenAPI snapshot at run time
 │   ├── catalog/              snapshot of GET /api/catalog/{sources,transforms,sinks} and per-plugin /schema
@@ -34,9 +34,9 @@ This folder contains the raw evidence files for two composer evals run on the sa
 
 | Document | Purpose |
 |---|---|
-| `composer-hardmode-demo-for-boss-2026-05-03.md` | Boss-facing field report ("the brief") |
-| `composer-hardmode-eval-2026-05-03.md` | Technical eval report for the hard-mode (persona-driven) eval |
-| `composer-llm-eval-2026-05-03.md` | Technical eval report for the basic-mode (LLM-driver) eval |
+| `composer-fieldreport-2026-05-03.md` | Boss-facing field report ("the brief") |
+| `composer-eval-hardmode-2026-05-03.md` | Technical eval report for the hard-mode (persona-driven) eval |
+| `composer-eval-basic-2026-05-03.md` | Technical eval report for the basic-mode (LLM-driver) eval |
 
 The brief is the document the CTO reads. Both technical reports back specific claims in the brief and reference files in this evidence tree.
 

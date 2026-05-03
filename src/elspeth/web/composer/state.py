@@ -1316,7 +1316,9 @@ def _check_schema_contracts(
                 node.plugin,
                 deep_thaw(node.options),
             )
-        except Exception:
+        except Exception as exc:
+            if not _is_config_probe_exception(exc):
+                raise
             continue
 
         output_config = transform._output_schema_config

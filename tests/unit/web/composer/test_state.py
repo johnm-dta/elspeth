@@ -2521,6 +2521,87 @@ class TestSchemaContractValidation:
         with pytest.raises(RuntimeError, match="framework bug inside transform __init__"):
             state.validate()
 
+    def test_rule_c_unexpected_constructor_exception_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Rule C must apply the same probe-exception discipline as its siblings.
+
+        Rule C (per-transform self-consistency for ``field_mapper`` with
+        ``select_only: True``) constructs the transform to read its computed
+        emit set. When that construction raises an unexpected exception (i.e.
+        not in the closed set adjudicated by ``_is_config_probe_exception``),
+        the discipline established by f3137ae8 — and already implemented by
+        the producer-probe sites at ``state.py:884`` and ``state.py:1057`` and
+        the semantic-validator helpers in ``_semantic_validator.py`` — is
+        that the exception MUST propagate so the bug surfaces at composer-time
+        rather than being silently deferred to ``/execute``. Per CLAUDE.md
+        (plugin-as-system-code policy: a plugin method that raises is a bug
+        we MUST know about), Rule C swallowing every exception with a bare
+        ``except Exception: continue`` would conceal genuine framework bugs.
+
+        ``_check_schema_contracts`` is invoked directly (rather than via
+        ``state.validate()``) because the orchestration in ``validate()`` runs
+        ``validate_semantic_contracts`` *before* the schema-contract pass, and
+        ``_instantiate_consumer`` already implements the discipline — so a
+        ``state.validate()``-level test would see the exception propagate from
+        the earlier pass regardless of Rule C's behaviour, and silently miss
+        the regression. Calling ``_check_schema_contracts`` in isolation pins
+        Rule C as the discipline under test.
+
+        Pipeline shape: source → field_mapper(select_only=True, declares an
+        output field absent from the mapping) → sink. The field_mapper's
+        upstream is the source sentinel (no producer-probe call), and the
+        sink uses ``mode: observed`` with no required_fields (so neither
+        sink-Rule-A nor sink-Rule-B reaches ``_producer_emit_set``). Rule C
+        is therefore the only probe site that calls ``create_transform``
+        for the broken plugin.
+        """
+        from elspeth.web.composer.state import _check_schema_contracts
+
+        source = self._make_source(
+            on_success="map_select",
+            plugin="text",
+            options={"schema": {"mode": "observed"}},
+        )
+        field_mapper_node = self._make_transform(
+            "map_select",
+            "map_select",
+            "main",
+            plugin="field_mapper",
+            options={
+                "schema": {
+                    "mode": "fixed",
+                    "fields": ["body: str", "batch_size: int"],
+                    "required_fields": ["body", "batch_size"],
+                },
+                "mapping": {"text": "body"},
+                "select_only": True,
+                "strict": True,
+            },
+        )
+        sink = OutputSpec(
+            name="main",
+            plugin="csv",
+            options={
+                "path": "outputs/main.csv",
+                "schema": {"mode": "observed"},
+            },
+            on_write_failure="discard",
+        )
+
+        class _BrokenManager:
+            def create_transform(self, plugin_name: str, options: dict[str, Any]) -> object:
+                raise RuntimeError("framework bug inside field_mapper __init__")
+
+            def get_transforms(self) -> list[type]:
+                return []
+
+        monkeypatch.setattr(
+            "elspeth.plugins.infrastructure.manager.get_shared_plugin_manager",
+            lambda: _BrokenManager(),
+        )
+
+        with pytest.raises(RuntimeError, match="framework bug inside field_mapper __init__"):
+            _check_schema_contracts(source, (field_mapper_node,), (sink,))
+
     def test_contract_probe_redacts_exception_detail_from_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Regression (P2c): the constructor-time exception message is the
         plugin author's free-form text (plugin options, DSN fragments,
@@ -2570,7 +2651,7 @@ class TestSchemaContractValidation:
         # Production constructors have raised all three shapes.
         leaked_substrings = (
             "Authorization: Bearer sk-SUPER-SECRET-TOKEN-123",
-            "postgres://admin:hunter2@db.internal:5432/prod",
+            "postgres://admin:hunter2@db.internal:5432/prod",  # secret-scan: allow-this-line
             "/home/appuser/.ssh/id_rsa",
         )
 

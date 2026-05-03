@@ -457,20 +457,6 @@ allow_hits:
     select_only=False puts field_mapper into the additive/loose-bound regime that Rule C explicitly does
     not adjudicate
   expires: null
-- key: web/composer/state.py:R4:_check_schema_contracts:fp=f0618f00470421a4
-  owner: web-composer
-  reason: "Rule C catches Exception broadly when probing field_mapper construction because the rule is
-    purely additive: when a transform can't be instantiated for any reason, the existing edge-loop validation
-    (raw-schema parsing on lines 1068-1099 above) and plugin construction at /execute will surface the
-    underlying error. Re-raising here would convert a Rule C non-applicability into a /validate crash
-    that masks the primary diagnostic. Distinct from _effective_producer_vote/_is_config_probe_exception
-    where unexpected exceptions are re-raised — those paths feed downstream edge contracts that depend
-    on the producer signal; Rule C is a pure self-consistency check with no downstream signal."
-  safety: Rule C silently no-ops for the offending transform; the underlying construction error is reported
-    by the other validation layers (edge loop, /execute) so the user still sees a structured diagnostic;
-    the only signal lost is Rule C's specific self-consistency rejection, which is degenerate when the
-    plugin can't even be constructed
-  expires: null
 - key: web/composer/state.py:R6:CompositionState:validate:fp=dac5151a896ece02
   owner: web-composer
   reason: Aggregation trigger PydanticValidationError is intentionally converted into a blocking ValidationEntry

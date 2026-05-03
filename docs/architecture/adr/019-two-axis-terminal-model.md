@@ -1,7 +1,7 @@
 # ADR-019: Two-Axis Terminal Model — Lifecycle, Outcome, and Path
 
 **Date:** 2026-05-04
-**Status:** Accepted (panel-reviewed 2026-05-04, all sub-decisions resolved)
+**Status:** Proposed (round-2 acceptance reverted 2026-05-04 after round-3 panel review caught a load-bearing reasoning error in the round-2 mechanical test; sub-decision conclusions preserved, reasoning chain rebuilt — see "Round-2 Correction" subsection)
 **Deciders:** ELSPETH maintainers
 **Tags:** contracts, audit, row-outcomes, public-api, supersedes-adr-018
 
@@ -116,21 +116,26 @@ mapping table below.
 
 > **Note on `DIVERTED` two-flavor split.** `RowOutcome.DIVERTED` is a single
 > enum value today used for two materially different cases. **Failsink mode**
-> (`engine/executors/sink.py:952`, `sink_name=failsink_name`) writes a
-> `DIVERTED` token_outcome alongside a successful failsink token_outcome for
-> the same `token_id` — the failsink record carries the lifecycle answer, so
-> the `DIVERTED` record is bookkeeping (genuinely transient). **Discard mode**
-> (`engine/executors/sink.py:998`, `sink_name="__discard__"`) writes only the
-> `DIVERTED` record alongside `NodeStateStatus.FAILED` (`sink.py:991`); no
-> paired record exists, so the `DIVERTED` record IS the permanent audit
-> answer for the row. ADR-018 line 56 implicitly classed both flavors as
-> non-predicate-input. ADR-019 corrects this: discard-mode is `(FAILURE,
-> SINK_DISCARDED)` and a predicate input (panel-resolved 2026-05-04). The
-> `TRANSIENT` invariant — "the lifecycle answer lives on a different token" —
-> holds for failsink-mode but is false for discard-mode (no other token
-> exists), and the engine itself already classifies discard at the node-state
-> layer as `FAILED`. This is a deliberate semantic correction; see
-> Consequences/Negative for the user-visible behavior change.
+> (`engine/executors/sink.py:952`, `sink_name=failsink_name`) writes a single
+> `DIVERTED` `token_outcomes` row, paired with a `NodeStateStatus.COMPLETED`
+> `node_state` for the failsink (`sink.py:898-903`) and a registered
+> `artifacts` row (`sink.py:938-946`). The failsink's durable artifact carries
+> the row's lifecycle answer; the `DIVERTED` `token_outcomes` row is
+> bookkeeping for "see the failsink artifact." Genuinely transient on the
+> original-sink side. **Discard mode** (`sink.py:998`,
+> `sink_name="__discard__"`) writes the `DIVERTED` `token_outcomes` row
+> alongside `NodeStateStatus.FAILED` (`sink.py:991`); no failsink node_state,
+> no `artifacts` row. The `DIVERTED` row IS the permanent audit answer for a
+> row that reached no destination. ADR-018 line 56 implicitly classed both
+> flavors as non-predicate-input. ADR-019 corrects this: discard-mode is
+> `(FAILURE, SINK_DISCARDED)` and a predicate input. The corrected mechanical
+> framing — producer declares; topology cannot derive (`ROUTED_ON_ERROR` is
+> topologically identical to failsink-mode `DIVERTED`, so the audit DB cannot
+> distinguish FAILURE from TRANSIENT without producer declaration) — is
+> developed in "Classification is producer-declared, not topology-derivable"
+> below. This is a deliberate semantic correction; see Behavior Change
+> Notice immediately above Consequences for the user-visible run-status
+> impact.
 
 The bifurcated success predicate at `contracts/run_result.py:208` becomes:
 
@@ -164,16 +169,23 @@ double-count or mis-attribute.
   answer; the consumed row's record is bookkeeping for "where the absorption
   happened."
 - **Sink fallback to a failsink** (`DIVERTED` with `sink_name=failsink_name`,
-  per `engine/executors/sink.py:952`): two `token_outcomes` records exist for
-  the same `token_id` — the failsink's record carries the lifecycle answer;
-  the original-sink `DIVERTED` record is bookkeeping for "the intended
-  sink-write didn't work, see the failsink record." Genuinely transient on
-  the original-sink side. **Discard-mode `DIVERTED`** (`sink_name="__discard__"`,
-  per `sink.py:998`) is materially different: there is no paired record
-  carrying the lifecycle answer; the `DIVERTED` record IS the permanent audit
-  answer for a row that never reached any destination. Its classification
-  (transient or failure) is an explicit panel-review decision — see the
-  mapping-table footnote and "Open Questions" below.
+  per `engine/executors/sink.py:952`): a paired `NodeStateStatus.COMPLETED`
+  `node_state` for the same `token_id` exists at the failsink node, with a
+  registered row in the `artifacts` table (`sink.py:898-946`). The failsink's
+  durable artifact carries the lifecycle answer; the original-sink `DIVERTED`
+  `token_outcomes` record is bookkeeping for "the intended sink-write didn't
+  work, see the failsink artifact." Genuinely transient on the original-sink
+  side. (Note: only ONE `token_outcomes` row is written for the diverted
+  token — the DIVERTED row at `sink.py:952`. The lifecycle answer lives in
+  `node_states` + `artifacts`, not in a paired `token_outcomes` record. An
+  earlier draft of this ADR claimed otherwise; see "Round-2 Correction"
+  below.) **Discard-mode `DIVERTED`** (`sink_name="__discard__"`, per
+  `sink.py:998`) is materially different: no paired failsink `node_state`,
+  no `artifacts` row, primary `node_state` completed at
+  `NodeStateStatus.FAILED` (`sink.py:991`). The row reached no destination
+  and the `DIVERTED` `token_outcomes` record IS the permanent audit answer.
+  Classified `(FAILURE, SINK_DISCARDED)` and a predicate input — see
+  Behavior Change Notice for the user-visible run-status consequence.
 
 `TRANSIENT` makes these visible in `token_outcomes` with a path explaining the
 circumstance, but explicitly excludes them from the success and failure
@@ -196,12 +208,65 @@ contributing to the run-status biconditional; "transient" describes the
 *token's nature* — its audit record is bookkeeping while the actual lifecycle
 answer lives on a different token.
 
-The mechanical test for `TRANSIENT` is: **does another `token_outcomes`
-record (or batch-result token) exist that carries this row's lifecycle
-answer?** If yes, this token is `TRANSIENT`. If no, this token IS the
-lifecycle answer and must be `SUCCESS` or `FAILURE`. This test is what
-classifies failsink-mode `DIVERTED` (paired record exists → TRANSIENT) and
-discard-mode `DIVERTED` (no paired record → FAILURE) into different cells.
+### Classification is producer-declared, not topology-derivable
+
+The mapping table above is canonical; **producers declare the (outcome, path)
+pair at the emit site.** The audit tier records the declaration; cross-checks
+(below) verify structural consistency for the `TRANSIENT` direction. Topology
+cannot derive the classification in the `SUCCESS`-vs-`FAILURE` direction:
+`ROUTED_ON_ERROR` (transform threw, on-error sink received the row) and
+`SINK_FALLBACK_TO_FAILSINK` (original sink-write failed, failsink absorbed
+for visibility) produce structurally identical artefacts at the audit
+layer — both create a paired `NodeStateStatus.COMPLETED` `node_state` for the
+same `token_id` at a different node, plus a registered `artifacts` row. Only
+the producer knows whether "transform's work failed but routing succeeded"
+versus "original sink-write failed but failsink absorbed." The audit DB
+cannot recover that distinction. CLAUDE.md's Auditability Standard ("no
+inference — if it's not recorded, it didn't happen") forecloses the
+reconstruction.
+
+**Classification rationale (descriptive, not derivational):** a `TRANSIENT`
+token has its row's lifecycle answer durably recorded *elsewhere* — either
+(a) on a paired `token_outcomes` record reachable via the same `row_id`
+lineage (`FORK_PARENT`, `EXPAND_PARENT`) or via `batch_id`
+(`BATCH_CONSUMED`), or (b) on a paired `NodeStateStatus.COMPLETED`
+`node_state` for the same `token_id` at a different node, with a registered
+row in the `artifacts` table (`SINK_FALLBACK_TO_FAILSINK`). A `SUCCESS` or
+`FAILURE` token IS its row's lifecycle answer.
+
+### Cross-check invariants (verify producer declaration; do not derive)
+
+The recorder Tier 1 cross-checks below verify *some* structural facts in the
+`TRANSIENT` direction. They catch violations of the producer's declared
+classification; they do not derive the classification. Where the cross-check
+cannot run in real time (children/batch-result tokens land later), the
+invariant is a *deferred* obligation rather than a write-time assertion.
+
+- **I1a (lineage-paired):** `(TRANSIENT, FORK_PARENT)` and
+  `(TRANSIENT, EXPAND_PARENT)` require ≥1 child `token_outcomes` row with
+  `parent_token_id == this.token_id`. *Deferred* — children complete after
+  the parent.
+- **I1b (aggregate-paired):** `(TRANSIENT, BATCH_CONSUMED)` requires the
+  consuming batch's batch-result token to be recorded at flush time.
+  *Deferred*.
+- **I1c (sink-fallback-paired):** `(TRANSIENT, SINK_FALLBACK_TO_FAILSINK)`
+  requires a paired `NodeStateStatus.COMPLETED` `node_state` for the same
+  `token_id` at the failsink node, AND that node_state has a registered
+  `artifacts` row. *Real-time verifiable* — `engine/executors/sink.py:898-946`
+  registers the artifact and completes the failsink node_state before
+  `record_token_outcome()` at line 952.
+- **I3 (discard-FAILURE):** `(FAILURE, SINK_DISCARDED)` requires
+  `sink_name="__discard__"` AND no paired `NodeStateStatus.COMPLETED` sink
+  `node_state` for the same `token_id` (no failsink absorbed). *Real-time
+  verifiable* — `sink.py:977-1003` does not call `register_artifact()` and
+  completes the primary node_state at `NodeStateStatus.FAILED` (line 991).
+
+I1a/I1b/I1c/I3 are cross-row/cross-table invariants — strictly stronger than
+the single-row scalar guards at `model_loaders.py:547-580` that the
+implementation will need to extend. The single-row guards remain in force
+for required-field constraints (`sink_name`, `error_hash`, `fork_group_id`);
+the new invariants add structural consistency between `token_outcomes` and
+`node_states`/`artifacts`.
 
 ### Public API field-name preservation
 
@@ -235,12 +300,16 @@ ELSPETH's "delete the DB on schema change" policy
 (`MEMORY.md::project_db_migration_policy`) applies. There is no in-place
 migration: operators discard old `audit.db` and `sessions.db` files when ADR-019
 ships. The recorder, wire schemas, frontend counter readers, and integration
-tests flip together. Migration surface (verified by `grep -rn 'RowOutcome\.'
-src/ tests/`): **779 total references across 81 files (13 in `src/`, 68 in
-`tests/`)**, of which **143 are `outcome == RowOutcome` test assertions** that
-must flip to assert the new field pair. This is too large for a single
-coordinated commit; the implementation rolls out as a sequenced PR series with
-the closed-set partition assertion gating each stage:
+tests flip together. Migration surface is approximately 700–800 `RowOutcome.X`
+references across ~80 files (precise count depends on commit; both
+pre-composer-audit and post-composer-audit grep totals are in this band). Of
+these, on the order of 90–150 are `outcome == RowOutcome` test assertion sites
+that must flip to assert the new field pair. Re-grep at implementation-stage
+start with `grep -rn 'RowOutcome\.' src/ tests/ | wc -l` and
+`grep -rn 'outcome == RowOutcome\|\.outcome.*== RowOutcome' src/ tests/ | wc -l`
+for the contemporary number. This is too large for a single coordinated
+commit; the implementation rolls out as a sequenced PR series with the
+closed-set partition assertion gating each stage:
 
 1. **Contract layer** (`contracts/enums.py`): introduce `TerminalOutcome` and
    `TerminalPath`, retain `RowOutcome` temporarily as a derivable view over
@@ -260,6 +329,24 @@ The "delete the DB" policy (`MEMORY.md::project_db_migration_policy`)
 contains the data-side migration: operators discard old `audit.db` and
 `sessions.db` between stages 1 and 5. No in-place migration; no schema
 versioning.
+
+## Behavior Change Notice (operator-visible)
+
+> ⚠ **Pipelines using discard sinks (`sink_name="__discard__"`) will see run
+> status flip from `COMPLETED` to `COMPLETED_WITH_FAILURES` (or `FAILED` if
+> all rows discard).** ADR-019 reclassifies discard-mode `DIVERTED` as
+> `(FAILURE, SINK_DISCARDED)`, a predicate input. Today the engine already
+> classifies discard at the node-state layer as `NodeStateStatus.FAILED`
+> (`engine/executors/sink.py:991`); the token-outcome layer was silently
+> disagreeing, leaving `failure_indicator` unset for runs with discarded
+> rows. ADR-019 reconciles both layers.
+>
+> **Operator action required:** if your pipeline uses discard as silent
+> housekeeping (rows you intend to drop without affecting run status),
+> reconfigure to route those rows to a no-op success sink. If you are
+> comfortable with the new semantics (discarded rows count toward
+> `rows_failed` and flip `failure_indicator`), no action needed beyond
+> re-baselining dashboards.
 
 ## Consequences
 
@@ -289,26 +376,19 @@ versioning.
   (e.g., MCP analyzer queries grouping by outcome distribution) read two
   columns instead of one. SQL filters that previously matched a single
   `RowOutcome` value now match a (outcome, path) pair.
-- **Migration surface is large.** 779 `RowOutcome.X` references across 81
-  files (143 test assertions); recorder, repository load/store, resume
-  aggregation, the closed-set partition assertion, and the explain() lineage
-  report all participate. The "delete the DB" policy contains the data side;
-  the code side is a sequenced 5-stage rollout (see "Migration policy"
-  section), not a single commit.
-- **Discard-sink behavior change (deliberate).** Pipelines using discard
-  sinks (`sink_name="__discard__"`, `engine/executors/sink.py:998`) currently
-  produce no failure indicator for discarded rows — discarded rows increment
-  `rows_diverted` (structural) but neither `rows_succeeded` nor `rows_failed`.
-  Under ADR-019, discard-mode `DIVERTED` becomes `(FAILURE, SINK_DISCARDED)`
-  and increments `rows_failed`, flipping `failure_indicator` for any run
-  with discarded rows. Run status changes from `COMPLETED` to
-  `COMPLETED_WITH_FAILURES` (or `FAILED` if all rows discard) for affected
-  pipelines. This is the right correction (a row that reached no destination
-  is a failed lifecycle, and the engine already classes discard as
-  `NodeStateStatus.FAILED` at `sink.py:991` — the token-outcome layer was
-  silently disagreeing with the node-state layer). Operators relying on
-  discard as silent housekeeping must reconfigure or accept the new run-
-  status semantics.
+- **Migration surface is large.** ~700–800 `RowOutcome.X` references across
+  ~80 files; recorder, repository load/store, resume aggregation, the
+  closed-set partition assertion, and the explain() lineage report all
+  participate. The "delete the DB" policy contains the data side; the code
+  side is a sequenced 5-stage rollout (see "Migration policy" section), not
+  a single commit.
+- **Discard-sink behavior change (deliberate).** See "Behavior Change
+  Notice" callout above Consequences for the operator-visible summary. The
+  short form: discard-mode `DIVERTED` becomes `(FAILURE, SINK_DISCARDED)`
+  and a predicate input, flipping `failure_indicator` for runs with
+  discarded rows. The engine already classifies discard at the node-state
+  layer as `NodeStateStatus.FAILED` (`sink.py:991`); the token-outcome
+  layer was silently disagreeing. ADR-019 reconciles both layers.
 - **Three outcome values, not two.** The user's natural mental model
   ("success or failure") admits a `TRANSIENT` middle ground for parent-token
   bookkeeping. This is a justified deviation (see "Why `TRANSIENT` exists"
@@ -398,10 +478,11 @@ Questions for the Maintainer." A three-agent review panel
 (`axiom-solution-architect:solution-design-reviewer`,
 `axiom-system-architect:architecture-critic`,
 `yzmir-systems-thinking:pattern-recognizer`) reviewed ADR-019 against primary
-source on 2026-05-04 and resolved all five **unanimously**. The verdicts are
-recorded here as the binding interpretation of the mapping table above; if a
-future reader disagrees, an ADR-020 amendment is the vehicle, not local
-re-litigation.
+source on 2026-05-04. The panel ran twice — see "Round-2 Correction"
+subsection below for an honest account of why. After round-3, all five
+sub-decisions are resolved **unanimously**. The verdicts are recorded here as
+the binding interpretation of the mapping table above; if a future reader
+disagrees, an ADR-020 amendment is the vehicle, not local re-litigation.
 
 1. **`QUARANTINED` path naming.** **Verdict: distinct (`QUARANTINED_AT_SOURCE`
    vs `UNROUTED`).** Source-side coercion failure is a Tier 3 trust-boundary
@@ -430,16 +511,63 @@ re-litigation.
    keeps each ADR's revert path clean.
 
 5. **Discard-mode `DIVERTED`: `(FAILURE, SINK_DISCARDED)`, predicate input.**
-   `sink.py:998` writes only the `DIVERTED` record alongside
-   `NodeStateStatus.FAILED` (line 991). No paired token carries a separate
-   lifecycle answer, so the `TRANSIENT` invariant fails for discard-mode.
-   Classifying as `TRANSIENT` would assert the audit-row layer disagrees
-   with the node-state layer about whether the row failed — a Tier 1
-   inconsistency. ADR-018 line 56's blanket "non-predicate-input"
-   classification was a single-flavor decision based on the dominant
-   failsink case; ADR-019 corrects an under-specified classification. See
-   Consequences/Negative for the user-visible run-status change for
-   pipelines using discard sinks.
+   `sink.py:998` writes the `DIVERTED` `token_outcomes` row alongside
+   `NodeStateStatus.FAILED` (line 991). No paired failsink `node_state` and
+   no `artifacts` row exist for the diverted token (`sink.py:977-1003`
+   contains no `register_artifact()` call). The discard `DIVERTED` row IS
+   the row's lifecycle answer; classifying as `TRANSIENT` would assert that
+   the audit-row layer disagrees with the node-state layer about whether
+   the row failed — a Tier 1 inconsistency. ADR-018 line 56's blanket
+   "non-predicate-input" classification was a single-flavor decision based
+   on the dominant failsink case; ADR-019 corrects an under-specified
+   classification via cross-layer agreement (cross-check invariant I3 in
+   the "Cross-check invariants" subsection above). See Behavior Change
+   Notice for the user-visible run-status impact.
+
+### Round-2 Correction
+
+The first panel review (round-2, also 2026-05-04) accepted ADR-019 with a
+mechanical test for `TRANSIENT` classification phrased as: *"does another
+`token_outcomes` record exist for this token's row's lifecycle answer? If
+yes, TRANSIENT."* Verdict 5 (discard-mode → FAILURE) was endorsed on the
+grounds that no paired `token_outcomes` record existed for discard-mode but
+one did exist for failsink-mode.
+
+The maintainer's primary-source check disconfirmed the test. Failsink mode
+writes exactly one `record_token_outcome` call (`engine/executors/sink.py:952`).
+The "paired record" the round-2 panel relied on was the failsink's
+`NodeStateStatus.COMPLETED` `node_state` (`sink.py:898-903`), which is in a
+*different table* (`node_states`, not `token_outcomes`). All three
+round-2 reviewers had endorsed the test on reasoning-coherence grounds
+without verifying it pair-by-pair against `sink.py`.
+
+Round-3 (also 2026-05-04) reconvened the panel as an actual collaborative
+team rather than parallel reviewers. `panel-ac` walked the mapping table
+pair-by-pair and surfaced a structural ambiguity: `ROUTED_ON_ERROR`
+(`outcomes.py:266-291` — transform threw, on-error sink received the row)
+produces a paired `NodeStateStatus.COMPLETED` `node_state` plus registered
+`artifacts` row at a different node — *topologically identical* to
+failsink-mode `DIVERTED` at the audit layer. Topology cannot derive the
+classification: only producer declaration distinguishes "transform's work
+failed but routing succeeded" (FAILURE) from "original sink-write failed
+but failsink absorbed for visibility" (TRANSIENT). The panel converged on
+**producer-declared classification, with audit-tier cross-checks verifying
+structural consistency in the `TRANSIENT` direction only** — see the
+"Classification is producer-declared, not topology-derivable" and
+"Cross-check invariants" subsections above.
+
+**Sub-decision conclusions are unchanged from round-2.** The reasoning
+chain underneath sub-decision 5 is rebuilt: discard-mode → FAILURE rests
+on `sink.py:991` (FAILED `node_state`), absence of `register_artifact()`
+in `sink.py:977-1003`, and cross-check invariant I3 (cross-layer agreement
+between `node_states` and `token_outcomes`) — *not* on the round-2 claim
+about a "paired `token_outcomes` record."
+
+**Panel-process finding (recorded for future ADR reviews):** for any
+mechanical test or derivation invariant in ADR text, each reviewer must
+independently verify the claim against primary source for *every row in
+the relevant mapping table* before endorsing. Reasoning-coherence checks
+are insufficient when the claim references audit-table sequencing.
 
 ## Related Decisions
 

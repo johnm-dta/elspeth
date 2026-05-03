@@ -36,6 +36,7 @@ from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.token_usage import TokenUsage
+from elspeth.contracts.value_source import register_value_source_plugin
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.batching import BatchTransformMixin, OutputPort
 from elspeth.plugins.infrastructure.clients.llm import ContextLengthError, LLMClientError
@@ -999,7 +1000,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
 
     name = "llm"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6279c8fd19b1c53d"
+    source_file_hash: str | None = "sha256:c2ba40f9b135efbc"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1076,11 +1077,21 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:
-        """Minimal no-network config for the ADR-009 forward invariant."""
+        """Minimal no-network config for the ADR-009 forward invariant.
+
+        Uses ``openai/gpt-4o`` because it's a stable presence in
+        ``litellm.model_list``'s OpenRouter slice — the probe never
+        actually makes a network call (preflight mode defers all
+        external client setup), but the value-source compliance walker
+        runs at construction time, so the model identifier MUST satisfy
+        the OpenRouter catalog declaration. A model that drops in/out
+        across litellm versions (e.g. ``gpt-4o-mini``) would make probes
+        flaky against the catalog snapshot.
+        """
         return {
             "provider": "openrouter",
             "api_key": "probe-key",
-            "model": "openai/gpt-4o-mini",
+            "model": "openai/gpt-4o",
             "template": "{{ row.llm_probe_text }}",
             "schema": {"mode": "observed"},
             "required_input_fields": [],
@@ -1332,6 +1343,21 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         # Batch processing state
         self._batch_initialized = False
 
+    @property
+    def provider_config(self) -> AzureOpenAIConfig | OpenRouterConfig:
+        """Read-only accessor for the typed provider config.
+
+        Exposes the post-validation ``LLMConfig`` subclass so cross-cutting
+        validators (notably the value-source compliance walker) can inspect
+        ``VALUE_SOURCES`` declarations and field values without reaching for
+        ``self._config`` private attribute access.
+
+        Named ``provider_config`` (not ``config``) to avoid colliding with
+        :class:`BaseTransform.config` (the raw ``dict[str, Any]`` configuration
+        passed to ``__init__``) — distinct meanings, distinct names.
+        """
+        return self._config
+
     def connect_output(self, output: OutputPort, max_pending: int = 30) -> None:
         """Connect output port and initialize batch processing."""
         if self._batch_initialized:
@@ -1444,3 +1470,11 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
             self._provider = None
 
         self._recorder = None
+
+
+# Register opt-in for value-source compliance: the typed Pydantic config
+# (OpenRouterConfig | AzureOpenAIConfig) is exposed via the public
+# ``provider_config`` property. The walker (engine/orchestrator/preflight.py)
+# uses this registration to find the typed config without resorting to
+# duck-typing or getattr.
+register_value_source_plugin(LLMTransform, config_attr="provider_config")

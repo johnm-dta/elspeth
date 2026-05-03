@@ -1,30 +1,33 @@
 #!/bin/bash
-# Build a single-source briefing as a professional PDF.
+# Build the composer walkthrough as a professional PDF.
 #
-# Modelled on build-arch-pack.sh but for one markdown source rather than
-# a multi-track concatenation.  Reuses the same Typst template, pandoc
-# invocation, preprocess and postprocess steps.
+# Sibling to build-briefing.sh.  Both drive the same single-source
+# pipeline (preprocess → pandoc → postprocess → typst), reuse the
+# same Typst template, and differ only in their pinned defaults
+# for source markdown, metadata YAML, and output PDF path.
 #
-# Pipeline: source briefing markdown → strip self-contained metadata
-# header (since the title page is template-driven) → preprocess.py
-# (mermaid render, hrule strip) → pandoc (typst output with template +
-# briefing metadata) → postprocess.py (cell-alignment strip) → typst
-# compile → PDF.
+# Pipeline: source walkthrough markdown → strip self-contained
+# metadata header (since the title page is template-driven) →
+# preprocess.py (mermaid render, hrule strip) → pandoc (typst
+# output with template + walkthrough metadata) → postprocess.py
+# (cell-alignment strip) → typst compile → PDF.
 #
-# Requirements: pandoc >= 3.0, typst >= 0.14, mermaid-cli (mmdc), python3.
+# Requirements: pandoc >= 3.0, typst >= 0.14, mermaid-cli (mmdc),
+# python3.  mmdc is required by the shared toolchain check even
+# though the walkthrough has no mermaid blocks.
 #
 # Usage:
-#   ./build-briefing.sh                          # Generate .typ intermediate only
-#   ./build-briefing.sh --pdf                    # Generate .typ and compile to PDF
-#   ./build-briefing.sh --pdf --source PATH      # Override source markdown
-#   ./build-briefing.sh --pdf --metadata PATH    # Override metadata YAML
-#   ./build-briefing.sh --pdf --output PATH      # Override output PDF path
+#   ./build-walkthrough.sh                          # Generate .typ intermediate only
+#   ./build-walkthrough.sh --pdf                    # Generate .typ and compile to PDF
+#   ./build-walkthrough.sh --pdf --source PATH      # Override source markdown
+#   ./build-walkthrough.sh --pdf --metadata PATH    # Override metadata YAML
+#   ./build-walkthrough.sh --pdf --output PATH      # Override output PDF path
 #
 # Environment:
-#   ELSPETH_BRIEFING_SOURCE     Override source markdown path.
-#   ELSPETH_BRIEFING_METADATA   Override metadata YAML path.
-#   ELSPETH_BRIEFING_OUTPUT     Override output PDF path.
-#   FORCE_DATE                  Override the title-page date (default: today).
+#   ELSPETH_WALKTHROUGH_SOURCE     Override source markdown path.
+#   ELSPETH_WALKTHROUGH_METADATA   Override metadata YAML path.
+#   ELSPETH_WALKTHROUGH_OUTPUT     Override output PDF path.
+#   FORCE_DATE                     Override the title-page date (default: today).
 
 set -euo pipefail
 
@@ -36,13 +39,13 @@ source "$SCRIPT_DIR/lib.sh"
 # ─────────────────────────────────────────────────────────────
 # Defaults — can be overridden via env or flag.
 # ─────────────────────────────────────────────────────────────
-DEFAULT_SOURCE="$PROJECT_ROOT/notes/composer-briefing-2026-05-03.md"
-DEFAULT_METADATA="$SCRIPT_DIR/briefing-metadata.yaml"
-DEFAULT_OUTPUT="$PROJECT_ROOT/docs/assets/composer-briefing-2026-05-03.pdf"
+DEFAULT_SOURCE="$PROJECT_ROOT/notes/composer-walkthrough-2026-05-03.md"
+DEFAULT_METADATA="$SCRIPT_DIR/walkthrough-metadata.yaml"
+DEFAULT_OUTPUT="$PROJECT_ROOT/docs/assets/composer-walkthrough-2026-05-03.pdf"
 
-SOURCE="${ELSPETH_BRIEFING_SOURCE:-$DEFAULT_SOURCE}"
-METADATA="${ELSPETH_BRIEFING_METADATA:-$DEFAULT_METADATA}"
-OUTPUT_PDF="${ELSPETH_BRIEFING_OUTPUT:-$DEFAULT_OUTPUT}"
+SOURCE="${ELSPETH_WALKTHROUGH_SOURCE:-$DEFAULT_SOURCE}"
+METADATA="${ELSPETH_WALKTHROUGH_METADATA:-$DEFAULT_METADATA}"
+OUTPUT_PDF="${ELSPETH_WALKTHROUGH_OUTPUT:-$DEFAULT_OUTPUT}"
 COMPILE_PDF=false
 
 # ─────────────────────────────────────────────────────────────
@@ -78,7 +81,7 @@ els_check_toolchain
 
 # ─────────────────────────────────────────────────────────────
 # Strip the markdown's self-contained metadata header.  The
-# briefing is designed to stand alone as markdown, so its first
+# walkthrough is designed to stand alone as markdown, so its first
 # block is a title (H1) + a list of bold metadata fields + a
 # free-text framing paragraph + a horizontal-rule divider.  For
 # PDF rendering the template provides the title page from the
@@ -87,7 +90,8 @@ els_check_toolchain
 #
 # The strip is bounded: from the first H1 down through the
 # first standalone "---" line, inclusive.  Subsequent "---"
-# dividers (between sections) are preserved.
+# dividers (between sections) are preserved at this stage and
+# stripped later by preprocess.py.
 # ─────────────────────────────────────────────────────────────
 COMBINED=$(mktemp)
 PROCESSED=$(mktemp)

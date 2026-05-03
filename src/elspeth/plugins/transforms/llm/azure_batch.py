@@ -22,10 +22,10 @@ import uuid
 from collections import Counter
 from datetime import UTC, datetime
 from threading import Lock
-from typing import Any
+from typing import Any, ClassVar
 
 import structlog
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from elspeth.contracts import (
     BatchPendingError,
@@ -43,6 +43,11 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.token_usage import TokenUsage
+from elspeth.contracts.value_source import (
+    DerivedFromSiblingValueSource,
+    ValueSource,
+    register_value_source_plugin,
+)
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
@@ -91,6 +96,16 @@ class AzureBatchConfig(TransformDataConfig):
     api_key: str = Field(..., description="Azure OpenAI API key")
     api_version: str = Field(default="2024-10-21", description="Azure API version")
 
+    # Mirrors ``AzureOpenAIConfig.model`` for parity with the non-batch
+    # path: an operator may set ``model:`` in YAML for documentation /
+    # readability, but the canonical model identifier on Azure is the
+    # deployment_name. The ``_set_model_from_deployment`` validator below
+    # fills the field when omitted; the value-source compliance walker
+    # then enforces ``model == deployment_name`` post-validation so a
+    # divergent override (a hallucinated model identifier) is rejected
+    # at preflight rather than at the first per-row HTTP call.
+    model: str = Field(default="", description="Model identifier (defaults to deployment_name)")
+
     template: str = Field(..., description="Jinja2 prompt template")
     system_prompt: str | None = Field(None, description="Optional system prompt")
     temperature: float = Field(0.0, ge=0.0, le=2.0, description="Sampling temperature")
@@ -112,6 +127,35 @@ class AzureBatchConfig(TransformDataConfig):
     tracing: dict[str, Any] | None = Field(
         default=None,
         description="Tier 2 tracing configuration (langfuse only - azure_ai not supported for batch API)",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _set_model_from_deployment(cls, data: Any) -> Any:
+        """Fill ``model`` from ``deployment_name`` when the operator
+        leaves the field empty. Mirrors :meth:`AzureOpenAIConfig._set_model_from_deployment`
+        so batch and non-batch Azure transforms share the same operator
+        ergonomics (omit ``model`` and let it inherit).
+        """
+        if isinstance(data, dict) and not data.get("model"):
+            deployment = data.get("deployment_name")
+            if deployment:
+                data["model"] = deployment
+        return data
+
+    # Value-source declaration: ``model`` is derived from ``deployment_name``
+    # — same contract as ``AzureOpenAIConfig`` (the non-batch sibling).
+    # The validator above fills the field when empty; the walker confirms
+    # post-validation that ``model == deployment_name`` (or that the
+    # original config left it empty, which the validator legalizes by
+    # substitution). This rejects a hallucinated batch ``model`` value at
+    # preflight rather than at first batch-submission HTTP call.
+    VALUE_SOURCES: ClassVar[tuple[ValueSource, ...]] = (
+        DerivedFromSiblingValueSource(
+            field_name="model",
+            sibling_field="deployment_name",
+            allow_empty_default=True,
+        ),
     )
 
 
@@ -156,7 +200,7 @@ class AzureBatchLLMTransform(BaseTransform):
 
     name = "azure_batch_llm"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:e274cc41ca477f7d"
+    source_file_hash: str | None = "sha256:3a118aa8cdf61caa"
     is_batch_aware = True  # Engine passes list[dict] for batch processing
     config_model = AzureBatchConfig
 
@@ -172,6 +216,11 @@ class AzureBatchLLMTransform(BaseTransform):
         super().__init__(config)
 
         cfg = AzureBatchConfig.from_dict(config, plugin_name=self.name)
+        # Retain the typed config so the value-source compliance walker
+        # can inspect ``VALUE_SOURCES`` declarations and field values
+        # (model / deployment_name) without scraping ``self._field_name``
+        # destructured copies. Exposed publicly via ``provider_config``.
+        self._config = cfg
         self._initialize_declared_input_fields(cfg)
 
         # Declare output fields for centralized collision detection.
@@ -1583,6 +1632,19 @@ class AzureBatchLLMTransform(BaseTransform):
         """Azure deployment name."""
         return self._deployment_name
 
+    @property
+    def provider_config(self) -> AzureBatchConfig:
+        """Read-only accessor for the typed batch config.
+
+        Mirrors :attr:`elspeth.plugins.transforms.llm.transform.LLMTransform.provider_config`
+        so the value-source compliance walker can inspect the
+        ``VALUE_SOURCES`` declaration and post-validation field values
+        without reaching into ``self._config`` private state. Named
+        ``provider_config`` (not ``config``) to avoid colliding with
+        :attr:`BaseTransform.config` (the raw ``dict[str, Any]``).
+        """
+        return self._config
+
     def close(self) -> None:
         """Release resources and flush tracing."""
         self._tracer.flush()
@@ -1590,3 +1652,11 @@ class AzureBatchLLMTransform(BaseTransform):
             self._client.close()
             self._client = None
         self._langfuse_client = None
+
+
+# Register opt-in for value-source compliance: the typed Pydantic config
+# (AzureBatchConfig) is exposed via the public ``provider_config``
+# property. Mirrors the non-batch registration at transform.py:1480 so
+# the walker (engine/orchestrator/preflight.py) treats batch and
+# non-batch Azure transforms identically.
+register_value_source_plugin(AzureBatchLLMTransform, config_attr="provider_config")

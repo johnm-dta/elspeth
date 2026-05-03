@@ -32,9 +32,9 @@ per_file_rules:
 - pattern: plugins/transforms/llm/*
   rules:
   - R5
-  reason: Type discrimination for LLM response validation and provider dispatch
+  reason: Type discrimination for LLM response validation and provider dispatch (includes Pydantic model_validator(mode="before") isinstance(data, dict) Tier-3 input checks on AzureOpenAIConfig and AzureBatchConfig)
   expires: null
-  max_hits: 70
+  max_hits: 73
 - pattern: plugins/transforms/azure/*
   rules:
   - R1

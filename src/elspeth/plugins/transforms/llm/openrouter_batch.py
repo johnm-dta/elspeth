@@ -21,7 +21,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import httpx
 import structlog
@@ -34,6 +34,11 @@ from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.token_usage import TokenUsage
+from elspeth.contracts.value_source import (
+    CatalogValueSource,
+    ValueSource,
+    register_value_source_plugin,
+)
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 from elspeth.plugins.infrastructure.pooling import is_capacity_error
@@ -47,6 +52,7 @@ from elspeth.plugins.transforms.llm import (
 )
 from elspeth.plugins.transforms.llm.base import LLMConfig
 from elspeth.plugins.transforms.llm.langfuse import create_langfuse_tracer
+from elspeth.plugins.transforms.llm.model_catalog import MODEL_CATALOG_OPENROUTER
 from elspeth.plugins.transforms.llm.templates import PromptTemplate
 from elspeth.plugins.transforms.llm.tracing import (
     TracingConfig,
@@ -135,6 +141,24 @@ class OpenRouterBatchConfig(LLMConfig):
         description="Tier 2 tracing configuration (langfuse only - azure_ai not supported)",
     )
 
+    # Value-source declaration: ``model`` must appear in the OpenRouter
+    # slice of ``litellm.model_list`` whenever ``base_url`` targets the
+    # canonical OpenRouter endpoint. The ``applies_when`` predicate keeps
+    # the catalog check in lock-step with the actual HTTP boundary —
+    # operators redirecting to a chaos test server (errorworks /
+    # chaosllm) or a private OpenAI-compatible gateway skip the catalog
+    # check, since the model identifier semantics are owned by that
+    # endpoint, not by litellm's OpenRouter slug list. Mirrors the
+    # non-batch :attr:`OpenRouterConfig.VALUE_SOURCES` exactly so batch
+    # and non-batch enforcement do not drift.
+    VALUE_SOURCES: ClassVar[tuple[ValueSource, ...]] = (
+        CatalogValueSource(
+            field_name="model",
+            catalog_id=MODEL_CATALOG_OPENROUTER,
+            applies_when=(("base_url", "https://openrouter.ai/api/v1"),),
+        ),
+    )
+
 
 class OpenRouterBatchLLMTransform(BaseTransform):
     """Batch-aware LLM transform using OpenRouter API.
@@ -172,7 +196,7 @@ class OpenRouterBatchLLMTransform(BaseTransform):
 
     name = "openrouter_batch_llm"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:ec55543c0b9c8bae"
+    source_file_hash: str | None = "sha256:43760e473c36eebc"
     is_batch_aware = True  # Engine passes list[dict] for batch processing
     config_model = OpenRouterBatchConfig
 
@@ -189,6 +213,11 @@ class OpenRouterBatchLLMTransform(BaseTransform):
 
         # Parse OpenRouter-specific config
         cfg = OpenRouterBatchConfig.from_dict(config, plugin_name=self.name)
+        # Retain the typed config so the value-source compliance walker
+        # can inspect ``VALUE_SOURCES`` declarations and post-validation
+        # field values without scraping ``self._field_name`` destructured
+        # copies. Exposed publicly via ``provider_config``.
+        self._config = cfg
         self._initialize_declared_input_fields(cfg)
 
         # Declare output fields for centralized collision detection.
@@ -272,6 +301,19 @@ class OpenRouterBatchLLMTransform(BaseTransform):
             transform_name=self.name,
             tracing_config=self._tracing_config,
         )
+
+    @property
+    def provider_config(self) -> OpenRouterBatchConfig:
+        """Read-only accessor for the typed batch config.
+
+        Mirrors :attr:`elspeth.plugins.transforms.llm.transform.LLMTransform.provider_config`
+        so the value-source compliance walker can inspect the
+        ``VALUE_SOURCES`` declaration and post-validation field values
+        without reaching into ``self._config`` private state. Named
+        ``provider_config`` (not ``config``) to avoid colliding with
+        :attr:`BaseTransform.config` (the raw ``dict[str, Any]``).
+        """
+        return self._config
 
     def on_start(self, ctx: LifecycleContext) -> None:
         """Capture recorder, telemetry, rate limit context, and initialize tracing.
@@ -847,3 +889,11 @@ class OpenRouterBatchLLMTransform(BaseTransform):
             self._http_clients.clear()
 
         self._recorder = None
+
+
+# Register opt-in for value-source compliance: the typed Pydantic config
+# (OpenRouterBatchConfig) is exposed via the public ``provider_config``
+# property. Mirrors the non-batch registration at transform.py:1480 so
+# the walker (engine/orchestrator/preflight.py) treats batch and
+# non-batch OpenRouter transforms identically.
+register_value_source_plugin(OpenRouterBatchLLMTransform, config_attr="provider_config")

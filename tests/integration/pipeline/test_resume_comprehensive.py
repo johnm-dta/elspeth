@@ -1481,11 +1481,17 @@ class TestResumeComprehensive:
            Landscape and calls ``derive_terminal_run_status`` with the
            accumulated counters.
         3. Verify: ``result.status == RunStatus.COMPLETED`` (not FAILED).
-        4. Verify: ``result.rows_succeeded == 0`` — no on_success success-path
-           outcomes; every row is ROUTED.
+        4. Verify: ``result.rows_succeeded == 5`` — counter symmetry with
+           the live path (outcomes.py:251 ROUTED branch bumps both
+           rows_succeeded and rows_routed_success). A gate-routed row that
+           sunk successfully is, in lifecycle terms, a successful
+           termination; the umbrella ``rows_succeeded`` counter reflects
+           that. Pre-symmetry (elspeth-ee836019b1): asserted == 0 because
+           the resume accumulator under-counted; that asymmetry surfaced
+           operationally as ``✓0 succeeded | →N routed`` in CLI summaries.
         5. Verify: ``result.rows_routed_success == 5`` — the resume-side
            accumulator must surface the existing ``ROUTED`` outcomes via the
-           split counter.
+           split counter (orthogonal attribution: which gate, which sink).
         6. Verify: ``result.rows_routed_failure == 0`` — no on_error reroutes.
 
         Pre-PR (commit 8865559e, before the rows_routed split): the resume's
@@ -1600,7 +1606,10 @@ class TestResumeComprehensive:
             f"early-exit Landscape readback). "
             f"result={result.to_dict()}"
         )
-        assert result.rows_succeeded == 0  # No on_success success-path sink.
+        # Counter symmetry (elspeth-ee836019b1): ROUTED rows that sunk
+        # successfully bump BOTH rows_succeeded (umbrella) and
+        # rows_routed_success (gate attribution). Pre-symmetry this was 0.
+        assert result.rows_succeeded == 5
         assert result.rows_routed_success == 5  # All rows recorded as ROUTED.
         assert result.rows_routed_failure == 0  # No on_error reroutes.
 

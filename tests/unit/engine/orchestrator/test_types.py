@@ -21,6 +21,8 @@ from elspeth.engine.orchestrator.types import (
     AggregationFlushResult,
     ExecutionCounters,
     PipelineConfig,
+    ValueSourceFinding,
+    ValueSourceValidationError,
 )
 
 
@@ -372,3 +374,81 @@ class TestPipelineConfig:
         assert isinstance(config.sinks, MappingProxyType)
         assert config.transforms == frozen_transforms
         assert config.sinks == frozen_sinks
+
+
+class TestValueSourceFinding:
+    """Pin the structured-finding contract.
+
+    The walker (``preflight.validate_value_source_compliance``) emits
+    these; the composer ``/validate`` consumer reads
+    ``component_id``/``field_name``/``reason`` directly. Replacing the
+    pre-existing string round-trip eliminated a silent
+    ``ValidationError(component_id=None)`` failure mode whenever the
+    finding format string drifted.
+    """
+
+    def test_construct_with_all_fields(self) -> None:
+        finding = ValueSourceFinding(
+            component_id="openrouter_node_1",
+            field_name="model",
+            reason="value 'foo/bar' is not in catalog 'openrouter'",
+        )
+        assert finding.component_id == "openrouter_node_1"
+        assert finding.field_name == "model"
+        assert finding.reason.startswith("value")
+
+    def test_format_round_trips_through_human_readable_string(self) -> None:
+        finding = ValueSourceFinding(
+            component_id="azure_node_1",
+            field_name="model",
+            reason="value 'a' must equal sibling 'deployment_name' (currently 'b')",
+        )
+        rendered = finding.format()
+        # The format is the operator-facing surface — pin its shape so
+        # log lines and ValidationCheck.detail strings stay stable.
+        assert rendered == ("component 'azure_node_1' field 'model': value 'a' must equal sibling 'deployment_name' (currently 'b')")
+
+    def test_frozen(self) -> None:
+        finding = ValueSourceFinding(
+            component_id="x",
+            field_name="y",
+            reason="z",
+        )
+        with pytest.raises(FrozenInstanceError):
+            finding.component_id = "other"  # type: ignore[misc]
+
+    @pytest.mark.parametrize(
+        ("component_id", "field_name", "reason", "match"),
+        [
+            ("", "model", "reason", "component_id must be non-empty"),
+            ("c", "", "reason", "field_name must be non-empty"),
+            ("c", "model", "", "reason must be non-empty"),
+        ],
+    )
+    def test_empty_field_rejected(self, component_id: str, field_name: str, reason: str, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            ValueSourceFinding(
+                component_id=component_id,
+                field_name=field_name,
+                reason=reason,
+            )
+
+
+class TestValueSourceValidationError:
+    """Pin the structured exception contract.
+
+    Replaces the previous ``findings: tuple[str, ...]`` shape — consumers
+    now read ``finding.component_id`` directly without parsing.
+    """
+
+    def test_carries_findings_tuple(self) -> None:
+        f1 = ValueSourceFinding(component_id="c1", field_name="m", reason="r1")
+        f2 = ValueSourceFinding(component_id="c2", field_name="m", reason="r2")
+        err = ValueSourceValidationError("two violations", findings=(f1, f2))
+        assert err.findings == (f1, f2)
+        # Message remains accessible via str() for ValidationCheck.detail.
+        assert str(err) == "two violations"
+
+    def test_findings_default_to_empty_tuple(self) -> None:
+        err = ValueSourceValidationError("no findings")
+        assert err.findings == ()

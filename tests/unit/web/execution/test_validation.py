@@ -636,13 +636,14 @@ class TestValidatePipelineSuccess:
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is True
-        assert len(result.checks) == 9
+        assert len(result.checks) == 10
         assert all(c.passed for c in result.checks)
         # B11 fix: path_allowlist check is always recorded
         assert _check(result, "path_allowlist").passed is True
         assert _check(result, "secret_refs").passed is True
         assert _check(result, "semantic_contracts").passed is True
         assert _check(result, "batch_transform_options").passed is True
+        assert _check(result, "value_source_compliance").passed is True
         assert _check(result, "route_target_resolution").passed is True
         assert result.errors == []
 

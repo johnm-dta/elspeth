@@ -286,6 +286,11 @@ from elspeth.contracts.url import (
     SanitizedDatabaseUrl,
     SanitizedWebhookUrl,
 )
+from elspeth.contracts.value_source import (
+    CatalogValueSource,
+    DerivedFromSiblingValueSource,
+    ValueSource,
+)
 
 __all__ = [  # Grouped by category for readability
     # audit
@@ -532,4 +537,8 @@ __all__ = [  # Grouped by category for readability
     # probes
     "CollectionProbe",
     "CollectionReadinessResult",
+    # value-source declarations
+    "CatalogValueSource",
+    "DerivedFromSiblingValueSource",
+    "ValueSource",
 ]

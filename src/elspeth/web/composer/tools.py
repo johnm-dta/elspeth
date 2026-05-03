@@ -795,7 +795,10 @@ def get_tool_definitions() -> list[dict[str, Any]]:
             "name": "list_models",
             "description": "List available LLM model identifiers. Without a provider "
             "filter, returns provider names and counts. With a provider filter, "
-            "returns matching model IDs (capped at limit).",
+            "returns matching model IDs (capped at limit). For provider='openrouter/' "
+            "the returned slugs are normalised to OpenRouter's HTTP API form "
+            "(without the litellm-internal 'openrouter/' routing prefix) — these "
+            "are the values to put directly in `model:`.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -3451,13 +3454,14 @@ def _execute_list_models(
     Without a provider filter, returns provider names and model counts
     to avoid dumping hundreds of entries. With a provider filter,
     returns matching model IDs capped at ``limit``.
-    """
-    try:
-        import litellm
 
-        all_models: list[str] = sorted(litellm.model_list)
-    except (ImportError, AttributeError):
-        all_models = []
+    Reads via :func:`read_litellm_model_list` so this tool and the
+    value-source compliance walker share a single source of truth for
+    what counts as "a known model."
+    """
+    from elspeth.plugins.transforms.llm.model_catalog import read_litellm_model_list
+
+    all_models: list[str] = list(read_litellm_model_list())
 
     provider = args.get("provider")
     limit = args.get("limit", 50)
@@ -3470,6 +3474,21 @@ def _execute_list_models(
             filtered = [m for m in all_models if "/" not in m]
         else:
             filtered = [m for m in all_models if m.startswith(provider)]
+        # OpenRouter consumers (the actual HTTP API at /chat/completions)
+        # expect un-prefixed slugs (e.g. ``openai/gpt-4o``, not
+        # ``openrouter/openai/gpt-4o``). The litellm representation carries
+        # an ``openrouter/`` routing prefix that ELSPETH's
+        # OpenRouterLLMProvider does not strip — so the tool returns the
+        # un-prefixed form to match what the user must put in their YAML
+        # and what the value-source compliance validator accepts. The
+        # OPENROUTER_LITELLM_PREFIX constant lives next to the catalog
+        # reader so both sites strip identically.
+        from elspeth.plugins.transforms.llm.model_catalog import OPENROUTER_LITELLM_PREFIX
+
+        normalised = provider.rstrip("/")
+        if normalised == OPENROUTER_LITELLM_PREFIX.rstrip("/"):
+            prefix_len = len(OPENROUTER_LITELLM_PREFIX)
+            filtered = [m[prefix_len:] for m in filtered]
         truncated = len(filtered) > limit
         data: dict[str, Any] = {
             "models": filtered[:limit],

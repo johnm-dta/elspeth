@@ -16,13 +16,14 @@ from __future__ import annotations
 import json
 import math
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import httpx
 from pydantic import Field
 
 from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.token_usage import TokenUsage
+from elspeth.contracts.value_source import CatalogValueSource, ValueSource
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 from elspeth.plugins.infrastructure.clients.llm import (
     ContentPolicyError,
@@ -33,6 +34,7 @@ from elspeth.plugins.infrastructure.clients.llm import (
     ServerError,
 )
 from elspeth.plugins.transforms.llm.base import LLMConfig
+from elspeth.plugins.transforms.llm.model_catalog import MODEL_CATALOG_OPENROUTER
 from elspeth.plugins.transforms.llm.provider import LLMQueryResult, parse_finish_reason
 from elspeth.plugins.transforms.llm.validation import reject_nonfinite_constant
 
@@ -76,6 +78,23 @@ class OpenRouterConfig(LLMConfig):
     tracing: dict[str, Any] | None = Field(
         default=None,
         description="Tier 2 tracing configuration (langfuse only - azure_ai not supported)",
+    )
+
+    # Value-source declaration: ``model`` must appear in the OpenRouter
+    # slice of ``litellm.model_list``, BUT only when this config targets
+    # the canonical OpenRouter endpoint. When an operator overrides
+    # ``base_url`` (e.g. to a chaos test server like errorworks/chaosllm,
+    # or a private OpenAI-compatible gateway), the model identifier
+    # semantics are owned by that endpoint — not by litellm's OpenRouter
+    # slug list. The ``applies_when`` predicate keeps the catalog check
+    # in lock-step with the actual HTTP boundary the runtime targets.
+    # ClassVar so Pydantic v2 ignores it.
+    VALUE_SOURCES: ClassVar[tuple[ValueSource, ...]] = (
+        CatalogValueSource(
+            field_name="model",
+            catalog_id=MODEL_CATALOG_OPENROUTER,
+            applies_when=(("base_url", "https://openrouter.ai/api/v1"),),
+        ),
     )
 
 

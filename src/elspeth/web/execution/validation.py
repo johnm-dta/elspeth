@@ -34,7 +34,10 @@ from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.core.dag.models import GraphValidationError
 from elspeth.core.secrets import is_secret_field, resolve_secret_refs, secret_env_ref_name
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
-from elspeth.engine.orchestrator.types import RouteValidationError
+from elspeth.engine.orchestrator.types import (
+    RouteValidationError,
+    ValueSourceValidationError,
+)
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
@@ -66,11 +69,16 @@ _CHECK_SEMANTIC_CONTRACTS = "semantic_contracts"
 _CHECK_BATCH_TRANSFORM_OPTIONS = "batch_transform_options"
 _CHECK_SETTINGS = "settings_load"
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
+_CHECK_VALUE_SOURCE_COMPLIANCE = "value_source_compliance"
 _CHECK_GRAPH = RUNTIME_CHECK_GRAPH_STRUCTURE
 _CHECK_ROUTE_TARGETS = "route_target_resolution"
 _CHECK_SCHEMA = RUNTIME_CHECK_SCHEMA_COMPATIBILITY
 assert RUNTIME_GRAPH_VALIDATION_CHECKS == (_CHECK_PLUGINS, _CHECK_GRAPH, _CHECK_SCHEMA)
 
+# _CHECK_VALUE_SOURCE_COMPLIANCE slots between _CHECK_PLUGINS (typed configs
+# now exist) and _CHECK_GRAPH (so a hallucinated model fails before any DAG
+# work). The position is asserted by tests/unit/web/execution/test_validation.py
+# to prevent silent reordering.
 _ALL_CHECKS = [
     _CHECK_PATH_ALLOWLIST,
     _CHECK_SECRET_REFS,
@@ -78,6 +86,7 @@ _ALL_CHECKS = [
     _CHECK_BATCH_TRANSFORM_OPTIONS,
     _CHECK_SETTINGS,
     _CHECK_PLUGINS,
+    _CHECK_VALUE_SOURCE_COMPLIANCE,
     _CHECK_GRAPH,
     _CHECK_ROUTE_TARGETS,
     _CHECK_SCHEMA,
@@ -564,7 +573,21 @@ def validate_pipeline(
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
-    # Step 4: Plugin instantiation
+    # Step 4: Plugin instantiation + value-source compliance
+    #
+    # ``instantiate_plugins_from_config`` now runs the value-source walker
+    # against ``bundle.transforms`` before returning, so a hallucinated
+    # model identifier (or any field that violates a plugin's
+    # VALUE_SOURCES declaration) raises ``ValueSourceValidationError``
+    # from inside this call. We disambiguate the two failure classes by
+    # exception type:
+    #
+    # * ``PluginNotFoundError`` / ``PluginConfigError`` / ``FileExistsError``
+    #   → the bundle was never built; PLUGINS check failed, value-source
+    #   compliance is skipped via cascade (it could not run).
+    # * ``ValueSourceValidationError`` → the bundle was built successfully
+    #   but rejected by the walker; PLUGINS check passed, VALUE_SOURCE
+    #   compliance check failed, downstream checks skipped via cascade.
     try:
         bundle = instantiate_runtime_plugins(elspeth_settings, preflight_mode=True)
         checks.append(
@@ -573,6 +596,56 @@ def validate_pipeline(
                 passed=True,
                 detail="All plugins instantiated",
             )
+        )
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_VALUE_SOURCE_COMPLIANCE,
+                passed=True,
+                detail="All declared value sources satisfied",
+            )
+        )
+    except ValueSourceValidationError as exc:
+        # Bundle was built — instantiation succeeded — but the walker
+        # rejected one or more declared field values. Surface PLUGINS
+        # as passed, VALUE_SOURCE as failed.
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_PLUGINS,
+                passed=True,
+                detail="All plugins instantiated",
+            )
+        )
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_VALUE_SOURCE_COMPLIANCE,
+                passed=False,
+                detail=str(exc),
+            )
+        )
+        # Each finding names a single ``component_id`` field-violation —
+        # surface them as separate ValidationError records so the composer
+        # UI can attribute each to its node. ``finding`` is a
+        # :class:`ValueSourceFinding` carrying the attribution structurally
+        # — no string parsing, no silent ``component_id=None`` fallback.
+        for finding in exc.findings:
+            errors.append(
+                ValidationError(
+                    component_id=finding.component_id,
+                    component_type="transform",
+                    message=finding.format(),
+                    suggestion=(
+                        "Use the list_models composer tool to pick a known "
+                        "model identifier; for Azure transforms, leave 'model' "
+                        "empty so it inherits from 'deployment_name'."
+                    ),
+                )
+            )
+        checks.extend(_skipped_checks(_CHECK_VALUE_SOURCE_COMPLIANCE))
+        return ValidationResult(
+            is_valid=False,
+            checks=checks,
+            errors=errors,
+            semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
     except (PluginNotFoundError, PluginConfigError) as exc:
         comp_type = _infer_component_type_from_plugin_error(exc)

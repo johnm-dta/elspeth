@@ -49,18 +49,14 @@ transforms:
       allowed_hosts:
         - "127.0.0.0/8"
     schema:
-      mode: observed
-      # Declare the fields this transform guarantees to output.
-      # Pass-through fields from source + fields added by web_scrape.
-      guaranteed_fields:
-        - id
-        - url
-        - label
-        - page_content
-        - page_fingerprint
-        - fetch_status
-        - fetch_url_final
-        - fetch_url_final_ip
+      mode: fixed
+      # Declare the input fields this transform consumes — required so the
+      # static output schema (WebScrapeOutput) carries id/url/label through to
+      # downstream consumers (the CSV sinks below declare those fields).
+      fields:
+      - 'id: int'
+      - 'url: str'
+      - 'label: str'
 
 gates:
 # Gate: Route short or suspicious content to review

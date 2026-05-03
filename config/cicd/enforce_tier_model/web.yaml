@@ -453,11 +453,6 @@ allow_hits:
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types
     propagate
   expires: null
-- key: web/composer/tools.py:R6:_execute_list_models:fp=57d6d75b420e0998
-  owner: web-composer
-  reason: "list_models gracefully handles missing litellm \u2014 returns empty model list"
-  safety: ImportError/AttributeError returns empty list; no data fabrication
-  expires: null
 - key: web/composer/tools.py:R6:_prevalidate_plugin_options:fp=719a709512ce8cc8
   owner: web-composer
   reason: "UnknownPluginTypeError is expected for unrecognised plugin names \u2014 lets engine validation\
@@ -480,23 +475,23 @@ allow_hits:
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is
     re-raised unchanged
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=8e131e639fc35a2d
+- key: web/execution/validation.py:R5:validate_pipeline:fp=0fedd060cfbb3911
   owner: web-execution
   reason: isinstance(exc, PluginConfigError) discriminates exception type to extract plugin_name attribute
   safety: Type dispatch for error formatting, not contract masking; both branches produce validation checks
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=23ae486e36f24cbf
+- key: web/execution/validation.py:R5:validate_pipeline:fp=2ac7f40b0ea4a09e
   owner: web-execution
   reason: isinstance(exc, PluginConfigError) discriminates exception type to prefer cause detail over
     generic str(exc)
   safety: Type dispatch for error formatting, not contract masking; both branches produce validation checks
   expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=b8ee54ccd69f9fc7
+- key: web/execution/validation.py:R1:validate_pipeline:fp=32458bed9cd2e510
   owner: web-execution
   reason: Validation checks optional source path/file keys supplied by composition state
   safety: Absent keys are treated honestly as 'no path provided' and the check is recorded as skipped/passed
   expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=4b1e8a09c509e092
+- key: web/execution/validation.py:R1:validate_pipeline:fp=1b0856836925abd5
   owner: web-execution
   reason: Validation checks optional output path/file keys supplied by composition state
   safety: Absent keys treated as 'no path provided'; check recorded as skipped/passed
@@ -613,65 +608,65 @@ allow_hits:
 
     '
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=13452a842a4ef930
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=d106a2385f341c81
   owner: web-execution
   reason: "Tree-walk \u2014 isinstance(Mapping) dispatches dict/list/scalar branches in recursive config\
     \ traversal"
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=7099bedf2ffcf86a
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=d0b6fca60230e23b
   owner: web-execution
   reason: "Tree-walk \u2014 isinstance(ref, str) validates secret_ref marker value type"
   safety: Non-string ref is silently skipped (malformed marker); no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=1ec8ad2fda7ec112
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=4eafa014e224e701
   owner: web-execution
   reason: "Tree-walk \u2014 isinstance() dispatches list/tuple branch in recursive config traversal"
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=c1f4a497a1e7d656
+- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=9526b5ebc2462f9d
   owner: web-execution
   reason: isinstance(value, Mapping) on user-supplied YAML option value to recognise a wired secret_ref
     marker (issue elspeth-72d1dccd44 fabrication check)
   safety: Non-mapping values fall through to the literal-string branch; no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=59bcf76178012f27
+- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=bcfdcf00164e94a8
   owner: web-execution
   reason: isinstance(value['secret_ref'], str) validates the marker payload type before accepting a value
     as wired
   safety: Non-string secret_ref payload is treated as un-wired (rejected by fabrication check); no crash
     masking
   expires: null
-- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=e805176d4b22cbf1
+- key: web/execution/validation.py:R5:_value_is_wired_secret:fp=9b31e051a18897e3
   owner: web-execution
   reason: isinstance(value, str) gates the env-marker shape check on user-supplied YAML option values
   safety: Non-string values fall through and are not treated as env markers; no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=c945fb57ae1c1dcf
+- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=b47570883a264ddc
   owner: web-execution
   reason: "Tree-walk \u2014 isinstance(options, Mapping) dispatches recursive descent through user-supplied\
     \ YAML option dicts"
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=fd6d19a125a6f44a
+- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=1df413eaee44e1b5
   owner: web-execution
   reason: "isinstance(key, str) before applying is_secret_field \u2014 defensive against non-string keys\
     \ produced by YAML edge cases"
   safety: Non-string keys are skipped (no false positives); recursion continues
   expires: null
-- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=a9352352ea2da5b2
+- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=e4a15c99f2d77e28
   owner: web-execution
   reason: isinstance(value, str) discriminates literal-placeholder credential values from non-string types
     (which Pydantic rejects later with a precise schema error)
   safety: "Non-string values in credential fields are deferred to settings_load \u2014 no double-reporting,\
     \ no contract masking"
   expires: null
-- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=6a79780127c7b6f9
+- key: web/execution/validation.py:R5:_collect_credential_field_violations:fp=d106c824ee1683aa
   owner: web-execution
   reason: "Tree-walk \u2014 isinstance() dispatches list/tuple branch in recursive option traversal"
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=3127301b879f9927
+- key: web/execution/validation.py:R5:validate_pipeline:fp=6e72151e130e829a
   owner: web-execution
   reason: "isinstance(config_dict, dict) validates YAML parse output before resolve_secret_refs \u2014\
     \ yaml.safe_load can return non-dict for malformed input"
@@ -1036,7 +1031,7 @@ allow_hits:
     \ exception metrics correctly."
   safety: Read-only dispatch for telemetry emission; no state mutation
   expires: null
-- key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=6f49f1d7d6db1940
+- key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=381b81d86d526c89
   owner: web-validation
   reason: "Union type dispatch \u2014 function receives PluginNotFoundError | PluginConfigError, isinstance\
     \ needed to read component_type attribute only present on PluginConfigError"

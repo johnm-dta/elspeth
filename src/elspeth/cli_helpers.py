@@ -119,13 +119,27 @@ def instantiate_plugins_from_config(
             sinks[sink_name] = sink_cls(dict(sink_config.options))
             sinks[sink_name]._on_write_failure = sink_config.on_write_failure
 
-        return PluginBundle(
+        bundle = PluginBundle(
             source=source,
             source_settings=config.source,
             transforms=transforms,
             sinks=sinks,
             aggregations=aggregations,
         )
+
+    # Value-source compliance check. Single source of truth: every
+    # caller (composer ``/validate``, web service, every CLI command,
+    # the dependency-runner callback) passes through this function, so
+    # placing the check here means hand-authored YAML with hallucinated
+    # values is rejected at construction time regardless of which entry
+    # point built the bundle. Runs after ``plugin_preflight_mode``
+    # context exits — the bundle exists and is well-formed; the only
+    # remaining question is whether declared field values comply with
+    # their plugins' VALUE_SOURCES contracts.
+    from elspeth.engine.orchestrator.preflight import validate_value_source_compliance
+
+    validate_value_source_compliance(bundle.transforms)
+    return bundle
 
 
 def _make_sink_factory(config: "ElspethSettings") -> "Callable[[str], SinkProtocol]":
@@ -274,7 +288,9 @@ def bootstrap_and_run(settings_path: Path) -> "RunResult":
     # Phase 1: Load and validate config with secret resolution
     config, secret_resolutions = _load_settings_with_secrets(settings_path)
 
-    # Phase 2: Instantiate plugins
+    # Phase 2: Instantiate plugins (value-source compliance is checked
+    # inside ``instantiate_plugins_from_config`` for all callers — see
+    # the validate_value_source_compliance call there).
     plugins = instantiate_plugins_from_config(config)
 
     # Phase 3: Build and validate execution graph

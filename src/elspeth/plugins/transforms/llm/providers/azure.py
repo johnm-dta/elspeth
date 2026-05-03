@@ -13,12 +13,13 @@ evicting the wrong cache entry during retry races.
 from __future__ import annotations
 
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import structlog
 from pydantic import Field, model_validator
 
 from elspeth.contracts.audit_protocols import PluginAuditWriter
+from elspeth.contracts.value_source import DerivedFromSiblingValueSource, ValueSource
 from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient, ContentPolicyError, LLMClientError
 from elspeth.plugins.transforms.llm.base import LLMConfig
 from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult, parse_finish_reason
@@ -75,6 +76,19 @@ class AzureOpenAIConfig(LLMConfig):
             if deployment:
                 data["model"] = deployment
         return data
+
+    # Value-source declaration: ``model`` is derived from ``deployment_name``.
+    # The ``_set_model_from_deployment`` validator above fills the field when
+    # empty; the value-source compliance walker confirms post-validation that
+    # ``model == deployment_name`` (or that ``model`` was empty in the original
+    # config — accepted because the validator substitutes the sibling).
+    VALUE_SOURCES: ClassVar[tuple[ValueSource, ...]] = (
+        DerivedFromSiblingValueSource(
+            field_name="model",
+            sibling_field="deployment_name",
+            allow_empty_default=True,
+        ),
+    )
 
 
 class AzureLLMProvider:

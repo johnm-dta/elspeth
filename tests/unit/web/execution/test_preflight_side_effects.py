@@ -143,7 +143,7 @@ transforms:
     options:
       provider: openrouter
       api_key: probe-key
-      model: openai/gpt-4o-mini
+      model: openai/gpt-4o
       template: "{{{{ row.llm_probe_text }}}}"
       schema:
         mode: observed

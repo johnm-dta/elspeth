@@ -2577,7 +2577,13 @@ class TestComposerRuntimeRunStatusAgreement:
 
         self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.COMPLETED)
         assert run_result.rows_processed == 4
-        assert run_result.rows_succeeded == 0  # No success-path sink
+        # Counter symmetry (elspeth-ee836019b1): a gate-routed row that
+        # sunk successfully bumps BOTH ``rows_succeeded`` (umbrella
+        # success terminal count) and ``rows_routed_success`` (gate
+        # attribution). Pre-symmetry this asserted ``== 0`` and surfaced
+        # operationally as ``✓0 succeeded | →N routed`` in CLI summaries
+        # — operationally indistinguishable from "every row failed."
+        assert run_result.rows_succeeded == 4
         assert run_result.rows_routed_success == 4  # All routed via MOVE
         assert run_result.rows_routed_failure == 0  # No on_error reroutes
         assert len(high_sink.results) == 2

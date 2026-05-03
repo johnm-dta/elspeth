@@ -129,6 +129,60 @@ class TestWalkerL2Direct:
         assert finding.field_name == "model"
         assert "empty or unavailable" in finding.reason
 
+    def test_empty_catalog_finding_quotes_registered_dep_hint(self) -> None:
+        """When a hint is registered for the catalog, the walker quotes
+        it verbatim in place of the generic fallback. Proves the L3
+        registrar's actionable string makes it through the L0 registry
+        to the operator-visible finding (code-reviewer I-2).
+        """
+        from elspeth.contracts.value_source import (
+            _CATALOG_DEP_HINTS,
+            _CATALOG_READERS,
+            register_catalog_reader,
+        )
+
+        # Register a fresh catalog id with an explicit hint so we don't
+        # depend on which L3 packs are loaded in this test process.
+        catalog_id = "test_walker_dep_hint"
+
+        def empty_reader() -> frozenset[str]:
+            return frozenset()
+
+        register_catalog_reader(
+            catalog_id,
+            empty_reader,
+            missing_dep_hint="install fakelib via uv pip install elspeth[fakelib]",
+        )
+        try:
+            from elspeth.contracts.value_source import (
+                CatalogValueSource as _CatalogValueSource,
+            )
+            from elspeth.contracts.value_source import (
+                ValueSource as _ValueSource,
+            )
+
+            class _ConfigUnderTest:
+                VALUE_SOURCES: tuple[_ValueSource, ...] = (_CatalogValueSource(field_name="model", catalog_id=catalog_id),)
+
+                def __init__(self) -> None:
+                    self.model = "anything"
+
+            _plugin, wired = _build_wired_with_config(
+                config_class=_ConfigUnderTest,
+                config_kwargs={},
+                settings_name="hint_node_1",
+            )
+            with pytest.raises(ValueSourceValidationError) as exc_info:
+                validate_value_source_compliance([wired])
+            finding = exc_info.value.findings[0]
+            assert "fakelib" in finding.reason
+            # Generic fallback text must NOT appear when a hint exists —
+            # otherwise we'd be presenting both, which is operator-noise.
+            assert "install the optional dependency that provides the catalog" not in finding.reason
+        finally:
+            _CATALOG_READERS.pop(catalog_id, None)
+            _CATALOG_DEP_HINTS.pop(catalog_id, None)
+
     def test_derived_from_sibling_pass_when_equal(self) -> None:
         _plugin, wired = _build_wired_with_config(
             config_class=_FakeAzureConfig,

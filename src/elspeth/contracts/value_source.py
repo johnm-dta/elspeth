@@ -36,6 +36,7 @@ __all__ = [
     "UnknownCatalogIdError",
     "ValueSource",
     "find_value_source_config",
+    "get_catalog_missing_dep_hint",
     "get_catalog_values",
     "list_registered_catalogs",
     "register_catalog_reader",
@@ -55,8 +56,22 @@ class UnknownCatalogIdError(KeyError):
 _CatalogReader = Callable[[], frozenset[str]]
 _CATALOG_READERS: dict[str, _CatalogReader] = {}
 
+# L3 plugin packs that depend on optional dependencies (e.g. ``litellm``)
+# can register an actionable hint alongside their catalog reader. The
+# walker (L2) reads the hint when the catalog is empty and includes it
+# in the finding's ``reason`` so an operator sees ``install elspeth[llm]``
+# instead of ``install the optional dependency``. Keeping the hint as
+# an opaque string preserves L0's leaf property — L0 does not interpret
+# the hint, only stores and surfaces it.
+_CATALOG_DEP_HINTS: dict[str, str] = {}
 
-def register_catalog_reader(catalog_id: str, reader: _CatalogReader) -> None:
+
+def register_catalog_reader(
+    catalog_id: str,
+    reader: _CatalogReader,
+    *,
+    missing_dep_hint: str | None = None,
+) -> None:
     """Register a catalog reader under ``catalog_id``.
 
     Idempotent re-registration with the same reader function is allowed
@@ -65,6 +80,12 @@ def register_catalog_reader(catalog_id: str, reader: _CatalogReader) -> None:
     overrides cannot occur. L3 plugin packs call this at module-import
     time; the walker (L2) consumes the registry via
     :func:`get_catalog_values`.
+
+    ``missing_dep_hint`` is an optional, operator-actionable string the
+    walker quotes verbatim when the catalog is empty (e.g. the optional
+    dependency is not installed). Providing a hint lets the registrar
+    name the package and install command without leaking that knowledge
+    into L2/L0. Callers that omit the hint get a generic message.
     """
     if not catalog_id:
         raise ValueError("catalog_id must be non-empty")
@@ -72,12 +93,34 @@ def register_catalog_reader(catalog_id: str, reader: _CatalogReader) -> None:
         existing = _CATALOG_READERS[catalog_id]
         if existing is not reader:
             raise ValueError(f"Catalog reader already registered for {catalog_id!r}")
+    if missing_dep_hint is not None and not missing_dep_hint:
+        raise ValueError("missing_dep_hint must be non-empty when provided")
     _CATALOG_READERS[catalog_id] = reader
+    if missing_dep_hint is not None:
+        _CATALOG_DEP_HINTS[catalog_id] = missing_dep_hint
 
 
 def list_registered_catalogs() -> tuple[str, ...]:
     """Return the sorted tuple of registered catalog ids."""
     return tuple(sorted(_CATALOG_READERS))
+
+
+def get_catalog_missing_dep_hint(catalog_id: str) -> str | None:
+    """Return the registered missing-dep hint for ``catalog_id`` or ``None``.
+
+    The walker calls this when the catalog is empty so the empty-catalog
+    finding can quote the registrar's actionable string verbatim. Returns
+    ``None`` when no hint was registered — callers fall back to a generic
+    message.
+
+    Uses ``in``/direct-access (not ``.get()``) to match the project's
+    forbidden-defensive-programming idiom — see CLAUDE.md "Defensive
+    Programming: Forbidden". Absence is a legitimate signal here ("no
+    hint registered"), not a bug to hide.
+    """
+    if catalog_id not in _CATALOG_DEP_HINTS:
+        return None
+    return _CATALOG_DEP_HINTS[catalog_id]
 
 
 # --- Plugin opt-in registry ─────────────────────────────────────────

@@ -199,3 +199,74 @@ class TestCatalogRegistry:
         # Existing ``try/except KeyError`` paths must still catch the new exception.
         with pytest.raises(KeyError):
             get_catalog_values("absolutely-not-registered-anywhere")
+
+
+class TestCatalogMissingDepHint:
+    """L0 contract for the optional ``missing_dep_hint`` parameter.
+
+    L3 plugin packs that depend on optional dependencies (e.g. litellm)
+    register an actionable string alongside their reader. The walker
+    quotes the string verbatim when the catalog is empty so the
+    operator sees the specific install command instead of a generic
+    "install the optional dependency". L0 stores the hint without
+    interpreting it — preserves the contracts-leaf property.
+    """
+
+    def test_register_with_hint_stores_hint(self) -> None:
+        from elspeth.contracts.value_source import (
+            _CATALOG_DEP_HINTS,
+            _CATALOG_READERS,
+            get_catalog_missing_dep_hint,
+        )
+
+        catalog_id = "test_value_source_register_with_hint"
+
+        def reader() -> frozenset[str]:
+            return frozenset()
+
+        register_catalog_reader(
+            catalog_id,
+            reader,
+            missing_dep_hint="install elspeth[fakelib]",
+        )
+        try:
+            assert get_catalog_missing_dep_hint(catalog_id) == "install elspeth[fakelib]"
+        finally:
+            _CATALOG_READERS.pop(catalog_id, None)
+            _CATALOG_DEP_HINTS.pop(catalog_id, None)
+
+    def test_register_without_hint_returns_none(self) -> None:
+        from elspeth.contracts.value_source import (
+            _CATALOG_READERS,
+            get_catalog_missing_dep_hint,
+        )
+
+        catalog_id = "test_value_source_no_hint"
+
+        def reader() -> frozenset[str]:
+            return frozenset()
+
+        register_catalog_reader(catalog_id, reader)
+        try:
+            assert get_catalog_missing_dep_hint(catalog_id) is None
+        finally:
+            _CATALOG_READERS.pop(catalog_id, None)
+
+    def test_unknown_catalog_id_returns_none(self) -> None:
+        from elspeth.contracts.value_source import get_catalog_missing_dep_hint
+
+        # Hint accessor is non-raising — the walker only cares about the
+        # presence/absence of a hint, never about whether the catalog id
+        # is registered (that question is answered by ``get_catalog_values``).
+        assert get_catalog_missing_dep_hint("never-registered-anywhere") is None
+
+    def test_empty_string_hint_rejected(self) -> None:
+        # An empty hint is a programmer bug — accepting it would surface
+        # an empty parenthetical to operators (... cannot verify field
+        # value () ...) which is worse than the generic fallback.
+        with pytest.raises(ValueError, match="missing_dep_hint must be non-empty"):
+            register_catalog_reader(
+                "test_value_source_empty_hint",
+                lambda: frozenset(),
+                missing_dep_hint="",
+            )

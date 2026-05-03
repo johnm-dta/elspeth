@@ -87,4 +87,16 @@ def _read_openrouter_catalog() -> frozenset[str]:
     return frozenset(m[len(prefix) :] for m in read_litellm_model_list() if m.startswith(prefix))
 
 
-register_catalog_reader(MODEL_CATALOG_OPENROUTER, _read_openrouter_catalog)
+register_catalog_reader(
+    MODEL_CATALOG_OPENROUTER,
+    _read_openrouter_catalog,
+    # The catalog is sourced from ``litellm.model_list``. When the
+    # walker reports an empty catalog (the operator is running ELSPETH
+    # in a deployment that did not install the optional dependency, or
+    # litellm's bundled list is empty for this version), this hint is
+    # the actionable remediation it surfaces verbatim.
+    missing_dep_hint=(
+        "install elspeth with the LLM extra (``uv pip install 'elspeth[llm]'``) "
+        "to provide the litellm model catalog, or pin a static catalog snapshot"
+    ),
+)

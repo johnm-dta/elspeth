@@ -36,6 +36,7 @@ from elspeth.contracts.value_source import (
     UnknownCatalogIdError,
     ValueSource,
     find_value_source_config,
+    get_catalog_missing_dep_hint,
     get_catalog_values,
 )
 from elspeth.engine.orchestrator.types import (
@@ -263,14 +264,20 @@ def _check_catalog_membership(
     value = _read_field(config, declaration.field_name)
     catalog = get_catalog_values(declaration.catalog_id)
     if not catalog:
+        # Quote the registrar's actionable hint verbatim when present so
+        # the operator sees the specific install command instead of a
+        # generic "install the optional dependency". Falls back to the
+        # generic message when no hint was registered.
+        dep_hint = get_catalog_missing_dep_hint(declaration.catalog_id)
+        remediation = (
+            dep_hint
+            if dep_hint is not None
+            else ("install the optional dependency that provides the catalog or pin a static catalog snapshot")
+        )
         return ValueSourceFinding(
             component_id=component_id,
             field_name=declaration.field_name,
-            reason=(
-                f"catalog '{declaration.catalog_id}' is empty or unavailable; "
-                "cannot verify field value (install the optional dependency "
-                "that provides the catalog or pin a static catalog snapshot)"
-            ),
+            reason=(f"catalog '{declaration.catalog_id}' is empty or unavailable; cannot verify field value ({remediation})"),
         )
     # ``value`` is a string for the LLM ``model`` field today; for non-string
     # values we structurally reject (type mismatch is a Pydantic-level fault

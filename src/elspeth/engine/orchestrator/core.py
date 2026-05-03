@@ -1912,6 +1912,22 @@ class Orchestrator:
             # Get route resolution map - maps (gate_node, label) -> "continue" | sink_name
             route_resolution_map = graph.get_route_resolution_map()
 
+            # NOTE — value-source compliance is enforced at the entry-point
+            # boundary, NOT here. The walker
+            # (``engine/orchestrator/preflight.validate_value_source_compliance``)
+            # runs inside ``cli_helpers.instantiate_plugins_from_config`` and
+            # the composer/web-execution validate paths
+            # (``web/execution/validation.validate_pipeline``,
+            # ``web/execution/service._run_pipeline``). Every legitimate caller
+            # that builds a ``PipelineConfig`` passes through one of those
+            # surfaces, so by the time we reach ``Orchestrator.run`` the bundle
+            # has already been gated. If you add a new entry point that
+            # constructs a ``PipelineConfig`` directly (test harness,
+            # programmatic API, etc.), call ``validate_value_source_compliance``
+            # at that boundary too — the orchestrator does NOT re-validate
+            # value-source declarations per run, and a bypassing entry point
+            # would silently skip the check otherwise.
+            #
             # Validate all route destinations BEFORE processing any rows
             # This catches config errors early instead of after partial processing
             # Note: config gates also add to route_resolution_map, validated the same way

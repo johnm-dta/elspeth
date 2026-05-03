@@ -241,6 +241,8 @@ class TestExplicitSinkRouting:
         # is COMPLETED (success_indicator true, no failure_indicator).
         assert run_result.status == RunStatus.COMPLETED
         assert run_result.rows_processed == 2
+        assert run_result.rows_succeeded == 0
+        assert run_result.rows_routed_success == 2
 
         # Merged results route to output sink via terminal gate
         assert len(output_sink.results) == 2

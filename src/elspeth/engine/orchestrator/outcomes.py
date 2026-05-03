@@ -124,20 +124,9 @@ def reconcile_sink_write_diversions(
         return
 
     if pending_outcome.outcome == RowOutcome.ROUTED:
-        # Mirror of the dual-counter increment at accumulate_row_outcomes
-        # ROUTED branch: a diverted routed-success row was provisionally
-        # counted in BOTH ``rows_succeeded`` (umbrella) and
-        # ``rows_routed_success`` (attribution). Both must decrement.
-        # Decrement ``rows_succeeded`` first so a counter underflow there
-        # (the more visible umbrella) surfaces before we touch attribution.
-        if counters.rows_succeeded < diversion_count:
-            raise OrchestrationInvariantError(
-                f"Cannot subtract {diversion_count} diverted rows from "
-                f"rows_succeeded={counters.rows_succeeded} for sink "
-                f"{sink_name!r} and pending outcome {pending_outcome.outcome.value!r}. "
-                "This indicates counter drift between processing and sink-write phases."
-            )
-        counters.rows_succeeded -= diversion_count
+        # ROUTED rows live in the routed-success terminal bucket. Do not
+        # decrement rows_succeeded here: the terminal web schemas treat
+        # rows_succeeded and rows_routed_success as additive buckets.
         if counters.rows_routed_success < diversion_count:
             raise OrchestrationInvariantError(
                 f"Cannot subtract {diversion_count} diverted rows from "
@@ -249,16 +238,10 @@ def accumulate_row_outcomes(
             sink_name = _require_sink_name(result)
             _route_to_sink(sink_name, pending_tokens, result.token, RowOutcome.COMPLETED)
         elif result.outcome == RowOutcome.ROUTED:
-            # Counter symmetry with COALESCED at line 289: a row that the gate
-            # routed to a sink and the sink wrote successfully is, in lifecycle
-            # terms, a successful termination. ``rows_succeeded`` is the
-            # umbrella "row reached a written terminal" count;
-            # ``rows_routed_success`` is the orthogonal attribution counter
-            # (which sink, via which gate). Both are bumped because they
-            # describe different facts about the same row. A sink-write
-            # diversion decrements both via reconcile_sink_write_diversions
-            # below, keeping the buckets balanced.
-            counters.rows_succeeded += 1
+            # Intentional gate MOVE. ``rows_routed_success`` is the terminal
+            # success bucket and status indicator for this row; folding it into
+            # ``rows_succeeded`` would double-count the additive terminal
+            # decomposition exposed by the web API.
             counters.rows_routed_success += 1
             sink_name = _require_sink_name(result)
             counters.routed_destinations[sink_name] += 1

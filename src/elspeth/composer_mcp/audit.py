@@ -242,6 +242,11 @@ def verify_events_sidecar_integrity(path: Path) -> None:
             # should crash with KeyError rather than be papered over.
             result_canonical = record["result_canonical"]
             result_hash = record["result_hash"]
+            if (result_canonical is None) != (result_hash is None):
+                raise ValueError(
+                    f"Tier-1 audit anomaly at {path}:{lineno}: result digest pair incomplete — "
+                    f"result_canonical and result_hash must both be null or both be present."
+                )
             if result_canonical is not None and result_hash is not None:
                 recomputed_r = hashlib.sha256(result_canonical.encode("utf-8")).hexdigest()
                 if recomputed_r != result_hash:

@@ -437,6 +437,34 @@ class TestCompletedDataDecomposition:
         assert data.rows_routed_success == 5
         assert data.rows_routed_failure == 0
 
+    def test_one_row_routed_success_completion_accepted(self) -> None:
+        data = CompletedData(
+            status="completed",
+            rows_processed=1,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=1,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            landscape_run_id="lscape-routed",
+        )
+
+        assert data.rows_routed_success == 1
+        assert data.rows_succeeded == 0
+
+    def test_double_counted_routed_success_rejected(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
+            CompletedData(
+                status="completed",
+                rows_processed=1,
+                rows_succeeded=1,
+                rows_failed=0,
+                rows_routed_success=1,
+                rows_routed_failure=0,
+                rows_quarantined=0,
+                landscape_run_id="lscape-routed",
+            )
+
 
 class TestRowCountConstraints:
     """Row count fields must be non-negative."""

@@ -461,17 +461,10 @@ class Orchestrator:
                     rows_succeeded += 1
                     rows_processed += 1
                 case RowOutcome.ROUTED:
-                    # Intentional gate MOVE. Symmetric counter accumulation
-                    # mirrors the live path at outcomes.py:251 (ROUTED branch
-                    # bumps both rows_succeeded and rows_routed_success):
-                    # ``rows_succeeded`` is the umbrella "row reached a written
-                    # terminal" count; ``rows_routed_success`` is the orthogonal
-                    # gate-attribution counter. Both describe true facts about
-                    # the row — it succeeded AND was gate-routed. Without the
-                    # rows_succeeded bump here, the resume path would
-                    # under-report succeeded rows compared to the live path
-                    # for any pipeline where gates land rows in sinks.
-                    rows_succeeded += 1
+                    # Intentional gate MOVE. Keep this aligned with the live
+                    # accumulator: rows_routed_success is the terminal success
+                    # bucket for routed rows, and rows_succeeded remains a
+                    # separate additive terminal bucket.
                     rows_routed_success += 1
                     rows_processed += 1
                 case RowOutcome.ROUTED_ON_ERROR:

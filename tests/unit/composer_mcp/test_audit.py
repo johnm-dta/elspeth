@@ -134,6 +134,34 @@ def test_integrity_check_catches_hash_tamper_alone(tmp_path: Path) -> None:
         verify_events_sidecar_integrity(sidecar)
 
 
+def test_integrity_check_rejects_result_canonical_without_hash(tmp_path: Path) -> None:
+    """SUCCESS/ARG_ERROR records with a result payload need a complete digest pair."""
+    sid_holder: list[str | None] = ["abc123def456"]
+    rec = JsonlEventRecorder(tmp_path, lambda: sid_holder[0])
+    rec.record(_make_invocation(1))
+    sidecar = events_sidecar_path(tmp_path, "abc123def456")
+    line = sidecar.read_text().rstrip()
+    obj = json.loads(line)
+    obj["result_hash"] = None
+    sidecar.write_text(json.dumps(obj, sort_keys=True, separators=(",", ":")) + "\n")
+    with pytest.raises(ValueError, match="result digest pair"):
+        verify_events_sidecar_integrity(sidecar)
+
+
+def test_integrity_check_rejects_result_hash_without_canonical(tmp_path: Path) -> None:
+    """A bare result_hash cannot prove what result bytes were audited."""
+    sid_holder: list[str | None] = ["abc123def456"]
+    rec = JsonlEventRecorder(tmp_path, lambda: sid_holder[0])
+    rec.record(_make_invocation(1))
+    sidecar = events_sidecar_path(tmp_path, "abc123def456")
+    line = sidecar.read_text().rstrip()
+    obj = json.loads(line)
+    obj["result_canonical"] = None
+    sidecar.write_text(json.dumps(obj, sort_keys=True, separators=(",", ":")) + "\n")
+    with pytest.raises(ValueError, match="result digest pair"):
+        verify_events_sidecar_integrity(sidecar)
+
+
 def test_integrity_check_byte_integrity_only_documented_gap(tmp_path: Path) -> None:
     """Pin the documented narrow semantics: a consistent
     canonical+hash rewrite is NOT detected by this verifier (byte-integrity,

@@ -362,6 +362,69 @@ sinks:
     assert transform.is_batch_aware is True
 
 
+def test_aggregation_value_sources_reject_hallucinated_openrouter_batch_model(tmp_path: Path):
+    """Aggregation-backed batch transforms must receive value-source validation."""
+    from unittest.mock import patch
+
+    from elspeth.engine.orchestrator.types import ValueSourceValidationError
+
+    config_yaml = """
+source:
+  plugin: csv
+  on_success: llm_batch
+  options:
+    path: test.csv
+    schema:
+      mode: observed
+    on_validation_failure: discard
+
+aggregations:
+  - name: llm_batch
+    plugin: openrouter_batch_llm
+    input: llm_batch
+    on_success: output
+    on_error: discard
+    options:
+      api_key: placeholder
+      model: anthropic/claude-3.5-sonnet
+      template: "Hello {{ row }}"
+      schema:
+        mode: observed
+    trigger:
+      count: 10
+
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+    options:
+      path: output.csv
+      schema:
+        mode: fixed
+        fields:
+          - "llm_response: str"
+
+"""
+    config_file = tmp_path / "settings.yaml"
+    config_file.write_text(config_yaml)
+
+    config = load_settings(config_file)
+
+    with (
+        patch(
+            "elspeth.engine.orchestrator.preflight.get_catalog_values",
+            return_value=frozenset({"openai/gpt-4o"}),
+        ),
+        pytest.raises(ValueSourceValidationError) as exc_info,
+    ):
+        instantiate_plugins_from_config(config)
+
+    finding = exc_info.value.findings[0]
+    assert finding.component_id == "llm_batch"
+    assert finding.field_name == "model"
+    assert "anthropic/claude-3.5-sonnet" in finding.reason
+
+
 def test_aggregation_rejects_transform_without_is_batch_aware_attribute():
     """Transforms with is_batch_aware=False should be rejected for aggregation.
 

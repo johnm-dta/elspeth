@@ -671,6 +671,7 @@ class ComposerServiceImpl:
                 state,
                 initial_version,
                 deadline,
+                recorder=recorder,
             )
             assistant_message = response.choices[0].message
 
@@ -1203,6 +1204,7 @@ class ComposerServiceImpl:
                         state,
                         initial_version,
                         deadline,
+                        recorder=recorder,
                     )
                     assistant_message = response.choices[0].message
                     if not assistant_message.tool_calls:
@@ -1402,7 +1404,9 @@ class ComposerServiceImpl:
         """
         from litellm.exceptions import APIError as LiteLLMAPIError
 
-        invocations: tuple[ComposerToolInvocation, ...] = recorder.invocations if recorder is not None else ()
+        def _captured_invocations() -> tuple[ComposerToolInvocation, ...]:
+            return recorder.invocations if recorder is not None else ()
+
         attempt = 0
         while True:
             remaining = deadline - asyncio.get_event_loop().time()
@@ -1412,7 +1416,7 @@ class ComposerServiceImpl:
                     budget_exhausted="timeout",
                     state=state,
                     initial_version=initial_version,
-                    tool_invocations=invocations,
+                    tool_invocations=_captured_invocations(),
                 )
             try:
                 return await asyncio.wait_for(
@@ -1425,7 +1429,7 @@ class ComposerServiceImpl:
                     budget_exhausted="timeout",
                     state=state,
                     initial_version=initial_version,
-                    tool_invocations=invocations,
+                    tool_invocations=_captured_invocations(),
                 ) from None
             except LiteLLMAPIError:
                 attempt += 1

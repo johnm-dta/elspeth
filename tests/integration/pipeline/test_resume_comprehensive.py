@@ -1481,14 +1481,10 @@ class TestResumeComprehensive:
            Landscape and calls ``derive_terminal_run_status`` with the
            accumulated counters.
         3. Verify: ``result.status == RunStatus.COMPLETED`` (not FAILED).
-        4. Verify: ``result.rows_succeeded == 5`` — counter symmetry with
-           the live path (outcomes.py:251 ROUTED branch bumps both
-           rows_succeeded and rows_routed_success). A gate-routed row that
-           sunk successfully is, in lifecycle terms, a successful
-           termination; the umbrella ``rows_succeeded`` counter reflects
-           that. Pre-symmetry (elspeth-ee836019b1): asserted == 0 because
-           the resume accumulator under-counted; that asymmetry surfaced
-           operationally as ``✓0 succeeded | →N routed`` in CLI summaries.
+        4. Verify: ``result.rows_succeeded == 0`` — routed successes do not
+           also occupy the ordinary success bucket because terminal web
+           schemas treat ``rows_succeeded`` and ``rows_routed_success`` as
+           additive buckets.
         5. Verify: ``result.rows_routed_success == 5`` — the resume-side
            accumulator must surface the existing ``ROUTED`` outcomes via the
            split counter (orthogonal attribution: which gate, which sink).
@@ -1606,10 +1602,9 @@ class TestResumeComprehensive:
             f"early-exit Landscape readback). "
             f"result={result.to_dict()}"
         )
-        # Counter symmetry (elspeth-ee836019b1): ROUTED rows that sunk
-        # successfully bump BOTH rows_succeeded (umbrella) and
-        # rows_routed_success (gate attribution). Pre-symmetry this was 0.
-        assert result.rows_succeeded == 5
+        # ROUTED rows are terminal successes via rows_routed_success; they
+        # must not also be counted in the ordinary rows_succeeded bucket.
+        assert result.rows_succeeded == 0
         assert result.rows_routed_success == 5  # All rows recorded as ROUTED.
         assert result.rows_routed_failure == 0  # No on_error reroutes.
 

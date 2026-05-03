@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     from elspeth.contracts import SinkProtocol, SourceProtocol, TransformProtocol
     from elspeth.contracts.run_result import RunResult
-    from elspeth.core.config import AggregationSettings, ElspethSettings, LandscapeSettings, SourceSettings
+    from elspeth.core.config import AggregationSettings, ElspethSettings, LandscapeSettings, SourceSettings, TransformSettings
     from elspeth.core.dag import WiredTransform
     from elspeth.core.landscape.factory import RecorderFactory
 
@@ -138,8 +138,26 @@ def instantiate_plugins_from_config(
     # their plugins' VALUE_SOURCES contracts.
     from elspeth.engine.orchestrator.preflight import validate_value_source_compliance
 
-    validate_value_source_compliance(bundle.transforms)
+    validate_value_source_compliance(_value_source_wired_transforms(bundle))
     return bundle
+
+
+def _value_source_wired_transforms(bundle: PluginBundle) -> "tuple[WiredTransform, ...]":
+    """Return all transform-shaped plugin instances for value-source checks.
+
+    Aggregations are backed by transform plugins too, but they live in a
+    separate bundle field until pipeline assembly folds them into the runtime
+    transform list. The assembly helper intentionally does not rerun the
+    value-source walker, so the construction boundary must present both ordinary
+    transforms and aggregation transforms here.
+    """
+    from elspeth.core.dag import WiredTransform
+
+    aggregation_transforms = tuple(
+        WiredTransform(plugin=transform, settings=cast("TransformSettings", agg_settings))
+        for transform, agg_settings in bundle.aggregations.values()
+    )
+    return (*bundle.transforms, *aggregation_transforms)
 
 
 def _make_sink_factory(config: "ElspethSettings") -> "Callable[[str], SinkProtocol]":

@@ -108,6 +108,44 @@ async def test_arg_error_payload_recorded_for_audit_replay() -> None:
 
 
 @pytest.mark.asyncio
+async def test_argument_canonicalization_failure_records_arg_error() -> None:
+    """Non-finite arguments are malformed MCP client input, not success.
+
+    ``canonical_json(arguments)`` rejects ``inf`` before dispatch. The handler
+    must still return the normal ARG_ERROR tool response and record the same
+    structured error payload for audit replay.
+    """
+    catalog = create_catalog_service()
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(catalog, scratch, recorder=probe)
+        response = await _call_handler(
+            server.request_handlers,
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "out",
+                "options": {"non_finite": float("inf")},
+                "on_validation_failure": "quarantine",
+            },
+        )
+
+    call_result = response.root
+    assert call_result.isError is True
+    assert call_result.content[0].text == "Tool error: ValueError"
+
+    assert len(probe.invocations) == 1
+    inv = probe.invocations[0]
+    assert inv.status == ComposerToolStatus.ARG_ERROR
+    assert inv.tool_name == "set_source"
+    assert inv.error_class == "ValueError"
+    assert inv.error_message == "ValueError"
+    assert inv.version_after is None
+    assert inv.result_canonical is not None
+
+
+@pytest.mark.asyncio
 async def test_audit_records_in_order_across_session() -> None:
     """A multi-call session must record invocations in dispatch order."""
     catalog = create_catalog_service()

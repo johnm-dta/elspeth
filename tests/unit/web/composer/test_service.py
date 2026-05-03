@@ -1233,8 +1233,7 @@ class TestComposeTimeout:
         import time
 
         catalog = _mock_catalog()
-        # Very tight timeout — tool execution will consume most of it
-        settings = _make_settings(composer_timeout_seconds=0.5)
+        settings = _make_settings()
         service = ComposerServiceImpl(catalog=catalog, settings=settings)
         state = _empty_state()
 
@@ -1267,7 +1266,7 @@ class TestComposeTimeout:
                 data=None,
             )
 
-        async def slow_then_timeout_llm(*args: Any, **kwargs: Any) -> Any:
+        async def first_tool_then_timeout_llm(*args: Any, **kwargs: Any) -> Any:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -1286,22 +1285,22 @@ class TestComposeTimeout:
                         }
                     ],
                 )
-            # Second call: will exceed remaining deadline
-            await asyncio.sleep(5.0)
-            return _make_llm_response(content="Too late.")
+            # Second call: exercise _call_llm_before_deadline's timeout
+            # capture path without depending on wall-clock scheduling.
+            raise TimeoutError
 
         with (
-            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(service, "_call_llm", new=first_tool_then_timeout_llm),
             patch(
                 "elspeth.web.composer.service.execute_tool",
                 side_effect=_slow_mutation_tool,
             ),
+            pytest.raises(ComposerConvergenceError) as exc_info,
         ):
-            mock_llm.side_effect = slow_then_timeout_llm
-            with pytest.raises(ComposerConvergenceError) as exc_info:
-                await service.compose("Build pipeline", [], state)
+            await service.compose("Build pipeline", [], state)
 
         assert exc_info.value.budget_exhausted == "timeout"
+        assert call_count == 2
         # The mutation tool completed BEFORE the timeout fired on the
         # second LLM call.  With cooperative timeout, partial_state must
         # reflect the completed mutation.

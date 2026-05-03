@@ -35,6 +35,7 @@ from elspeth.contracts.composer_audit import ComposerToolStatus
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.protocol import (
+    ComposerConvergenceError,
     ComposerPluginCrashError,
     ToolArgumentError,
 )
@@ -470,6 +471,74 @@ async def test_compose_loop_records_success_when_canonical_json_fails() -> None:
     assert "_canonicalization_error" in payload
     # Pin the version-after capture: the success path completed; the
     # state advanced; the audit row carries the post-mutation version.
+    assert inv.version_after == 2
+
+
+@pytest.mark.asyncio
+async def test_timeout_after_successful_tool_carries_audit_invocations() -> None:
+    """A wall-clock timeout after a successful tool must preserve its audit row.
+
+    The timeout is raised by ``_call_llm_before_deadline`` on the model call
+    after the tool result was appended. ``_compose_loop`` owns the
+    BufferingRecorder, so both deadline-call sites must pass it through or the
+    resulting ``ComposerConvergenceError`` reaches the route layer with no
+    tool_invocations to persist.
+    """
+    catalog = _mock_catalog()
+    settings = _make_settings()
+    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    state = _empty_state()
+
+    mutated_state = replace(state, version=2)
+    success_result = ToolResult(
+        success=True,
+        updated_state=mutated_state,
+        validation=ValidationSummary(
+            is_valid=True,
+            errors=(),
+            warnings=(),
+            suggestions=(),
+            semantic_contracts=(),
+        ),
+        affected_nodes=(),
+    )
+
+    turn = _make_llm_response(
+        tool_calls=[
+            {
+                "id": "call_success_before_timeout",
+                "name": "set_metadata",
+                "arguments": {"patch": {"name": "Timed"}},
+            }
+        ],
+    )
+
+    calls = {"count": 0}
+
+    async def first_tool_then_timeout_llm(*_args: Any, **_kwargs: Any) -> _FakeLLMResponse:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return turn
+        raise TimeoutError
+
+    with (
+        patch.object(service, "_call_llm", new=first_tool_then_timeout_llm),
+        patch(
+            "elspeth.web.composer.service.execute_tool",
+            return_value=success_result,
+        ) as mock_execute_tool,
+        pytest.raises(ComposerConvergenceError) as exc_info,
+    ):
+        await service.compose("Timeout after the tool", [], state)
+
+    assert exc_info.value.budget_exhausted == "timeout"
+    assert calls["count"] == 2
+    assert mock_execute_tool.call_count == 1
+    invocations = exc_info.value.tool_invocations
+    assert len(invocations) == 1
+    inv = invocations[0]
+    assert inv.status == ComposerToolStatus.SUCCESS
+    assert inv.tool_call_id == "call_success_before_timeout"
     assert inv.version_after == 2
 
 

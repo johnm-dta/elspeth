@@ -74,6 +74,17 @@ def _make_composer_mock(
     return mock
 
 
+def _audit_tool_calls(tool_call_id: str = "call-audit") -> list[dict[str, Any]]:
+    return [
+        {
+            "_kind": "audit",
+            "invocation": {
+                "tool_call_id": tool_call_id,
+            },
+        }
+    ]
+
+
 class _BlockingRecordingComposer:
     """Composer stub that lets tests observe and gate concurrent compose() calls."""
 
@@ -1686,7 +1697,7 @@ class TestLiteLLMErrorRedaction:
 
         from elspeth.web.sessions.routes import _litellm_error_detail
 
-        secret = "sk-or-v1-abcdefghijklmnopqrstuvwxyz123456"
+        secret = "sk-or-v1-abcdefghijklmnopqrstuvwxyz123456"  # secret-scan: allow-this-line
         exc = LiteLLMAPIError(
             status_code=503,
             message=f"Provider echoed Authorization Bearer {secret}",
@@ -2830,7 +2841,7 @@ class TestYamlEndpoint:
     async def test_get_state_yaml_preserves_secret_ref_markers_in_output(self, tmp_path) -> None:
         app, service = _make_app(tmp_path)
         client = TestClient(app)
-        resolved_secret = "__RESOLVED_SECRET_CANARY_DO_NOT_EXPORT__"
+        resolved_secret = "__RESOLVED_SECRET_CANARY_DO_NOT_EXPORT__"  # secret-scan: allow-this-line
 
         class FakeResolvedSecretService:
             resolved_value = resolved_secret
@@ -3663,7 +3674,7 @@ class TestComposePluginCrashResponse:
         """
         from structlog.testing import capture_logs
 
-        message_secret = "postgres://user:p4ss@prod-db.internal:5432/audit"
+        message_secret = "postgres://user:p4ss@prod-db.internal:5432/audit"  # secret-scan: allow-this-line
         cause_secret = "/var/secrets/elspeth/bootstrap-key.pem"
 
         original = RuntimeError(f"upstream failure: {message_secret}")
@@ -4045,7 +4056,7 @@ def test_capture_runtime_preflight_failure_redacts_locals_and_source() -> None:
     """
     from elspeth.web.sessions.routes import _capture_runtime_preflight_failure
 
-    secret = "API_KEY=sk-LIVE-MUST-NOT-LEAK-ABCDEF"
+    secret = "API_KEY=sk-LIVE-MUST-NOT-LEAK-ABCDEF"  # secret-scan: allow-this-line
 
     def deeper() -> None:
         local_secret = secret
@@ -5146,6 +5157,43 @@ def test_intercepted_assistant_history_is_annotated_without_raw_content() -> Non
     assert "The pipeline is complete and valid" not in history[0]["content"]
 
 
+def test_composer_chat_history_skips_audit_tool_messages() -> None:
+    from elspeth.web.sessions.routes import _composer_chat_history
+
+    session_id = uuid.uuid4()
+    user_message = ChatMessageRecord(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        role="user",
+        content="Build a CSV pipeline.",
+        tool_calls=None,
+        created_at=datetime.now(UTC),
+    )
+    tool_audit_message = ChatMessageRecord(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        role="tool",
+        content='{"success": true}',
+        tool_calls=_audit_tool_calls("call-1"),
+        created_at=datetime.now(UTC),
+    )
+    assistant_message = ChatMessageRecord(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        role="assistant",
+        content="I updated the pipeline.",
+        tool_calls=None,
+        created_at=datetime.now(UTC),
+    )
+
+    history = _composer_chat_history([user_message, tool_audit_message, assistant_message])
+
+    assert history == [
+        {"role": "user", "content": "Build a CSV pipeline."},
+        {"role": "assistant", "content": "I updated the pipeline."},
+    ]
+
+
 def test_send_message_annotates_intercepted_assistant_history_for_llm(tmp_path) -> None:
     app, service = _make_app(tmp_path)
     composer = _make_composer_mock(response_text="Retrying from the runtime failure.")
@@ -5177,3 +5225,66 @@ def test_send_message_annotates_intercepted_assistant_history_for_llm(tmp_path) 
     assert history[1]["content"].startswith("[ELSPETH composer note: Your previous assistant response was intercepted")
     assert "runtime preflight failed: bad config" in history[1]["content"]
     assert "The pipeline is complete and valid" not in history[1]["content"]
+
+
+def test_send_message_does_not_replay_audit_tool_rows_to_composer(tmp_path) -> None:
+    app, service = _make_app(tmp_path)
+    composer = _make_composer_mock(response_text="Continuing without audit rows.")
+    app.state.composer_service = composer
+    client = TestClient(app)
+
+    session_resp = client.post("/api/sessions", json={"title": "Chat"})
+    session_id = uuid.UUID(session_resp.json()["id"])
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
+        loop.run_until_complete(service.add_message(session_id, "assistant", "I started."))
+        loop.run_until_complete(
+            service.add_message(
+                session_id,
+                "tool",
+                '{"success": true}',
+                tool_calls=_audit_tool_calls("call-1"),
+            )
+        )
+    finally:
+        loop.close()
+
+    resp = client.post(f"/api/sessions/{session_id}/messages", json={"content": "Continue"})
+
+    assert resp.status_code == 200
+    history = composer.compose.call_args.args[1]
+    assert [entry["role"] for entry in history] == ["user", "assistant"]
+    assert all(entry["role"] != "tool" for entry in history)
+
+
+def test_recompose_uses_last_conversational_user_before_audit_tool_rows(tmp_path) -> None:
+    app, service = _make_app(tmp_path)
+    composer = _make_composer_mock(response_text="Retrying failed turn.")
+    app.state.composer_service = composer
+    client = TestClient(app, raise_server_exceptions=False)
+
+    session_resp = client.post("/api/sessions", json={"title": "Retry"})
+    session_id = uuid.UUID(session_resp.json()["id"])
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+        loop.run_until_complete(
+            service.add_message(
+                session_id,
+                "tool",
+                '{"success": true}',
+                tool_calls=_audit_tool_calls("call-1"),
+            )
+        )
+    finally:
+        loop.close()
+
+    resp = client.post(f"/api/sessions/{session_id}/recompose")
+
+    assert resp.status_code == 200
+    composer.compose.assert_awaited_once()
+    assert composer.compose.call_args.args[0] == "Build a CSV pipeline"
+    assert composer.compose.call_args.args[1] == []

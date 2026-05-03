@@ -759,7 +759,7 @@ allow_hits:
   reason: contextlib.suppress(CancelledError) is the expected shutdown path for the periodic orphan cleanup task
   safety: Clean cancellation during app shutdown; no error suppression
   expires: null
-- key: web/sessions/routes.py:R6:_persist_tool_invocations:fp=1588bd7c838edebd
+- key: web/sessions/routes.py:R6:_persist_tool_invocations:fp=6f61f5fadea39905
   owner: composer-audit
   reason: Audit-system-failure exemption (logging-telemetry-policy permits slog when audit DB itself fails). Per-tool-call
     audit row persistence is best-effort — a SQLAlchemy failure here MUST NOT mask the calling handler's primary outcome (the
@@ -859,7 +859,7 @@ allow_hits:
   reason: Tier 3 — fingerprint key from deployment environment; os.environ.get followed by check-and-crash
   safety: Missing key raises RuntimeError immediately; no silent default
   expires: null
-- key: web/sessions/routes.py:R6:_handle_convergence_error:fp=aa6c62e7de86000d
+- key: web/sessions/routes.py:R6:_handle_convergence_error:fp=159e13e9ccb2dc1d
   owner: web-sessions
   reason: Convergence partial-state save may fail — catch covers the full SQLAlchemyError family (IntegrityError, OperationalError
     for lock timeout or pool disconnect, ProgrammingError for schema drift, and siblings). A narrow IntegrityError catch would
@@ -871,7 +871,7 @@ allow_hits:
     and the HTTP response body (partial_state_save_error=ClassName) carry the exception class name only — no SQL statement,
     no bound parameters, no __cause__ text.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_plugin_crash:fp=76c894940a2607ba
+- key: web/sessions/routes.py:R6:_handle_plugin_crash:fp=2432659e69538ebd
   owner: web-sessions
   reason: Plugin-crash partial-state save may fail — catch covers the full SQLAlchemyError family. A narrow IntegrityError
     catch would let OperationalError, ProgrammingError, and siblings escape and mask the redacted 500 plugin-crash response.
@@ -882,7 +882,7 @@ allow_hits:
   safety: Returns 500 with structured error; logs exc_class (no traceback, same redaction policy as the convergence path).
     Original plugin crash still propagates via the outer `raise HTTPException(...) from crash.original_exc`.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=ba9971f7add0d0c2
+- key: web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=986fceb97158ef91
   owner: web-sessions
   reason: Runtime-preflight partial-state save may fail — catch covers the full SQLAlchemyError family, structurally identical
     to the sibling _handle_plugin_crash and _handle_convergence_error helpers. A narrow IntegrityError catch would let OperationalError
@@ -895,57 +895,57 @@ allow_hits:
     same redaction policy as the sibling helpers). Original runtime-preflight cause still propagates via the outer `raise
     HTTPException(...) from rpf_exc.original_exc` at the call site.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=ab552a6862cefd1a
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=093d85e41d0d03b7
   owner: web-sessions
   reason: isinstance check on deserialized composition state source — Tier 3 boundary.
   safety: Validates structure from persisted state
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=c46af050a5754966
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=f72a3cb6119075be
   owner: web-sessions
   reason: source_dict.get() on Tier 3 composition state — optional source options.
   safety: Returns None on miss, and the blob rewrite path is skipped
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=8cc5f4f96ee4e9de
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=9fa9d0de3ecad0f9
   owner: web-sessions
   reason: isinstance(options, dict) validates persisted source.options before mutating nested fields during fork blob rewrite
   safety: Non-dict raises AuditIntegrityError immediately; no silent skip or coercion
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=1ac3bbd0bb14a67a
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=0ed0b53140dd62cc
   owner: web-sessions
   reason: options.get() on Tier 3 state source — blob_ref is optional.
   safety: Returns None on miss, handled by conditional below
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=19be6d98ab13cdda
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=bf19398765c14266
   owner: web-sessions
   reason: isinstance check on blob_ref — may be str or UUID from persisted state.
   safety: Tier 3 boundary — persisted blob_ref type is not guaranteed
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=a0184ce5a4b6a8df
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=1c53c5a027154228
   owner: web-sessions
   reason: blob_map.get() on copied blob UUID — not every source reference is guaranteed to have a copied blob target, so fork
     rewrite falls back to path/file matching
   safety: None result only triggers the secondary path/file rewrite probe; no fabricated blob mapping is introduced
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=920bcf94e8ed801e
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=036bbf8f99196c5e
   owner: web-sessions
   reason: options.get(path_key) on persisted source options — path/file keys are optional and used only for fallback blob
     rewrite
   safety: None result skips that fallback key and continues scanning remaining candidates
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=5385e025057fe9c4
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=769498432d3cef68
   owner: web-sessions
   reason: isinstance(path_value, str) guards source_blob_path_map lookup against non-string persisted path/file values
   safety: Only string values participate in the fallback rewrite; non-string values remain unchanged and can still fail later
     validation instead of being silently coerced
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=15a8dbf00587ace1
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=6fcd29b29cf0b30a
   owner: web-sessions
   reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the BlobQuotaExceededError path — DB/IO
     faults expected during cleanup; programmer bugs still propagate
   safety: Cleanup failure attached as RecoveryFailed[<type>] note on the HTTPException(413) that propagates; orphan sessions.id
     flagged for manual cleanup; user-facing 413 response remains intact even when cleanup fails
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=0e002519990af5cc
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=26d799de5ce53a5a
   owner: web-sessions
   reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the generic except Exception path — DB/IO
     faults expected during cleanup; programmer bugs still propagate
@@ -1001,14 +1001,14 @@ allow_hits:
     original is defensive against helper contract change
   safety: Falls back to unredacted source_data (less privacy, not less safety)
   expires: null
-- key: web/sessions/routes.py:R5:_composer_persisted_validation:fp=4fe4d70bdef845aa
+- key: web/sessions/routes.py:R5:_composer_persisted_validation:fp=f834b408d8ddbf4e
   owner: web-sessions
   reason: isinstance(runtime_preflight, _RuntimePreflightFailed) dispatches the _RuntimePreflightOutcome union type — sentinel,
     ValidationResult, and None are the three legal values; isinstance is the only way to distinguish sentinel from result
     without adding a separate boolean parameter.
   safety: Exhaustive dispatch with ValueError for invalid combinations; no silent default
   expires: null
-- key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=fcff8bf0d5c30cf6
+- key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=f0dba9516c90bdcc
   owner: web-sessions
   reason: state.validate() may fail on structurally damaged partial-state from LLM convergence/crash — catch (ValueError,
     TypeError, KeyError) mirrors the pre-existing guard in _handle_convergence_error and _handle_plugin_crash to produce a
@@ -1016,7 +1016,7 @@ allow_hits:
   safety: Falls back to ValidationSummary(is_valid=False) with a generic error entry; does not swallow the damage, just allows
     persistence to proceed
   expires: null
-- key: web/sessions/routes.py:R5:_state_data_from_composer_state:fp=1348c06189bd3e32
+- key: web/sessions/routes.py:R5:_state_data_from_composer_state:fp=27d500c280b01848
   owner: web-sessions
   reason: isinstance(runtime, ValidationResult) dispatches the _RuntimePreflightOutcome union type to emit telemetry — sentinel
     and ValidationResult must be distinguished to record pass/fail vs exception metrics correctly.
@@ -1245,7 +1245,7 @@ allow_hits:
     and cancellation now also drains the shielded future's eventual exception via add_done_callback so asyncio's GC handler
     cannot fire a misleading 'Future exception was never retrieved' traceback.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=cffa33d8241c1d60
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=272f0c8e49ac4370
   owner: web-sessions
   reason: contextlib.suppress(asyncio.CancelledError) wraps the shielded progress publish in the send_message cancellation
     handler — asyncio.shield re-raises CancelledError to the cancelling task while the inner publish runs to completion in
@@ -1255,7 +1255,7 @@ allow_hits:
     reaches the registry. The cancellation chain is preserved by the explicit ``raise`` that follows, so no real cancellation
     is silently dropped — only the duplicate re-raise from the shield is suppressed.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=82faddcf11cc9ad7
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=8a80600fbf09d98b
   owner: web-sessions
   reason: Mirror of the send_message cancellation handler above — same shielded-publish pattern in the recompose route so
     cancellation behaviour cannot drift between the two composer entry points.

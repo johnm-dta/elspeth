@@ -116,6 +116,7 @@ class TestAccumulateRowOutcomesRouted:
         accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_routed_success == 1
+        assert counters.rows_succeeded == 0
         assert counters.rows_routed_failure == 0
 
     def test_routed_tracks_destination(self) -> None:
@@ -199,6 +200,7 @@ class TestAccumulateRowOutcomesRoutedOnError:
         accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_routed_success == 1
+        assert counters.rows_succeeded == 0
         assert counters.rows_routed_failure == 0
 
 
@@ -355,15 +357,12 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         self._assert_counters(counters, succeeded=1)
         assert len(pending["output"]) == 1
 
-    def test_routed_increments_succeeded_and_routed_success(self) -> None:
-        """Counter symmetry (elspeth-ee836019b1): a ROUTED outcome bumps
-        BOTH ``rows_succeeded`` (umbrella terminal-success count) AND
-        ``rows_routed_success`` (orthogonal gate-attribution count). The
-        sink-write reconcile decrements both if the row is later diverted.
+    def test_routed_increments_routed_success_only(self) -> None:
+        """ROUTED is a terminal success indicator without double-counting.
 
-        Pre-symmetry, only ``rows_routed_success`` was bumped, which
-        surfaced operationally as ``✓0 succeeded | →N routed`` in CLI
-        summaries — operationally indistinguishable from a failed run.
+        The web terminal decomposition treats ``rows_succeeded`` and
+        ``rows_routed_success`` as additive buckets, so a gate MOVE belongs
+        only in the routed-success bucket.
         """
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "risk": []}
@@ -372,7 +371,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
             counters,
             pending,
         )
-        self._assert_counters(counters, succeeded=1, routed_success=1)
+        self._assert_counters(counters, succeeded=0, routed_success=1)
         assert counters.routed_destinations["risk"] == 1
         assert len(pending["risk"]) == 1
         assert len(pending["output"]) == 0
@@ -631,14 +630,14 @@ class TestReconcileSinkWriteDiversions:
     """Tests for post-sink durable counter reconciliation."""
 
     def test_routed_diversion_decrements_routed_counters(self) -> None:
-        """Counter symmetry (elspeth-ee836019b1): a routed-success row was
-        provisionally counted in BOTH ``rows_succeeded`` and
-        ``rows_routed_success`` at accumulate time. Reconciling a
-        sink-write diversion must decrement BOTH to keep the umbrella
-        count balanced with the attribution buckets.
+        """A routed-success sink diversion decrements only routed counters.
+
+        ``rows_succeeded`` is a separate additive terminal bucket, so
+        reconciling a diverted gate MOVE must not subtract from unrelated
+        ordinary successes.
         """
         counters = _make_counters()
-        counters.rows_succeeded = 1
+        counters.rows_succeeded = 7
         counters.rows_routed_success = 1
         counters.routed_destinations["risk_sink"] = 1
 
@@ -649,7 +648,7 @@ class TestReconcileSinkWriteDiversions:
             diversion_count=1,
         )
 
-        assert counters.rows_succeeded == 0
+        assert counters.rows_succeeded == 7
         assert counters.rows_routed_success == 0
         assert counters.rows_routed_failure == 0
         assert counters.routed_destinations == {}

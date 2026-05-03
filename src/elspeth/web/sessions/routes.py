@@ -550,6 +550,16 @@ def _composer_history_content(message: ChatMessageRecord) -> str:
     return message.content
 
 
+def _is_composer_audit_tool_message(message: ChatMessageRecord) -> bool:
+    """Return true when a persisted chat row is an audit-only composer tool row."""
+    return message.role == "tool"
+
+
+def _composer_conversation_messages(messages: Sequence[ChatMessageRecord]) -> list[ChatMessageRecord]:
+    """Return persisted messages that are part of the LLM conversation."""
+    return [message for message in messages if not _is_composer_audit_tool_message(message)]
+
+
 def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[str, str]]:
     """Convert persisted session messages to LLM chat history.
 
@@ -557,8 +567,14 @@ def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[s
     model. When an assistant message has raw_content, its visible content is a
     synthetic runtime-preflight replacement; annotate that visible content so
     the next LLM turn understands why its apparent prior answer changed.
+
+    Composer tool-call audit rows are persisted as ``role="tool"`` messages so
+    the session record retains the dispatch trail. They are not prior LLM
+    dialogue turns: replaying them without the in-loop assistant tool-call
+    request that produced them creates orphan OpenAI tool messages. Keep them
+    in storage/API responses, but exclude them from prompt history.
     """
-    return [{"role": message.role, "content": _composer_history_content(message)} for message in messages]
+    return [{"role": message.role, "content": _composer_history_content(message)} for message in _composer_conversation_messages(messages)]
 
 
 def _composer_persisted_validation(
@@ -1983,13 +1999,16 @@ def create_session_router() -> APIRouter:
                 state = _state_from_record(state_record)
                 pre_send_state_id = state_record.id
 
-            # Fetch full chat history — the last message must be the user turn
-            # that failed.  Reject if it's not, since blindly dropping
-            # records[-1] would corrupt the conversation transcript.
+            # Fetch full chat history. Audit-only tool rows can trail a failed
+            # user turn, so the recompose precondition is the last
+            # conversational message rather than the last persisted row.
+            # Reject if the conversation does not end at a user turn; blindly
+            # dropping the final conversational row would corrupt the transcript.
             records = await service.get_messages(session.id, limit=None)
-            if not records:
+            conversation_records = _composer_conversation_messages(records)
+            if not conversation_records:
                 raise HTTPException(status_code=400, detail="No messages to recompose from")
-            if records[-1].role != "user":
+            if conversation_records[-1].role != "user":
                 raise HTTPException(
                     status_code=409,
                     detail="Cannot recompose: the last message is not a user message. "
@@ -1997,8 +2016,8 @@ def create_session_router() -> APIRouter:
                     "user turn whose composition failed.",
                 )
 
-            last_user_content = records[-1].content
-            request_id = str(records[-1].id)
+            last_user_content = conversation_records[-1].content
+            request_id = str(conversation_records[-1].id)
             progress_registry = _get_composer_progress_registry(request)
             progress_sink = _composer_progress_sink(
                 progress_registry,
@@ -2023,7 +2042,7 @@ def create_session_router() -> APIRouter:
             try:
                 # Exclude the last user message — the composer receives it
                 # separately via the message arg and appends it in _build_messages.
-                chat_messages = _composer_chat_history(records[:-1])
+                chat_messages = _composer_chat_history(conversation_records[:-1])
 
                 # Run the LLM composition loop
                 composer: ComposerService = request.app.state.composer_service

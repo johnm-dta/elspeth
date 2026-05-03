@@ -631,6 +631,7 @@ class TestAccumulateRowOutcomesProperties:
         result = _make_row_result(RowOutcome.ROUTED, sink_name="alerts")
         counters, pending = self._run_accumulation([result])
 
+        assert counters.rows_succeeded == 0
         assert counters.rows_routed_success == 1
         assert counters.rows_routed_failure == 0
         assert counters.routed_destinations["alerts"] == 1
@@ -779,6 +780,7 @@ class TestAccumulateRowOutcomesProperties:
         assert counters.routed_destinations["alerts"] == n
         # RowOutcome.ROUTED (gate route_to_sink MOVE) increments
         # rows_routed_success only.
+        assert counters.rows_succeeded == 0
         assert counters.rows_routed_success == n
         assert counters.rows_routed_failure == 0
 

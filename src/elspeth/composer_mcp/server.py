@@ -609,10 +609,12 @@ def create_server(
         # is recorded).
         error_payload_for_audit: dict[str, Any] | None = None
         try:
-            if canonicalization_failed is not None:
-                # Pre-dispatch ARG_ERROR: malformed LLM arguments.
-                raise ValueError(f"arguments not canonicalizable ({type(canonicalization_failed).__name__})") from canonicalization_failed
             try:
+                if canonicalization_failed is not None:
+                    # Pre-dispatch ARG_ERROR: malformed LLM arguments.
+                    raise ValueError(
+                        f"arguments not canonicalizable ({type(canonicalization_failed).__name__})"
+                    ) from canonicalization_failed
                 result_dict = _dispatch_tool(
                     name,
                     arguments,

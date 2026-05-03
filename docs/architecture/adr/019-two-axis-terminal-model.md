@@ -320,8 +320,10 @@ closed-set partition assertion gating each stage:
 3. **Producers + accumulator** (`engine/orchestrator/`, `engine/executors/`):
    producer sites emit `(outcome, path)` pairs; accumulator reads from the
    new fields.
-4. **Test migration** (`tests/`): the 143 assertion sites flip to the new
-   field pair. The temporary `RowOutcome` derivable view is removed.
+4. **Test migration** (`tests/`): the test assertion sites flip to the new
+   field pair (count is in the 90–150 range described in Migration policy
+   above; re-grep at stage start for the contemporary number). The
+   temporary `RowOutcome` derivable view is removed.
 5. **Final sweep**: delete the temporary `RowOutcome` view; closed-set
    assertion is now the only enforcement of the partition.
 
@@ -616,12 +618,15 @@ The implementation surface, in order of dependency:
 5. `engine/executors/sink.py`: write the new column pair instead of
    `RowOutcome` at every recorder write site — the primary terminal at line
    635, and the diversion sites at line 952 (failsink mode) and line 998
-   (discard mode). The discard-mode site changes predicate behavior if the
-   panel adopts ADR-019's recommendation to class discard-mode `DIVERTED` as
-   `(FAILURE, SINK_DISCARDED)` rather than transient.
-6. Producer sites that emit `RowOutcome.X`: each site emits the (outcome, path)
+   (discard mode). The discard-mode site changes predicate behavior because
+   `(FAILURE, SINK_DISCARDED)` is the canonical classification per
+   sub-decision 5 (round-3 panel-resolved); see Behavior Change Notice for
+   the operator-visible run-status impact.
+6. Producer sites that emit `RowOutcome.X`: each site emits the `(outcome, path)`
    pair instead.
-7. Tests (~72 hits): update assertions in the same commit per "no legacy
-   code" policy.
+7. Tests (90–150 assertion sites; re-grep at stage start): update assertions
+   in the stage-4 commit per the 5-stage Migration policy. The "no legacy
+   code" policy applies once the temporary `RowOutcome` derivable view is
+   removed in stage 5.
 8. Frontend types (`web/frontend/src/types/index.ts`): no change required for
    ADR-019 (counter names preserved); update if ADR-020 ships.

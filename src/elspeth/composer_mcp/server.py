@@ -14,7 +14,10 @@ import argparse
 import asyncio
 import json
 import logging
+import time
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -23,8 +26,15 @@ from mcp.server.stdio import stdio_server
 from mcp.types import CallToolResult, TextContent, Tool
 from pydantic import BaseModel
 
+from elspeth.composer_mcp.audit import JsonlEventRecorder
 from elspeth.composer_mcp.session import SessionManager, SessionNotFoundError
+from elspeth.contracts.composer_audit import (
+    ComposerToolInvocation,
+    ComposerToolRecorder,
+    ComposerToolStatus,
+)
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
@@ -466,6 +476,7 @@ def create_server(
     runtime_preflight_timeout_seconds: float = 5.0,
     runtime_preflight_coordinator: RuntimePreflightCoordinator | None = None,
     session_scope_provider: SessionScopeProvider | None = None,
+    recorder: ComposerToolRecorder | None = None,
 ) -> Server:
     """Create an MCP server for pipeline composition.
 
@@ -490,6 +501,14 @@ def create_server(
     server = Server("elspeth-composer")
     coordinator = runtime_preflight_coordinator or RuntimePreflightCoordinator()
     session_id_ref: list[str | None] = [None]
+    audit_recorder: ComposerToolRecorder = (
+        recorder
+        if recorder is not None
+        else JsonlEventRecorder(
+            scratch_dir,
+            lambda: session_id_ref[0],
+        )
+    )
 
     def current_session_scope() -> str:
         if session_scope_provider is not None:
@@ -553,42 +572,186 @@ def create_server(
 
             runtime_preflight_callback = _make_mcp_callback()
 
+        # Audit envelope around the entire dispatch. The try/finally
+        # makes "audit fires before return" structurally enforceable —
+        # success path, ARG_ERROR path, and PLUGIN_CRASH path all flow
+        # through the recorder before this coroutine yields. Mirrors
+        # the AuditedLLMClient.chat_completion shape in
+        # plugins/infrastructure/clients/llm.py.
+        tool_call_id = uuid.uuid4().hex
+        started_at = datetime.now(UTC)
+        started_ns = time.monotonic_ns()
+        version_before = state_ref[0].version
+        # Pre-compute canonical args + hash so the audit record is
+        # complete on every exit path. canonical_json may itself raise
+        # ValueError on non-finite floats (Tier-3 boundary policy);
+        # that's a structural input violation that pre-dates the tool
+        # dispatch and is recorded as ARG_ERROR.
         try:
-            result = _dispatch_tool(
-                name,
-                arguments,
-                state_ref[0],
-                catalog,
-                scratch_dir,
-                baseline=baseline_ref[0],
-                runtime_preflight=runtime_preflight_callback,
+            arguments_canonical = canonical_json(arguments)
+            arguments_hash = stable_hash(arguments)
+            canonicalization_failed: BaseException | None = None
+        except (ValueError, TypeError) as canon_exc:
+            arguments_canonical = json.dumps(
+                {"_canonicalization_error": type(canon_exc).__name__},
+                sort_keys=True,
             )
-        except (ValueError, KeyError, TypeError) as exc:
-            # Bad LLM arguments (wrong keys, invalid values) — report to agent
-            return CallToolResult(
-                content=[TextContent(type="text", text=f"Tool error: {exc!s}")],
-                isError=True,
+            arguments_hash = stable_hash({"_canonicalization_error": type(canon_exc).__name__})
+            canonicalization_failed = canon_exc
+
+        result_dict: dict[str, Any] | None = None
+        status: ComposerToolStatus = ComposerToolStatus.SUCCESS
+        error_class: str | None = None
+        error_message: str | None = None
+        # Captured for ARG_ERROR/PLUGIN_CRASH paths so result_canonical can
+        # mirror what the LLM saw (Solution-architect review H4 — the LLM
+        # made a decision against this payload, audit primacy demands it
+        # is recorded).
+        error_payload_for_audit: dict[str, Any] | None = None
+        try:
+            if canonicalization_failed is not None:
+                # Pre-dispatch ARG_ERROR: malformed LLM arguments.
+                raise ValueError(f"arguments not canonicalizable ({type(canonicalization_failed).__name__})") from canonicalization_failed
+            try:
+                result_dict = _dispatch_tool(
+                    name,
+                    arguments,
+                    state_ref[0],
+                    catalog,
+                    scratch_dir,
+                    baseline=baseline_ref[0],
+                    runtime_preflight=runtime_preflight_callback,
+                )
+            except (ValueError, KeyError, TypeError) as exc:
+                # Bad LLM arguments (wrong keys, invalid values), or a
+                # ``CorruptSessionFileError``/``InvalidSessionIdError`` from
+                # the session subsystem. Per Python-engineer review W1:
+                # ``str(exc)`` from these classes can carry operator-readable
+                # filesystem paths via ``CorruptSessionFileError.reason``.
+                # Use class-name only (matches the PLUGIN_CRASH discipline)
+                # — we trade message detail for guaranteed leak-safety.
+                status = ComposerToolStatus.ARG_ERROR
+                error_class = type(exc).__name__
+                error_message = type(exc).__name__
+                # Build a structured payload so the LLM and the audit row
+                # see the same string (Solution-architect H4 symmetry fix).
+                # ``exc.args[0]`` for ToolArgumentError is safe by construction;
+                # for other ValueError/KeyError/TypeError it may carry detail
+                # we do not want echoed — use class name only.
+                safe_message = error_message
+                error_payload_for_audit = {
+                    "error": f"Tool error: {safe_message}",
+                    "isError": True,
+                }
+                return CallToolResult(
+                    content=[TextContent(type="text", text=f"Tool error: {safe_message}")],
+                    isError=True,
+                )
+            except Exception as exc:
+                # PLUGIN_CRASH path. CLAUDE.md "Plugin Ownership": let
+                # the exception propagate. Record the crash before
+                # re-raise so the audit trail captures the bug.
+                status = ComposerToolStatus.PLUGIN_CRASH
+                error_class = type(exc).__name__
+                error_message = type(exc).__name__
+                raise
+
+            # Success path: handle state update + redaction. Wrap in its
+            # own try/except per Solution-architect review H2: a Tier-1
+            # invariant breach reading back our own dispatch output (e.g.
+            # CompositionState.from_dict KeyError on a malformed result)
+            # MUST be audited as PLUGIN_CRASH, not laundered as SUCCESS.
+            try:
+                if "state" in result_dict:
+                    new_state = CompositionState.from_dict(result_dict["state"])
+                    state_ref[0] = new_state
+                    # Capture baseline when session is created or loaded.
+                    # load_session can return success=False on SessionNotFoundError;
+                    # in that case, leave session_id_ref unchanged so the scratch
+                    # session scope ("unsaved") is used.
+                    if name in ("new_session", "load_session"):
+                        baseline_ref[0] = new_state
+                        if result_dict["success"]:
+                            resolved_sid: str = result_dict["data"]["session_id"]
+                            session_id_ref[0] = resolved_sid
+                            audit_recorder.resolve_session(resolved_sid)
+                    # Solution-architect review C1: clear session_id_ref on
+                    # successful delete_session so the deletion record does
+                    # NOT recreate the just-unlinked sidecar. The deletion
+                    # itself buffers in the recorder; the next
+                    # new_session/load_session drains it (semantically:
+                    # "the delete that happened before this session began").
+                    if name == "delete_session" and result_dict["success"]:
+                        session_id_ref[0] = None
+                    # B4: Redact storage paths from the response sent to the agent.
+                    result_dict["state"] = redact_source_storage_path(result_dict["state"])
+            except (KeyError, TypeError, ValueError) as readback_exc:
+                # Tier-1 read-back failure on our own dispatch output.
+                # Reclassify as PLUGIN_CRASH and re-raise — the original
+                # success the dispatcher claimed is no longer truthful.
+                status = ComposerToolStatus.PLUGIN_CRASH
+                error_class = type(readback_exc).__name__
+                error_message = type(readback_exc).__name__
+                result_dict = None
+                raise
+
+            return [TextContent(type="text", text=json.dumps(result_dict, indent=2))]
+        finally:
+            finished_at = datetime.now(UTC)
+            latency_ms = (time.monotonic_ns() - started_ns) // 1_000_000
+
+            result_canonical: str | None
+            result_hash: str | None
+            version_after: int | None
+
+            if status == ComposerToolStatus.SUCCESS and result_dict is not None:
+                # Result canonicalization happens AFTER state-mutation +
+                # redaction so the recorded result mirrors what was sent
+                # back to the LLM. Wrap in try/except per Solution-architect
+                # review H3: a non-finite float / non-serializable type in
+                # ``result_dict`` would otherwise raise from finally and
+                # mask the success return entirely. Fall back to a sentinel
+                # canonical so the audit row still lands.
+                try:
+                    result_canonical = canonical_json(result_dict)
+                    result_hash = stable_hash(result_dict)
+                except (ValueError, TypeError) as canon_result_exc:
+                    sentinel = {"_canonicalization_error": type(canon_result_exc).__name__}
+                    result_canonical = canonical_json(sentinel)
+                    result_hash = stable_hash(sentinel)
+                version_after = state_ref[0].version
+            elif status == ComposerToolStatus.ARG_ERROR and error_payload_for_audit is not None:
+                # ARG_ERROR: record the error payload that was returned to
+                # the LLM (Solution-architect H4 symmetry with web side).
+                result_canonical = canonical_json(error_payload_for_audit)
+                result_hash = stable_hash(error_payload_for_audit)
+                version_after = None
+            else:
+                # PLUGIN_CRASH path: no result was sent to the LLM (the
+                # exception propagates as a server error). version_after
+                # is None to signal "dispatch did not complete".
+                result_canonical = None
+                result_hash = None
+                version_after = None
+
+            invocation = ComposerToolInvocation(
+                tool_call_id=tool_call_id,
+                tool_name=name,
+                arguments_canonical=arguments_canonical,
+                arguments_hash=arguments_hash,
+                result_canonical=result_canonical,
+                result_hash=result_hash,
+                status=status,
+                error_class=error_class,
+                error_message=error_message,
+                version_before=version_before,
+                version_after=version_after,
+                started_at=started_at,
+                finished_at=finished_at,
+                latency_ms=latency_ms,
+                actor="composer-mcp:cli",
             )
-
-        # Update server-side state from the result (BEFORE redaction —
-        # the internal state needs storage paths for pipeline execution).
-        if "state" in result:
-            new_state = CompositionState.from_dict(result["state"])
-            state_ref[0] = new_state
-            # Capture baseline when session is created or loaded.
-            # load_session can return success=False on SessionNotFoundError;
-            # in that case, leave session_id_ref unchanged so the scratch
-            # session scope ("unsaved") is used. The success path is contractual
-            # — the tool returns {"data": {"session_id": ...}} on success,
-            # so direct access is correct.
-            if name in ("new_session", "load_session"):
-                baseline_ref[0] = new_state
-                if result["success"]:
-                    session_id_ref[0] = result["data"]["session_id"]
-            # B4: Redact storage paths from the response sent to the agent.
-            result["state"] = redact_source_storage_path(result["state"])
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            audit_recorder.record(invocation)
 
     return server
 

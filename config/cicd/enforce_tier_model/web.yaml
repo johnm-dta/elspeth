@@ -798,32 +798,43 @@ allow_hits:
     task
   safety: Clean cancellation during app shutdown; no error suppression
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=3c9758fe5ee2a857
+- key: web/composer/service.py:R5:_begin_dispatch:fp=8c7ec28199542a97
+  owner: composer-audit
+  reason: "Typed-union narrowing inside the audit envelope helper — _begin_dispatch
+    accepts Mapping[str, Any] | str (parsed dict from successful json.loads, or raw
+    string from the JSON-decode-failure branch). isinstance(arguments, str) selects
+    the truncated-canonical path for raw input. Same pattern as _cached_runtime_preflight's
+    union narrowing."
+  safety: Both branches build a canonical_json + stable_hash payload; no defensive
+    access of attributes; no silent fallback. The dispatch site documents which call
+    pattern is allowed.
+  expires: null
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=e84dcf769c61c96e
   owner: bugfix
   reason: Tier 3 boundary - LiteLLM tool-call arguments can decode to JSON arrays, nulls, or scalars;
     the composer must reject non-object arguments before cache lookup or tool dispatch
   safety: Emits a tool error back to the LLM, does not call execute_tool, marks mutation intent for budget
     accounting, and preserves current state
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=307551cc0c6eebf3
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=48c68ac070db6360
   owner: web-composer
   reason: "isinstance(cached, ValidationResult) narrows the union RuntimePreflightEntry = ValidationResult\
     \ | RuntimePreflightFailure \u2014 not defensive access, structural type dispatch on a typed sum type"
   safety: Union covers all cases; no third value possible; isinstance correct
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=2c49a9e927389fe8
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=0f7b3c13607da2a9
   owner: web-composer
   reason: isinstance(cached, RuntimePreflightFailure) narrows RuntimePreflightEntry union for the failure
     re-raise path
   safety: Paired with ValidationResult check above; exhaustive union dispatch
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=aedec40406a76bc5
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=95bedd32e11ffdbe
   owner: web-composer
   reason: isinstance(entry, RuntimePreflightFailure) narrows freshly-resolved coordinator entry for failure
     re-raise; mirrors cached check above
   safety: entry is RuntimePreflightEntry (ValidationResult | RuntimePreflightFailure); all cases handled
   expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=e5575f1c9f2cfea3
+- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=7ee9ce3066de93c6
   owner: web-composer
   reason: cache.get(key) checks per-compose runtime preflight cache for an existing result before running
     the coordinator; key is RuntimePreflightKey, not external data

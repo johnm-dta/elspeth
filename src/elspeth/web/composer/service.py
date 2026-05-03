@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -27,9 +28,12 @@ from opentelemetry import metrics
 from sqlalchemy import Engine, update
 from sqlalchemy.exc import SQLAlchemyError
 
+from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer import yaml_generator
+from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
     ComposerProgressSink,
@@ -218,6 +222,181 @@ class _CachedDiscoveryPayload:
 _RuntimePreflightCache = dict[RuntimePreflightKey, RuntimePreflightEntry]
 
 
+@dataclass(frozen=True, slots=True)
+class _DispatchAudit:
+    """Per-call timing + canonical-arguments envelope for the audit trail.
+
+    Captured at the start of every dispatch branch in :meth:`_compose_loop`
+    so each branch's invocation record carries consistent ``started_at`` /
+    ``arguments_canonical`` / ``version_before`` regardless of which path
+    the call ultimately follows. The six branch-specific finalizers
+    (``_finish_*``) read fields from here to construct the final
+    :class:`ComposerToolInvocation`.
+    """
+
+    tool_call_id: str
+    tool_name: str
+    arguments_canonical: str
+    arguments_hash: str
+    version_before: int
+    started_at: datetime
+    started_ns: int
+    actor: str
+
+
+def _begin_dispatch(
+    tool_call_id: str,
+    tool_name: str,
+    arguments: Mapping[str, Any] | str,
+    *,
+    version_before: int,
+    actor: str,
+) -> _DispatchAudit:
+    """Open a per-call audit envelope.
+
+    ``arguments`` is either a parsed dict (typical path) or a raw string
+    (JSON-decode failure path before parse succeeded). For the raw-string
+    case the canonical form wraps the (truncated) string in a sentinel
+    object so the audit trail still records what the LLM tried even
+    when it wasn't valid JSON. Truncation guards against unbounded
+    audit-row sizes for pathological LLM output.
+    """
+    if isinstance(arguments, str):
+        # 4 KiB is the same boundary as POSIX PIPE_BUF — a sane upper
+        # bound that captures normal tool-call shapes while preventing
+        # a malformed multi-megabyte LLM response from blowing up audit
+        # rows. The full string is recoverable from upstream LiteLLM
+        # tracing if needed; the audit row records intent, not bytes.
+        truncated = arguments[:4096]
+        canon = canonical_json({"_unparseable_arguments": truncated, "_truncated": len(arguments) > 4096})
+        h = stable_hash({"_unparseable_arguments": truncated, "_truncated": len(arguments) > 4096})
+    else:
+        canon = canonical_json(arguments)
+        h = stable_hash(arguments)
+    return _DispatchAudit(
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        arguments_canonical=canon,
+        arguments_hash=h,
+        version_before=version_before,
+        started_at=datetime.now(UTC),
+        started_ns=time.monotonic_ns(),
+        actor=actor,
+    )
+
+
+def _finish_success(
+    audit: _DispatchAudit,
+    *,
+    result_payload: Mapping[str, Any],
+    version_after: int,
+    cache_hit: bool = False,
+) -> ComposerToolInvocation:
+    """Build a SUCCESS-status invocation record.
+
+    A "successful dispatch" includes handler returns where the underlying
+    tool reported ``success=False`` semantically — that is still a
+    successful dispatch, and the semantic outcome is recoverable from
+    ``result_canonical``. Only path-level failures (ARG_ERROR,
+    PLUGIN_CRASH) get a non-success status.
+    """
+    canon = canonical_json(result_payload)
+    return ComposerToolInvocation(
+        tool_call_id=audit.tool_call_id,
+        tool_name=audit.tool_name,
+        arguments_canonical=audit.arguments_canonical,
+        arguments_hash=audit.arguments_hash,
+        result_canonical=canon,
+        result_hash=stable_hash(result_payload),
+        status=ComposerToolStatus.SUCCESS,
+        error_class=None,
+        error_message=None,
+        version_before=audit.version_before,
+        version_after=version_after,
+        started_at=audit.started_at,
+        finished_at=datetime.now(UTC),
+        latency_ms=(time.monotonic_ns() - audit.started_ns) // 1_000_000,
+        actor=audit.actor,
+        cache_hit=cache_hit,
+    )
+
+
+def _finish_arg_error(
+    audit: _DispatchAudit,
+    *,
+    error_class: str,
+    error_message: str,
+    error_payload: Mapping[str, Any] | None = None,
+) -> ComposerToolInvocation:
+    """Build an ARG_ERROR invocation record.
+
+    ``error_message`` is already-redacted at the dispatch boundary —
+    callers MUST pass safe-by-construction text (``ToolArgumentError.args[0]``,
+    a known schema-failure summary, or a class-name-only fallback).
+
+    ``error_payload``, when supplied, is canonicalized into
+    ``result_canonical`` so the audit trail records what was sent back
+    to the LLM. Pre-dispatch ARG_ERROR sites pass a structured dict
+    that mirrors the ``role=tool`` content the LLM saw.
+
+    ``version_after = None`` — ARG_ERROR means the dispatch did not
+    complete (the handler either was never reached or raised before
+    producing a result). Aligned with the standalone MCP recorder
+    (``server.py:call_tool``) so a Tier-1 verifier can apply a single
+    invariant: "version_after is None on paths that did not complete".
+    """
+    return ComposerToolInvocation(
+        tool_call_id=audit.tool_call_id,
+        tool_name=audit.tool_name,
+        arguments_canonical=audit.arguments_canonical,
+        arguments_hash=audit.arguments_hash,
+        result_canonical=canonical_json(error_payload) if error_payload is not None else None,
+        result_hash=stable_hash(error_payload) if error_payload is not None else None,
+        status=ComposerToolStatus.ARG_ERROR,
+        error_class=error_class,
+        error_message=error_message,
+        version_before=audit.version_before,
+        version_after=None,
+        started_at=audit.started_at,
+        finished_at=datetime.now(UTC),
+        latency_ms=(time.monotonic_ns() - audit.started_ns) // 1_000_000,
+        actor=audit.actor,
+    )
+
+
+def _finish_plugin_crash(
+    audit: _DispatchAudit,
+    *,
+    exc: Exception,
+) -> ComposerToolInvocation:
+    """Build a PLUGIN_CRASH invocation record.
+
+    ``error_message`` is the class name only — plugin exception
+    messages can carry secrets, DB URLs, filesystem paths. The full
+    cause chain remains on ``__cause__`` for ASGI / server-log
+    machinery; this record is for the audit trail, which is
+    operator-readable.
+    """
+    cls_name = type(exc).__name__
+    return ComposerToolInvocation(
+        tool_call_id=audit.tool_call_id,
+        tool_name=audit.tool_name,
+        arguments_canonical=audit.arguments_canonical,
+        arguments_hash=audit.arguments_hash,
+        result_canonical=None,
+        result_hash=None,
+        status=ComposerToolStatus.PLUGIN_CRASH,
+        error_class=cls_name,
+        error_message=cls_name,
+        version_before=audit.version_before,
+        version_after=None,
+        started_at=audit.started_at,
+        finished_at=datetime.now(UTC),
+        latency_ms=(time.monotonic_ns() - audit.started_ns) // 1_000_000,
+        actor=audit.actor,
+    )
+
+
 class ComposerServiceImpl:
     """LLM-driven pipeline composer with dual-counter budget and discovery caching.
 
@@ -375,6 +554,7 @@ class ComposerServiceImpl:
         last_runtime_preflight: ValidationResult | None,
         runtime_preflight_cache: _RuntimePreflightCache,
         session_scope: str,
+        tool_invocations: tuple[ComposerToolInvocation, ...] = (),
     ) -> ComposerResult:
         """Apply the deterministic final-gate check and build a ComposerResult.
 
@@ -405,7 +585,7 @@ class ComposerServiceImpl:
             )
 
         if runtime_result is None:
-            return ComposerResult(message=content, state=state)
+            return ComposerResult(message=content, state=state, tool_invocations=tool_invocations)
 
         if not runtime_result.is_valid:
             return ComposerResult(
@@ -413,9 +593,15 @@ class ComposerServiceImpl:
                 state=state,
                 runtime_preflight=runtime_result,
                 raw_assistant_content=content,
+                tool_invocations=tool_invocations,
             )
 
-        return ComposerResult(message=content, state=state, runtime_preflight=runtime_result)
+        return ComposerResult(
+            message=content,
+            state=state,
+            runtime_preflight=runtime_result,
+            tool_invocations=tool_invocations,
+        )
 
     async def explain_run_diagnostics(self, snapshot: Mapping[str, object]) -> str:
         """Return a plain-language explanation of a bounded run snapshot.
@@ -596,6 +782,14 @@ class ComposerServiceImpl:
         initial_version = state.version
         llm_messages = self._build_messages(messages, state, message)
         tools = self._get_litellm_tools()
+        # Per-call audit recorder. Surfaced on ComposerResult and on
+        # the three partial-state-carrier exceptions so the route handler
+        # always has the per-call decision trail — including failure paths.
+        recorder = BufferingRecorder()
+        # Stable actor string for every invocation in this compose() call.
+        # Falls back to "anonymous" when user_id is None (CLI/test paths);
+        # the real web composer always has user_id from auth dependency.
+        actor = f"composer-web:user-{user_id}" if user_id is not None else "composer-web:anonymous"
         await _emit_progress(
             progress,
             ComposerProgressEvent(
@@ -662,6 +856,7 @@ class ComposerServiceImpl:
                     last_runtime_preflight=last_runtime_preflight,
                     runtime_preflight_cache=runtime_preflight_cache,
                     session_scope=session_scope,
+                    tool_invocations=recorder.invocations,
                 )
 
             await _emit_progress(
@@ -703,15 +898,33 @@ class ComposerServiceImpl:
                     # Track mutation intent even when args are unparseable
                     if not is_discovery_tool(tool_name):
                         turn_has_mutation = True
+                    # ARG_ERROR pre-dispatch site (1/3): JSON-decode failure.
+                    # Open the audit envelope with the raw (pre-parse) string
+                    # so the trail records what the LLM tried, even when it
+                    # wasn't valid JSON. ``error_message`` is class-name only
+                    # because ``str(exc)`` for JSONDecodeError can echo column
+                    # offsets that reference the un-truncated raw bytes.
+                    audit = _begin_dispatch(
+                        tool_call.id,
+                        tool_name,
+                        tool_call.function.arguments,
+                        version_before=state.version,
+                        actor=actor,
+                    )
+                    error_payload = {"error": f"Invalid JSON in arguments: {exc}"}
+                    recorder.record(
+                        _finish_arg_error(
+                            audit,
+                            error_class=type(exc).__name__,
+                            error_message=type(exc).__name__,
+                            error_payload=error_payload,
+                        )
+                    )
                     llm_messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": json.dumps(
-                                {
-                                    "error": f"Invalid JSON in arguments: {exc}",
-                                }
-                            ),
+                            "content": json.dumps(error_payload),
                         }
                     )
                     all_cache_hits = False
@@ -720,17 +933,33 @@ class ComposerServiceImpl:
                 if not isinstance(decoded_arguments, dict):
                     if not is_discovery_tool(tool_name):
                         turn_has_mutation = True
+                    # ARG_ERROR pre-dispatch site (2/3): non-dict arguments.
+                    # The LLM produced valid JSON but not a JSON object. The
+                    # canonicalized record wraps the (possibly scalar/list)
+                    # value under ``_decoded_non_object`` so the audit trail
+                    # captures it deterministically.
+                    audit = _begin_dispatch(
+                        tool_call.id,
+                        tool_name,
+                        {"_decoded_non_object": decoded_arguments},
+                        version_before=state.version,
+                        actor=actor,
+                    )
+                    err_msg = f"Tool '{tool_name}' arguments must be a JSON object, got {type(decoded_arguments).__name__}."
+                    error_payload = {"error": err_msg}
+                    recorder.record(
+                        _finish_arg_error(
+                            audit,
+                            error_class="TypeError",
+                            error_message=f"non-object arguments ({type(decoded_arguments).__name__})",
+                            error_payload=error_payload,
+                        )
+                    )
                     llm_messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": json.dumps(
-                                {
-                                    "error": (
-                                        f"Tool '{tool_name}' arguments must be a JSON object, got {type(decoded_arguments).__name__}."
-                                    ),
-                                }
-                            ),
+                            "content": json.dumps(error_payload),
                         }
                     )
                     all_cache_hits = False
@@ -738,11 +967,27 @@ class ComposerServiceImpl:
 
                 arguments = cast(dict[str, Any], decoded_arguments)
 
+                # Open the audit envelope ONCE per dispatch — the cache,
+                # required-paths, ToolArgumentError, plugin-crash, and
+                # success branches below all read from this envelope so
+                # ``started_at``/``arguments_canonical``/``version_before``
+                # are consistent regardless of which branch fires.
+                audit = _begin_dispatch(
+                    tool_call.id,
+                    tool_name,
+                    arguments,
+                    version_before=state.version,
+                    actor=actor,
+                )
+
                 # Check discovery cache before executing
                 if is_cacheable_discovery_tool(tool_name):
                     cache_key = _make_cache_key(tool_name, arguments)
                     if cache_key in discovery_cache:
-                        # Cache hit — return cached result, no budget charge
+                        # Cache hit — return cached result, no budget charge.
+                        # Audit-recorded with cache_hit=True so the trail
+                        # captures every LLM decision-point, even those
+                        # served from cache without re-running the handler.
                         await _emit_progress(
                             progress,
                             ComposerProgressEvent(
@@ -752,16 +997,28 @@ class ComposerServiceImpl:
                                 likely_next="ELSPETH will continue from the cached tool result.",
                             ),
                         )
+                        cached_result = _result_from_cached_discovery_payload(
+                            state,
+                            discovery_cache[cache_key],
+                        )
+                        cached_payload = {
+                            "success": cached_result.success,
+                            "data": cached_result.data,
+                            "cache_hit": True,
+                        }
+                        recorder.record(
+                            _finish_success(
+                                audit,
+                                result_payload=cached_payload,
+                                version_after=state.version,
+                                cache_hit=True,
+                            )
+                        )
                         llm_messages.append(
                             {
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
-                                "content": _serialize_tool_result(
-                                    _result_from_cached_discovery_payload(
-                                        state,
-                                        discovery_cache[cache_key],
-                                    )
-                                ),
+                                "content": _serialize_tool_result(cached_result),
                             }
                         )
                         continue
@@ -781,15 +1038,25 @@ class ComposerServiceImpl:
                 if missing:
                     if not is_discovery_tool(tool_name):
                         turn_has_mutation = True
+                    # ARG_ERROR pre-dispatch site (3/3): schema-required
+                    # paths missing. ``missing`` is a list of dotted/indexed
+                    # path strings — operator-controlled schema field names,
+                    # safe to echo verbatim.
+                    err_msg = f"Tool '{tool_name}' missing required argument(s): {', '.join(missing)}"
+                    error_payload = {"error": err_msg}
+                    recorder.record(
+                        _finish_arg_error(
+                            audit,
+                            error_class="MissingRequiredPaths",
+                            error_message=f"missing: {', '.join(missing)}",
+                            error_payload=error_payload,
+                        )
+                    )
                     llm_messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": json.dumps(
-                                {
-                                    "error": (f"Tool '{tool_name}' missing required argument(s): {', '.join(missing)}"),
-                                }
-                            ),
+                            "content": json.dumps(error_payload),
                         }
                     )
                     continue
@@ -892,15 +1159,23 @@ class ComposerServiceImpl:
                         ),
                     )
                     safe_message = exc.args[0] if exc.args else "tool argument error"
+                    error_payload = {"error": f"Tool '{tool_name}' failed: {safe_message}"}
+                    # ARG_ERROR dispatch site (ToolArgumentError raised by
+                    # the handler itself). ``error_message=safe_message`` is
+                    # safe-by-construction per the redaction discipline above.
+                    recorder.record(
+                        _finish_arg_error(
+                            audit,
+                            error_class="ToolArgumentError",
+                            error_message=str(safe_message),
+                            error_payload=error_payload,
+                        )
+                    )
                     llm_messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": json.dumps(
-                                {
-                                    "error": f"Tool '{tool_name}' failed: {safe_message}",
-                                }
-                            ),
+                            "content": json.dumps(error_payload),
                         }
                     )
                     continue
@@ -973,10 +1248,17 @@ class ComposerServiceImpl:
                     # _call_llm_before_deadline / _build_messages surface
                     # through their own exception classes
                     # (ComposerServiceError, ComposerConvergenceError).
+                    # Record PLUGIN_CRASH BEFORE raising — the audit trail
+                    # MUST capture the bug-triggering call. The ``capture()``
+                    # helper takes the recorder buffer (including this final
+                    # crash record) so the route handler's ``_handle_plugin_crash``
+                    # gets the complete sequence.
+                    recorder.record(_finish_plugin_crash(audit, exc=tool_exc))
                     raise ComposerPluginCrashError.capture(
                         tool_exc,
                         state=state,
                         initial_version=initial_version,
+                        tool_invocations=recorder.invocations,
                     ) from tool_exc
 
                 state = result.updated_state
@@ -984,6 +1266,19 @@ class ComposerServiceImpl:
                 last_runtime_preflight = result.runtime_preflight or last_runtime_preflight
                 result_json = _serialize_tool_result(result)
                 await _emit_progress(progress, _tool_completed_progress_event(tool_name, result.success))
+
+                # SUCCESS dispatch site. ``state.version`` here reflects the
+                # post-rebind value, so version_after = state.version captures
+                # any mutation. The ToolResult itself is canonicalized via
+                # ``result.to_dict()`` rather than the LLM-facing JSON string
+                # so the audit shape is structured (not stringified).
+                recorder.record(
+                    _finish_success(
+                        audit,
+                        result_payload=result.to_dict(),
+                        version_after=state.version,
+                    )
+                )
 
                 # Cache cacheable discovery results
                 if is_cacheable_discovery_tool(tool_name):
@@ -1046,12 +1341,14 @@ class ComposerServiceImpl:
                             last_runtime_preflight=last_runtime_preflight,
                             runtime_preflight_cache=runtime_preflight_cache,
                             session_scope=session_scope,
+                            tool_invocations=recorder.invocations,
                         )
                     raise ComposerConvergenceError.capture(
                         max_turns=composition_turns_used + discovery_turns_used,
                         budget_exhausted="composition",
                         state=state,
                         initial_version=initial_version,
+                        tool_invocations=recorder.invocations,
                     )
             else:
                 discovery_turns_used += 1
@@ -1061,6 +1358,7 @@ class ComposerServiceImpl:
                         budget_exhausted="discovery",
                         state=state,
                         initial_version=initial_version,
+                        tool_invocations=recorder.invocations,
                     )
 
     def _persist_crashed_session(self, session_id: str) -> None:
@@ -1202,6 +1500,7 @@ class ComposerServiceImpl:
         state: CompositionState,
         initial_version: int,
         deadline: float,
+        recorder: BufferingRecorder | None = None,
     ) -> Any:
         """Call the LLM with a per-call timeout derived from the deadline.
 
@@ -1209,9 +1508,18 @@ class ComposerServiceImpl:
         are safe to cancel via asyncio.wait_for.  If the deadline has
         already passed or the call exceeds the remaining budget, raise
         ComposerConvergenceError with the current partial state.
+
+        ``recorder`` is the in-flight :class:`BufferingRecorder` from
+        :meth:`_compose_loop` (or ``None`` from test paths). When set,
+        timeout-based ``ComposerConvergenceError`` raises include the
+        buffer's ``tool_invocations`` so the route handler's audit
+        persistence has the per-call decision trail even when the
+        budget exhaustion was a wall-clock timeout (no LLM mutation
+        in this final call).
         """
         from litellm.exceptions import APIError as LiteLLMAPIError
 
+        invocations: tuple[ComposerToolInvocation, ...] = recorder.invocations if recorder is not None else ()
         attempt = 0
         while True:
             remaining = deadline - asyncio.get_event_loop().time()
@@ -1221,6 +1529,7 @@ class ComposerServiceImpl:
                     budget_exhausted="timeout",
                     state=state,
                     initial_version=initial_version,
+                    tool_invocations=invocations,
                 )
             try:
                 return await asyncio.wait_for(
@@ -1233,6 +1542,7 @@ class ComposerServiceImpl:
                     budget_exhausted="timeout",
                     state=state,
                     initial_version=initial_version,
+                    tool_invocations=invocations,
                 ) from None
             except LiteLLMAPIError:
                 attempt += 1

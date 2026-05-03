@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, Protocol
 
+from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.web.composer.progress import ComposerProgressSink
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.schemas import ValidationResult
@@ -47,6 +48,12 @@ class ComposerResult:
     state: CompositionState
     runtime_preflight: ValidationResult | None = None
     raw_assistant_content: str | None = None
+    # Per-tool-call audit trail produced during this compose() invocation.
+    # Populated by ComposerServiceImpl._compose_loop via a BufferingRecorder.
+    # The route handler persists each entry as a role=tool chat message row.
+    # Empty tuple when the compose loop made no tool calls (e.g. the LLM
+    # returned text-only).
+    tool_invocations: tuple[ComposerToolInvocation, ...] = ()
 
     def __post_init__(self) -> None:
         # Bidirectional iff enforcement of the field-pairing invariant
@@ -106,7 +113,7 @@ class ComposerConvergenceError(ComposerServiceError):
             route-handler branches.
     """
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"max_turns", "budget_exhausted", "partial_state"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"max_turns", "budget_exhausted", "partial_state", "tool_invocations"})
 
     def __init__(
         self,
@@ -114,6 +121,7 @@ class ComposerConvergenceError(ComposerServiceError):
         *,
         budget_exhausted: Literal["composition", "discovery", "timeout"] = "composition",
         partial_state: CompositionState | None = None,
+        tool_invocations: tuple[ComposerToolInvocation, ...] = (),
     ) -> None:
         super().__init__(
             f"Composer did not converge within {max_turns} turns "
@@ -123,6 +131,13 @@ class ComposerConvergenceError(ComposerServiceError):
         self.max_turns = max_turns
         self.budget_exhausted = budget_exhausted
         self.partial_state = partial_state
+        # Per-tool-call audit trail accumulated up to the convergence
+        # event. Includes the tool calls that did NOT cause a state
+        # mutation (cache hits, ARG_ERROR, discovery-only). The route
+        # handler persists this regardless of whether ``partial_state``
+        # is set — an audit gap on a no-state-change failure is still
+        # an audit gap.
+        self.tool_invocations = tool_invocations
 
     def __setattr__(self, name: str, value: object) -> None:
         # Guard only the declared attributes; exception-chain machinery
@@ -144,6 +159,7 @@ class ComposerConvergenceError(ComposerServiceError):
         budget_exhausted: Literal["composition", "discovery", "timeout"] = "composition",
         state: CompositionState,
         initial_version: int,
+        tool_invocations: tuple[ComposerToolInvocation, ...] = (),
     ) -> ComposerConvergenceError:
         """Build from compose-loop locals, applying the partial-state rule.
 
@@ -154,6 +170,11 @@ class ComposerConvergenceError(ComposerServiceError):
         append an identity-copy row to ``composition_states`` (which
         would pollute the audit history with zero-delta entries).
 
+        ``tool_invocations`` carries the per-tool-call audit trail. It
+        is populated unconditionally — even when ``partial_state`` is
+        None — so failed runs without state mutations still leave a
+        record of what the LLM tried.
+
         This classmethod is the SINGLE source of truth for the rule.
         Every production compose-loop raise site MUST use it so the
         invariant cannot drift between sites.
@@ -163,6 +184,7 @@ class ComposerConvergenceError(ComposerServiceError):
             max_turns,
             budget_exhausted=budget_exhausted,
             partial_state=partial,
+            tool_invocations=tool_invocations,
         )
 
 
@@ -206,18 +228,24 @@ class ComposerPluginCrashError(ComposerServiceError):
     precedes one of its ``ComposerServiceError`` subclasses.
     """
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"original_exc", "partial_state", "exc_class"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"original_exc", "partial_state", "exc_class", "tool_invocations"})
 
     def __init__(
         self,
         original_exc: Exception,
         *,
         partial_state: CompositionState | None = None,
+        tool_invocations: tuple[ComposerToolInvocation, ...] = (),
     ) -> None:
         super().__init__(f"Composer plugin crash: {type(original_exc).__name__}")
         self.original_exc = original_exc
         self.partial_state = partial_state
         self.exc_class = type(original_exc).__name__
+        # Per-tool-call audit trail accumulated up to the crashing call.
+        # The crashing call itself appears as the LAST entry with
+        # status=PLUGIN_CRASH so the audit trail records what the LLM
+        # tried that triggered the bug.
+        self.tool_invocations = tool_invocations
 
     def __setattr__(self, name: str, value: object) -> None:
         # Guard only the declared attributes; exception-chain dunders
@@ -241,6 +269,7 @@ class ComposerPluginCrashError(ComposerServiceError):
         *,
         state: CompositionState,
         initial_version: int,
+        tool_invocations: tuple[ComposerToolInvocation, ...] = (),
     ) -> ComposerPluginCrashError:
         """Build from compose-loop locals, applying the partial-state rule.
 
@@ -251,25 +280,42 @@ class ComposerPluginCrashError(ComposerServiceError):
         row to ``composition_states`` (polluting the audit history with
         zero-delta entries).
 
+        ``tool_invocations`` is the per-tool-call audit trail accumulated
+        before the crash. The crashing call itself appears as the LAST
+        entry with ``status=PLUGIN_CRASH``.
+
         This classmethod is the SINGLE source of truth for the rule.
         Every production compose-loop raise site MUST use it so the
         invariant cannot drift between sites (mirrors
         :meth:`ComposerConvergenceError.capture`).
         """
         partial = state if state.version > initial_version else None
-        return cls(original_exc, partial_state=partial)
+        return cls(original_exc, partial_state=partial, tool_invocations=tool_invocations)
 
 
 class ComposerRuntimePreflightError(ComposerServiceError):
     """Unexpected internal failure while running composer runtime preflight."""
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"original_exc", "partial_state", "exc_class"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"original_exc", "partial_state", "exc_class", "tool_invocations"})
 
-    def __init__(self, *, original_exc: Exception, partial_state: CompositionState | None) -> None:
+    def __init__(
+        self,
+        *,
+        original_exc: Exception,
+        partial_state: CompositionState | None,
+        tool_invocations: tuple[ComposerToolInvocation, ...] = (),
+    ) -> None:
         super().__init__("Composer runtime preflight failed internally.")
         self.original_exc = original_exc
         self.partial_state = partial_state
         self.exc_class = type(original_exc).__name__
+        # Per-tool-call audit trail accumulated before the runtime
+        # preflight failure. Path-1 (cached preflight raised from inside
+        # ``compose()``) populates this from the in-flight buffer at
+        # raise time. Path-2 (post-compose state-save preflight raised
+        # from ``_state_data_from_composer_state``) is populated by
+        # the caller threading ``result.tool_invocations`` through.
+        self.tool_invocations = tool_invocations
 
     def __setattr__(self, name: str, value: object) -> None:
         if name in type(self)._FROZEN_ATTRS and name in self.__dict__:
@@ -283,9 +329,10 @@ class ComposerRuntimePreflightError(ComposerServiceError):
         *,
         state: CompositionState,
         initial_version: int,
+        tool_invocations: tuple[ComposerToolInvocation, ...] = (),
     ) -> ComposerRuntimePreflightError:
         partial = state if state.version > initial_version else None
-        return cls(original_exc=exc, partial_state=partial)
+        return cls(original_exc=exc, partial_state=partial, tool_invocations=tool_invocations)
 
 
 class ToolArgumentError(Exception):

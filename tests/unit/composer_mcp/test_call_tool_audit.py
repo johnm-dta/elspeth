@@ -16,6 +16,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import BaseModel, ConfigDict
+from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.composer_mcp.server import create_server
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
@@ -33,6 +35,20 @@ class _ProbeRecorder:
 
     def resolve_session(self, session_id: str) -> None:
         return
+
+
+class _StrictPreflightProbe(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    enabled: bool
+
+
+def _preflight_validation_error() -> PydanticValidationError:
+    try:
+        _StrictPreflightProbe.model_validate({"enabled": "yes"})
+    except PydanticValidationError as exc:
+        return exc
+    raise AssertionError("strict preflight probe unexpectedly accepted a string bool")
 
 
 def _call_handler(handlers, name: str, arguments: dict):
@@ -281,6 +297,78 @@ async def test_preview_runtime_preflight_failure_records_before_transport_error(
     assert inv.tool_name == "preview_pipeline"
     assert inv.error_class == "RuntimeError"
     assert inv.error_message == "RuntimeError"
+    assert inv.version_after is None
+    assert inv.result_canonical is None
+    assert inv.result_hash is None
+
+
+@pytest.mark.asyncio
+async def test_preview_runtime_preflight_validation_error_is_plugin_crash_not_arg_error() -> None:
+    """Pydantic preflight failures are runtime failures, not LLM argument errors."""
+    catalog = create_catalog_service()
+
+    async def failing_preflight(_state) -> object:
+        raise _preflight_validation_error()
+
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(
+            catalog,
+            scratch,
+            recorder=probe,
+            runtime_preflight=failing_preflight,
+            runtime_preflight_settings_hash="settings-hash",
+        )
+        response = await _call_handler(
+            server.request_handlers,
+            "preview_pipeline",
+            {},
+        )
+
+    assert response.root.isError is True
+    assert len(probe.invocations) == 1
+    inv = probe.invocations[0]
+    assert inv.status == ComposerToolStatus.PLUGIN_CRASH
+    assert inv.tool_name == "preview_pipeline"
+    assert inv.error_class == "ValidationError"
+    assert inv.error_message == "ValidationError"
+    assert inv.version_after is None
+    assert inv.result_canonical is None
+    assert inv.result_hash is None
+
+
+@pytest.mark.asyncio
+async def test_preview_runtime_preflight_missing_settings_hash_is_plugin_crash_not_arg_error() -> None:
+    """Runtime preflight configuration errors must not be returned as ARG_ERROR."""
+    catalog = create_catalog_service()
+
+    async def passing_preflight(_state) -> object:
+        raise AssertionError("preflight must not run without a settings hash")
+
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(
+            catalog,
+            scratch,
+            recorder=probe,
+            runtime_preflight=passing_preflight,
+            runtime_preflight_settings_hash=None,
+        )
+        response = await _call_handler(
+            server.request_handlers,
+            "preview_pipeline",
+            {},
+        )
+
+    assert response.root.isError is True
+    assert len(probe.invocations) == 1
+    inv = probe.invocations[0]
+    assert inv.status == ComposerToolStatus.PLUGIN_CRASH
+    assert inv.tool_name == "preview_pipeline"
+    assert inv.error_class == "ValueError"
+    assert inv.error_message == "ValueError"
     assert inv.version_after is None
     assert inv.result_canonical is None
     assert inv.result_hash is None

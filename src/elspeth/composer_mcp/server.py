@@ -583,14 +583,50 @@ def create_server(
         # made a decision against this payload, audit primacy demands it
         # is recorded).
         error_payload_for_audit: dict[str, Any] | None = None
+
+        def _argument_error_result(exc: Exception) -> CallToolResult:
+            nonlocal status, error_class, error_message, error_payload_for_audit
+            # Bad LLM arguments (wrong keys, invalid values), or a
+            # ``CorruptSessionFileError``/``InvalidSessionIdError`` from
+            # the session subsystem. Per Python-engineer review W1:
+            # ``str(exc)`` from these classes can carry operator-readable
+            # filesystem paths via ``CorruptSessionFileError.reason``.
+            # Use class-name only (matches the PLUGIN_CRASH discipline)
+            # — we trade message detail for guaranteed leak-safety.
+            status = ComposerToolStatus.ARG_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            # Build a structured payload so the LLM and the audit row
+            # see the same string (Solution-architect H4 symmetry fix).
+            # ``exc.args[0]`` for ToolArgumentError is safe by construction;
+            # for other ValueError/KeyError/TypeError it may carry detail
+            # we do not want echoed — use class name only.
+            safe_message = error_message
+            error_payload_for_audit = {
+                "error": f"Tool error: {safe_message}",
+                "isError": True,
+            }
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"Tool error: {safe_message}")],
+                isError=True,
+            )
+
+        def _capture_plugin_crash(exc: Exception) -> None:
+            nonlocal status, error_class, error_message
+            # PLUGIN_CRASH path. CLAUDE.md "Plugin Ownership": let
+            # the exception propagate. Record the crash before re-raise
+            # so the audit trail captures the bug.
+            status = ComposerToolStatus.PLUGIN_CRASH
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+
         try:
-            try:
-                if canonicalization_failed is not None:
-                    # Pre-dispatch ARG_ERROR: malformed LLM arguments.
-                    raise ValueError(
-                        f"arguments not canonicalizable ({type(canonicalization_failed).__name__})"
-                    ) from canonicalization_failed
-                if name == "preview_pipeline" and runtime_preflight is not None:
+            if canonicalization_failed is not None:
+                # Pre-dispatch ARG_ERROR: malformed LLM arguments.
+                return _argument_error_result(ValueError(f"arguments not canonicalizable ({type(canonicalization_failed).__name__})"))
+
+            if name == "preview_pipeline" and runtime_preflight is not None:
+                try:
                     if runtime_preflight_settings_hash is None:
                         raise ValueError("runtime_preflight_settings_hash is required when runtime_preflight is configured")
                     preview_preflight = await _mcp_preview_runtime_preflight(
@@ -601,17 +637,23 @@ def create_server(
                         timeout_seconds=runtime_preflight_timeout_seconds,
                         run_preflight=runtime_preflight,
                     )
-                    _captured = preview_preflight
+                except Exception as exc:
+                    _capture_plugin_crash(exc)
+                    raise
 
-                    def _make_mcp_callback(
-                        _result: ValidationResult = _captured,
-                    ) -> RuntimePreflight:
-                        def _cb(_state: CompositionState) -> ValidationResult:
-                            return _result
+                _captured = preview_preflight
 
-                        return _cb
+                def _make_mcp_callback(
+                    _result: ValidationResult = _captured,
+                ) -> RuntimePreflight:
+                    def _cb(_state: CompositionState) -> ValidationResult:
+                        return _result
 
-                    runtime_preflight_callback = _make_mcp_callback()
+                    return _cb
+
+                runtime_preflight_callback = _make_mcp_callback()
+
+            try:
                 result_dict = _dispatch_tool(
                     name,
                     arguments,
@@ -622,37 +664,9 @@ def create_server(
                     runtime_preflight=runtime_preflight_callback,
                 )
             except (ValueError, KeyError, TypeError) as exc:
-                # Bad LLM arguments (wrong keys, invalid values), or a
-                # ``CorruptSessionFileError``/``InvalidSessionIdError`` from
-                # the session subsystem. Per Python-engineer review W1:
-                # ``str(exc)`` from these classes can carry operator-readable
-                # filesystem paths via ``CorruptSessionFileError.reason``.
-                # Use class-name only (matches the PLUGIN_CRASH discipline)
-                # — we trade message detail for guaranteed leak-safety.
-                status = ComposerToolStatus.ARG_ERROR
-                error_class = type(exc).__name__
-                error_message = type(exc).__name__
-                # Build a structured payload so the LLM and the audit row
-                # see the same string (Solution-architect H4 symmetry fix).
-                # ``exc.args[0]`` for ToolArgumentError is safe by construction;
-                # for other ValueError/KeyError/TypeError it may carry detail
-                # we do not want echoed — use class name only.
-                safe_message = error_message
-                error_payload_for_audit = {
-                    "error": f"Tool error: {safe_message}",
-                    "isError": True,
-                }
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"Tool error: {safe_message}")],
-                    isError=True,
-                )
+                return _argument_error_result(exc)
             except Exception as exc:
-                # PLUGIN_CRASH path. CLAUDE.md "Plugin Ownership": let
-                # the exception propagate. Record the crash before
-                # re-raise so the audit trail captures the bug.
-                status = ComposerToolStatus.PLUGIN_CRASH
-                error_class = type(exc).__name__
-                error_message = type(exc).__name__
+                _capture_plugin_crash(exc)
                 raise
 
             # Success path: handle state update + redaction. Wrap in its

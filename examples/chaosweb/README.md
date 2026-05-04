@@ -67,3 +67,13 @@ Or start the MCP analysis server:
 ```bash
 elspeth-mcp --database sqlite:///examples/chaosweb/runs/audit.db
 ```
+
+## Schema Notes
+
+The `web_scrape` transform uses `schema.mode: fixed` with explicit `fields` declaring
+the input fields this transform consumes (`id`, `url`, `label`). This is required so
+the static `WebScrapeOutput` contract carries those pass-through fields through to the
+downstream CSV sinks, which declare them as required input. Using `mode: observed` with
+`guaranteed_fields` does not propagate pass-through fields the same way — the
+gate→CSV-sink edge would fail Phase 2 type-validation. See the engine's contract
+propagation rules for details.

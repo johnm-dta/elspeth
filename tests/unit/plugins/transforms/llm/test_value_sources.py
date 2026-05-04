@@ -232,6 +232,48 @@ class TestBatchTransformWalkerBehaviour:
     surface for hallucinated model identifiers.
     """
 
+    def test_openrouter_llm_rejects_hallucinated_model_with_trailing_slash_base_url(self) -> None:
+        """Canonical OpenRouter URL with a trailing slash still uses the catalog.
+
+        Runtime HTTP joins strip the trailing slash before posting to
+        OpenRouter. The value-source predicate must treat that URL as the
+        same endpoint so a hallucinated model fails before the HTTP call.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.engine.orchestrator.preflight import validate_value_source_compliance
+        from elspeth.engine.orchestrator.types import ValueSourceValidationError
+        from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+        plugin = LLMTransform(
+            {
+                "provider": "openrouter",
+                "api_key": "placeholder",
+                "model": "anthropic/claude-3.5-sonnet",
+                "base_url": "https://openrouter.ai/api/v1/",
+                "template": "Hello",
+                "schema": {"mode": "observed"},
+                "required_input_fields": [],
+            }
+        )
+        wired = MagicMock()
+        wired.plugin = plugin
+        wired.settings = MagicMock()
+        wired.settings.name = "openrouter_node_1"
+        with (
+            patch(
+                "elspeth.engine.orchestrator.preflight.get_catalog_values",
+                return_value=frozenset({"openai/gpt-4o"}),
+            ),
+            pytest.raises(ValueSourceValidationError) as exc_info,
+        ):
+            validate_value_source_compliance([wired])
+
+        finding = exc_info.value.findings[0]
+        assert finding.component_id == "openrouter_node_1"
+        assert finding.field_name == "model"
+        assert "anthropic/claude-3.5-sonnet" in finding.reason
+
     def test_openrouter_batch_rejects_hallucinated_model_at_canonical_endpoint(self) -> None:
         from unittest.mock import MagicMock, patch
 
@@ -260,6 +302,40 @@ class TestBatchTransformWalkerBehaviour:
             pytest.raises(ValueSourceValidationError) as exc_info,
         ):
             validate_value_source_compliance([wired])
+        finding = exc_info.value.findings[0]
+        assert finding.component_id == "openrouter_batch_node_1"
+        assert finding.field_name == "model"
+        assert "anthropic/claude-3.5-sonnet" in finding.reason
+
+    def test_openrouter_batch_rejects_hallucinated_model_with_trailing_slash_base_url(self) -> None:
+        """Batch OpenRouter must mirror the non-batch canonical URL predicate."""
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.engine.orchestrator.preflight import validate_value_source_compliance
+        from elspeth.engine.orchestrator.types import ValueSourceValidationError
+
+        plugin = OpenRouterBatchLLMTransform(
+            {
+                "api_key": "placeholder",
+                "model": "anthropic/claude-3.5-sonnet",
+                "base_url": "https://openrouter.ai/api/v1/",
+                "template": "Hello",
+                "schema": {"mode": "observed"},
+            }
+        )
+        wired = MagicMock()
+        wired.plugin = plugin
+        wired.settings = MagicMock()
+        wired.settings.name = "openrouter_batch_node_1"
+        with (
+            patch(
+                "elspeth.engine.orchestrator.preflight.get_catalog_values",
+                return_value=frozenset({"openai/gpt-4o"}),
+            ),
+            pytest.raises(ValueSourceValidationError) as exc_info,
+        ):
+            validate_value_source_compliance([wired])
+
         finding = exc_info.value.findings[0]
         assert finding.component_id == "openrouter_batch_node_1"
         assert finding.field_name == "model"

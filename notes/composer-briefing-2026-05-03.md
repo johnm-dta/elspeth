@@ -4,7 +4,7 @@
 **Author:** John Morrissey
 **Audience:** Senior Executives, Digital Transformation Agency
 **Classification:** OFFICIAL
-**Companion artefact:** `composer-hardmode-demo-for-boss-2026-05-03.md` (the "field report" — transcript-level evidence)
+**Companion artefact:** `composer-fieldreport-2026-05-03.md` (the "field report" — transcript-level evidence)
 
 This document is designed to stand alone. It can serve as pre-demo prep, post-demo reference, or — if a live demo cannot run for any reason — as a self-contained account of what the system is, how we evaluated it, what we found, and what to do with the result.
 
@@ -245,8 +245,8 @@ This section gives you sentences you can lift verbatim, and pre-thought answers 
 ## 7. References and provenance
 
 **Companion documents.**
-- *Field report* — `notes/composer-hardmode-demo-for-boss-2026-05-03.md` — verbatim transcript-level evidence, scenario-by-scenario walkthroughs, the unsoftened version of what happened in each session.
-- *Technical eval report* — `notes/composer-hardmode-eval-2026-05-03.md` — the engineering view, methodology rationale, aggregate metrics.
+- *Field report* — `notes/composer-fieldreport-2026-05-03.md` — verbatim transcript-level evidence, scenario-by-scenario walkthroughs, the unsoftened version of what happened in each session.
+- *Technical eval report* — `notes/composer-eval-hardmode-2026-05-03.md` — the engineering view, methodology rationale, aggregate metrics.
 
 **Filed observations.**[^1]
 - `elspeth-obs-f3143acba2` — Composer-selected LLM model strings can 404 on OpenRouter; model identifier validation absent.

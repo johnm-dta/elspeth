@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, Protocol
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
+from elspeth.contracts.composer_llm_audit import ComposerLLMCall
 from elspeth.web.composer.progress import ComposerProgressSink
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.schemas import ValidationResult
@@ -54,6 +55,7 @@ class ComposerResult:
     # Empty tuple when the compose loop made no tool calls (e.g. the LLM
     # returned text-only).
     tool_invocations: tuple[ComposerToolInvocation, ...] = ()
+    llm_calls: tuple[ComposerLLMCall, ...] = ()
 
     def __post_init__(self) -> None:
         # Bidirectional iff enforcement of the field-pairing invariant
@@ -113,7 +115,7 @@ class ComposerConvergenceError(ComposerServiceError):
             route-handler branches.
     """
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"max_turns", "budget_exhausted", "partial_state", "tool_invocations"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"max_turns", "budget_exhausted", "partial_state", "tool_invocations", "llm_calls"})
 
     def __init__(
         self,
@@ -122,6 +124,7 @@ class ComposerConvergenceError(ComposerServiceError):
         budget_exhausted: Literal["composition", "discovery", "timeout"] = "composition",
         partial_state: CompositionState | None = None,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
+        llm_calls: tuple[ComposerLLMCall, ...] = (),
     ) -> None:
         super().__init__(
             f"Composer did not converge within {max_turns} turns "
@@ -138,6 +141,7 @@ class ComposerConvergenceError(ComposerServiceError):
         # is set — an audit gap on a no-state-change failure is still
         # an audit gap.
         self.tool_invocations = tool_invocations
+        self.llm_calls = llm_calls
 
     def __setattr__(self, name: str, value: object) -> None:
         # Guard only the declared attributes; exception-chain machinery
@@ -160,6 +164,7 @@ class ComposerConvergenceError(ComposerServiceError):
         state: CompositionState,
         initial_version: int,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
+        llm_calls: tuple[ComposerLLMCall, ...] = (),
     ) -> ComposerConvergenceError:
         """Build from compose-loop locals, applying the partial-state rule.
 
@@ -185,6 +190,7 @@ class ComposerConvergenceError(ComposerServiceError):
             budget_exhausted=budget_exhausted,
             partial_state=partial,
             tool_invocations=tool_invocations,
+            llm_calls=llm_calls,
         )
 
 
@@ -228,7 +234,7 @@ class ComposerPluginCrashError(ComposerServiceError):
     precedes one of its ``ComposerServiceError`` subclasses.
     """
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"original_exc", "partial_state", "exc_class", "tool_invocations"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"original_exc", "partial_state", "exc_class", "tool_invocations", "llm_calls"})
 
     def __init__(
         self,
@@ -236,6 +242,7 @@ class ComposerPluginCrashError(ComposerServiceError):
         *,
         partial_state: CompositionState | None = None,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
+        llm_calls: tuple[ComposerLLMCall, ...] = (),
     ) -> None:
         super().__init__(f"Composer plugin crash: {type(original_exc).__name__}")
         self.original_exc = original_exc
@@ -246,6 +253,7 @@ class ComposerPluginCrashError(ComposerServiceError):
         # status=PLUGIN_CRASH so the audit trail records what the LLM
         # tried that triggered the bug.
         self.tool_invocations = tool_invocations
+        self.llm_calls = llm_calls
 
     def __setattr__(self, name: str, value: object) -> None:
         # Guard only the declared attributes; exception-chain dunders
@@ -270,6 +278,7 @@ class ComposerPluginCrashError(ComposerServiceError):
         state: CompositionState,
         initial_version: int,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
+        llm_calls: tuple[ComposerLLMCall, ...] = (),
     ) -> ComposerPluginCrashError:
         """Build from compose-loop locals, applying the partial-state rule.
 
@@ -290,13 +299,13 @@ class ComposerPluginCrashError(ComposerServiceError):
         :meth:`ComposerConvergenceError.capture`).
         """
         partial = state if state.version > initial_version else None
-        return cls(original_exc, partial_state=partial, tool_invocations=tool_invocations)
+        return cls(original_exc, partial_state=partial, tool_invocations=tool_invocations, llm_calls=llm_calls)
 
 
 class ComposerRuntimePreflightError(ComposerServiceError):
     """Unexpected internal failure while running composer runtime preflight."""
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"original_exc", "partial_state", "exc_class", "tool_invocations"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"original_exc", "partial_state", "exc_class", "tool_invocations", "llm_calls"})
 
     def __init__(
         self,
@@ -304,6 +313,7 @@ class ComposerRuntimePreflightError(ComposerServiceError):
         original_exc: Exception,
         partial_state: CompositionState | None,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
+        llm_calls: tuple[ComposerLLMCall, ...] = (),
     ) -> None:
         super().__init__("Composer runtime preflight failed internally.")
         self.original_exc = original_exc
@@ -316,6 +326,7 @@ class ComposerRuntimePreflightError(ComposerServiceError):
         # from ``_state_data_from_composer_state``) is populated by
         # the caller threading ``result.tool_invocations`` through.
         self.tool_invocations = tool_invocations
+        self.llm_calls = llm_calls
 
     def __setattr__(self, name: str, value: object) -> None:
         if name in type(self)._FROZEN_ATTRS and name in self.__dict__:
@@ -330,9 +341,10 @@ class ComposerRuntimePreflightError(ComposerServiceError):
         state: CompositionState,
         initial_version: int,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
+        llm_calls: tuple[ComposerLLMCall, ...] = (),
     ) -> ComposerRuntimePreflightError:
         partial = state if state.version > initial_version else None
-        return cls(original_exc=exc, partial_state=partial, tool_invocations=tool_invocations)
+        return cls(original_exc=exc, partial_state=partial, tool_invocations=tool_invocations, llm_calls=llm_calls)
 
 
 class ToolArgumentError(Exception):

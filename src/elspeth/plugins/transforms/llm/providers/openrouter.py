@@ -17,9 +17,10 @@ import json
 import math
 from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.token_usage import TokenUsage
@@ -42,9 +43,26 @@ if TYPE_CHECKING:
     from elspeth.plugins.infrastructure.clients.base import TelemetryEmitCallback
 
 __all__ = [
+    "OPENROUTER_BASE_URL",
+    "OPENROUTER_BASE_URL_APPLIES_WHEN",
     "OpenRouterConfig",
     "OpenRouterLLMProvider",
+    "normalize_openrouter_base_url",
 ]
+
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+"""Canonical OpenRouter HTTP API base URL used by direct OpenRouter providers."""
+
+OPENROUTER_BASE_URL_APPLIES_WHEN = (("base_url", OPENROUTER_BASE_URL),)
+"""Value-source predicate for configs targeting the canonical OpenRouter API."""
+
+
+def normalize_openrouter_base_url(value: str) -> str:
+    """Normalize base URL spellings that runtime HTTP joining treats as identical."""
+    parsed = urlsplit(value)
+    path = parsed.path.rstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
 class OpenRouterConfig(LLMConfig):
@@ -67,10 +85,15 @@ class OpenRouterConfig(LLMConfig):
 
     api_key: str = Field(..., description="OpenRouter API key")
     base_url: str = Field(
-        default="https://openrouter.ai/api/v1",
+        default=OPENROUTER_BASE_URL,
         description="OpenRouter API base URL",
     )
     timeout_seconds: float = Field(default=60.0, gt=0, description="Request timeout")
+
+    @field_validator("base_url")
+    @classmethod
+    def _normalize_base_url(cls, value: str) -> str:
+        return normalize_openrouter_base_url(value)
 
     # Tier 2: Plugin-internal tracing (optional, Langfuse only)
     # Azure AI tracing is NOT supported - it auto-instruments the OpenAI SDK,
@@ -93,7 +116,7 @@ class OpenRouterConfig(LLMConfig):
         CatalogValueSource(
             field_name="model",
             catalog_id=MODEL_CATALOG_OPENROUTER,
-            applies_when=(("base_url", "https://openrouter.ai/api/v1"),),
+            applies_when=OPENROUTER_BASE_URL_APPLIES_WHEN,
         ),
     )
 
@@ -118,7 +141,7 @@ class OpenRouterLLMProvider:
         self,
         *,
         api_key: str,
-        base_url: str = "https://openrouter.ai/api/v1",
+        base_url: str = OPENROUTER_BASE_URL,
         timeout_seconds: float = 60.0,
         recorder: PluginAuditWriter,
         run_id: str,

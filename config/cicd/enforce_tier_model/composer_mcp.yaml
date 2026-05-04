@@ -13,7 +13,7 @@ per_file_rules:
   expires: null
   max_hits: 4
 allow_hits:
-- key: composer_mcp/server.py:R6:create_server:call_tool:fp=9d9606b70d4b220e
+- key: composer_mcp/server.py:R6:create_server:call_tool:fp=d82bd1508da8e964
   owner: composer-audit
   reason: Trust-boundary recovery — canonical_json/stable_hash on LLM-supplied arguments
     can raise on Tier-3 input (non-finite floats, non-serializable types). The catch
@@ -23,7 +23,7 @@ allow_hits:
     row; the original exception is re-raised as a ValueError caught by the ARG_ERROR
     handler one level out, returning a structured tool error to the LLM."
   expires: null
-- key: composer_mcp/server.py:R6:create_server:call_tool:fp=737a9b3e0da3d791
+- key: composer_mcp/server.py:R6:create_server:call_tool:fp=275288b86e214664
   owner: composer-audit
   reason: Trust-boundary recovery — canonical_json/stable_hash on the success-path result_dict
     runs in finally to compute the audit row. A non-finite float in our own dispatch output

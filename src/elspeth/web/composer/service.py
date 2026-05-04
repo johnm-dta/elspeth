@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,14 +30,19 @@ from sqlalchemy import Engine, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
+from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
+from elspeth.contracts.token_usage import TokenUsage
+from elspeth.core.canonical import stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer import yaml_generator
 from elspeth.web.composer.audit import (
     BufferingRecorder,
     begin_dispatch,
+    begin_dispatch_or_arg_error,
     dispatch_with_audit,
     finish_arg_error,
+    finish_plugin_crash,
     finish_success,
 )
 from elspeth.web.composer.progress import (
@@ -101,11 +108,101 @@ _RUNTIME_PREFLIGHT_COUNTER = metrics.get_meter(__name__).create_counter(
 )
 
 
+class _MalformedLLMResponseError(ComposerServiceError):
+    """Internal carrier for malformed provider responses after the call returned."""
+
+    def __init__(self, message: str, *, response: Any) -> None:
+        super().__init__(message)
+        self.response = response
+
+
+class _BadRequestLLMError(ComposerServiceError):
+    """Internal carrier for provider bad-request failures."""
+
+
 async def _litellm_acompletion(**kwargs: Any) -> Any:
     """Call LiteLLM lazily so app startup never imports provider machinery."""
     import litellm
 
     return await litellm.acompletion(**kwargs)
+
+
+def _token_usage_from_response(response: Any | None) -> TokenUsage:
+    """Normalize provider usage metadata without fabricating missing counts."""
+    if response is None:
+        return TokenUsage.unknown()
+    usage = getattr(response, "usage", None)
+    if isinstance(usage, Mapping):
+        usage_data = {
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+        }
+    else:
+        usage_data = {
+            "prompt_tokens": getattr(usage, "prompt_tokens", None),
+            "completion_tokens": getattr(usage, "completion_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+        }
+    return TokenUsage.from_dict(usage_data)
+
+
+def _safe_response_model(response: Any | None) -> str | None:
+    if response is None:
+        return None
+    model = getattr(response, "model", None)
+    if isinstance(model, str) and model.strip():
+        return model
+    return None
+
+
+def _safe_provider_request_id(response: Any | None) -> str | None:
+    if response is None:
+        return None
+    for attr in ("id", "request_id"):
+        value = getattr(response, attr, None)
+        if isinstance(value, str) and value and len(value) <= 256:
+            return value
+    return None
+
+
+def _build_llm_call_record(
+    *,
+    model_requested: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    status: ComposerLLMCallStatus,
+    started_at: datetime,
+    started_ns: int,
+    response: Any | None = None,
+    error_class: str | None = None,
+    error_message: str | None = None,
+) -> ComposerLLMCall:
+    usage = _token_usage_from_response(response)
+    return ComposerLLMCall(
+        model_requested=model_requested,
+        model_returned=_safe_response_model(response),
+        status=status,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        total_tokens=usage.total_tokens,
+        latency_ms=(time.monotonic_ns() - started_ns) // 1_000_000,
+        provider_request_id=_safe_provider_request_id(response),
+        messages_hash=stable_hash(messages),
+        tools_spec_hash=stable_hash(tools) if tools is not None else None,
+        started_at=started_at,
+        finished_at=datetime.now(UTC),
+        error_class=error_class,
+        error_message=error_message,
+    )
+
+
+def _attach_llm_calls(exc: BaseException, recorder: BufferingRecorder | None) -> None:
+    """Attach buffered LLM calls to exception objects that otherwise lack carriers."""
+    if recorder is None:
+        return
+    exc_with_calls = cast(Any, exc)
+    exc_with_calls.llm_calls = recorder.llm_calls
 
 
 def _collect_required_paths(
@@ -298,11 +395,13 @@ class ComposerServiceImpl:
         *,
         state: CompositionState,
         initial_version: int,
+        llm_calls: tuple[ComposerLLMCall, ...] = (),
     ) -> NoReturn:
         raise ComposerRuntimePreflightError.capture(
             failure.original_exc,
             state=state,
             initial_version=initial_version,
+            llm_calls=llm_calls,
         ) from failure.original_exc
 
     async def _cached_runtime_preflight(
@@ -313,6 +412,7 @@ class ComposerServiceImpl:
         cache: _RuntimePreflightCache,
         initial_version: int,
         session_scope: str,
+        llm_calls: tuple[ComposerLLMCall, ...] = (),
     ) -> ValidationResult:
         key = RuntimePreflightKey(
             session_scope=session_scope,
@@ -327,6 +427,7 @@ class ComposerServiceImpl:
                 cached,
                 state=state,
                 initial_version=initial_version,
+                llm_calls=llm_calls,
             )
 
         async def worker() -> ValidationResult:
@@ -348,6 +449,7 @@ class ComposerServiceImpl:
                 entry,
                 state=state,
                 initial_version=initial_version,
+                llm_calls=llm_calls,
             )
         _RUNTIME_PREFLIGHT_COUNTER.add(1, {"outcome": "success"})
         return entry
@@ -393,6 +495,7 @@ class ComposerServiceImpl:
         runtime_preflight_cache: _RuntimePreflightCache,
         session_scope: str,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
+        llm_calls: tuple[ComposerLLMCall, ...] = (),
     ) -> ComposerResult:
         """Apply the deterministic final-gate check and build a ComposerResult.
 
@@ -420,10 +523,11 @@ class ComposerServiceImpl:
                 cache=runtime_preflight_cache,
                 initial_version=initial_version,
                 session_scope=session_scope,
+                llm_calls=llm_calls,
             )
 
         if runtime_result is None:
-            return ComposerResult(message=content, state=state, tool_invocations=tool_invocations)
+            return ComposerResult(message=content, state=state, tool_invocations=tool_invocations, llm_calls=llm_calls)
 
         if not runtime_result.is_valid:
             return ComposerResult(
@@ -432,6 +536,7 @@ class ComposerServiceImpl:
                 runtime_preflight=runtime_result,
                 raw_assistant_content=content,
                 tool_invocations=tool_invocations,
+                llm_calls=llm_calls,
             )
 
         return ComposerResult(
@@ -439,6 +544,7 @@ class ComposerServiceImpl:
             state=state,
             runtime_preflight=runtime_result,
             tool_invocations=tool_invocations,
+            llm_calls=llm_calls,
         )
 
     async def explain_run_diagnostics(self, snapshot: Mapping[str, object]) -> str:
@@ -696,6 +802,7 @@ class ComposerServiceImpl:
                     runtime_preflight_cache=runtime_preflight_cache,
                     session_scope=session_scope,
                     tool_invocations=recorder.invocations,
+                    llm_calls=recorder.llm_calls,
                 )
 
             await _emit_progress(
@@ -777,20 +884,27 @@ class ComposerServiceImpl:
                     # canonicalized record wraps the (possibly scalar/list)
                     # value under ``_decoded_non_object`` so the audit trail
                     # captures it deterministically.
-                    audit = begin_dispatch(
+                    audit, canonicalization_failed = begin_dispatch_or_arg_error(
                         tool_call.id,
                         tool_name,
                         {"_decoded_non_object": decoded_arguments},
                         version_before=state.version,
                         actor=actor,
                     )
-                    err_msg = f"Tool '{tool_name}' arguments must be a JSON object, got {type(decoded_arguments).__name__}."
+                    if canonicalization_failed is None:
+                        err_msg = f"Tool '{tool_name}' arguments must be a JSON object, got {type(decoded_arguments).__name__}."
+                        error_class = "TypeError"
+                        error_message = f"non-object arguments ({type(decoded_arguments).__name__})"
+                    else:
+                        err_msg = f"Tool '{tool_name}' arguments are not canonical JSON ({type(canonicalization_failed).__name__})."
+                        error_class = type(canonicalization_failed).__name__
+                        error_message = type(canonicalization_failed).__name__
                     error_payload = {"error": err_msg}
                     recorder.record(
                         finish_arg_error(
                             audit,
-                            error_class="TypeError",
-                            error_message=f"non-object arguments ({type(decoded_arguments).__name__})",
+                            error_class=error_class,
+                            error_message=error_message,
                             error_payload=error_payload,
                         )
                     )
@@ -811,13 +925,36 @@ class ComposerServiceImpl:
                 # success branches below all read from this envelope so
                 # ``started_at``/``arguments_canonical``/``version_before``
                 # are consistent regardless of which branch fires.
-                audit = begin_dispatch(
+                audit, canonicalization_failed = begin_dispatch_or_arg_error(
                     tool_call.id,
                     tool_name,
                     arguments,
                     version_before=state.version,
                     actor=actor,
                 )
+                if canonicalization_failed is not None:
+                    if not is_discovery_tool(tool_name):
+                        turn_has_mutation = True
+                    error_payload = {
+                        "error": f"Tool '{tool_name}' arguments are not canonical JSON ({type(canonicalization_failed).__name__})."
+                    }
+                    recorder.record(
+                        finish_arg_error(
+                            audit,
+                            error_class=type(canonicalization_failed).__name__,
+                            error_message=type(canonicalization_failed).__name__,
+                            error_payload=error_payload,
+                        )
+                    )
+                    llm_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps(error_payload),
+                        }
+                    )
+                    all_cache_hits = False
+                    continue
 
                 # Check discovery cache before executing
                 if is_cacheable_discovery_tool(tool_name):
@@ -908,13 +1045,24 @@ class ComposerServiceImpl:
                 # before it enters the worker thread pool.
                 runtime_preflight_callback: RuntimePreflight | None = None
                 if tool_name == "preview_pipeline":
-                    preview_preflight = await self._cached_runtime_preflight(
-                        state,
-                        user_id=user_id,
-                        cache=runtime_preflight_cache,
-                        initial_version=initial_version,
-                        session_scope=session_scope,
-                    )
+                    try:
+                        preview_preflight = await self._cached_runtime_preflight(
+                            state,
+                            user_id=user_id,
+                            cache=runtime_preflight_cache,
+                            initial_version=initial_version,
+                            session_scope=session_scope,
+                            llm_calls=recorder.llm_calls,
+                        )
+                    except ComposerRuntimePreflightError as preflight_exc:
+                        recorder.record(finish_plugin_crash(audit, exc=preflight_exc.original_exc))
+                        raise ComposerRuntimePreflightError.capture(
+                            preflight_exc.original_exc,
+                            state=state,
+                            initial_version=initial_version,
+                            tool_invocations=recorder.invocations,
+                            llm_calls=recorder.llm_calls,
+                        ) from preflight_exc.original_exc
 
                     def _make_preflight_callback(
                         _result: ValidationResult = preview_preflight,
@@ -1149,6 +1297,7 @@ class ComposerServiceImpl:
                         state=state,
                         initial_version=initial_version,
                         tool_invocations=recorder.invocations,
+                        llm_calls=recorder.llm_calls,
                     ) from tool_exc
 
                 # SUCCESS path — the helper already recorded
@@ -1227,6 +1376,7 @@ class ComposerServiceImpl:
                             runtime_preflight_cache=runtime_preflight_cache,
                             session_scope=session_scope,
                             tool_invocations=recorder.invocations,
+                            llm_calls=recorder.llm_calls,
                         )
                     raise ComposerConvergenceError.capture(
                         max_turns=composition_turns_used + discovery_turns_used,
@@ -1234,6 +1384,7 @@ class ComposerServiceImpl:
                         state=state,
                         initial_version=initial_version,
                         tool_invocations=recorder.invocations,
+                        llm_calls=recorder.llm_calls,
                     )
             else:
                 discovery_turns_used += 1
@@ -1244,6 +1395,7 @@ class ComposerServiceImpl:
                         state=state,
                         initial_version=initial_version,
                         tool_invocations=recorder.invocations,
+                        llm_calls=recorder.llm_calls,
                     )
 
     def _persist_crashed_session(self, session_id: str) -> None:
@@ -1352,12 +1504,12 @@ class ComposerServiceImpl:
                 tools=tools,
             )
         except LiteLLMBadRequestError as exc:
-            raise ComposerServiceError(f"LLM request rejected ({type(exc).__name__})") from exc
+            raise _BadRequestLLMError(f"LLM request rejected ({type(exc).__name__})") from exc
         # Tier 3 boundary: LiteLLM can return empty choices on content-filter,
         # rate-limit, or malformed upstream responses.  Validate before callers
         # index into choices[0].
         if not response.choices:
-            raise ComposerServiceError("LLM returned empty choices array — cannot continue composition")
+            raise _MalformedLLMResponseError("LLM returned empty choices array — cannot continue composition", response=response)
         return response
 
     async def _call_text_llm(
@@ -1373,10 +1525,91 @@ class ComposerServiceImpl:
                 messages=messages,
             )
         except LiteLLMBadRequestError as exc:
-            raise ComposerServiceError(f"LLM request rejected ({type(exc).__name__})") from exc
+            raise _BadRequestLLMError(f"LLM request rejected ({type(exc).__name__})") from exc
         if not response.choices:
-            raise ComposerServiceError("LLM returned empty choices array — cannot explain run diagnostics")
+            raise _MalformedLLMResponseError("LLM returned empty choices array — cannot explain run diagnostics", response=response)
         return response
+
+    async def _call_llm_with_audit(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        timeout: float,
+        recorder: BufferingRecorder | None,
+    ) -> Any:
+        """Call the composer LLM once and record an audit sidecar."""
+        from litellm.exceptions import APIError as LiteLLMAPIError
+        from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+
+        started_at = datetime.now(UTC)
+        started_ns = time.monotonic_ns()
+        status: ComposerLLMCallStatus | None = None
+        response: Any | None = None
+        error_class: str | None = None
+        error_message: str | None = None
+        try:
+            response = await asyncio.wait_for(
+                self._call_llm(messages, tools),
+                timeout=timeout,
+            )
+            status = ComposerLLMCallStatus.SUCCESS
+            return response
+        except TimeoutError:
+            status = ComposerLLMCallStatus.TIMEOUT
+            error_class = "TimeoutError"
+            error_message = "TimeoutError"
+            raise
+        except asyncio.CancelledError as exc:
+            status = ComposerLLMCallStatus.CANCELLED
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            _attach_llm_calls(exc, recorder)
+            raise
+        except LiteLLMAuthError as exc:
+            status = ComposerLLMCallStatus.AUTH_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            _attach_llm_calls(exc, recorder)
+            raise
+        except LiteLLMAPIError as exc:
+            status = ComposerLLMCallStatus.API_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            _attach_llm_calls(exc, recorder)
+            raise
+        except _MalformedLLMResponseError as exc:
+            status = ComposerLLMCallStatus.MALFORMED_RESPONSE
+            response = exc.response
+            error_class = type(exc).__name__
+            error_message = "malformed_response"
+            _attach_llm_calls(exc, recorder)
+            raise
+        except _BadRequestLLMError as exc:
+            cause = exc.__cause__
+            status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
+            error_class = type(cause).__name__ if cause is not None else type(exc).__name__
+            error_message = error_class
+            _attach_llm_calls(exc, recorder)
+            raise
+        finally:
+            if recorder is not None and status is not None:
+                recorder.record_llm_call(
+                    _build_llm_call_record(
+                        model_requested=self._model,
+                        messages=messages,
+                        tools=tools,
+                        status=status,
+                        started_at=started_at,
+                        started_ns=started_ns,
+                        response=response,
+                        error_class=error_class,
+                        error_message=error_message,
+                    )
+                )
+                current_exc = sys.exc_info()[1]
+                if current_exc is not None:
+                    _attach_llm_calls(current_exc, recorder)
 
     async def _call_llm_before_deadline(
         self,
@@ -1403,9 +1636,13 @@ class ComposerServiceImpl:
         in this final call).
         """
         from litellm.exceptions import APIError as LiteLLMAPIError
+        from litellm.exceptions import AuthenticationError as LiteLLMAuthError
 
         def _captured_invocations() -> tuple[ComposerToolInvocation, ...]:
             return recorder.invocations if recorder is not None else ()
+
+        def _captured_llm_calls() -> tuple[ComposerLLMCall, ...]:
+            return recorder.llm_calls if recorder is not None else ()
 
         attempt = 0
         while True:
@@ -1417,11 +1654,14 @@ class ComposerServiceImpl:
                     state=state,
                     initial_version=initial_version,
                     tool_invocations=_captured_invocations(),
+                    llm_calls=_captured_llm_calls(),
                 )
             try:
-                return await asyncio.wait_for(
-                    self._call_llm(messages, tools),
+                return await self._call_llm_with_audit(
+                    messages,
+                    tools,
                     timeout=remaining,
+                    recorder=recorder,
                 )
             except TimeoutError:
                 raise ComposerConvergenceError.capture(
@@ -1430,7 +1670,10 @@ class ComposerServiceImpl:
                     state=state,
                     initial_version=initial_version,
                     tool_invocations=_captured_invocations(),
+                    llm_calls=_captured_llm_calls(),
                 ) from None
+            except LiteLLMAuthError:
+                raise
             except LiteLLMAPIError:
                 attempt += 1
                 if attempt >= _LLM_API_MAX_ATTEMPTS:

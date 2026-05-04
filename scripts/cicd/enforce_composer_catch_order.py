@@ -75,14 +75,15 @@ RULES = {
     }
 }
 
-# Declared hierarchy. The test file cross-checks this against the real
-# MRO of ``elspeth.web.composer.protocol`` so drift (e.g. a new
-# ComposerServiceError subclass) fails CI rather than silently bypassing
-# the gate.
+# Declared hierarchy. The test file imports the known composer modules that
+# define ``ComposerServiceError`` subclasses and cross-checks this map against
+# the real MRO so drift fails CI rather than silently bypassing the gate.
 _SUBCLASS_TO_SUPERCLASSES: dict[str, frozenset[str]] = {
     "ComposerPluginCrashError": frozenset({"ComposerServiceError"}),
     "ComposerConvergenceError": frozenset({"ComposerServiceError"}),
     "ComposerRuntimePreflightError": frozenset({"ComposerServiceError"}),
+    "_BadRequestLLMError": frozenset({"ComposerServiceError"}),
+    "_MalformedLLMResponseError": frozenset({"ComposerServiceError"}),
 }
 
 # Canonical file this gate protects — fail-closed if it is missing under

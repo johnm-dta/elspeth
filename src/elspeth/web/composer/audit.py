@@ -53,6 +53,7 @@ from elspeth.contracts.composer_audit import (
     ComposerToolRecorder,
     ComposerToolStatus,
 )
+from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallRecorder
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.composer.protocol import ToolArgumentError
 
@@ -62,21 +63,22 @@ __all__ = [
     "DispatchOutcome",
     "audit_envelope",
     "begin_dispatch",
+    "begin_dispatch_or_arg_error",
     "dispatch_with_audit",
     "finish_arg_error",
     "finish_plugin_crash",
     "finish_success",
+    "llm_call_audit_envelope",
 ]
 
 
-class BufferingRecorder(ComposerToolRecorder):
-    """Append-only in-memory buffer of :class:`ComposerToolInvocation`.
+class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder):
+    """Append-only in-memory buffer for composer audit records.
 
     Used inside :meth:`ComposerServiceImpl._compose_loop`. The buffer is
-    surfaced on :class:`ComposerResult` and on the three partial-state-
-    carrier exceptions so the route handler always has the per-call
-    audit trail — including on convergence/plugin-crash/runtime-preflight
-    failure paths where the LLM never produced a final assistant text.
+    surfaced on :class:`ComposerResult` and on the partial-state-carrier
+    exceptions so the route handler always has the per-tool-call decision
+    trail and per-LLM-call operational trail.
 
     Threading: ``record()`` is safe to call from any thread. The compose
     loop dispatches synchronously to a worker via ``run_sync_in_worker``
@@ -86,17 +88,28 @@ class BufferingRecorder(ComposerToolRecorder):
 
     def __init__(self) -> None:
         self._invocations: list[ComposerToolInvocation] = []
+        self._llm_calls: list[ComposerLLMCall] = []
         self._lock = threading.Lock()
 
     def record(self, invocation: ComposerToolInvocation) -> None:
         with self._lock:
             self._invocations.append(invocation)
 
+    def record_llm_call(self, call: ComposerLLMCall) -> None:
+        with self._lock:
+            self._llm_calls.append(call)
+
     @property
     def invocations(self) -> tuple[ComposerToolInvocation, ...]:
         """Snapshot the current buffer as an immutable tuple."""
         with self._lock:
             return tuple(self._invocations)
+
+    @property
+    def llm_calls(self) -> tuple[ComposerLLMCall, ...]:
+        """Snapshot the current LLM-call buffer as an immutable tuple."""
+        with self._lock:
+            return tuple(self._llm_calls)
 
     def resolve_session(self, session_id: str) -> None:
         """Protocol no-op — the in-memory buffer has nothing to flush.
@@ -130,6 +143,11 @@ def audit_envelope(invocation: ComposerToolInvocation) -> dict[str, object]:
     tampering.
     """
     return {"_kind": "audit", "invocation": invocation.to_dict()}
+
+
+def llm_call_audit_envelope(call: ComposerLLMCall) -> dict[str, object]:
+    """Wrap an LLM call in the canonical ``tool_calls`` JSON envelope."""
+    return {"_kind": "llm_call_audit", "call": call.to_dict()}
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +223,51 @@ def begin_dispatch(
         started_ns=time.monotonic_ns(),
         actor=actor,
     )
+
+
+def begin_dispatch_or_arg_error(
+    tool_call_id: str,
+    tool_name: str,
+    arguments: Mapping[str, Any] | str,
+    *,
+    version_before: int,
+    actor: str,
+) -> tuple[DispatchAudit, BaseException | None]:
+    """Open an audit envelope without letting malformed args bypass audit.
+
+    ``json.loads`` accepts non-standard constants like ``NaN`` and
+    ``Infinity``. The canonicalizer rejects those values, which is
+    correct, but that rejection can happen before the compose loop has an
+    audit row. This helper mirrors the standalone MCP path: store a
+    canonical sentinel for the arguments, return the canonicalization
+    exception to the caller, and let the caller record ARG_ERROR.
+    """
+    try:
+        return (
+            begin_dispatch(
+                tool_call_id,
+                tool_name,
+                arguments,
+                version_before=version_before,
+                actor=actor,
+            ),
+            None,
+        )
+    except (ValueError, TypeError) as exc:
+        sentinel = {"_canonicalization_error": type(exc).__name__}
+        return (
+            DispatchAudit(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                arguments_canonical=canonical_json(sentinel),
+                arguments_hash=stable_hash(sentinel),
+                version_before=version_before,
+                started_at=datetime.now(UTC),
+                started_ns=time.monotonic_ns(),
+                actor=actor,
+            ),
+            exc,
+        )
 
 
 def finish_success(

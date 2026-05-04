@@ -25,7 +25,7 @@ from typing import Any, ClassVar, Literal
 
 import httpx
 import structlog
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from elspeth.contracts import CallStatus, CallType, Determinism, TransformResult, TransformSuccessReason
 from elspeth.contracts.audit_protocols import PluginAuditWriter
@@ -53,6 +53,11 @@ from elspeth.plugins.transforms.llm import (
 from elspeth.plugins.transforms.llm.base import LLMConfig
 from elspeth.plugins.transforms.llm.langfuse import create_langfuse_tracer
 from elspeth.plugins.transforms.llm.model_catalog import MODEL_CATALOG_OPENROUTER
+from elspeth.plugins.transforms.llm.providers.openrouter import (
+    OPENROUTER_BASE_URL,
+    OPENROUTER_BASE_URL_APPLIES_WHEN,
+    normalize_openrouter_base_url,
+)
 from elspeth.plugins.transforms.llm.templates import PromptTemplate
 from elspeth.plugins.transforms.llm.tracing import (
     TracingConfig,
@@ -128,10 +133,15 @@ class OpenRouterBatchConfig(LLMConfig):
 
     api_key: str = Field(..., description="OpenRouter API key")
     base_url: str = Field(
-        default="https://openrouter.ai/api/v1",
+        default=OPENROUTER_BASE_URL,
         description="OpenRouter API base URL",
     )
     timeout_seconds: float = Field(default=60.0, gt=0, description="Request timeout")
+
+    @field_validator("base_url")
+    @classmethod
+    def _normalize_base_url(cls, value: str) -> str:
+        return normalize_openrouter_base_url(value)
 
     # Tier 2: Plugin-internal tracing (optional, Langfuse only)
     # Azure AI tracing is NOT supported - it auto-instruments the OpenAI SDK,
@@ -155,7 +165,7 @@ class OpenRouterBatchConfig(LLMConfig):
         CatalogValueSource(
             field_name="model",
             catalog_id=MODEL_CATALOG_OPENROUTER,
-            applies_when=(("base_url", "https://openrouter.ai/api/v1"),),
+            applies_when=OPENROUTER_BASE_URL_APPLIES_WHEN,
         ),
     )
 
@@ -196,7 +206,7 @@ class OpenRouterBatchLLMTransform(BaseTransform):
 
     name = "openrouter_batch_llm"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:43760e473c36eebc"
+    source_file_hash: str | None = "sha256:0139902ccd1a63ad"
     is_batch_aware = True  # Engine passes list[dict] for batch processing
     config_model = OpenRouterBatchConfig
 

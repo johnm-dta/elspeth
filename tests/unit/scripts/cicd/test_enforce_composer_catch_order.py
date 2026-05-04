@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from importlib import import_module
 from pathlib import Path
 
 
@@ -383,6 +384,19 @@ class TestHierarchyConsistency:
     """
 
     @staticmethod
+    def _import_known_exception_modules() -> None:
+        """Load modules that define ComposerServiceError subclasses.
+
+        ``__subclasses__()`` only sees classes whose defining modules have
+        already been imported. The full suite imports
+        ``elspeth.web.composer.service`` before this test, but the isolated
+        test module may not. Importing known definition modules here makes
+        the hierarchy check deterministic instead of order-dependent.
+        """
+        import_module("elspeth.web.composer.protocol")
+        import_module("elspeth.web.composer.service")
+
+    @staticmethod
     def _all_subclasses(cls: type) -> set[type]:
         """Transitive closure of ``cls.__subclasses__()``.
 
@@ -405,6 +419,7 @@ class TestHierarchyConsistency:
 
         from elspeth.web.composer.protocol import ComposerServiceError
 
+        self._import_known_exception_modules()
         real_subclasses = {cls.__name__ for cls in self._all_subclasses(ComposerServiceError)}
         declared_subclasses = set(_SUBCLASS_TO_SUPERCLASSES.keys())
         assert real_subclasses == declared_subclasses, (
@@ -446,6 +461,7 @@ class TestHierarchyConsistency:
 
         from elspeth.web.composer.protocol import ComposerServiceError
 
+        self._import_known_exception_modules()
         composer_family: set[type] = {ComposerServiceError} | self._all_subclasses(ComposerServiceError)
         name_to_cls = {cls.__name__: cls for cls in composer_family}
 

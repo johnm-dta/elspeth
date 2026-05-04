@@ -10,6 +10,7 @@ are the canary that catches the regression.
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -142,6 +143,7 @@ async def test_argument_canonicalization_failure_records_arg_error() -> None:
     assert inv.error_class == "ValueError"
     assert inv.error_message == "ValueError"
     assert inv.version_after is None
+    assert hashlib.sha256(inv.arguments_canonical.encode("utf-8")).hexdigest() == inv.arguments_hash
     assert inv.result_canonical is not None
 
 
@@ -238,6 +240,48 @@ async def test_plugin_crash_path_records_before_reraise() -> None:
     # No result_canonical or result_hash on the crash path — the LLM
     # never saw a tool result, so the audit row faithfully records
     # "no result was produced".
+    assert inv.result_canonical is None
+    assert inv.result_hash is None
+
+
+@pytest.mark.asyncio
+async def test_preview_runtime_preflight_failure_records_before_transport_error() -> None:
+    """preview_pipeline runtime preflight failure must land an audit row.
+
+    Runtime preflight runs before the normal preview tool handler. A
+    failure there is still caused by this tool call, so the standalone
+    MCP audit sidecar must record PLUGIN_CRASH before the MCP transport
+    frames the exception as an error result.
+    """
+    catalog = create_catalog_service()
+
+    async def failing_preflight(_state) -> object:
+        raise RuntimeError("synthetic runtime preflight bug")
+
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(
+            catalog,
+            scratch,
+            recorder=probe,
+            runtime_preflight=failing_preflight,
+            runtime_preflight_settings_hash="settings-hash",
+        )
+        response = await _call_handler(
+            server.request_handlers,
+            "preview_pipeline",
+            {},
+        )
+
+    assert response.root.isError is True
+    assert len(probe.invocations) == 1
+    inv = probe.invocations[0]
+    assert inv.status == ComposerToolStatus.PLUGIN_CRASH
+    assert inv.tool_name == "preview_pipeline"
+    assert inv.error_class == "RuntimeError"
+    assert inv.error_message == "RuntimeError"
+    assert inv.version_after is None
     assert inv.result_canonical is None
     assert inv.result_hash is None
 

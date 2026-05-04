@@ -20,6 +20,7 @@ from opentelemetry import metrics
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+from elspeth.contracts.composer_llm_audit import ComposerLLMCall
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
@@ -31,7 +32,7 @@ from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobQuotaExceededError, BlobServiceProtocol
 from elspeth.web.composer import yaml_generator
-from elspeth.web.composer.audit import audit_envelope
+from elspeth.web.composer.audit import audit_envelope, llm_call_audit_envelope
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
     ComposerProgressRegistry,
@@ -552,7 +553,19 @@ def _composer_history_content(message: ChatMessageRecord) -> str:
 
 def _is_composer_audit_tool_message(message: ChatMessageRecord) -> bool:
     """Return true when a persisted chat row is an audit-only composer tool row."""
-    return message.role == "tool"
+    if message.role != "tool":
+        return False
+    if message.tool_calls is None:
+        return True
+    for tool_call in message.tool_calls:
+        if "_kind" not in tool_call:
+            continue
+        kind = tool_call["_kind"]
+        if kind in {"audit", "llm_call_audit"}:
+            return True
+        if kind is not None:
+            return True
+    return True
 
 
 def _composer_conversation_messages(messages: Sequence[ChatMessageRecord]) -> list[ChatMessageRecord]:
@@ -708,6 +721,51 @@ async def _persist_tool_invocations(
             # event counts to the assistant's reported tool_invocations.
 
 
+def _llm_calls_from_exception(exc: BaseException) -> tuple[ComposerLLMCall, ...]:
+    exc_dict = exc.__dict__
+    if "llm_calls" not in exc_dict:
+        return ()
+    calls = exc_dict["llm_calls"]
+    if type(calls) is not tuple:
+        return ()
+    return cast(tuple[ComposerLLMCall, ...], calls)
+
+
+async def _persist_llm_calls(
+    service: SessionServiceProtocol,
+    session_id: UUID,
+    llm_calls: tuple[ComposerLLMCall, ...],
+    composition_state_id: UUID | None,
+) -> None:
+    """Persist per-LLM-call audit records as audit-only ``role=tool`` rows."""
+    for call in llm_calls:
+        content = json.dumps(
+            {
+                "_kind": "llm_call_audit",
+                "status": call.status.value,
+                "model_requested": call.model_requested,
+                "model_returned": call.model_returned,
+                "total_tokens": call.total_tokens,
+            }
+        )
+        try:
+            await service.add_message(
+                session_id,
+                "tool",
+                content,
+                tool_calls=[llm_call_audit_envelope(call)],
+                composition_state_id=composition_state_id,
+            )
+        except SQLAlchemyError as save_err:
+            slog.error(
+                "composer_llm_call_persist_failed",
+                session_id=str(session_id),
+                model_requested=call.model_requested,
+                status=call.status.value,
+                exc_class=type(save_err).__name__,
+            )
+
+
 async def _state_data_from_composer_state(
     state: CompositionState,
     *,
@@ -828,6 +886,7 @@ async def _handle_convergence_error(
     session_id: UUID,
     user_id: str,
     log_prefix: str,
+    llm_composition_state_id: UUID | None,
     settings: Any,
     secret_service: Any | None,
 ) -> dict[str, object]:
@@ -949,6 +1008,13 @@ async def _handle_convergence_error(
             exc.tool_invocations,
             persisted_state_id,
         )
+    if exc.llm_calls:
+        await _persist_llm_calls(
+            service,
+            session_id,
+            exc.llm_calls,
+            llm_composition_state_id,
+        )
     return response_body
 
 
@@ -958,6 +1024,7 @@ async def _handle_plugin_crash(
     session_id: UUID,
     user_id: str,
     log_prefix: str,
+    llm_composition_state_id: UUID | None,
     settings: Any,
     secret_service: Any | None,
 ) -> dict[str, object]:
@@ -1085,6 +1152,13 @@ async def _handle_plugin_crash(
             exc.tool_invocations,
             persisted_state_id_pc,
         )
+    if exc.llm_calls:
+        await _persist_llm_calls(
+            service,
+            session_id,
+            exc.llm_calls,
+            llm_composition_state_id,
+        )
     return response_body
 
 
@@ -1094,6 +1168,7 @@ async def _handle_runtime_preflight_failure(
     session_id: UUID,
     user_id: str,
     log_prefix: str,
+    llm_composition_state_id: UUID | None,
     settings: Any,
     secret_service: Any | None,
 ) -> dict[str, object]:
@@ -1282,17 +1357,24 @@ async def _handle_runtime_preflight_failure(
             exception_class=exc.exc_class,
         )
 
-    # Persist the per-tool-call audit trail. Path-1 raises before any
-    # tool call ran (cached preflight), so tool_invocations is empty there;
-    # Path-2 raises after the compose loop returned, so tool_invocations
-    # carries the entire turn. The unconditional call handles both via
-    # the empty-tuple early-return inside _persist_tool_invocations.
+    # Persist the per-tool-call audit trail. Preview-path runtime
+    # preflight failures now record the preview_pipeline tool invocation
+    # before raising; other runtime-preflight failures may still carry an
+    # empty tuple. The unconditional call handles both via the empty-tuple
+    # early-return inside _persist_tool_invocations.
     if exc.tool_invocations:
         await _persist_tool_invocations(
             service,
             session_id,
             exc.tool_invocations,
             persisted_state_id_rpf,
+        )
+    if exc.llm_calls:
+        await _persist_llm_calls(
+            service,
+            session_id,
+            exc.llm_calls,
+            llm_composition_state_id,
         )
     return response_body
 
@@ -1592,6 +1674,7 @@ def create_session_router() -> APIRouter:
                         session.id,
                         str(user.user_id),
                         "convergence",
+                        pre_send_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
                     )
@@ -1630,6 +1713,9 @@ def create_session_router() -> APIRouter:
                             reason="provider_auth_failed",
                         ),
                     )
+                    llm_calls = _llm_calls_from_exception(exc)
+                    if llm_calls:
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
                     raise HTTPException(
                         status_code=502,
                         detail=_litellm_error_detail(
@@ -1662,6 +1748,9 @@ def create_session_router() -> APIRouter:
                             reason="provider_unavailable",
                         ),
                     )
+                    llm_calls = _llm_calls_from_exception(exc)
+                    if llm_calls:
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
                     raise HTTPException(
                         status_code=502,
                         detail=_litellm_error_detail(
@@ -1704,6 +1793,7 @@ def create_session_router() -> APIRouter:
                         session.id,
                         str(user.user_id),
                         "compose",
+                        pre_send_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
                     )
@@ -1771,6 +1861,7 @@ def create_session_router() -> APIRouter:
                         session.id,
                         str(user.user_id),
                         "compose",
+                        pre_send_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
                     )
@@ -1789,6 +1880,9 @@ def create_session_router() -> APIRouter:
                             reason="service_setup_failed",
                         ),
                     )
+                    llm_calls = _llm_calls_from_exception(exc)
+                    if llm_calls:
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
                     raise HTTPException(
                         status_code=502,
                         detail={"error_type": "composer_error", "detail": str(exc)},
@@ -1833,6 +1927,12 @@ def create_session_router() -> APIRouter:
                             telemetry_source="compose",
                         )
                     except ComposerRuntimePreflightError as rpf_exc:
+                        rpf_exc = ComposerRuntimePreflightError(
+                            original_exc=rpf_exc.original_exc,
+                            partial_state=rpf_exc.partial_state,
+                            tool_invocations=result.tool_invocations,
+                            llm_calls=result.llm_calls,
+                        )
                         # UX-distinct from path 1 above: the LLM call already
                         # succeeded, so the failure messaging frames this as
                         # a validation/persistence-stage failure rather than
@@ -1856,6 +1956,7 @@ def create_session_router() -> APIRouter:
                             session.id,
                             str(user.user_id),
                             "compose",
+                            pre_send_state_id,
                             settings=settings,
                             secret_service=request.app.state.scoped_secret_resolver,
                         )
@@ -1898,6 +1999,13 @@ def create_session_router() -> APIRouter:
                         result.tool_invocations,
                         post_compose_state_id,
                     )
+                if result.llm_calls:
+                    await _persist_llm_calls(
+                        service,
+                        session.id,
+                        result.llm_calls,
+                        pre_send_state_id,
+                    )
                 await _publish_progress(
                     progress_registry,
                     session_id=str(session.id),
@@ -1929,7 +2037,7 @@ def create_session_router() -> APIRouter:
                 )
                 terminal_status = "completed"
                 return response
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
                 # Client-disconnect or operator cancel during the
                 # composer-engaged window. Publish a discriminated
                 # ``cancelled`` snapshot under ``asyncio.shield`` so the
@@ -1939,6 +2047,10 @@ def create_session_router() -> APIRouter:
                 # asyncio.shield`` re-raises on the cancelling task — the
                 # shielded coroutine itself runs to completion in the
                 # background.
+                llm_calls = _llm_calls_from_exception(exc)
+                if llm_calls:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.shield(_persist_llm_calls(service, session.id, llm_calls, pre_send_state_id))
                 with contextlib.suppress(asyncio.CancelledError):
                     # The shielded publish runs to completion in the
                     # background; the outer await re-raises CancelledError
@@ -2076,6 +2188,7 @@ def create_session_router() -> APIRouter:
                         session.id,
                         str(user.user_id),
                         "recompose_convergence",
+                        pre_send_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
                     )
@@ -2105,6 +2218,9 @@ def create_session_router() -> APIRouter:
                             reason="provider_auth_failed",
                         ),
                     )
+                    llm_calls = _llm_calls_from_exception(exc)
+                    if llm_calls:
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
                     raise HTTPException(
                         status_code=502,
                         detail=_litellm_error_detail(
@@ -2132,6 +2248,9 @@ def create_session_router() -> APIRouter:
                             reason="provider_unavailable",
                         ),
                     )
+                    llm_calls = _llm_calls_from_exception(exc)
+                    if llm_calls:
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
                     raise HTTPException(
                         status_code=502,
                         detail=_litellm_error_detail(
@@ -2151,6 +2270,7 @@ def create_session_router() -> APIRouter:
                         session.id,
                         str(user.user_id),
                         "recompose",
+                        pre_send_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
                     )
@@ -2200,6 +2320,7 @@ def create_session_router() -> APIRouter:
                         session.id,
                         str(user.user_id),
                         "recompose",
+                        pre_send_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
                     )
@@ -2218,6 +2339,9 @@ def create_session_router() -> APIRouter:
                             reason="service_setup_failed",
                         ),
                     )
+                    llm_calls = _llm_calls_from_exception(exc)
+                    if llm_calls:
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
                     raise HTTPException(
                         status_code=502,
                         detail={"error_type": "composer_error", "detail": str(exc)},
@@ -2254,6 +2378,12 @@ def create_session_router() -> APIRouter:
                             telemetry_source="recompose",
                         )
                     except ComposerRuntimePreflightError as rpf_exc:
+                        rpf_exc = ComposerRuntimePreflightError(
+                            original_exc=rpf_exc.original_exc,
+                            partial_state=rpf_exc.partial_state,
+                            tool_invocations=result.tool_invocations,
+                            llm_calls=result.llm_calls,
+                        )
                         await _publish_progress(
                             progress_registry,
                             session_id=str(session.id),
@@ -2273,6 +2403,7 @@ def create_session_router() -> APIRouter:
                             session.id,
                             str(user.user_id),
                             "recompose",
+                            pre_send_state_id,
                             settings=settings,
                             secret_service=request.app.state.scoped_secret_resolver,
                         )
@@ -2312,6 +2443,13 @@ def create_session_router() -> APIRouter:
                         result.tool_invocations,
                         post_compose_state_id,
                     )
+                if result.llm_calls:
+                    await _persist_llm_calls(
+                        service,
+                        session.id,
+                        result.llm_calls,
+                        pre_send_state_id,
+                    )
                 await _publish_progress(
                     progress_registry,
                     session_id=str(session.id),
@@ -2336,9 +2474,13 @@ def create_session_router() -> APIRouter:
                 )
                 terminal_status = "completed"
                 return response
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
                 # Mirror of send_message cancellation path. See block
                 # comment there for the shielded-publish rationale.
+                llm_calls = _llm_calls_from_exception(exc)
+                if llm_calls:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.shield(_persist_llm_calls(service, session.id, llm_calls, pre_send_state_id))
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.shield(
                         _publish_progress(

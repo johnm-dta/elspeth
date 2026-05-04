@@ -1,0 +1,149 @@
+"""Unit tests for the composer LLM-call audit L0 contract."""
+
+from __future__ import annotations
+
+import dataclasses
+from datetime import UTC, datetime
+
+import pytest
+
+from elspeth.contracts.composer_llm_audit import (
+    ComposerLLMCall,
+    ComposerLLMCallRecorder,
+    ComposerLLMCallStatus,
+)
+from elspeth.core.canonical import stable_hash
+
+
+def _make_call(**overrides: object) -> ComposerLLMCall:
+    messages = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "assistant", "content": "Prior turn"},
+        {"role": "user", "content": "Current turn"},
+    ]
+    t = datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC)
+    defaults: dict[str, object] = {
+        "model_requested": "openrouter/openai/gpt-5.5",
+        "model_returned": "openai/gpt-5.5-2026-05-01",
+        "status": ComposerLLMCallStatus.SUCCESS,
+        "prompt_tokens": 17,
+        "completion_tokens": 5,
+        "total_tokens": 22,
+        "latency_ms": 123,
+        "provider_request_id": "chatcmpl-safe-scalar",
+        "messages_hash": stable_hash(messages),
+        "tools_spec_hash": stable_hash([{"type": "function", "function": {"name": "set_source"}}]),
+        "started_at": t,
+        "finished_at": t,
+        "error_class": None,
+        "error_message": None,
+    }
+    defaults.update(overrides)
+    return ComposerLLMCall(**defaults)  # type: ignore[arg-type]
+
+
+def test_status_strenum_values() -> None:
+    assert ComposerLLMCallStatus.SUCCESS.value == "success"
+    assert ComposerLLMCallStatus.TIMEOUT.value == "timeout"
+    assert ComposerLLMCallStatus.API_ERROR.value == "api_error"
+    assert ComposerLLMCallStatus.AUTH_ERROR.value == "auth_error"
+    assert ComposerLLMCallStatus.BAD_REQUEST_ERROR.value == "bad_request_error"
+    assert ComposerLLMCallStatus.MALFORMED_RESPONSE.value == "malformed_response"
+    assert ComposerLLMCallStatus.CANCELLED.value == "cancelled"
+
+
+def test_to_dict_serializes_enum_and_datetimes() -> None:
+    call = _make_call()
+
+    payload = call.to_dict()
+
+    assert payload["status"] == "success"
+    assert isinstance(payload["started_at"], str)
+    assert isinstance(payload["finished_at"], str)
+
+
+def test_token_none_values_are_preserved() -> None:
+    call = _make_call(prompt_tokens=None, completion_tokens=None, total_tokens=None)
+
+    payload = call.to_dict()
+
+    assert payload["prompt_tokens"] is None
+    assert payload["completion_tokens"] is None
+    assert payload["total_tokens"] is None
+
+
+def test_model_drift_preserves_requested_and_returned_models() -> None:
+    call = _make_call(model_requested="anthropic/claude-sonnet-4.5", model_returned="anthropic/claude-sonnet-4.5-20260501")
+
+    payload = call.to_dict()
+
+    assert payload["model_requested"] == "anthropic/claude-sonnet-4.5"
+    assert payload["model_returned"] == "anthropic/claude-sonnet-4.5-20260501"
+
+
+def test_messages_hash_is_hash_of_full_request_messages_array() -> None:
+    full_messages = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "assistant", "content": "Prior turn"},
+        {"role": "user", "content": "Current turn"},
+    ]
+    without_history = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "Current turn"},
+    ]
+
+    call = _make_call(messages_hash=stable_hash(full_messages))
+
+    assert call.messages_hash == stable_hash(full_messages)
+    assert call.messages_hash != stable_hash(without_history)
+
+
+def test_error_fields_are_safe_class_name_payloads() -> None:
+    call = _make_call(
+        status=ComposerLLMCallStatus.AUTH_ERROR,
+        model_returned=None,
+        prompt_tokens=None,
+        completion_tokens=None,
+        total_tokens=None,
+        provider_request_id=None,
+        error_class="AuthenticationError",
+        error_message="AuthenticationError",
+    )
+
+    payload = call.to_dict()
+
+    assert payload["status"] == "auth_error"
+    assert payload["error_class"] == "AuthenticationError"
+    assert payload["error_message"] == "AuthenticationError"
+
+
+def test_frozen_dataclass_blocks_mutation() -> None:
+    call = _make_call()
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        call.model_requested = "different"  # type: ignore[misc]
+
+
+def test_l0_module_has_no_upward_imports() -> None:
+    import elspeth.contracts.composer_llm_audit as audit
+
+    forbidden_prefixes = ("elspeth.core", "elspeth.engine", "elspeth.plugins", "elspeth.web", "elspeth.cli")
+    for ref in audit.__dict__.values():
+        ref_module = getattr(ref, "__module__", None)
+        if ref_module is None:
+            continue
+        for prefix in forbidden_prefixes:
+            assert not ref_module.startswith(prefix), f"composer_llm_audit imports {ref!r} from forbidden module {ref_module}"
+
+
+def test_recorder_protocol_runtime_check() -> None:
+    class _StubRecorder:
+        def record_llm_call(self, call: ComposerLLMCall) -> None:
+            return
+
+        def resolve_session(self, session_id: str) -> None:
+            return
+
+    rec: ComposerLLMCallRecorder = _StubRecorder()
+    rec.record_llm_call(_make_call())
+    rec.resolve_session("abc")

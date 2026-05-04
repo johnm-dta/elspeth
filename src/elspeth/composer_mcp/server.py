@@ -549,29 +549,6 @@ def create_server(
         arguments: dict[str, Any],
     ) -> CallToolResult | list[TextContent]:
         runtime_preflight_callback: RuntimePreflight | None = None
-        if name == "preview_pipeline" and runtime_preflight is not None:
-            if runtime_preflight_settings_hash is None:
-                raise ValueError("runtime_preflight_settings_hash is required when runtime_preflight is configured")
-            preview_preflight = await _mcp_preview_runtime_preflight(
-                state_ref[0],
-                coordinator=coordinator,
-                session_scope=current_session_scope(),
-                settings_hash=runtime_preflight_settings_hash,
-                timeout_seconds=runtime_preflight_timeout_seconds,
-                run_preflight=runtime_preflight,
-            )
-            _captured = preview_preflight
-
-            def _make_mcp_callback(
-                _result: ValidationResult = _captured,
-            ) -> RuntimePreflight:
-                def _cb(_state: CompositionState) -> ValidationResult:
-                    return _result
-
-                return _cb
-
-            runtime_preflight_callback = _make_mcp_callback()
-
         # Audit envelope around the entire dispatch. The try/finally
         # makes "audit fires before return" structurally enforceable —
         # success path, ARG_ERROR path, and PLUGIN_CRASH path all flow
@@ -592,11 +569,9 @@ def create_server(
             arguments_hash = stable_hash(arguments)
             canonicalization_failed: BaseException | None = None
         except (ValueError, TypeError) as canon_exc:
-            arguments_canonical = json.dumps(
-                {"_canonicalization_error": type(canon_exc).__name__},
-                sort_keys=True,
-            )
-            arguments_hash = stable_hash({"_canonicalization_error": type(canon_exc).__name__})
+            sentinel = {"_canonicalization_error": type(canon_exc).__name__}
+            arguments_canonical = canonical_json(sentinel)
+            arguments_hash = stable_hash(sentinel)
             canonicalization_failed = canon_exc
 
         result_dict: dict[str, Any] | None = None
@@ -615,6 +590,28 @@ def create_server(
                     raise ValueError(
                         f"arguments not canonicalizable ({type(canonicalization_failed).__name__})"
                     ) from canonicalization_failed
+                if name == "preview_pipeline" and runtime_preflight is not None:
+                    if runtime_preflight_settings_hash is None:
+                        raise ValueError("runtime_preflight_settings_hash is required when runtime_preflight is configured")
+                    preview_preflight = await _mcp_preview_runtime_preflight(
+                        state_ref[0],
+                        coordinator=coordinator,
+                        session_scope=current_session_scope(),
+                        settings_hash=runtime_preflight_settings_hash,
+                        timeout_seconds=runtime_preflight_timeout_seconds,
+                        run_preflight=runtime_preflight,
+                    )
+                    _captured = preview_preflight
+
+                    def _make_mcp_callback(
+                        _result: ValidationResult = _captured,
+                    ) -> RuntimePreflight:
+                        def _cb(_state: CompositionState) -> ValidationResult:
+                            return _result
+
+                        return _cb
+
+                    runtime_preflight_callback = _make_mcp_callback()
                 result_dict = _dispatch_tool(
                     name,
                     arguments,

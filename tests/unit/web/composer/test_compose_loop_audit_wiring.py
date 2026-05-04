@@ -37,6 +37,7 @@ from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
     ComposerPluginCrashError,
+    ComposerRuntimePreflightError,
     ToolArgumentError,
 )
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
@@ -543,6 +544,51 @@ async def test_timeout_after_successful_tool_carries_audit_invocations() -> None
 
 
 @pytest.mark.asyncio
+async def test_preview_runtime_preflight_failure_records_tool_invocation() -> None:
+    """preview_pipeline preflight crashes must still audit the tool call.
+
+    The preview runtime preflight runs after the audit envelope opens but
+    before ``dispatch_with_audit``. If it raises, the resulting
+    ``ComposerRuntimePreflightError`` must carry a PLUGIN_CRASH
+    invocation for the preview tool call that caused the failure.
+    """
+    catalog = _mock_catalog()
+    settings = _make_settings()
+    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    state = _empty_state()
+
+    turn = _make_llm_response(
+        tool_calls=[
+            {
+                "id": "call_preview_preflight_crash",
+                "name": "preview_pipeline",
+                "arguments": {},
+            }
+        ],
+    )
+
+    with (
+        patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        patch.object(service, "_runtime_preflight", side_effect=RuntimeError("synthetic runtime preflight bug")),
+        patch("elspeth.web.composer.service.execute_tool") as mock_execute_tool,
+        pytest.raises(ComposerRuntimePreflightError) as exc_info,
+    ):
+        mock_llm.return_value = turn
+        await service.compose("Preview the current pipeline", [], state)
+
+    mock_execute_tool.assert_not_called()
+    invocations = exc_info.value.tool_invocations
+    assert len(invocations) == 1
+    inv = invocations[0]
+    assert inv.status == ComposerToolStatus.PLUGIN_CRASH
+    assert inv.tool_call_id == "call_preview_preflight_crash"
+    assert inv.tool_name == "preview_pipeline"
+    assert inv.error_class == "RuntimeError"
+    assert inv.error_message == "RuntimeError"
+    assert inv.version_after is None
+
+
+@pytest.mark.asyncio
 async def test_dispatch_records_plugin_crash_on_cancelled_error() -> None:
     """Reviewer fix: ``CancelledError`` MUST be audited before propagation.
 
@@ -628,3 +674,95 @@ async def test_dispatch_records_plugin_crash_on_cancelled_error() -> None:
     # Dispatch did not complete — version_after must be None to
     # satisfy the Tier-1 verifier invariant.
     assert inv.version_after is None
+
+
+@pytest.mark.asyncio
+async def test_compose_loop_records_arg_error_for_non_finite_object_arguments() -> None:
+    """Parsed NaN/Infinity inside object arguments must produce ARG_ERROR.
+
+    Python's ``json.loads`` accepts ``NaN``/``Infinity`` constants even
+    though canonical JSON rejects them. The compose loop must record a
+    corrective ARG_ERROR tool row and continue, rather than raising from
+    ``begin_dispatch`` before the recorder fires.
+    """
+    catalog = _mock_catalog()
+    settings = _make_settings()
+    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    state = _empty_state()
+
+    turn1 = _make_llm_response(
+        tool_calls=[
+            {
+                "id": "call_non_finite_object",
+                "name": "set_metadata",
+                "arguments": {"patch": {"name": float("nan")}},
+            }
+        ],
+    )
+    turn2 = _make_llm_response(content="Recovered.")
+    passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+
+    with (
+        patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        patch.object(service, "_runtime_preflight", return_value=passing_preflight),
+        patch("elspeth.web.composer.service.execute_tool") as mock_execute_tool,
+    ):
+        mock_llm.side_effect = [turn1, turn2]
+        result = await service.compose("Trigger non-finite object arguments", [], state)
+
+    assert result.message == "Recovered."
+    mock_execute_tool.assert_not_called()
+    assert len(result.tool_invocations) == 1
+    inv = result.tool_invocations[0]
+    assert inv.status == ComposerToolStatus.ARG_ERROR
+    assert inv.tool_call_id == "call_non_finite_object"
+    assert inv.error_class == "ValueError"
+    assert inv.error_message == "ValueError"
+    assert inv.version_after is None
+
+    second_call_messages = mock_llm.call_args_list[1].args[0]
+    tool_messages = [msg for msg in second_call_messages if msg["role"] == "tool"]
+    assert tool_messages[-1]["tool_call_id"] == "call_non_finite_object"
+
+
+@pytest.mark.asyncio
+async def test_compose_loop_records_arg_error_for_non_finite_non_object_arguments() -> None:
+    """Top-level Infinity must use the non-object ARG_ERROR audit path."""
+    catalog = _mock_catalog()
+    settings = _make_settings()
+    service = ComposerServiceImpl(catalog=catalog, settings=settings)
+    state = _empty_state()
+
+    turn1 = _make_llm_response(
+        tool_calls=[
+            {
+                "id": "call_non_finite_scalar",
+                "name": "set_metadata",
+                "arguments": float("inf"),
+            }
+        ],
+    )
+    turn2 = _make_llm_response(content="Recovered.")
+    passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+
+    with (
+        patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        patch.object(service, "_runtime_preflight", return_value=passing_preflight),
+        patch("elspeth.web.composer.service.execute_tool") as mock_execute_tool,
+    ):
+        mock_llm.side_effect = [turn1, turn2]
+        result = await service.compose("Trigger non-finite scalar arguments", [], state)
+
+    assert result.message == "Recovered."
+    mock_execute_tool.assert_not_called()
+    assert len(result.tool_invocations) == 1
+    inv = result.tool_invocations[0]
+    assert inv.status == ComposerToolStatus.ARG_ERROR
+    assert inv.tool_call_id == "call_non_finite_scalar"
+    assert inv.error_class == "ValueError"
+    assert inv.error_message == "ValueError"
+    assert inv.version_after is None
+
+    second_call_messages = mock_llm.call_args_list[1].args[0]
+    tool_messages = [msg for msg in second_call_messages if msg["role"] == "tool"]
+    assert tool_messages[-1]["tool_call_id"] == "call_non_finite_scalar"

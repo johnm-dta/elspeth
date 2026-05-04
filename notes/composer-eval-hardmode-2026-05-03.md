@@ -6,7 +6,7 @@
 **Composer model:** `openrouter/openai/gpt-5.5`
 **Tester:** `dta_user`
 **Eval design:** 3 personas × 3 task-classes (happy / edge / limit) = 9 scenarios. Persona-driven by `general-purpose` subagents locked to a persona spec; harness driver is the parent agent using a bash+python wrapper around the public HTTP surface.
-**Companion:** `notes/composer-llm-eval-2026-05-03.md` (today's primary 5-scenario eval — LLM-driver-with-expertise version).
+**Companion:** `notes/composer-eval-basic-2026-05-03.md` (today's primary 5-scenario eval — LLM-driver-with-expertise version).
 
 ## Why this eval was run
 

@@ -4,19 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
+from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
     nodes_table,
@@ -83,6 +86,54 @@ def _audit_tool_calls(tool_call_id: str = "call-audit") -> list[dict[str, Any]]:
             },
         }
     ]
+
+
+def _llm_call(**overrides: Any) -> ComposerLLMCall:
+    defaults: dict[str, Any] = {
+        "model_requested": "openrouter/openai/gpt-5.5",
+        "model_returned": "openai/gpt-5.5-2026-05-01",
+        "status": ComposerLLMCallStatus.SUCCESS,
+        "prompt_tokens": 13,
+        "completion_tokens": 8,
+        "total_tokens": 21,
+        "latency_ms": 42,
+        "provider_request_id": "chatcmpl-route",
+        "messages_hash": "m" * 64,
+        "tools_spec_hash": "t" * 64,
+        "started_at": datetime.now(UTC),
+        "finished_at": datetime.now(UTC),
+        "error_class": None,
+        "error_message": None,
+    }
+    defaults.update(overrides)
+    return ComposerLLMCall(**defaults)
+
+
+def _cancelled_error_with_llm_call(call: ComposerLLMCall) -> asyncio.CancelledError:
+    exc = asyncio.CancelledError()
+    exc_with_calls = cast(Any, exc)
+    exc_with_calls.llm_calls = (call,)
+    return exc
+
+
+def _llm_call_audit_tool_calls(call: ComposerLLMCall | None = None) -> list[dict[str, Any]]:
+    return [
+        {
+            "_kind": "llm_call_audit",
+            "call": (call or _llm_call()).to_dict(),
+        }
+    ]
+
+
+def _llm_call_audit_rows(messages: Sequence[ChatMessageRecord]) -> list[tuple[ChatMessageRecord, Mapping[str, Any]]]:
+    rows: list[tuple[ChatMessageRecord, Mapping[str, Any]]] = []
+    for message in messages:
+        if message.role != "tool" or message.tool_calls is None:
+            continue
+        first_tool_call = message.tool_calls[0]
+        if first_tool_call.get("_kind") == "llm_call_audit":
+            rows.append((message, first_tool_call))
+    return rows
 
 
 class _BlockingRecordingComposer:
@@ -1501,6 +1552,81 @@ class TestMessageRoutes:
         messages = msgs_resp.json()
         assert [message["role"] for message in messages] == ["user", "assistant"]
         assert all(message["content"] != '{"success": true}' for message in messages)
+
+    def test_send_message_persists_llm_call_audit_sidecars_with_precompose_state(self, tmp_path) -> None:
+        app, service = _make_app(tmp_path)
+        llm_calls = (
+            _llm_call(provider_request_id="chatcmpl-a", prompt_tokens=13, completion_tokens=8, total_tokens=21),
+            _llm_call(provider_request_id="chatcmpl-b", prompt_tokens=5, completion_tokens=16, total_tokens=21),
+        )
+        composer = AsyncMock()
+        composer.compose = AsyncMock(return_value=ComposerResult(message="Saved with audit.", state=_EMPTY_STATE, llm_calls=llm_calls))
+        app.state.composer_service = composer
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Chat"})
+        session_id = uuid.UUID(resp.json()["id"])
+
+        loop = asyncio.new_event_loop()
+        try:
+            pre_state = loop.run_until_complete(
+                service.save_composition_state(
+                    session_id,
+                    CompositionStateData(metadata_={"name": "Precompose", "description": ""}, is_valid=True),
+                )
+            )
+        finally:
+            loop.close()
+
+        send_resp = client.post(f"/api/sessions/{session_id}/messages", json={"content": "Build it"})
+
+        assert send_resp.status_code == 200
+        loop = asyncio.new_event_loop()
+        try:
+            persisted = loop.run_until_complete(service.get_messages(session_id, limit=None))
+        finally:
+            loop.close()
+
+        llm_audit_rows = _llm_call_audit_rows(persisted)
+        assert len(llm_audit_rows) == 2
+        assert {row.composition_state_id for row, _tool_call in llm_audit_rows} == {pre_state.id}
+        assert [tool_call["call"]["provider_request_id"] for _row, tool_call in llm_audit_rows] == ["chatcmpl-a", "chatcmpl-b"]
+        assert sum(tool_call["call"]["total_tokens"] for _row, tool_call in llm_audit_rows) == 42
+
+        messages_resp = client.get(f"/api/sessions/{session_id}/messages")
+        assert messages_resp.status_code == 200
+        assert [message["role"] for message in messages_resp.json()] == ["user", "assistant"]
+
+    def test_send_message_llm_call_persistence_failure_does_not_mask_success(self, tmp_path) -> None:
+        app, service = _make_app(tmp_path)
+        composer = AsyncMock()
+        composer.compose = AsyncMock(
+            return_value=ComposerResult(
+                message="Assistant still saved.",
+                state=_EMPTY_STATE,
+                llm_calls=(_llm_call(provider_request_id="chatcmpl-fail-persist"),),
+            )
+        )
+        app.state.composer_service = composer
+        client = TestClient(app, raise_server_exceptions=False)
+
+        original_add_message = service.add_message
+
+        async def flaky_add_message(*args: Any, **kwargs: Any) -> ChatMessageRecord:
+            role = args[1]
+            tool_calls = kwargs.get("tool_calls")
+            if role == "tool" and tool_calls and tool_calls[0].get("_kind") == "llm_call_audit":
+                raise OperationalError("INSERT INTO chat_messages", {}, Exception("db unavailable"))
+            return await original_add_message(*args, **kwargs)
+
+        service.add_message = flaky_add_message  # type: ignore[method-assign]
+
+        resp = client.post("/api/sessions", json={"title": "Chat"})
+        session_id = uuid.UUID(resp.json()["id"])
+        send_resp = client.post(f"/api/sessions/{session_id}/messages", json={"content": "Build it"})
+
+        assert send_resp.status_code == 200
+        assert send_resp.json()["message"]["content"] == "Assistant still saved."
 
     @pytest.mark.asyncio
     async def test_send_message_serializes_concurrent_requests_per_session(self, tmp_path) -> None:
@@ -3202,6 +3328,41 @@ class TestComposerCancellationLifecycle:
         assert active == ()
 
     @pytest.mark.asyncio
+    async def test_send_message_persists_cancelled_llm_call_audit_sidecar(self, tmp_path) -> None:
+        app, service = _make_progress_route_app(tmp_path)
+        llm_call = _llm_call(
+            status=ComposerLLMCallStatus.CANCELLED,
+            model_returned=None,
+            prompt_tokens=None,
+            completion_tokens=None,
+            total_tokens=None,
+            provider_request_id=None,
+            error_class="CancelledError",
+            error_message="CancelledError",
+        )
+        cancelled = _cancelled_error_with_llm_call(llm_call)
+
+        class _CancellingComposer:
+            async def compose(self, *args, **kwargs) -> None:
+                del args, kwargs
+                raise cancelled
+
+        app.state.composer_service = _CancellingComposer()
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            with pytest.raises(asyncio.CancelledError):
+                await client.post(
+                    f"/api/sessions/{service.session.id}/messages",
+                    json={"content": "Will be cancelled"},
+                )
+
+        llm_audit_rows = _llm_call_audit_rows(service.messages)
+        assert len(llm_audit_rows) == 1
+        _row, tool_call = llm_audit_rows[0]
+        assert tool_call["call"]["status"] == "cancelled"
+        assert tool_call["call"]["messages_hash"] == llm_call.messages_hash
+
+    @pytest.mark.asyncio
     async def test_send_message_increments_terminal_counter_with_cancelled_status(self, tmp_path, monkeypatch) -> None:
         """The terminal counter must record status=cancelled separately from
         status=timed_out so a Grafana board can distinguish "the client gave
@@ -3293,6 +3454,39 @@ class TestComposerCancellationLifecycle:
         snapshot = await registry.get_latest(str(service.session.id))
         assert snapshot.phase == "cancelled"
         assert snapshot.reason == "client_cancelled"
+
+    @pytest.mark.asyncio
+    async def test_recompose_persists_cancelled_llm_call_audit_sidecar(self, tmp_path) -> None:
+        app, service = _make_progress_route_app(tmp_path)
+        await service.add_message(service.session.id, "user", "Will be cancelled on retry")
+        llm_call = _llm_call(
+            status=ComposerLLMCallStatus.CANCELLED,
+            model_returned=None,
+            prompt_tokens=None,
+            completion_tokens=None,
+            total_tokens=None,
+            provider_request_id=None,
+            error_class="CancelledError",
+            error_message="CancelledError",
+        )
+        cancelled = _cancelled_error_with_llm_call(llm_call)
+
+        class _CancellingComposer:
+            async def compose(self, *args, **kwargs) -> None:
+                del args, kwargs
+                raise cancelled
+
+        app.state.composer_service = _CancellingComposer()
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            with pytest.raises(asyncio.CancelledError):
+                await client.post(f"/api/sessions/{service.session.id}/recompose")
+
+        llm_audit_rows = _llm_call_audit_rows(service.messages)
+        assert len(llm_audit_rows) == 1
+        _row, tool_call = llm_audit_rows[0]
+        assert tool_call["call"]["status"] == "cancelled"
+        assert tool_call["call"]["messages_hash"] == llm_call.messages_hash
 
     @pytest.mark.asyncio
     async def test_recompose_increments_terminal_counter_with_cancelled_status(self, tmp_path, monkeypatch) -> None:
@@ -4206,6 +4400,7 @@ def test_runtime_preflight_failure_500_detail_does_not_promise_journal_traceback
             _UUID("00000000-0000-4000-8000-000000000001"),
             "user-id",
             "compose",
+            None,
             settings=object(),
             secret_service=None,
         ),
@@ -4395,6 +4590,7 @@ def test_recompose_success_persists_runtime_invalid_state(tmp_path) -> None:
     assert persisted.metadata_ is not None
     assert persisted.metadata_["name"] == "runtime-invalid-recompose"
     assert persisted.is_valid is False
+    assert persisted.validation_errors is not None
     assert list(persisted.validation_errors) == ["runtime failure from recompose"]
 
 
@@ -4458,6 +4654,7 @@ def test_recompose_convergence_persists_runtime_invalid_partial_state(tmp_path) 
     assert persisted.metadata_ is not None
     assert persisted.metadata_["name"] == "partial-after-convergence"
     assert persisted.is_valid is False
+    assert persisted.validation_errors is not None
     assert list(persisted.validation_errors) == ["runtime failure from convergence"]
 
 
@@ -4514,6 +4711,7 @@ def test_compose_plugin_crash_persists_runtime_invalid_partial_state(tmp_path) -
     assert persisted.metadata_ is not None
     assert persisted.metadata_["name"] == "partial-after-plugin-crash"
     assert persisted.is_valid is False
+    assert persisted.validation_errors is not None
     assert list(persisted.validation_errors) == ["runtime failure from plugin crash"]
 
 
@@ -4612,6 +4810,7 @@ def test_compose_runtime_preflight_persists_partial_state(tmp_path) -> None:
     # remains the legacy sentinel so external parsers keying on it still
     # match; subsequent entries carry exception_class + first-line message
     # + bounded file:line:function frames.
+    assert persisted.validation_errors is not None
     errors = list(persisted.validation_errors)
     assert errors[0] == "runtime_preflight_failed"
     assert "exception_class=RuntimeError" in errors
@@ -4673,6 +4872,7 @@ def test_recompose_runtime_preflight_persists_partial_state(tmp_path) -> None:
     assert persisted.is_valid is False
     # See sibling test in test_compose_runtime_preflight_persists_partial_state
     # for the structured-error rationale (elspeth-2c3d63037c).
+    assert persisted.validation_errors is not None
     errors = list(persisted.validation_errors)
     assert errors[0] == "runtime_preflight_failed"
     assert "exception_class=RuntimeError" in errors
@@ -5219,6 +5419,51 @@ def test_composer_chat_history_skips_audit_tool_messages() -> None:
     )
 
     history = _composer_chat_history([user_message, tool_audit_message, assistant_message])
+
+    assert history == [
+        {"role": "user", "content": "Build a CSV pipeline."},
+        {"role": "assistant", "content": "I updated the pipeline."},
+    ]
+
+
+def test_composer_chat_history_skips_llm_call_audit_and_unknown_audit_kinds() -> None:
+    from elspeth.web.sessions.routes import _composer_chat_history
+
+    session_id = uuid.uuid4()
+    user_message = ChatMessageRecord(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        role="user",
+        content="Build a CSV pipeline.",
+        tool_calls=None,
+        created_at=datetime.now(UTC),
+    )
+    llm_audit_message = ChatMessageRecord(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        role="tool",
+        content="llm audit sidecar",
+        tool_calls=_llm_call_audit_tool_calls(_llm_call(provider_request_id="chatcmpl-history")),
+        created_at=datetime.now(UTC),
+    )
+    unknown_audit_message = ChatMessageRecord(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        role="tool",
+        content="future audit sidecar",
+        tool_calls=[{"_kind": "future_audit", "payload": {"id": "future"}}],
+        created_at=datetime.now(UTC),
+    )
+    assistant_message = ChatMessageRecord(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        role="assistant",
+        content="I updated the pipeline.",
+        tool_calls=None,
+        created_at=datetime.now(UTC),
+    )
+
+    history = _composer_chat_history([user_message, llm_audit_message, unknown_audit_message, assistant_message])
 
     assert history == [
         {"role": "user", "content": "Build a CSV pipeline."},

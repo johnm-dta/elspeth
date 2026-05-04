@@ -1,7 +1,7 @@
 # ADR-019: Two-Axis Terminal Model — Lifecycle, Outcome, and Path
 
 **Date:** 2026-05-04
-**Status:** Accepted (re-accepted 2026-05-04 against round-3 corrected text; supersedes ADR-018; round-2 acceptance was reverted earlier 2026-05-04 after the round-3 panel caught a mechanical-test reasoning error — see "Round-2 Correction" subsection for the honest record)
+**Status:** Accepted (re-accepted 2026-05-04 against round-3 corrected text; supersedes ADR-018; round-2 acceptance was reverted earlier 2026-05-04 after the round-3 panel caught a mechanical-test reasoning error — see "Round-2 Correction" subsection for the honest record; round-4 amendment 2026-05-04: §"Public API field-name preservation" rewritten as §"Counter derivation contract — public API field names preserved" to make the `(outcome, path) → counter` mapping at lines 99-115 explicitly normative and to enumerate the two accumulator behaviour changes the migration must ship — no Re-Accept, contract clarified)
 **Deciders:** ELSPETH maintainers
 **Tags:** contracts, audit, row-outcomes, public-api, supersedes-adr-018
 
@@ -268,16 +268,67 @@ for required-field constraints (`sink_name`, `error_hash`, `fork_group_id`);
 the new invariants add structural consistency between `token_outcomes` and
 `node_states`/`artifacts`.
 
-### Public API field-name preservation
+### Counter derivation contract — public API field names preserved
 
 Wire schemas (`ProgressEvent`, `RunSummary`, `CompletedData`) continue to
 expose the existing predicate-role counter names: `rows_succeeded`,
 `rows_routed_success`, `rows_routed_failure`, `rows_failed`, `rows_quarantined`,
-`rows_coalesce_failed`, plus structural counters. Per ADR-018 line 109-114,
-counter renames are a separate breaking-API decision. ADR-019 redefines the
-underlying engine model; a follow-on ADR-020 may revisit counter names if the
-team wants to align them with the new vocabulary. Frontend counter widgets and
+`rows_coalesce_failed`, plus structural counters (`rows_coalesced`,
+`rows_forked`, `rows_expanded`, `rows_buffered`, `rows_diverted`). Per
+ADR-018 line 109-114, counter *renames* are a separate breaking-API decision
+and remain out of scope for ADR-019. The frontend counter widgets and
 operator dashboards do not require changes for ADR-019.
+
+What ADR-019 *does* normatively specify is the **`(outcome, path) →
+counter increment` mapping** — the bridge between producer emissions under
+the two-axis model and the public counter surface that
+`RunResult.__post_init__` (`src/elspeth/contracts/run_result.py:77-142`)
+consumes to derive `RunStatus` (the four-value taxonomy made publicly
+visible at `/api/runs/{rid}` by commit `cc895589`). The Mapping table at
+lines 99-115 above IS this contract; read it by `(outcome, path)` as the
+key. The accumulator at
+`src/elspeth/engine/orchestrator/outcomes.py:235-307` is the authoritative
+implementation; any deviation between the table and the accumulator is a
+bug to fix in the accumulator, not a permitted hidden behavior.
+
+#### Behavior change at the contract layer
+
+Two existing accumulator behaviors change under the new model to align
+producer emissions with the canonical predicate
+(`success_indicator = rows_succeeded > 0`,
+`failure_indicator = rows_failed > 0`). Live code on RC5 does NOT yet
+match the contract for these two cases:
+
+- **`(SUCCESS, GATE_ROUTED)` (was `RowOutcome.ROUTED`).** Under the new
+  model, a gate-routed-and-sunk row increments BOTH `rows_succeeded` AND
+  `rows_routed_success`. Live code today only increments
+  `rows_routed_success` (`outcomes.py:245`). The migration's atomic
+  recorder/producer flip MUST update the accumulator. This is the
+  positive-side change that makes the bifurcated
+  `OR rows_routed_success > 0` predicate clause vestigial and removable.
+- **`(FAILURE, ON_ERROR_ROUTED)` (was `RowOutcome.ROUTED_ON_ERROR`).**
+  Symmetric: increments BOTH `rows_failed` AND `rows_routed_failure`.
+  Live code today only increments `rows_routed_failure`
+  (`outcomes.py:266`). The migration updates the accumulator together
+  with the predicate.
+
+These two accumulator updates are necessary AND sufficient for
+`success_indicator = rows_succeeded > 0` and
+`failure_indicator = rows_failed > 0` to be the canonical predicates
+under the new model. The migration plan's Stage 2/3 (merged) PR ships
+the accumulator change in lockstep with the `RunResult.__post_init__`
+predicate rewrite — neither edit is safe in isolation.
+
+The third behaviour change is the discard-mode flip already documented
+in §Behavior Change Notice: `(FAILURE, SINK_DISCARDED)` now increments
+`rows_failed`, where `RowOutcome.DIVERTED` (discard flavor) previously
+incremented neither succeeded nor failed counters. This change is
+operator-visible via `RunStatus`.
+
+A follow-on ADR-020 *may* revisit counter names (e.g., aligning
+`rows_routed_success` with the `(SUCCESS, GATE_ROUTED)` vocabulary)
+if the team wants to. That is an independent breaking-API decision,
+not a prerequisite for ADR-019 implementation.
 
 The `RowOutcome` enum at `contracts/enums.py:160` is removed. Code paths that
 read `outcome.outcome == RowOutcome.X` flip to read the new field pair

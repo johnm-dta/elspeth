@@ -1,0 +1,324 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "summary": "Plan is architecturally sound and properly TDD-structured, but has 12 unique blocking issues after deduplication. Five concern unscoped downstream consumers (MCP analyzer/diagnostics, web backend, core landscape utilities) that will crash or silently return wrong results post-merge — a Tier 1 audit-integrity failure per CLAUDE.md. Two are non-existent or wrong-named symbols that turn key implementation steps into AttributeError or silent no-ops (sweep hook method, SinkExecutor counter site). Two are import/export mismatches in plan code samples. One is a literal SyntaxError in a test class name. One is an unresolved schema placeholder in the I3 invariant query. One is missing helper definitions and inconsistent helper locations. One is unspecified sweep-crash audit durability. Plan must be revised before execution.",
+  "plan_files": [
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-overview.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-2-producers.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-3-accumulator-predicate.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-4-cross-check-invariants.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-5-test-strategy.md"
+  ],
+  "adr": "docs/architecture/adr/019-two-axis-terminal-model.md",
+  "stage_1_anchor_commit": "60d30551",
+  "branch": "RC5-UX-RoutingVocabFix",
+  "reviewed_at": "2026-05-05T00:00:00Z",
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "blocking_issues": [
+    {
+      "id": "B1",
+      "title": "Phase 4 sweep wired into non-existent method _post_source_iteration_work",
+      "sources": ["systems:SYS-001"],
+      "category": "non_existent_hook",
+      "priority_score": 36,
+      "severity": "Critical",
+      "likelihood": "Certain",
+      "reversibility": "Difficult",
+      "issue": "Phase 4 Task 4.3 instructs adding the deferred sweep to `_post_source_iteration_work`. That method does not exist on the orchestrator — the actual hook is `_finalize_source_iteration` at core.py:2511. `_post_source_iteration_work` appears only in comments. Implementing literally yields AttributeError, or worse a silent no-op if attached as a free function never called.",
+      "evidence": "grep `_post_source_iteration_work` returns only comment hits; `_finalize_source_iteration` at core.py:2511 is the dispatch loop's actual post-iteration method.",
+      "resolution": "Replace `_post_source_iteration_work` with `_finalize_source_iteration` everywhere in Phase 4. Verify the dispatch-loop call site. Add an explicit assertion (or test) that the sweep ran for at least one run during integration tests."
+    },
+    {
+      "id": "B2",
+      "title": "MCP analyzer reads is_terminal column and exposes it as public TypedDict — unscoped",
+      "sources": ["systems:SYS-002"],
+      "category": "unscoped_downstream_consumer",
+      "priority_score": 36,
+      "severity": "Critical",
+      "likelihood": "Certain",
+      "reversibility": "Difficult",
+      "issue": "`src/elspeth/mcp/analyzers/reports.py` references the `is_terminal` column at lines 659, 663, 700, 708-709 (GROUP BY/SELECT). `src/elspeth/mcp/types.py:364` exposes `is_terminal` as a public field on the `OutcomeDistributionEntry` TypedDict (MCP wire format). After Phase 1 drops the column these queries will KeyError, and the wire schema will be inconsistent with the database. Neither file is in Phase 1's 'Files touched'.",
+      "evidence": "src/elspeth/mcp/analyzers/reports.py:659,663,700,708-709; src/elspeth/mcp/types.py:364.",
+      "resolution": "Add mcp/analyzers/reports.py and mcp/types.py to Phase 1 'Files touched'. Update column references to the new (outcome, path) pair. Update OutcomeDistributionEntry to expose `outcome` and `path` (no is_terminal). Add a Phase 5 grep guard (`is_terminal` should yield zero hits in src/)."
+    },
+    {
+      "id": "B3",
+      "title": "MCP diagnostics hardcodes RowOutcome.quarantined string — silent zero post Phase 2",
+      "sources": ["systems:SYS-003"],
+      "category": "unscoped_downstream_consumer",
+      "priority_score": 36,
+      "severity": "Critical",
+      "likelihood": "Certain",
+      "reversibility": "Difficult",
+      "issue": "`src/elspeth/mcp/analyzers/diagnostics.py:181` matches `outcome == \"quarantined\"`. After Phase 2 producers emit (FAILURE, QUARANTINED) the predicate matches zero rows. `diagnose()` will silently report zero quarantines for runs that have them — a Tier 1 audit-integrity failure (CLAUDE.md: silent wrong results are worse than crashes).",
+      "evidence": "src/elspeth/mcp/analyzers/diagnostics.py:181.",
+      "resolution": "Add diagnostics.py to Phase 2 scope. Rewrite predicate as `outcome == 'failure' AND path == 'quarantined'`. Add a Phase 5 lint that fails on `outcome == \"quarantined\"` string literals."
+    },
+    {
+      "id": "B4",
+      "title": "Web backend reads is_terminal AND mirrors bifurcated engine predicate — unscoped",
+      "sources": ["systems:SYS-004"],
+      "category": "unscoped_downstream_consumer",
+      "priority_score": 36,
+      "severity": "Critical",
+      "likelihood": "Certain",
+      "reversibility": "Difficult",
+      "issue": "Two SQL sites read the dropped is_terminal column (`web/execution/discard_summary.py:92`, `web/execution/diagnostics.py:170`) and crash post Phase 1. `web/execution/schemas.py:220-221` carries a Pydantic copy of the bifurcated counter-vs-state predicate that becomes inconsistent with the engine post Phase 3, returning 500 / validation errors on `/api/runs/{rid}` for valid runs. The overview's claim that 'frontend type updates not required' is true only for TypeScript — it does not cover the Python web module.",
+      "evidence": "web/execution/discard_summary.py:92; web/execution/diagnostics.py:170; web/execution/schemas.py:220-221.",
+      "resolution": "Add discard_summary.py and diagnostics.py to Phase 1 'Files touched'. Add schemas.py to Phase 3 (update `_check_status_row_count_invariant` to match the new accumulator predicate). Correct the overview to scope the 'no frontend type updates' claim to TypeScript only."
+    },
+    {
+      "id": "B5",
+      "title": "Core landscape utilities access .is_terminal attribute — TUI explain and MCP explain_token crash",
+      "sources": ["systems:SYS-005"],
+      "category": "unscoped_downstream_consumer",
+      "priority_score": 36,
+      "severity": "Critical",
+      "likelihood": "Certain",
+      "reversibility": "Difficult",
+      "issue": "Three `.is_terminal` attribute accesses on TokenOutcome at `core/landscape/lineage.py:118`, `exporter.py:430`, `formatters.py:170`. These are on the critical path for the `elspeth explain` TUI and the MCP `explain_token` tool — both crash post Phase 1. None of these files appear in Phase 1's 'Files touched'.",
+      "evidence": "core/landscape/lineage.py:118; core/landscape/exporter.py:430; core/landscape/formatters.py:170.",
+      "resolution": "Add lineage.py, exporter.py, and formatters.py to Phase 1 'Files touched'. Verify data_flow_repository.py:899/930 fall within the plan's stated 802-880 line range (or extend it). Run a codebase-wide `is_terminal` grep before marking Phase 1 done; result must be empty in src/."
+    },
+    {
+      "id": "B6",
+      "title": "Phase 3 SinkExecutor._counters does not exist — discard-mode counter bumps will AttributeError",
+      "sources": ["reality:R4"],
+      "category": "non_existent_symbol",
+      "priority_score": 36,
+      "severity": "Critical",
+      "likelihood": "Certain",
+      "reversibility": "Difficult",
+      "issue": "Phase 3 Task 3.3 Step 3 (lines 416-427) instructs `self._counters.rows_failed += 1` / `self._counters.rows_diverted += 1` inside SinkExecutor in sink.py. SinkExecutor has no `_counters` attribute. The diversion counter is incremented in core.py:2199 via `loop_ctx.counters.rows_diverted += total_diversions`. Following the plan literally yields AttributeError.",
+      "evidence": "grep on sink.py returns zero hits for self._counters/self.counters; core.py:2199 holds the rows_diverted bump.",
+      "resolution": "Implement the rows_failed bump for discard mode in core.py at the existing diversion-tally point. May require adding a `discard_count` field to SinkWriteResult so the executor can report the count back without owning a counter."
+    },
+    {
+      "id": "B7",
+      "title": "AuditIntegrityError import path wrong in Phase 4 test sketch",
+      "sources": ["reality:R1"],
+      "category": "wrong_import_path",
+      "priority_score": 24,
+      "severity": "High",
+      "likelihood": "Certain",
+      "reversibility": "Easy",
+      "issue": "Phase 4 line 69 imports `from elspeth.contracts.audit import AuditIntegrityError`. The class is defined at `src/elspeth/contracts/errors.py:752` and is not re-exported from `contracts/audit.py` or `contracts/__init__.py`. Test collection fails with ImportError.",
+      "evidence": "grep for AuditIntegrityError returns errors.py:752 only; tests/integration/audit/test_recorder_runs.py:226 uses the correct import.",
+      "resolution": "Replace with `from elspeth.contracts.errors import AuditIntegrityError` to match the established import path."
+    },
+    {
+      "id": "B8",
+      "title": "Phase 2 imports TerminalOutcome/TerminalPath from contracts package, but they are only in contracts.enums",
+      "sources": ["reality:R2"],
+      "category": "missing_export",
+      "priority_score": 24,
+      "severity": "High",
+      "likelihood": "Certain",
+      "reversibility": "Easy",
+      "issue": "Phase 2 Task 2.1 Step 6 (lines 176-184) shows processor.py importing TerminalOutcome and TerminalPath from `elspeth.contracts`. Stage 1 added them only to `contracts/enums.py`; `contracts/__init__.py` exports `RowOutcome` but not the new enums. Other Phase 2 tasks correctly import from `contracts.enums`. Inconsistency yields ImportError.",
+      "evidence": "grep TerminalOutcome/TerminalPath in contracts/__init__.py: zero hits; contracts/enums.py defines both.",
+      "resolution": "Pick one: (a) add TerminalOutcome and TerminalPath to `contracts/__init__.py`'s public export in Phase 1 Task 1.2; or (b) change the Phase 2 Task 2.1 sample to import from `elspeth.contracts.enums` consistently with the other Phase 2 sites."
+    },
+    {
+      "id": "B9",
+      "title": "SyntaxError: literal space in test class name TestI1aFork ParentDeferred",
+      "sources": ["reality:R3", "quality:Q2"],
+      "category": "syntax_error",
+      "priority_score": 24,
+      "severity": "High",
+      "likelihood": "Certain",
+      "reversibility": "Easy",
+      "issue": "Phase 4 line 141 declares `class TestI1aFork ParentDeferred:` — a literal space in the class name. Python raises SyntaxError; the RED step fails for the wrong reason and pytest cannot collect the test module.",
+      "evidence": "Read of plan line 141.",
+      "resolution": "Rename to `TestI1aForkParentDeferred` (no space)."
+    },
+    {
+      "id": "B10",
+      "title": "Phase 4 Task 4.3 I3 invariant query has unresolved schema placeholder",
+      "sources": ["architecture:ARCH-W05", "quality:Q1"],
+      "category": "unresolved_placeholder",
+      "priority_score": 24,
+      "severity": "High",
+      "likelihood": "Certain",
+      "reversibility": "Easy",
+      "issue": "I3 invariant query in Phase 4 Task 4.3 contains a literal placeholder: `.where(node_states_table.c.node_id != \"<source-node-id-or-equiv>\")`. Executor cannot run this; the predicate's correctness depends on resolving exactly which non-source node states must be excluded.",
+      "evidence": "Plan source for Phase 4 Task 4.3.",
+      "resolution": "Read the node_states schema and replace the placeholder with the correct predicate, OR add a Task 4.0 prerequisite investigation step that fixes the predicate before Task 4.3 implementation. Add a unit test guarding against false-positive matches on non-sink COMPLETED node_states."
+    },
+    {
+      "id": "B11",
+      "title": "Phase 3 references on_error_route helper that is not imported and does not exist",
+      "sources": ["reality:R5", "reality:R11", "reality:R12"],
+      "category": "missing_helper",
+      "priority_score": 24,
+      "severity": "High",
+      "likelihood": "Certain",
+      "reversibility": "Easy",
+      "issue": "Phase 3 Task 3.2 import block (line 220) imports only `build_test_pipeline_with_gate_route` and `run_pipeline`, but the `on_error_route` helper is used at line 244. None of the three helpers (`build_test_pipeline_with_gate_route`, `build_test_pipeline_with_discard_sink`, `on_error_route`) exist in `elspeth.testing` today. Plan also disagrees with itself on whether the helpers live in `elspeth.testing` (line 118) or `tests.integration._helpers` (line 179, which doesn't exist).",
+      "evidence": "Phase 3 lines 118, 163-165, 179, 219-220, 244; ls tests/integration/ shows no _helpers.py.",
+      "resolution": "Pick one authoritative location for the helpers and make Task 3.1 explicitly create them there. Add `on_error_route` to the import block in Task 3.2. Per CLAUDE.md test-path-integrity, helpers MUST instantiate via `ExecutionGraph.from_plugin_instances()` and `instantiate_plugins_from_config()` (also Q7)."
+    },
+    {
+      "id": "B12",
+      "title": "Sweep-crash audit durability and run-finalization ordering unspecified",
+      "sources": ["quality:Q3"],
+      "category": "audit_durability",
+      "priority_score": 24,
+      "severity": "High",
+      "likelihood": "Likely",
+      "reversibility": "Difficult",
+      "issue": "Phase 4 Task 4.3 / overview D3 do not specify whether a crash inside the end-of-run sweep leaves the run finalized and audit rows durable. CLAUDE.md attributability requires that `explain(recorder, run_id, token_id)` works for any persisted run, including those with sweep failures. If the sweep runs after run finalization and crashes, the audit trail is durable; if it runs before, a crash could leave the run unfinalized and unattributable.",
+      "evidence": "Phase 4 Task 4.3 description; ADR-019 D3.",
+      "resolution": "Specify the sweep ordering relative to run finalization (recommended: sweep is read-only and runs BEFORE finalization, raising AuditIntegrityError that aborts the run cleanly with all token rows already durable). Add an integration test: induce sweep crash, assert run row is in a final state with audit rows queryable for explain()."
+    }
+  ],
+  "warnings": [
+    {
+      "id": "W1",
+      "title": "Phase 4 inclusion in atomic merge is a planner choice, not an ADR constraint",
+      "sources": ["architecture:ARCH-W02"],
+      "priority_score": 12,
+      "issue": "ADR-019:318-320 mandates Phases 1-3 atomic. Phase 4 inclusion expands blast radius if it surfaces engine bugs (Task 4.4 admits this is possible).",
+      "recommendation": "Add a D7 decision-record entry justifying Phase 4 in the atomic merge with a circuit-breaker (split if Task 4.4 finds engine bugs), OR split Phase 4 into a follow-up branch."
+    },
+    {
+      "id": "W2",
+      "title": "Phase 3 opening pseudocode contradicts Task 3.3 implementation",
+      "sources": ["architecture:ARCH-W03"],
+      "priority_score": 9,
+      "issue": "Phase 3 lines 65-69 show a (FAILURE, SINK_DISCARDED) accumulator arm with `rows_failed += 1`. An inline note corrects it; Task 3.3 implementation is correct. Reviewer trap.",
+      "recommendation": "Delete the opening pseudocode block."
+    },
+    {
+      "id": "W3",
+      "title": "D6 Category A and B greps are not mutually exclusive",
+      "sources": ["architecture:ARCH-W04"],
+      "priority_score": 9,
+      "issue": "Files matching both constructor and assertion patterns will be processed twice or under-processed.",
+      "recommendation": "Add an explicit dedup step: files matching A and B → treated as A, removed from B list."
+    },
+    {
+      "id": "W4",
+      "title": "No startup guard for stale audit.db",
+      "sources": ["systems:SYS-006"],
+      "priority_score": 12,
+      "issue": "create_all() is a no-op on existing tables. An operator who skips the delete-old-DB step gets cryptic SQL errors on first write — higher risk on the staging deployment.",
+      "recommendation": "Add a startup probe: check for `token_outcomes.path` column presence; raise StaleDatabaseError with a clear message if absent."
+    },
+    {
+      "id": "W5",
+      "title": "Deferred sweep idempotency unspecified",
+      "sources": ["systems:SYS-007"],
+      "priority_score": 12,
+      "issue": "Plan does not say whether the sweep is read-only or corrective. Orchestrator has retry; double-execution could corrupt counters or produce false invariant violations.",
+      "recommendation": "Specify read-only vs corrective; add retry contract or idempotency guard."
+    },
+    {
+      "id": "W6",
+      "title": "Frontend TS test fixtures pin counter values that shift with new arithmetic",
+      "sources": ["systems:SYS-008"],
+      "priority_score": 9,
+      "issue": "Counter doubling for (SUCCESS, GATE_ROUTED) and (FAILURE, ON_ERROR_ROUTED) changes arithmetic, not just field names. `web/frontend/tests/executionStore.test.ts` will silently miscompare otherwise.",
+      "recommendation": "Add explicit Phase 5 callout to review TS counter assertions for double-counting semantics."
+    },
+    {
+      "id": "W7",
+      "title": "Missing zero-row pipeline test under new predicate",
+      "sources": ["quality:Q4"],
+      "priority_score": 9,
+      "recommendation": "Add zero-row test to test_adr_019_counter_changes.py."
+    },
+    {
+      "id": "W8",
+      "title": "Missing mixed-path test (default_flow + gate_routed)",
+      "sources": ["quality:Q5"],
+      "priority_score": 8,
+      "recommendation": "Add a 3-routed + 2-default-flow test asserting rows_succeeded=5, rows_routed_success=3."
+    },
+    {
+      "id": "W9",
+      "title": "Missing discard + on_error_route same-pipeline test",
+      "sources": ["quality:Q6"],
+      "priority_score": 7,
+      "recommendation": "Add 2 discard + 3 on_error_routed test asserting rows_failed=5."
+    },
+    {
+      "id": "W10",
+      "title": "AuditIntegrityError messages include token_id but not run_id",
+      "sources": ["quality:Q8"],
+      "priority_score": 6,
+      "recommendation": "Add ref.run_id to message templates."
+    },
+    {
+      "id": "W11",
+      "title": "Overview TDD ordering claim misleading",
+      "sources": ["architecture:ARCH-W01", "quality:Q9"],
+      "priority_score": 6,
+      "issue": "Overview line 34 says 'Phase 5's tests written FIRST' but each phase writes its own RED-first tests; Phase 5 is consolidation/triage.",
+      "recommendation": "Amend overview line 34: 'Each phase writes failing tests before implementation. Phase 5 consolidates and confirms green.'"
+    },
+    {
+      "id": "W12",
+      "title": "Phase 2 falsely states Phase 1 updated _emit_token_completed signature",
+      "sources": ["reality:R6"],
+      "priority_score": 6,
+      "issue": "_emit_token_completed lives at processor.py:536; processor.py is in Phase 2 only.",
+      "recommendation": "Add an explicit Step 0 in Phase 2 Task 2.1 to update the signature; remove the misleading 'Phase 1 already did this' sentence."
+    },
+    {
+      "id": "W13",
+      "title": "Stale counts in plan: ~143 outcome assertions, ~120 producer refs, ~15 callers",
+      "sources": ["reality:R7", "reality:R8", "reality:R9"],
+      "priority_score": 4,
+      "issue": "Actual numbers: ~104-134 assertion sites, 116 producer refs (excluding enums.py + testing/__init__.py), 11 _emit_token_completed callers.",
+      "recommendation": "Update counts; executor should re-grep at stage start."
+    },
+    {
+      "id": "W14",
+      "title": "Plan references docs/operator/migrations/ but docs/operator/ does not exist",
+      "sources": ["reality:R10"],
+      "priority_score": 4,
+      "recommendation": "Add `mkdir -p docs/operator/migrations` to Phase 5 Task 5.4."
+    }
+  ],
+  "info": [
+    {"id": "I1", "title": "DB migration rollback story consistent with project policy (no-Alembic / delete-the-old-DB)", "sources": ["architecture:ARCH-I01"]},
+    {"id": "I2", "title": "Freeze-guard analysis correct: no container fields added in plan", "sources": ["architecture:ARCH-I02"]},
+    {"id": "I3", "title": "Layer compliance correct: imports flow L0→L1→L2→L3 downward", "sources": ["architecture:ARCH-I03"]},
+    {"id": "I4", "title": "Empty src/ allowlist after merge claim is mechanically verifiable", "sources": ["architecture:ARCH-I04"]},
+    {"id": "I5", "title": "Phase 1 schema column verification target is correct", "sources": ["reality:R13"]},
+    {"id": "I6", "title": "Extracting _REQUIRED_FIELDS_BY_PAIR to contracts/audit.py is layer-compliant", "sources": ["reality:R14"]}
+  ],
+  "conflicts_resolved": [
+    {
+      "issue": "Phase 4 I3 placeholder severity",
+      "architecture_view": "ARCH-W05 — WARNING (custom_code_vs_reuse)",
+      "quality_view": "Q1 — BLOCKER (edge_case)",
+      "resolution": "Treated as BLOCKER (B10). Per skill spec, err toward higher severity. The query is non-executable as written — implementer cannot proceed without resolving the placeholder."
+    },
+    {
+      "issue": "Class-name space in Phase 4 line 141",
+      "reality_view": "R3 — BLOCKER (symbol)",
+      "quality_view": "Q2 — BLOCKER (test_strategy)",
+      "resolution": "Consolidated as B9 with both sources cited."
+    },
+    {
+      "issue": "Overview TDD ordering claim",
+      "architecture_view": "ARCH-W01 — WARNING",
+      "quality_view": "Q9 — INFO",
+      "resolution": "Consolidated as W11 at WARNING severity. Both reviewers describe the same defect; architecture's higher classification stands because the claim materially misleads execution-order planning."
+    },
+    {
+      "issue": "Helper-factory test-path integrity (Q7) vs helper existence (R5/R11/R12)",
+      "quality_view": "Q7 — WARNING (CLAUDE.md production-instantiation requirement)",
+      "reality_view": "R5/R11/R12 — BLOCKER (helpers don't exist; inconsistent locations)",
+      "resolution": "Folded Q7 into B11 as part of the helper-creation acceptance criteria. The helpers must be created AND must use production paths."
+    }
+  ],
+  "reviewer_summaries": {
+    "reality": {"status": "ISSUES_FOUND", "blocking": 5, "warning": 7, "info": 2},
+    "architecture": {"status": "ISSUES_FOUND", "blocking": 0, "warning": 5, "info": 4},
+    "quality": {"status": "ISSUES_FOUND", "blocking": 3, "warning": 6, "info": 1},
+    "systems": {"status": "ISSUES_FOUND", "blocking": 5, "warning": 3, "info": 0}
+  }
+}

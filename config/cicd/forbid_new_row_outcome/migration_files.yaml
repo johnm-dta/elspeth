@@ -1,0 +1,81 @@
+# ADR-019 migration allowlist for forbid_new_row_outcome.py.
+#
+# Files listed here may freely reference RowOutcome.X during the migration
+# window. They are EXISTING migration sites that Stages 2/3/4 will flip to
+# (TerminalOutcome, TerminalPath) pairs. Any file outside this list that
+# introduces a RowOutcome.X reference fails the lint guard.
+#
+# Allowlist scope at Stage 1 PR time (2026-05-04):
+# - The contracts layer: enums.py defines RowOutcome (until Stage 5);
+#   audit.py, events.py, engine.py, results.py hold dataclass fields typed
+#   as RowOutcome that get retyped in Stage 2 alongside the recorder flip.
+# - The recorder + repository: data_flow_repository.py and model_loaders.py
+#   are the Tier 1 cross-check sites that flip in Stage 2.
+# - The accumulator + resume aggregation: outcomes.py and core.py flip
+#   together in Stage 3 because the predicate change in Stage 2's
+#   RunResult.__post_init__ is paired with the accumulator's counter
+#   increments.
+# - The producer sites: sink.py, transform.py, processor.py,
+#   coalesce_executor.py emit RowOutcome.X today; they flip in Stage 3.
+# - The checkpoint recovery path: recovery.py reads RowOutcome from saved
+#   state to restore in-flight runs; flips in Stage 2 with the recorder.
+# - The testing helpers: testing/__init__.py exposes RowOutcome to
+#   plugin-developer scaffolding and ChaosEngine fixtures; flips in Stage 4.
+# - The entire tests/ tree: ~645 RowOutcome.X references across 90-150
+#   assertion sites that flip mechanically in Stage 4. Allowing the whole
+#   subtree avoids per-file churn during the migration window.
+#
+# Stage 5 deletes RowOutcome and this allowlist (and the script that
+# consults it) — the partition assertion in contracts/enums.py becomes the
+# only enforcement of the (TerminalOutcome, TerminalPath) closed set.
+#
+# Allowlist entry rules:
+# - 'file' is a path RELATIVE TO THE REPO ROOT.
+# - A trailing '/' makes the entry a directory-prefix match (allows every
+#   .py file under that subtree).
+# - Anything else is an exact path match.
+# - 'justification' is mandatory and non-empty; it documents WHY this file
+#   is in the migration set, so a future reader of this allowlist can tell
+#   "remove this entry now that the file has been retyped" from "this entry
+#   still has work scheduled."
+
+allowed:
+  # Contracts layer — RowOutcome itself + dataclass fields that hold it.
+  - file: src/elspeth/contracts/enums.py
+    justification: ADR-019 migration site — defines RowOutcome (kept through Stage 4); also defines TerminalOutcome / TerminalPath added in Stage 1.
+  - file: src/elspeth/contracts/audit.py
+    justification: TokenOutcome.outcome is typed RowOutcome at line 684; retyped to TerminalOutcome alongside path field in Stage 2.
+  - file: src/elspeth/contracts/events.py
+    justification: TokenCompleted.outcome telemetry payload is typed RowOutcome at line 248; flips in Stage 2 to keep telemetry consumers in sync with the recorder.
+  - file: src/elspeth/contracts/engine.py
+    justification: PendingOutcome.outcome at line 84 plus _REQUIRES_ERROR_HASH_OUTCOMES ClassVar at line 76; both flip in Stage 2.
+  - file: src/elspeth/contracts/results.py
+    justification: RowResult.outcome at line 399 plus __post_init__ guards; flips in Stage 2 alongside RunResult.__post_init__ predicate rewrite.
+  # Core landscape — recorder and Tier 1 cross-check site.
+  - file: src/elspeth/core/landscape/data_flow_repository.py
+    justification: Recorder writes RowOutcome to token_outcomes today; Stage 2 migrates to (completed, outcome, path) triple.
+  - file: src/elspeth/core/landscape/model_loaders.py
+    justification: Tier 1 cross-check guards at lines 547-580 enforce per-RowOutcome required-field invariants; Stage 2 re-expresses each in (outcome, path) terms per ADR-019 Implementation Notes table.
+  # Core checkpoint recovery — reads RowOutcome from saved state.
+  - file: src/elspeth/core/checkpoint/recovery.py
+    justification: Resume path reads RowOutcome from checkpoint state to restore in-flight runs; flips in Stage 2 with the recorder migration so the read shape matches the new write shape.
+  # Engine accumulator + resume aggregation — predicate-input counters.
+  - file: src/elspeth/engine/orchestrator/outcomes.py
+    justification: accumulate_row_outcomes contains the per-RowOutcome match arms that increment predicate counters; Stage 3 rewrites as (outcome, path) match plus the two behaviour changes from ADR-019 § Counter derivation contract (GATE_ROUTED → also rows_succeeded; ON_ERROR_ROUTED → also rows_failed).
+  - file: src/elspeth/engine/orchestrator/core.py
+    justification: _derive_resume_terminal_status_from_audit reads RowOutcome from token_outcomes for resume aggregation; Stage 3 reads the new column pair.
+  # Engine executors — producer sites.
+  - file: src/elspeth/engine/executors/sink.py
+    justification: Sink executor emits the primary terminal outcome at line 635, the failsink-mode DIVERTED at line 952, and the discard-mode DIVERTED at line 998; Stage 3 emits (outcome, path) pairs at all three sites and ships the discard-mode behaviour change from ADR-019 § Sub-decision 5.
+  - file: src/elspeth/engine/executors/transform.py
+    justification: Transform executor emits ROUTED, ROUTED_ON_ERROR, DROPPED_BY_FILTER, FORKED, EXPANDED at producer sites; Stage 3 emits (outcome, path) pairs.
+  - file: src/elspeth/engine/processor.py
+    justification: RowProcessor classifies row terminal states using RowOutcome; flips in Stage 3 alongside the executors so the producer pair is consistent end-to-end.
+  - file: src/elspeth/engine/coalesce_executor.py
+    justification: Coalesce executor emits COALESCED at flush time (with synthesized COMPLETED for batch-result token per ADR-018 line 70-82); flips in Stage 3 to (SUCCESS, COALESCED) pair plus structural rows_coalesced increment.
+  # Testing helpers — exposed to plugin-developer scaffolding.
+  - file: src/elspeth/testing/__init__.py
+    justification: testing pack re-exports RowOutcome for ChaosEngine / plugin-test fixtures; flips in Stage 4 to also expose TerminalOutcome and TerminalPath, then drops RowOutcome in Stage 5.
+  # Tests subtree — bulk assertion-site flip in Stage 4.
+  - file: tests/
+    justification: ~645 RowOutcome.X references across ~143 assertion sites; Stage 4 mechanically flips each ``assert outcome == RowOutcome.X`` to ``assert (outcome, path) == (TerminalOutcome.Y, TerminalPath.Z)`` per the canonical mapping.

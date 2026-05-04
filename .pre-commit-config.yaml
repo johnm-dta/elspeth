@@ -111,3 +111,12 @@ repos:
         types: [python]
         pass_filenames: false
         files: ^(src/elspeth/|scripts/cicd/enforce_contract_manifest\.py|config/cicd/enforce_contract_manifest/)
+
+      # ADR-019 migration gate: forbid new RowOutcome.X references outside
+      # the migration allowlist. Removed in Stage 5 alongside RowOutcome.
+      - id: forbid-new-row-outcome
+        name: Forbid new RowOutcome.X references (ADR-019 migration)
+        entry: .venv/bin/python scripts/cicd/forbid_new_row_outcome.py check --root . --allowlist config/cicd/forbid_new_row_outcome
+        language: system
+        types: [python]
+        pass_filenames: false

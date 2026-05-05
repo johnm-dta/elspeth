@@ -27,9 +27,13 @@ from sqlalchemy import select
 from elspeth.contracts import (
     NodeType,
     RoutingMode,
-    RowOutcome,
 )
-from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.audit import (
+    _TERMINAL_PAIR_FIELD_CONSTRAINTS,
+    DISCARD_SINK_NAME,
+    TokenRef,
+)
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import repr_hash
 from elspeth.contracts.schema import SchemaConfig
@@ -53,6 +57,7 @@ from elspeth.core.landscape.schema import (
 from tests.fixtures.landscape import make_factory, make_landscape_db
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+_ERROR_HASH = "a" * 64
 
 
 def _make_repo(
@@ -120,7 +125,42 @@ def _make_repo_with_token(
     db, repo, factory = _make_repo(run_id=run_id, payload_store=payload_store)
     row = repo.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
     token = repo.create_token("row-1", token_id="tok-1")
+    factory.execution.create_batch(run_id=run_id, aggregation_node_id="transform-1", batch_id="batch-1")
     return db, repo, factory, row.row_id, token.token_id
+
+
+def _valid_constraint_fields(pair: tuple[TerminalOutcome | None, TerminalPath]) -> dict[str, str]:
+    """Return discriminator kwargs satisfying one ADR-019 constraint row."""
+    constraints = _TERMINAL_PAIR_FIELD_CONSTRAINTS[pair]
+    field_values = {
+        "sink_name": "sink-0",
+        "batch_id": "batch-1",
+        "fork_group_id": "fork-1",
+        "join_group_id": "join-1",
+        "expand_group_id": "expand-1",
+        "error_hash": _ERROR_HASH,
+    }
+    fields: dict[str, str] = {}
+    for field_name in constraints.required:
+        exact_value = constraints.exact.get(field_name)
+        fields[field_name] = str(exact_value if exact_value is not None else field_values[field_name])
+    for field_name, exact_value in constraints.exact.items():
+        fields[field_name] = str(exact_value)
+    return fields
+
+
+def _invalid_constraint_fields(pair: tuple[TerminalOutcome | None, TerminalPath]) -> dict[str, str | None]:
+    """Return discriminator kwargs violating one requirement for a constraint row."""
+    constraints = _TERMINAL_PAIR_FIELD_CONSTRAINTS[pair]
+    fields: dict[str, str | None] = dict(_valid_constraint_fields(pair))
+    if constraints.required:
+        fields[constraints.required[0]] = None
+    elif constraints.exact:
+        field_name = next(iter(constraints.exact))
+        fields[field_name] = "wrong-exact-value"
+    else:
+        fields[constraints.forbidden[0]] = "forbidden-extra"
+    return fields
 
 
 # ===========================================================================
@@ -172,14 +212,15 @@ class TestCreateToken:
         assert token.token_id == "custom-tok"
 
 
-class TestRecordTokenOutcomeDirect:
+class TestRecordTokenOutcomeTwoAxis:
     """Tests for DataFlowRepository.record_token_outcome via direct repo."""
 
     def test_facords_completed_outcome(self) -> None:
         _db, repo, _fac, _row, tok = _make_repo_with_token()
         outcome_id = repo.record_token_outcome(
             ref=TokenRef(token_id=tok, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="sink-0",
         )
         assert outcome_id.startswith("out_")
@@ -188,13 +229,136 @@ class TestRecordTokenOutcomeDirect:
         _db, repo, _fac, _row, tok = _make_repo_with_token()
         repo.record_token_outcome(
             ref=TokenRef(token_id=tok, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="sink-0",
         )
         fetched = repo.get_token_outcome(tok)
         assert fetched is not None
-        assert fetched.outcome == RowOutcome.COMPLETED
+        assert fetched.outcome == TerminalOutcome.SUCCESS
+        assert fetched.path == TerminalPath.DEFAULT_FLOW
+        assert fetched.completed is True
         assert fetched.sink_name == "sink-0"
+
+    def test_record_buffered(self) -> None:
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        repo.record_token_outcome(
+            ref=TokenRef(token_id=tok, run_id="run-1"),
+            outcome=None,
+            path=TerminalPath.BUFFERED,
+            batch_id="batch-1",
+        )
+
+        fetched = repo.get_token_outcome(tok)
+
+        assert fetched is not None
+        assert fetched.outcome is None
+        assert fetched.path == TerminalPath.BUFFERED
+        assert fetched.completed is False
+
+    def test_record_illegal_pair_crashes(self) -> None:
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        with pytest.raises(ValueError, match=r"Unhandled \(outcome, path\) pair"):
+            repo.record_token_outcome(
+                ref=TokenRef(token_id=tok, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.UNROUTED,
+                sink_name="sink-0",
+            )
+
+    def test_record_default_flow_requires_sink_name(self) -> None:
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        with pytest.raises(ValueError, match="sink_name"):
+            repo.record_token_outcome(
+                ref=TokenRef(token_id=tok, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+            )
+
+    def test_record_filter_dropped_requires_no_extra_fields(self) -> None:
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        with pytest.raises(ValueError, match="forbids sink_name"):
+            repo.record_token_outcome(
+                ref=TokenRef(token_id=tok, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.FILTER_DROPPED,
+                sink_name="sink-0",
+            )
+
+    def test_record_expand_parent_requires_expand_group_id(self) -> None:
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        with pytest.raises(ValueError, match="expand_group_id"):
+            repo.record_token_outcome(
+                ref=TokenRef(token_id=tok, run_id="run-1"),
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.EXPAND_PARENT,
+            )
+
+    def test_record_sink_discarded_requires_exact_discard_sink_name(self) -> None:
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        with pytest.raises(ValueError, match=DISCARD_SINK_NAME):
+            repo.record_token_outcome(
+                ref=TokenRef(token_id=tok, run_id="run-1"),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.SINK_DISCARDED,
+                sink_name="not-discard",
+                error_hash=_ERROR_HASH,
+            )
+
+    def test_record_default_flow_rejects_error_hash(self) -> None:
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        with pytest.raises(ValueError, match="forbids error_hash"):
+            repo.record_token_outcome(
+                ref=TokenRef(token_id=tok, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="sink-0",
+                error_hash=_ERROR_HASH,
+            )
+
+    def test_record_buffered_rejects_sink_name(self) -> None:
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        with pytest.raises(ValueError, match="forbids sink_name"):
+            repo.record_token_outcome(
+                ref=TokenRef(token_id=tok, run_id="run-1"),
+                outcome=None,
+                path=TerminalPath.BUFFERED,
+                batch_id="batch-1",
+                sink_name="sink-0",
+            )
+
+    @pytest.mark.parametrize("pair", tuple(_TERMINAL_PAIR_FIELD_CONSTRAINTS))
+    def test_record_accepts_every_constraint_pair(
+        self,
+        pair: tuple[TerminalOutcome | None, TerminalPath],
+    ) -> None:
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        outcome, path = pair
+
+        outcome_id = repo.record_token_outcome(
+            ref=TokenRef(token_id=tok, run_id="run-1"),
+            outcome=outcome,
+            path=path,
+            **_valid_constraint_fields(pair),
+        )
+
+        assert outcome_id.startswith("out_")
+
+    @pytest.mark.parametrize("pair", tuple(_TERMINAL_PAIR_FIELD_CONSTRAINTS))
+    def test_record_rejects_each_constraint_row_violation(
+        self,
+        pair: tuple[TerminalOutcome | None, TerminalPath],
+    ) -> None:
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        fields = _invalid_constraint_fields(pair)
+
+        with pytest.raises(ValueError, match="Contract violation"):
+            repo.record_token_outcome(
+                ref=TokenRef(token_id=tok, run_id="run-1"),
+                outcome=pair[0],
+                path=pair[1],
+                **fields,
+            )
 
     def test_cross_run_contamination_raises(self) -> None:
         """record_token_outcome rejects token from a different run."""
@@ -204,7 +368,8 @@ class TestRecordTokenOutcomeDirect:
         with pytest.raises(AuditIntegrityError, match="Cross-run contamination"):
             repo.record_token_outcome(
                 ref=TokenRef(token_id=tok, run_id="run-2"),
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="sink-0",
             )
 
@@ -275,7 +440,7 @@ class TestRegisterNodeDirect:
                 "api_key": "top-secret-key",
                 "nested": {
                     "client_secret": "nested-secret",
-                    "connection_string": "postgresql://user:password@example.test/db",
+                    "connection_string": "postgresql://example.test/db?credential=redacted",
                 },
             },
             node_id="source-secret",
@@ -293,7 +458,7 @@ class TestRegisterNodeDirect:
         )
         assert "connection_string" not in parsed["nested"]
         assert parsed["nested"]["connection_string_fingerprint"] == secret_fingerprint(
-            "postgresql://user:password@example.test/db",
+            "postgresql://example.test/db?credential=redacted",
             key=b"test-fingerprint-key",
         )
 
@@ -539,9 +704,10 @@ class TestValidateOutcomeFieldsExhaustive:
     def test_rejects_unknown_outcome_string(self) -> None:
         """Unknown outcome variants raise ValueError (M1 exhaustive guard)."""
         _db, repo, _fac = _make_repo()
-        with pytest.raises(ValueError, match="Unhandled RowOutcome"):
+        with pytest.raises(ValueError, match=r"Unhandled \(outcome, path\) pair"):
             repo._validate_outcome_fields(
-                cast(RowOutcome, "IMAGINARY_OUTCOME"),
+                cast(TerminalOutcome, "IMAGINARY_OUTCOME"),
+                TerminalPath.DEFAULT_FLOW,
                 sink_name=None,
                 batch_id=None,
                 fork_group_id=None,

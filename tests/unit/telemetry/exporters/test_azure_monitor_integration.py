@@ -20,7 +20,7 @@ azure_monitor = pytest.importorskip(
     reason="azure-monitor-opentelemetry-exporter not installed",
 )
 
-from elspeth.contracts.enums import RowOutcome, RunStatus  # noqa: E402
+from elspeth.contracts.enums import RunStatus, TerminalOutcome, TerminalPath  # noqa: E402
 from elspeth.contracts.events import RunFinished, RunStarted  # noqa: E402
 from elspeth.telemetry.exporters.azure_monitor import AzureMonitorExporter  # noqa: E402
 
@@ -130,7 +130,8 @@ class TestAzureMonitorIntegration:
             run_id="run-789",
             token_id="token-abc",
             row_id="row-def",
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output_sink",
         )
 
@@ -142,7 +143,8 @@ class TestAzureMonitorIntegration:
         assert span.name == "TokenCompleted"
         assert span.attributes.get("token_id") == "token-abc"
         assert span.attributes.get("row_id") == "row-def"
-        assert span.attributes.get("outcome") == "completed"
+        assert span.attributes.get("outcome") == "success"
+        assert span.attributes.get("path") == "default_flow"
         assert span.attributes.get("sink_name") == "output_sink"
 
     def test_trace_context_is_consistent(self, configured_exporter) -> None:
@@ -320,7 +322,8 @@ class TestAzureMonitorSpanFormat:
             run_id="none-test",
             token_id="token-1",
             row_id="row-1",
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name=None,  # Explicitly None
         )
         exporter.export(event)

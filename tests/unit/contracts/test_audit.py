@@ -32,7 +32,6 @@ from elspeth.contracts import (
     RoutingMode,
     Row,
     RowLineage,
-    RowOutcome,
     Run,
     RunStatus,
     SecretResolution,
@@ -43,6 +42,7 @@ from elspeth.contracts import (
     TriggerType,
     ValidationErrorRecord,
 )
+from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, TerminalOutcome, TerminalPath
 
 
 class TestNodeStateVariants:
@@ -693,88 +693,216 @@ class TestTokenOutcome:
             outcome_id="out-1",
             run_id="run-1",
             token_id="tok-1",
-            outcome=RowOutcome.COMPLETED,
-            is_terminal=True,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            completed=True,
             recorded_at=now,
+            sink_name="output",
         )
         assert outcome.outcome_id == "out-1"
         assert outcome.run_id == "run-1"
         assert outcome.token_id == "tok-1"
-        assert outcome.outcome == RowOutcome.COMPLETED
-        assert outcome.is_terminal is True
+        assert outcome.outcome == TerminalOutcome.SUCCESS
+        assert outcome.path == TerminalPath.DEFAULT_FLOW
+        assert outcome.completed is True
         assert outcome.recorded_at == now
 
-    def test_token_outcome_is_terminal_for_completed(self) -> None:
-        """COMPLETED outcome is terminal (no further processing)."""
+    def test_token_outcome_completed_for_success(self) -> None:
+        """SUCCESS/DEFAULT_FLOW outcome is completed (no further processing)."""
         outcome = TokenOutcome(
             outcome_id="out-1",
             run_id="run-1",
             token_id="tok-1",
-            outcome=RowOutcome.COMPLETED,
-            is_terminal=True,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            completed=True,
             recorded_at=datetime.now(UTC),
+            sink_name="output",
         )
-        assert outcome.is_terminal is True
+        assert outcome.completed is True
 
-    def test_token_outcome_buffered_is_not_terminal(self) -> None:
-        """BUFFERED outcome is NOT terminal (waiting for aggregation)."""
+    def test_token_outcome_buffered_is_not_completed(self) -> None:
+        """BUFFERED path is NOT completed (waiting for aggregation)."""
         outcome = TokenOutcome(
             outcome_id="out-1",
             run_id="run-1",
             token_id="tok-1",
-            outcome=RowOutcome.BUFFERED,
-            is_terminal=False,  # BUFFERED is the only non-terminal outcome
+            outcome=None,
+            path=TerminalPath.BUFFERED,
+            completed=False,
             recorded_at=datetime.now(UTC),
             batch_id="batch-123",  # BUFFERED has batch context
         )
-        assert outcome.is_terminal is False
+        assert outcome.completed is False
         assert outcome.batch_id == "batch-123"
 
     def test_token_outcome_routed_with_sink_name(self) -> None:
-        """ROUTED outcome includes sink_name for traceability."""
+        """GATE_ROUTED path includes sink_name for traceability."""
         outcome = TokenOutcome(
             outcome_id="out-1",
             run_id="run-1",
             token_id="tok-1",
-            outcome=RowOutcome.ROUTED,
-            is_terminal=True,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.GATE_ROUTED,
+            completed=True,
             recorded_at=datetime.now(UTC),
             sink_name="quarantine_sink",
         )
-        assert outcome.outcome == RowOutcome.ROUTED
+        assert outcome.outcome == TerminalOutcome.SUCCESS
+        assert outcome.path == TerminalPath.GATE_ROUTED
         assert outcome.sink_name == "quarantine_sink"
 
     def test_token_outcome_forked_with_fork_group(self) -> None:
-        """FORKED outcome includes fork_group_id for lineage tracking."""
+        """FORK_PARENT path includes fork_group_id for lineage tracking."""
         outcome = TokenOutcome(
             outcome_id="out-1",
             run_id="run-1",
             token_id="tok-1",
-            outcome=RowOutcome.FORKED,
-            is_terminal=True,  # Parent token is terminal after fork
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.FORK_PARENT,
+            completed=True,
             recorded_at=datetime.now(UTC),
             fork_group_id="fork-456",
         )
-        assert outcome.outcome == RowOutcome.FORKED
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.FORK_PARENT
         assert outcome.fork_group_id == "fork-456"
 
     def test_token_outcome_error_with_hash(self) -> None:
-        """QUARANTINED/FAILED outcomes can have error_hash."""
+        """QUARANTINED_AT_SOURCE outcomes can have error_hash."""
         outcome = TokenOutcome(
             outcome_id="out-1",
             run_id="run-1",
             token_id="tok-1",
-            outcome=RowOutcome.QUARANTINED,
-            is_terminal=True,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            completed=True,
             recorded_at=datetime.now(UTC),
             error_hash="err_abc123",
             context_json='{"reason": "validation_failed"}',
         )
-        assert outcome.outcome == RowOutcome.QUARANTINED
+        assert outcome.outcome == TerminalOutcome.FAILURE
+        assert outcome.path == TerminalPath.QUARANTINED_AT_SOURCE
         assert outcome.error_hash == "err_abc123"
         assert outcome.context_json == '{"reason": "validation_failed"}'
 
     # NOTE: Frozen immutability tested in TestFrozenDataclassImmutability
+
+
+class TestTokenOutcomeTwoAxis:
+    """ADR-019 Phase 1: TokenOutcome carries (outcome, path, completed)."""
+
+    def test_completed_outcome_has_outcome_path_completed(self) -> None:
+        """A completed-state TokenOutcome has all three two-axis fields."""
+        record = TokenOutcome(
+            outcome_id="out_test_01",
+            run_id="run_001",
+            token_id="tok_001",
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            completed=True,
+            recorded_at=datetime.now(UTC),
+            sink_name="primary",
+        )
+        assert record.outcome == TerminalOutcome.SUCCESS
+        assert record.path == TerminalPath.DEFAULT_FLOW
+        assert record.completed is True
+
+    def test_buffered_outcome_has_null_outcome_buffered_path(self) -> None:
+        """A non-terminal TokenOutcome has outcome=None, path=BUFFERED, completed=False."""
+        record = TokenOutcome(
+            outcome_id="out_test_02",
+            run_id="run_001",
+            token_id="tok_001",
+            outcome=None,
+            path=TerminalPath.BUFFERED,
+            completed=False,
+            recorded_at=datetime.now(UTC),
+            batch_id="batch_001",
+        )
+        assert record.outcome is None
+        assert record.path == TerminalPath.BUFFERED
+        assert record.completed is False
+
+    def test_completed_xor_outcome_invariant_completed_true_outcome_none(self) -> None:
+        """Tier 1: completed=True with outcome=None is an invariant violation."""
+        with pytest.raises(ValueError, match="completed"):
+            TokenOutcome(
+                outcome_id="out_test_03",
+                run_id="run_001",
+                token_id="tok_001",
+                outcome=None,
+                path=TerminalPath.DEFAULT_FLOW,
+                completed=True,
+                recorded_at=datetime.now(UTC),
+            )
+
+    def test_completed_xor_outcome_invariant_completed_false_outcome_set(self) -> None:
+        """Tier 1: completed=False with outcome=SUCCESS is an invariant violation."""
+        with pytest.raises(ValueError, match="completed"):
+            TokenOutcome(
+                outcome_id="out_test_04",
+                run_id="run_001",
+                token_id="tok_001",
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.BUFFERED,
+                completed=False,
+                recorded_at=datetime.now(UTC),
+            )
+
+    def test_legal_pair_required(self) -> None:
+        """Tier 1: an unknown (outcome, path) pair is an invariant violation."""
+        with pytest.raises(ValueError, match="_LEGAL_TERMINAL_PAIRS"):
+            TokenOutcome(
+                outcome_id="out_test_05",
+                run_id="run_001",
+                token_id="tok_001",
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.UNROUTED,
+                completed=True,
+                recorded_at=datetime.now(UTC),
+            )
+
+    @given(
+        outcome=st.sampled_from(list(TerminalOutcome)),
+        path=st.sampled_from(list(TerminalPath)),
+    )
+    def test_all_illegal_completed_pairs_rejected(
+        self,
+        outcome: TerminalOutcome,
+        path: TerminalPath,
+    ) -> None:
+        """Tier 1: every pair outside _LEGAL_TERMINAL_PAIRS is rejected."""
+        if (outcome, path) in _LEGAL_TERMINAL_PAIRS:
+            return
+
+        with pytest.raises(ValueError):
+            TokenOutcome(
+                outcome_id="out_prop_illegal",
+                run_id="run_001",
+                token_id="tok_001",
+                outcome=outcome,
+                path=path,
+                completed=True,
+                recorded_at=datetime.now(UTC),
+            )
+
+    @given(pair=st.sampled_from(list(_LEGAL_TERMINAL_PAIRS)))
+    def test_all_legal_pairs_accepted(
+        self,
+        pair: tuple[TerminalOutcome, TerminalPath],
+    ) -> None:
+        """Tier 1: every closed-set legal pair is accepted at the shape layer."""
+        outcome, path = pair
+        TokenOutcome(
+            outcome_id="out_prop_legal",
+            run_id="run_001",
+            token_id="tok_001",
+            outcome=outcome,
+            path=path,
+            completed=True,
+            recorded_at=datetime.now(UTC),
+        )
 
 
 class TestNonCanonicalMetadata:
@@ -1213,7 +1341,8 @@ class TestRequiredFieldValidation:
                 run_id="r1",
                 token_id="t1",
                 # outcome missing
-                is_terminal=True,
+                path=TerminalPath.DEFAULT_FLOW,
+                completed=True,
                 recorded_at=datetime.now(UTC),
             )
 
@@ -1423,8 +1552,7 @@ class TestPropertyBasedAuditContracts:
         outcome_id=valid_ids,
         run_id=valid_ids,
         token_id=valid_ids,
-        outcome=st.sampled_from(list(RowOutcome)),
-        is_terminal=st.booleans(),
+        pair=st.sampled_from(list(_LEGAL_TERMINAL_PAIRS)),
     )
     @settings(max_examples=50)
     def test_token_outcome_accepts_valid_inputs(
@@ -1432,20 +1560,22 @@ class TestPropertyBasedAuditContracts:
         outcome_id: str,
         run_id: str,
         token_id: str,
-        outcome: RowOutcome,
-        is_terminal: bool,
+        pair: tuple[TerminalOutcome, TerminalPath],
     ) -> None:
         """TokenOutcome accepts valid combinations."""
+        outcome, path = pair
         token_outcome = TokenOutcome(
             outcome_id=outcome_id,
             run_id=run_id,
             token_id=token_id,
             outcome=outcome,
-            is_terminal=is_terminal,
+            path=path,
+            completed=True,
             recorded_at=datetime.now(UTC),
         )
         assert token_outcome.outcome == outcome
-        assert token_outcome.is_terminal == is_terminal
+        assert token_outcome.path == path
+        assert token_outcome.completed is True
 
     @given(
         repr_value=st.text(min_size=1, max_size=200),

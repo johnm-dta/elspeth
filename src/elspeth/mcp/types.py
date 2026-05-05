@@ -201,6 +201,15 @@ class RunSummaryErrors(TypedDict):
     total: int
 
 
+class OutcomeDistributionEntry(TypedDict):
+    """Single entry in outcome distribution (ADR-019 two-axis terminal model)."""
+
+    outcome: str | None
+    path: str
+    completed: bool
+    count: int
+
+
 class RunSummaryReport(TypedDict):
     """Return type for ``get_run_summary``."""
 
@@ -211,7 +220,7 @@ class RunSummaryReport(TypedDict):
     run_duration_seconds: float | None
     counts: RunSummaryCounts
     errors: RunSummaryErrors
-    outcome_distribution: dict[str, int]  # dynamic outcome names
+    outcome_distribution: list[OutcomeDistributionEntry]
     avg_state_duration_ms: float | None
 
 
@@ -355,14 +364,6 @@ class OutcomeSummary(TypedDict):
     non_terminal_tokens: int
     fork_operations: int
     join_operations: int
-
-
-class OutcomeDistributionEntry(TypedDict):
-    """Single entry in outcome distribution."""
-
-    outcome: str
-    is_terminal: bool
-    count: int
 
 
 class OutcomeAnalysisReport(TypedDict):

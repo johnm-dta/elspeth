@@ -22,7 +22,7 @@ from elspeth.contracts.audit import (
     TokenOutcome,
     TokenParent,
 )
-from elspeth.contracts.enums import RowOutcome
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.lineage import LineageResult, explain
 
@@ -88,8 +88,9 @@ def _make_token(
 
 def _make_outcome(
     token_id: str = "tok-1",
-    outcome: RowOutcome = RowOutcome.COMPLETED,
-    is_terminal: bool = True,
+    outcome: TerminalOutcome | None = TerminalOutcome.SUCCESS,
+    path: TerminalPath = TerminalPath.DEFAULT_FLOW,
+    completed: bool = True,
     sink_name: str | None = None,
 ) -> TokenOutcome:
     from datetime import UTC, datetime
@@ -99,7 +100,8 @@ def _make_outcome(
         run_id="run-1",
         token_id=token_id,
         outcome=outcome,
-        is_terminal=is_terminal,
+        path=path,
+        completed=completed,
         recorded_at=datetime(2026, 1, 15, tzinfo=UTC),
         sink_name=sink_name,
     )
@@ -212,7 +214,7 @@ class TestExplainByRowId:
         assert result is None
 
     def test_returns_none_when_all_non_terminal(self) -> None:
-        outcomes = [_make_outcome(is_terminal=False, outcome=RowOutcome.BUFFERED)]
+        outcomes = [_make_outcome(outcome=None, path=TerminalPath.BUFFERED, completed=False)]
         factory = _make_factory(token_outcomes=outcomes)
         result = explain(factory.query, factory.data_flow, "run-1", row_id="row-1")
         assert result is None
@@ -545,14 +547,14 @@ class TestExplainSinkFilterEquality:
     def test_terminal_filter_excludes_non_terminal(self) -> None:
         """Verify non-terminal outcomes are excluded when mixed with terminal.
 
-        Kills mutant: ``o.is_terminal`` → ``not o.is_terminal``.
+        Kills mutant: ``o.completed`` → ``not o.completed``.
         With the mutant, only BUFFERED tokens are kept and the real
         terminal token is dropped, returning None instead of a result.
         """
         token = _make_token(token_id="tok-terminal")
         outcomes = [
-            _make_outcome(token_id="tok-buffered", is_terminal=False, outcome=RowOutcome.BUFFERED),
-            _make_outcome(token_id="tok-terminal", is_terminal=True, outcome=RowOutcome.COMPLETED),
+            _make_outcome(token_id="tok-buffered", outcome=None, path=TerminalPath.BUFFERED, completed=False),
+            _make_outcome(token_id="tok-terminal", outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, completed=True),
         ]
         factory = _make_factory(
             token=token,

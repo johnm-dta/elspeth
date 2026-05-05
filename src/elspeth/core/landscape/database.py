@@ -11,6 +11,7 @@ from typing import Any, Self
 
 from sqlalchemy import Connection, create_engine, event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.engine.url import make_url
 
 from elspeth.core.landscape.journal import LandscapeJournal
@@ -21,6 +22,9 @@ class SchemaCompatibilityError(Exception):
     """Raised when the Landscape database schema is incompatible with current code."""
 
     pass
+
+
+ADR019_MIGRATION_GUIDE = "docs/operator/migrations/adr-019.md"
 
 
 # Required columns that have been added since initial schema.
@@ -67,6 +71,9 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("batch_members", "run_id"),
     # Retry lineage exactness - retry_batch() must deduplicate per failed batch.
     ("batches", "retry_of_batch_id"),
+    # ADR-019 two-axis terminal model: old is_terminal DBs must fail fast.
+    ("token_outcomes", "completed"),
+    ("token_outcomes", "path"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).
@@ -111,6 +118,49 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
 )
 
 
+def _collect_missing_required_columns(inspector: Inspector) -> list[tuple[str, str]]:
+    """Return required columns missing from existing tables."""
+    existing_tables = set(inspector.get_table_names())
+    missing: list[tuple[str, str]] = []
+    for table_name, column_name in _REQUIRED_COLUMNS:
+        if table_name not in existing_tables:
+            continue
+        existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+        if column_name not in existing_columns:
+            missing.append((table_name, column_name))
+    return missing
+
+
+def _collect_token_outcomes_shape_errors(
+    inspector: Inspector,
+    *,
+    engine: Engine | None = None,
+    inspect_sqlite_indexes: bool = False,
+) -> list[str]:
+    """Return ADR-019 shape errors for existing token_outcomes tables."""
+    existing_tables = set(inspector.get_table_names())
+    if "token_outcomes" not in existing_tables:
+        return []
+
+    columns = {column["name"]: column for column in inspector.get_columns("token_outcomes")}
+    errors: list[str] = []
+
+    if "is_terminal" in columns:
+        errors.append("token_outcomes.is_terminal is stale; ADR-019 uses completed")
+    if "outcome" in columns and columns["outcome"]["nullable"] is False:
+        errors.append("token_outcomes.outcome nullable shape is stale; ADR-019 requires nullable outcome for BUFFERED rows")
+
+    if inspect_sqlite_indexes and engine is not None:
+        with engine.connect() as conn:
+            index_sql = conn.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'ix_token_outcomes_terminal_unique'"
+            ).scalar_one_or_none()
+        if index_sql is not None and "is_terminal" in str(index_sql).lower():
+            errors.append("token_outcomes stale terminal index predicate references is_terminal; ADR-019 uses completed")
+
+    return errors
+
+
 class LandscapeDB:
     """Landscape database connection manager."""
 
@@ -130,7 +180,7 @@ class LandscapeDB:
         Args:
             connection_string: SQLAlchemy connection string
                 e.g., "sqlite:///./state/audit.db"
-                      "postgresql://user:pass@host/dbname"
+                      "postgresql://user@host/dbname"
             passphrase: SQLCipher encryption passphrase. When provided, the
                 database is opened with AES-256 encryption via sqlcipher3.
                 The passphrase is never stored in the URL or audit trail.
@@ -372,23 +422,6 @@ class LandscapeDB:
                 elements, or if an encrypted database is opened without the
                 correct passphrase.
         """
-        if not self.connection_string.startswith("sqlite"):
-            # Backend-agnostic existence check for inspection callers
-            if self._require_existing_schema:
-                from sqlalchemy import inspect as sa_inspect
-
-                inspector = sa_inspect(self.engine)
-                existing_tables = set(inspector.get_table_names())
-                expected_tables = set(metadata.tables.keys())
-                if not existing_tables & expected_tables:
-                    raise SchemaCompatibilityError(
-                        "Database does not contain any Landscape tables.\n\n"
-                        "This does not appear to be an ELSPETH audit database. "
-                        "Verify the database path is correct.\n\n"
-                        f"Database: {self.connection_string}"
-                    )
-            return
-
         from sqlalchemy import inspect
         from sqlalchemy.exc import OperationalError
 
@@ -397,7 +430,7 @@ class LandscapeDB:
             existing_tables = set(inspector.get_table_names())
         except OperationalError as e:
             error_msg = str(e)
-            if "file is not a database" in error_msg or "file is encrypted" in error_msg:
+            if self.connection_string.startswith("sqlite") and ("file is not a database" in error_msg or "file is encrypted" in error_msg):
                 raise SchemaCompatibilityError(
                     "Cannot open Landscape database — file is encrypted or passphrase is incorrect.\n\n"
                     "If this is an encrypted (SQLCipher) database, ensure:\n"
@@ -409,7 +442,7 @@ class LandscapeDB:
             raise
         expected_tables = set(metadata.tables.keys())
         present_landscape_tables = existing_tables & expected_tables
-        schema_epoch = self._get_sqlite_schema_epoch()
+        schema_epoch = self._get_sqlite_schema_epoch() if self.connection_string.startswith("sqlite") else 0
 
         # If this looks like an existing Landscape database, all known tables must exist.
         # For brand-new DB files (no Landscape tables yet), creation happens in create_all().
@@ -424,30 +457,14 @@ class LandscapeDB:
                 "Verify the database path is correct.\n\n"
                 f"Database: {self.connection_string}"
             )
-        if present_landscape_tables and schema_epoch not in (0, SQLITE_SCHEMA_EPOCH):
-            raise SchemaCompatibilityError(
-                "Landscape database schema epoch is incompatible.\n\n"
-                f"Database epoch: {schema_epoch}\n"
-                f"Current epoch: {SQLITE_SCHEMA_EPOCH}\n\n"
-                "This ELSPETH version is using an incompatible SQLite schema epoch.\n"
-                "Pre-1.0 releases may require either recreating the database or "
-                "running a future migration command.\n\n"
-                f"Database: {self.connection_string}"
-            )
         missing_tables = sorted(expected_tables - existing_tables) if present_landscape_tables else []
 
-        missing_columns: list[tuple[str, str]] = []
-
-        for table_name, column_name in _REQUIRED_COLUMNS:
-            # Check if table exists
-            if table_name not in existing_tables:
-                # Table will be created by create_all, skip
-                continue
-
-            # Check if column exists
-            columns = {c["name"] for c in inspector.get_columns(table_name)}
-            if column_name not in columns:
-                missing_columns.append((table_name, column_name))
+        missing_columns = _collect_missing_required_columns(inspector)
+        token_outcomes_shape_errors = _collect_token_outcomes_shape_errors(
+            inspector,
+            engine=self.engine,
+            inspect_sqlite_indexes=self.connection_string.startswith("sqlite"),
+        )
 
         # Check for required foreign keys (Tier 1 audit integrity)
         missing_fks: list[tuple[str, str, str]] = []
@@ -510,9 +527,23 @@ class LandscapeDB:
             if not has_index:
                 missing_indexes.append((table_name, index_name))
 
-        # Raise errors for missing columns, FKs, check constraints, or indexes
-        if missing_tables or missing_columns or missing_fks or missing_composite_fks or missing_checks or missing_indexes:
+        epoch_incompatible = present_landscape_tables and schema_epoch not in (0, SQLITE_SCHEMA_EPOCH)
+
+        # Raise errors for missing columns, FKs, check constraints, indexes, or stale ADR-019 shapes.
+        if (
+            missing_tables
+            or missing_columns
+            or token_outcomes_shape_errors
+            or missing_fks
+            or missing_composite_fks
+            or missing_checks
+            or missing_indexes
+            or epoch_incompatible
+        ):
             error_parts = []
+
+            if epoch_incompatible:
+                error_parts.append(f"schema epoch is incompatible:\nDatabase epoch: {schema_epoch}\nCurrent epoch: {SQLITE_SCHEMA_EPOCH}")
 
             if missing_tables:
                 missing_tables_str = ", ".join(missing_tables)
@@ -521,6 +552,9 @@ class LandscapeDB:
             if missing_columns:
                 missing_str = ", ".join(f"{t}.{c}" for t, c in missing_columns)
                 error_parts.append(f"Missing columns: {missing_str}")
+
+            if token_outcomes_shape_errors:
+                error_parts.append("ADR-019 stale token_outcomes shape: " + "; ".join(token_outcomes_shape_errors))
 
             if missing_fks:
                 missing_fk_str = ", ".join(f"{t}.{c} → {ref}" for t, c, ref in missing_fks)
@@ -540,6 +574,18 @@ class LandscapeDB:
             if missing_indexes:
                 missing_indexes_str = ", ".join(f"{t}.{name}" for t, name in missing_indexes)
                 error_parts.append(f"Missing indexes: {missing_indexes_str}")
+
+            if (
+                ("token_outcomes", "completed") in missing_columns
+                or ("token_outcomes", "path") in missing_columns
+                or token_outcomes_shape_errors
+            ):
+                error_parts.append(
+                    "ADR-019 changed token_outcomes from RowOutcome/is_terminal to "
+                    "(TerminalOutcome, TerminalPath, completed). See "
+                    f"{ADR019_MIGRATION_GUIDE} and replace the stale audit.db "
+                    "before starting this ELSPETH version."
+                )
 
             raise SchemaCompatibilityError(
                 "Landscape database schema is outdated.\n\n" + "\n".join(error_parts) + "\n\n"

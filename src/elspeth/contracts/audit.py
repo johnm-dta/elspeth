@@ -9,7 +9,7 @@ garbage from it, something catastrophic happened - crash immediately.
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypedDict
 
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     pass  # Placeholder for future type-only imports
 
 from elspeth.contracts.enums import (
+    _LEGAL_TERMINAL_PAIRS,
     BatchStatus,
     CallStatus,
     CallType,
@@ -28,8 +29,9 @@ from elspeth.contracts.enums import (
     NodeType,
     ReproducibilityGrade,
     RoutingMode,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
 )
 
@@ -670,22 +672,27 @@ class TransformErrorRecord:
     error_details_json: str | None = None
 
 
+DISCARD_SINK_NAME = "__discard__"
+
+
 @dataclass(frozen=True, slots=True)
 class TokenOutcome:
-    """Recorded terminal state for a token.
+    """Recorded terminal state for a token (ADR-019 two-axis model).
 
-    Captures the moment a token reached its terminal (or buffered) state.
-    Part of AUD-001 audit integrity - explicit rather than derived.
+    ``outcome`` is the lifecycle answer when ``completed=True`` and ``None``
+    when ``completed=False``. ``path`` is the producer-declared provenance axis
+    and is always populated.
     """
 
     outcome_id: str
     run_id: str
     token_id: str
-    outcome: RowOutcome  # Direct type, not forward reference
-    is_terminal: bool
+    outcome: TerminalOutcome | None
+    path: TerminalPath
+    completed: bool
     recorded_at: datetime
 
-    # Outcome-specific fields (nullable based on outcome type)
+    # Outcome-specific fields (nullable based on (outcome, path) pair)
     sink_name: str | None = None
     batch_id: str | None = None
     fork_group_id: str | None = None
@@ -693,14 +700,115 @@ class TokenOutcome:
     expand_group_id: str | None = None
     error_hash: str | None = None
     context_json: str | None = None
-    expected_branches_json: str | None = None  # Branch contract for FORKED/EXPANDED
+    expected_branches_json: str | None = None  # Branch contract for FORK_PARENT/EXPAND_PARENT
 
     def __post_init__(self) -> None:
-        """Validate enum and bool fields - Tier 1 crash on invalid types."""
-        _validate_enum(self.outcome, RowOutcome, "outcome")
-        # is_terminal must be bool, not int or other truthy/falsy value
-        if not isinstance(self.is_terminal, bool):
-            raise TypeError(f"is_terminal must be bool, got {type(self.is_terminal).__name__}: {self.is_terminal!r}")
+        """Validate two-axis invariants — Tier 1 crash on invalid combinations."""
+        if not isinstance(self.completed, bool):
+            raise TypeError(f"completed must be bool, got {type(self.completed).__name__}: {self.completed!r}")
+        if self.completed and self.outcome is None:
+            raise ValueError(
+                f"TokenOutcome {self.outcome_id}: completed=True requires non-NULL outcome "
+                "(ADR-019 invariant: completed XOR (outcome IS NULL))"
+            )
+        if not self.completed and self.outcome is not None:
+            raise ValueError(f"TokenOutcome {self.outcome_id}: completed=False requires outcome=None (got outcome={self.outcome!r})")
+
+        if self.outcome is not None:
+            _validate_enum(self.outcome, TerminalOutcome, "outcome")
+        _validate_enum(self.path, TerminalPath, "path")
+
+        if self.completed:
+            assert self.outcome is not None
+            if (self.outcome, self.path) not in _LEGAL_TERMINAL_PAIRS:
+                raise ValueError(
+                    f"TokenOutcome {self.outcome_id}: ({self.outcome!r}, {self.path!r}) "
+                    "is not in _LEGAL_TERMINAL_PAIRS — see ADR-019 mapping table."
+                )
+        elif self.path != TerminalPath.BUFFERED:
+            raise ValueError(f"TokenOutcome {self.outcome_id}: completed=False requires path=BUFFERED (got path={self.path!r})")
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalPairFieldConstraints:
+    """Column-level constraints for one ADR-019 (outcome, path) pair."""
+
+    required: tuple[str, ...] = ()
+    exact: Mapping[str, object] = field(default_factory=dict)
+    forbidden: tuple[str, ...] = ()
+
+
+_DISCRIMINATOR_FIELDS = (
+    "sink_name",
+    "batch_id",
+    "fork_group_id",
+    "join_group_id",
+    "expand_group_id",
+    "error_hash",
+)
+
+
+def _forbid_except(*allowed: str) -> tuple[str, ...]:
+    return tuple(field_name for field_name in _DISCRIMINATOR_FIELDS if field_name not in allowed)
+
+
+_TERMINAL_PAIR_FIELD_CONSTRAINTS: dict[
+    tuple[TerminalOutcome | None, TerminalPath],
+    TerminalPairFieldConstraints,
+] = {
+    (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW): TerminalPairFieldConstraints(
+        required=("sink_name",),
+        forbidden=_forbid_except("sink_name"),
+    ),
+    (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED): TerminalPairFieldConstraints(
+        required=("sink_name",),
+        forbidden=_forbid_except("sink_name"),
+    ),
+    (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED): TerminalPairFieldConstraints(
+        required=("sink_name", "error_hash"),
+        forbidden=_forbid_except("sink_name", "error_hash"),
+    ),
+    (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED): TerminalPairFieldConstraints(
+        forbidden=_DISCRIMINATOR_FIELDS,
+    ),
+    (TerminalOutcome.SUCCESS, TerminalPath.COALESCED): TerminalPairFieldConstraints(
+        required=("sink_name", "join_group_id"),
+        forbidden=_forbid_except("sink_name", "join_group_id"),
+    ),
+    (TerminalOutcome.FAILURE, TerminalPath.UNROUTED): TerminalPairFieldConstraints(
+        required=("error_hash",),
+        forbidden=_forbid_except("error_hash"),
+    ),
+    (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE): TerminalPairFieldConstraints(
+        required=("error_hash",),
+        forbidden=_forbid_except("error_hash"),
+    ),
+    (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK): TerminalPairFieldConstraints(
+        required=("sink_name", "error_hash"),
+        forbidden=_forbid_except("sink_name", "error_hash"),
+    ),
+    (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED): TerminalPairFieldConstraints(
+        required=("sink_name", "error_hash"),
+        exact={"sink_name": DISCARD_SINK_NAME},
+        forbidden=_forbid_except("sink_name", "error_hash"),
+    ),
+    (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT): TerminalPairFieldConstraints(
+        required=("fork_group_id",),
+        forbidden=_forbid_except("fork_group_id"),
+    ),
+    (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT): TerminalPairFieldConstraints(
+        required=("expand_group_id",),
+        forbidden=_forbid_except("expand_group_id"),
+    ),
+    (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED): TerminalPairFieldConstraints(
+        required=("batch_id",),
+        forbidden=_forbid_except("batch_id"),
+    ),
+    (None, TerminalPath.BUFFERED): TerminalPairFieldConstraints(
+        required=("batch_id",),
+        forbidden=_forbid_except("batch_id"),
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)

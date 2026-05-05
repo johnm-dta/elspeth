@@ -5,6 +5,26 @@ from datetime import UTC, datetime
 import pytest
 
 
+class TestTokenCompletedTwoAxis:
+    """ADR-019 Phase 1: TokenCompleted telemetry event carries (outcome, path)."""
+
+    def test_token_completed_carries_outcome_and_path(self) -> None:
+        from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+        from elspeth.contracts.events import TokenCompleted
+
+        evt = TokenCompleted(
+            timestamp=datetime.now(UTC),
+            run_id="run_001",
+            row_id="row_001",
+            token_id="tok_001",
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="primary",
+        )
+        assert evt.outcome == TerminalOutcome.SUCCESS
+        assert evt.path == TerminalPath.DEFAULT_FLOW
+
+
 def test_transform_completed_allows_none_hashes():
     """TransformCompleted accepts None for input_hash and output_hash.
 

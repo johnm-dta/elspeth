@@ -7,7 +7,7 @@ new audit surface or a payload/context export path.
 
 from __future__ import annotations
 
-from elspeth.contracts import NodeStateStatus, NodeType, RowOutcome
+from elspeth.contracts import NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
@@ -75,7 +75,8 @@ def test_diagnostics_returns_bounded_tokens_states_operations_and_artifacts(tmp_
         )
         factory.data_flow.record_token_outcome(
             TokenRef(token_id=first_token.token_id, run_id=web_run_id),
-            RowOutcome.COMPLETED,
+            TerminalOutcome.SUCCESS,
+            TerminalPath.DEFAULT_FLOW,
             sink_name="json_out",
         )
         source_operation = factory.execution.begin_operation(web_run_id, "source", "source_load")
@@ -109,7 +110,7 @@ def test_diagnostics_returns_bounded_tokens_states_operations_and_artifacts(tmp_
         assert diagnostics.summary.state_counts["open"] == 1
         assert [token.token_id for token in diagnostics.tokens] == ["token-0"]
         assert diagnostics.tokens[0].row_index == 0
-        assert diagnostics.tokens[0].terminal_outcome == "completed"
+        assert diagnostics.tokens[0].terminal_outcome == "success"
         assert diagnostics.tokens[0].states[0].node_id == "extract"
         assert diagnostics.tokens[0].states[0].status == "completed"
         assert diagnostics.operations[0].operation_type == "source_load"

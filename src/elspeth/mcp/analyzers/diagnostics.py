@@ -11,6 +11,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from elspeth.contracts.enums import TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
@@ -178,7 +179,7 @@ def diagnose(db: LandscapeDB, factory: RecorderFactory) -> DiagnosticReport:
             quarantined_count = (
                 conn.execute(
                     select(func.count(token_outcomes_table.c.outcome_id))
-                    .where(token_outcomes_table.c.outcome == "quarantined")
+                    .where(token_outcomes_table.c.path == TerminalPath.QUARANTINED_AT_SOURCE.value)
                     .where(token_outcomes_table.c.run_id.in_(recent_run_ids))
                 ).scalar()
                 or 0

@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import ClassVar, TypedDict
 
-from elspeth.contracts.enums import RowOutcome
+from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, TerminalOutcome, TerminalPath
 from elspeth.contracts.freeze import require_int
 
 
@@ -43,61 +43,40 @@ class BufferEntry[T]:
             raise ValueError(f"BufferEntry.buffer_wait_ms must be non-negative and finite, got {self.buffer_wait_ms}")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PendingOutcome:
-    """Pending token outcome waiting for sink durability confirmation.
+    """Pending token outcome waiting for sink durability confirmation (ADR-019).
 
-    This dataclass carries outcome information through the pending_tokens queue
-    to be recorded AFTER sink durability is achieved.
-
-    The key insight: token outcomes must only be recorded after sink write + flush
-    complete successfully. Recording before durability creates audit trail entries
-    that claim data was written when it may not have been.
-
-    Attributes:
-        outcome: The terminal outcome (COMPLETED, ROUTED, QUARANTINED, etc.)
-        error_hash: Required for QUARANTINED, FAILED, and ROUTED_ON_ERROR
-                   outcomes - hash of error details. For other outcomes,
-                   this is None. The required-error-hash set is enforced
-                   by ``_REQUIRES_ERROR_HASH_OUTCOMES`` below; keep this
-                   docstring and that set in sync.
-
-    Quarantine outcomes are recorded after sink durability, not before.
+    Carries (outcome, path) pairs through the pending_tokens queue so token
+    outcomes are recorded only after sink write + flush complete successfully.
     """
 
-    # Outcomes that require ``error_hash`` on PendingOutcome.  ROUTED_ON_ERROR
-    # joins this set because it is the first outcome that both routes through
-    # the pending-sink pipeline AND requires error_hash for single-hop audit
-    # attributability — see docs/contracts/token-outcomes/00-token-outcome-contract.md.
-    # Note: ROUTED_ON_ERROR is operationally a *successful* sink write that
-    # captures an upstream transform error; it is not a "failure" in the
-    # rows_failed sense.  The set name reflects the audit-contract semantic
-    # ("requires error_hash") rather than the failure/success distinction.
-    _REQUIRES_ERROR_HASH_OUTCOMES: ClassVar[frozenset[RowOutcome]] = frozenset(
+    _REQUIRES_ERROR_HASH_PATHS: ClassVar[frozenset[TerminalPath]] = frozenset(
         {
-            RowOutcome.QUARANTINED,
-            RowOutcome.FAILED,
-            RowOutcome.ROUTED_ON_ERROR,
+            TerminalPath.ON_ERROR_ROUTED,
+            TerminalPath.UNROUTED,
+            TerminalPath.QUARANTINED_AT_SOURCE,
+            TerminalPath.SINK_FALLBACK_TO_FAILSINK,
+            TerminalPath.SINK_DISCARDED,
         }
     )
 
-    outcome: RowOutcome
+    outcome: TerminalOutcome | None
+    path: TerminalPath
     error_hash: str | None = None
 
     def __post_init__(self) -> None:
-        """Validate outcome/error_hash consistency.
+        """Validate pair/error_hash consistency before sink side effects."""
+        if self.outcome is None:
+            if self.path != TerminalPath.BUFFERED:
+                raise ValueError(f"PendingOutcome with outcome=None requires path=BUFFERED, got {self.path.name}")
+        elif (self.outcome, self.path) not in _LEGAL_TERMINAL_PAIRS:
+            raise ValueError(f"PendingOutcome has illegal (outcome, path) pair: ({self.outcome.name}, {self.path.name})")
 
-        QUARANTINED, FAILED, and ROUTED_ON_ERROR outcomes MUST have an
-        error_hash — the audit trail needs to reference the error record.
-        ROUTED_ON_ERROR is unique among the three in that it ALSO writes
-        to a sink (via the pending pipeline); QUARANTINED and FAILED are
-        recorded synchronously without sink writes. Other outcomes must NOT
-        have an error_hash (an error_hash on COMPLETED would be nonsensical).
-        """
-        if self.outcome in self._REQUIRES_ERROR_HASH_OUTCOMES and (self.error_hash is None or not self.error_hash.strip()):
-            raise ValueError(f"PendingOutcome with {self.outcome.name} outcome must have a non-empty error_hash")
-        if self.outcome not in self._REQUIRES_ERROR_HASH_OUTCOMES and self.error_hash is not None:
-            raise ValueError(f"PendingOutcome with {self.outcome.name} outcome must not have error_hash")
+        if self.path in self._REQUIRES_ERROR_HASH_PATHS and (self.error_hash is None or not self.error_hash.strip()):
+            raise ValueError(f"PendingOutcome with path={self.path.name} requires non-empty error_hash")
+        if self.path not in self._REQUIRES_ERROR_HASH_PATHS and self.error_hash is not None:
+            raise ValueError(f"PendingOutcome with path={self.path.name} must not have error_hash")
 
 
 class RetryPolicy(TypedDict, total=False):

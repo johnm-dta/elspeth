@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.node_state_context import NodeStateContext
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 
-from elspeth.contracts.enums import RowOutcome
+from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     FrameworkBugError,
     OrchestrationInvariantError,
@@ -378,10 +378,7 @@ class GateResult:
 
 @dataclass(frozen=True, slots=True)
 class RowResult:
-    """Final result of processing a row through the pipeline.
-
-    Uses RowOutcome enum, which is explicitly recorded in the token_outcomes
-    table (AUD-001) at determination time for complete audit traceability.
+    """Final result of processing a row through the pipeline (ADR-019 two-axis).
 
     Frozen to prevent post-construction mutation of outcome/sink_name,
     which would bypass __post_init__ invariant checks.
@@ -389,36 +386,46 @@ class RowResult:
     Fields:
         token: Token identity for this row instance
         final_data: Final row data as PipelineRow (may be original if failed early)
-        outcome: Terminal state (COMPLETED, FAILED, QUARANTINED, etc.)
-        sink_name: For ROUTED outcomes, the destination sink name
-        error: For FAILED outcomes, type-safe error details for audit
+        outcome: Lifecycle answer (None for non-terminal BUFFERED rows)
+        path: Provenance answer (always populated)
+        sink_name: For paths that reach a sink, the destination sink name
+        error: For ON_ERROR_ROUTED, type-safe error details for audit
     """
 
     token: TokenInfo
     final_data: PipelineRow
-    outcome: RowOutcome
+    outcome: TerminalOutcome | None
+    path: TerminalPath
     sink_name: str | None = None
     error: FailureInfo | None = None
 
     def __post_init__(self) -> None:
-        if self.outcome == RowOutcome.COMPLETED and self.sink_name is None:
-            raise OrchestrationInvariantError("COMPLETED outcome requires sink_name to be set")
-        if self.outcome == RowOutcome.ROUTED and self.sink_name is None:
-            raise OrchestrationInvariantError("ROUTED outcome requires sink_name to be set")
-        if self.outcome == RowOutcome.ROUTED_ON_ERROR:
+        if self.outcome is not None and (self.outcome, self.path) not in _LEGAL_TERMINAL_PAIRS:
+            raise OrchestrationInvariantError(f"RowResult: illegal (outcome, path) pair: ({self.outcome!r}, {self.path!r})")
+        if self.outcome is None and self.path != TerminalPath.BUFFERED:
+            raise OrchestrationInvariantError(f"RowResult: outcome=None requires path=BUFFERED, got path={self.path!r}")
+        if self.outcome is not None and self.path == TerminalPath.BUFFERED:
+            raise OrchestrationInvariantError(f"RowResult: path=BUFFERED requires outcome=None, got outcome={self.outcome!r}")
+        if self.outcome is None and self.path == TerminalPath.BUFFERED and self.sink_name is not None:
+            raise OrchestrationInvariantError("RowResult: BUFFERED rows must not set sink_name before terminal recording")
+
+        if self.path == TerminalPath.DEFAULT_FLOW and self.sink_name is None:
+            raise OrchestrationInvariantError("(SUCCESS, DEFAULT_FLOW) outcome requires sink_name to be set")
+        if self.path == TerminalPath.GATE_ROUTED and self.sink_name is None:
+            raise OrchestrationInvariantError("(SUCCESS, GATE_ROUTED) outcome requires sink_name to be set")
+        if self.path == TerminalPath.ON_ERROR_ROUTED:
             if self.sink_name is None:
-                raise OrchestrationInvariantError("ROUTED_ON_ERROR outcome requires sink_name to be set")
+                raise OrchestrationInvariantError("(FAILURE, ON_ERROR_ROUTED) outcome requires sink_name to be set")
             if self.error is None:
                 raise OrchestrationInvariantError(
-                    "ROUTED_ON_ERROR outcome requires error (FailureInfo) to be set — "
+                    "(FAILURE, ON_ERROR_ROUTED) outcome requires error (FailureInfo) to be set — "
                     "the originating transform error must be captured on the outcome "
-                    "record for single-hop audit attributability. See "
-                    "docs/contracts/token-outcomes/00-token-outcome-contract.md."
+                    "record for single-hop audit attributability."
                 )
             if not isinstance(self.error, FailureInfo):
-                raise OrchestrationInvariantError("ROUTED_ON_ERROR outcome requires error to be a FailureInfo instance")
-        if self.outcome == RowOutcome.COALESCED and self.sink_name is None:
-            raise OrchestrationInvariantError("COALESCED outcome requires sink_name to be set")
+                raise OrchestrationInvariantError("(FAILURE, ON_ERROR_ROUTED) outcome requires error to be a FailureInfo instance")
+        if self.path == TerminalPath.COALESCED and self.sink_name is None:
+            raise OrchestrationInvariantError("(SUCCESS, COALESCED) outcome requires sink_name to be set")
 
 
 @dataclass(frozen=True, slots=True)

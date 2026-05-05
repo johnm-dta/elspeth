@@ -45,7 +45,9 @@ metadata = MetaData()
 #        artifacts.produced_by_state_id is scoped by run_id.
 #   6 → batches.retry_of_batch_id records retry lineage so retry_batch()
 #        can deduplicate per failed batch rather than per aggregation node.
-SQLITE_SCHEMA_EPOCH = 6
+#   7 → ADR-019 Stage 2/3: token_outcomes stores the two-axis terminal model
+#        (`outcome`, `path`, `completed`) instead of RowOutcome + is_terminal.
+SQLITE_SCHEMA_EPOCH = 7
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -186,11 +188,18 @@ token_outcomes_table = Table(
     Column("token_id", String(64), nullable=False, index=True),
     # Composite FK: enforces token_id and run_id belong together (prevents cross-run contamination)
     ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
-    # Core outcome
-    Column("outcome", String(32), nullable=False),
-    Column("is_terminal", Integer, nullable=False),  # SQLite doesn't have Boolean, use Integer
+    # ADR-019 two-axis terminal model. ``completed`` mirrors the prior
+    # ``is_terminal`` column (sub-decision 3). ``outcome`` value space changed
+    # from RowOutcome (12 values, non-NULL) to TerminalOutcome (3 values:
+    # success / failure / transient) with NULL when completed=False
+    # (only ``BUFFERED`` today). ``path`` is producer-declared per ADR-019
+    # § "Classification is producer-declared, not topology-derivable" and
+    # always populated, including ``path="buffered"`` for non-terminal rows.
+    Column("outcome", String(32), nullable=True),
+    Column("path", String(64), nullable=False),
+    Column("completed", Integer, nullable=False),
     Column("recorded_at", DateTime(timezone=True), nullable=False),
-    # Outcome-specific fields (nullable based on outcome type)
+    # Outcome-specific fields (nullable based on (outcome, path) pair)
     Column("sink_name", String(128)),
     Column("batch_id", String(64)),
     Column("fork_group_id", String(64)),
@@ -211,8 +220,8 @@ Index(
     "ix_token_outcomes_terminal_unique",
     token_outcomes_table.c.token_id,
     unique=True,
-    sqlite_where=(token_outcomes_table.c.is_terminal == 1),
-    postgresql_where=(token_outcomes_table.c.is_terminal == 1),
+    sqlite_where=(token_outcomes_table.c.completed == 1),
+    postgresql_where=(token_outcomes_table.c.completed == 1),
 )
 
 # === Token Parents (for multi-parent joins) ===

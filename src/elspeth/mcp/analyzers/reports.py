@@ -117,14 +117,32 @@ def get_run_summary(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> R
             or 0
         )
 
-        # Get outcome distribution
+        # Get outcome distribution. ADR-019 makes outcome path-aware:
+        # outcome is TerminalOutcome.value or NULL, path is always populated.
         outcome_query = (
-            select(token_outcomes_table.c.outcome, func.count().label("count"))
+            select(
+                token_outcomes_table.c.outcome,
+                token_outcomes_table.c.path,
+                token_outcomes_table.c.completed,
+                func.count().label("count"),
+            )
             .where(token_outcomes_table.c.run_id == run_id)
-            .group_by(token_outcomes_table.c.outcome)
+            .group_by(
+                token_outcomes_table.c.outcome,
+                token_outcomes_table.c.path,
+                token_outcomes_table.c.completed,
+            )
         )
         outcome_rows = conn.execute(outcome_query).fetchall()
-        outcome_distribution = {row.outcome: row.count for row in outcome_rows}
+        outcome_distribution = [
+            {
+                "outcome": row.outcome,
+                "path": row.path,
+                "completed": bool(row.completed),
+                "count": row.count,
+            }
+            for row in outcome_rows
+        ]
 
         # Calculate average processing duration per node state
         avg_duration = conn.execute(select(func.avg(node_states_table.c.duration_ms)).where(node_states_table.c.run_id == run_id)).scalar()
@@ -656,11 +674,16 @@ def get_outcome_analysis(db: LandscapeDB, factory: RecorderFactory, run_id: str)
         outcome_dist = (
             select(
                 token_outcomes_table.c.outcome,
-                token_outcomes_table.c.is_terminal,
+                token_outcomes_table.c.path,
+                token_outcomes_table.c.completed,
                 func.count(token_outcomes_table.c.outcome_id).label("count"),
             )
             .where(token_outcomes_table.c.run_id == run_id)
-            .group_by(token_outcomes_table.c.outcome, token_outcomes_table.c.is_terminal)
+            .group_by(
+                token_outcomes_table.c.outcome,
+                token_outcomes_table.c.path,
+                token_outcomes_table.c.completed,
+            )
         )
         outcome_rows = conn.execute(outcome_dist).fetchall()
 
@@ -697,7 +720,8 @@ def get_outcome_analysis(db: LandscapeDB, factory: RecorderFactory, run_id: str)
     outcomes = [
         {
             "outcome": row.outcome,
-            "is_terminal": bool(row.is_terminal),
+            "path": row.path,
+            "completed": bool(row.completed),
             "count": row.count,
         }
         for row in outcome_rows
@@ -705,8 +729,8 @@ def get_outcome_analysis(db: LandscapeDB, factory: RecorderFactory, run_id: str)
 
     sinks = {row.sink_name: row.count for row in sink_rows}
 
-    terminal_count = sum(o["count"] for o in outcomes if o["is_terminal"])
-    non_terminal_count = sum(o["count"] for o in outcomes if not o["is_terminal"])
+    terminal_count = sum(o["count"] for o in outcomes if o["completed"])
+    non_terminal_count = sum(o["count"] for o in outcomes if not o["completed"])
 
     return {
         "run_id": run_id,

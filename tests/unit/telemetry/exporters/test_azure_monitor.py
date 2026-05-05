@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth.contracts.enums import RowOutcome, RunStatus
+from elspeth.contracts.enums import RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.events import (
     RunFinished,
     RunStarted,
@@ -375,7 +375,8 @@ class TestAzureMonitorExporterTokenCompleted:
             run_id="run-123",
             token_id="token-456",
             row_id="row-789",
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
 
@@ -389,4 +390,5 @@ class TestAzureMonitorExporterTokenCompleted:
         span = spans[0]
         assert span.name == "TokenCompleted"
         assert span.attributes.get("token_id") == "token-456"
-        assert span.attributes.get("outcome") == "completed"
+        assert span.attributes.get("outcome") == "success"
+        assert span.attributes.get("path") == "default_flow"

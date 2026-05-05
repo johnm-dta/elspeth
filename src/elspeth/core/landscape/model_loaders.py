@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy.engine import Row as SARow
 
 from elspeth.contracts.audit import (
+    _TERMINAL_PAIR_FIELD_CONSTRAINTS,
     Artifact,
     Batch,
     BatchMember,
@@ -34,6 +35,7 @@ from elspeth.contracts.audit import (
     ValidationErrorRecord,
 )
 from elspeth.contracts.enums import (
+    _LEGAL_TERMINAL_PAIRS,
     BatchStatus,
     CallStatus,
     CallType,
@@ -43,8 +45,9 @@ from elspeth.contracts.enums import (
     NodeType,
     ReproducibilityGrade,
     RoutingMode,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
 )
 from elspeth.contracts.errors import AuditIntegrityError
@@ -507,96 +510,93 @@ class TransformErrorLoader:
 class TokenOutcomeLoader:
     """Loader for TokenOutcome records.
 
-    Handles terminal token states. Converts outcome string to RowOutcome enum.
+    Handles token outcomes under the ADR-019 two-axis terminal model.
     """
 
     def load(self, row: SARow[Any]) -> TokenOutcome:
-        """Load TokenOutcome from database row.
-
-        Converts outcome string to RowOutcome enum.
-        Converts is_terminal from DB integer (0/1) to bool.
-
-        Args:
-            row: Database row from token_outcomes table
-
-        Returns:
-            TokenOutcome with outcome converted to RowOutcome enum
-
-        Raises:
-            AuditIntegrityError: If is_terminal is not 0 or 1 (Tier 1 audit integrity violation)
-            AuditIntegrityError: If outcome and is_terminal disagree (Tier 1 audit integrity violation)
-        """
-        # Tier 1 validation: is_terminal must be exactly int 0 or 1
-        # Per Data Manifesto: audit DB is OUR data - crash on any anomaly
-        # Note: bool is a subclass of int in Python, so `True in (0, 1)` is True.
-        # We use `type() is int` to reject booleans explicitly.
-        if type(row.is_terminal) is not int or row.is_terminal not in (0, 1):
-            raise AuditIntegrityError(
-                f"TokenOutcome {row.outcome_id} has invalid is_terminal={row.is_terminal!r} (expected 0 or 1) - audit integrity violation"
-            )
-        outcome = RowOutcome(row.outcome)
-        is_terminal = row.is_terminal == 1
-        if is_terminal != outcome.is_terminal:
-            raise AuditIntegrityError(
-                f"TokenOutcome {row.outcome_id} has inconsistent is_terminal={row.is_terminal!r} for outcome={outcome.value!r} "
-                f"(expected {1 if outcome.is_terminal else 0}) - audit integrity violation"
-            )
-        # Outcome-specific invariants (mirrors _validate_outcome_fields on write path).
-        # Tier 1: if the audit DB has impossible field combinations, crash immediately.
+        """Load a TokenOutcome row with Tier 1 ADR-019 cross-checks."""
         oid = row.outcome_id
-        if outcome in (RowOutcome.COMPLETED, RowOutcome.ROUTED) and row.sink_name is None:
+
+        if type(row.completed) is not int or row.completed not in (0, 1):
             raise AuditIntegrityError(
-                f"TokenOutcome {oid} has outcome={outcome.value!r} but sink_name is NULL — "
-                f"audit integrity violation (COMPLETED/ROUTED require sink_name)"
+                f"TokenOutcome {oid}: invalid completed={row.completed!r} (expected int 0 or 1) — audit integrity violation"
             )
-        if outcome == RowOutcome.ROUTED_ON_ERROR and row.sink_name is None:
+        completed = row.completed == 1
+
+        if row.outcome is None:
+            outcome: TerminalOutcome | None = None
+        else:
+            try:
+                outcome = TerminalOutcome(row.outcome)
+            except ValueError as exc:
+                raise AuditIntegrityError(
+                    f"TokenOutcome {oid}: invalid outcome={row.outcome!r} not in TerminalOutcome — audit integrity violation"
+                ) from exc
+
+        if row.path is None:
             raise AuditIntegrityError(
-                f"TokenOutcome {oid} has outcome={outcome.value!r} but sink_name is NULL — "
-                "audit integrity violation (ROUTED_ON_ERROR requires sink_name)"
+                f"TokenOutcome {oid}: path is NULL — audit integrity violation (path is always populated under ADR-019)"
             )
-        if outcome == RowOutcome.FORKED and row.fork_group_id is None:
+        try:
+            path = TerminalPath(row.path)
+        except ValueError as exc:
             raise AuditIntegrityError(
-                f"TokenOutcome {oid} has outcome=FORKED but fork_group_id is NULL — "
-                f"audit integrity violation (FORKED requires fork_group_id)"
-            )
-        if outcome == RowOutcome.COALESCED and row.join_group_id is None:
+                f"TokenOutcome {oid}: invalid path={row.path!r} not in TerminalPath — audit integrity violation"
+            ) from exc
+
+        if completed != (outcome is not None):
             raise AuditIntegrityError(
-                f"TokenOutcome {oid} has outcome=COALESCED but join_group_id is NULL — "
-                f"audit integrity violation (COALESCED requires join_group_id)"
+                f"TokenOutcome {oid}: completed={completed} but outcome={outcome!r} — "
+                "completed must be true iff outcome is non-NULL (ADR-019 invariant)"
             )
-        if outcome == RowOutcome.EXPANDED and row.expand_group_id is None:
+
+        if completed:
+            assert outcome is not None
+            if (outcome, path) not in _LEGAL_TERMINAL_PAIRS:
+                raise AuditIntegrityError(
+                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) not in _LEGAL_TERMINAL_PAIRS — audit integrity violation"
+                )
+        elif path != TerminalPath.BUFFERED:
             raise AuditIntegrityError(
-                f"TokenOutcome {oid} has outcome=EXPANDED but expand_group_id is NULL — "
-                f"audit integrity violation (EXPANDED requires expand_group_id)"
+                f"TokenOutcome {oid}: completed=False requires path=BUFFERED, got {path!r} — audit integrity violation"
             )
-        if outcome == RowOutcome.DIVERTED and row.sink_name is None:
-            raise AuditIntegrityError(
-                f"TokenOutcome {oid} has outcome=DIVERTED but sink_name is NULL — audit integrity violation (DIVERTED requires sink_name)"
-            )
-        if outcome in (RowOutcome.DIVERTED, RowOutcome.ROUTED_ON_ERROR) and row.error_hash is None:
-            raise AuditIntegrityError(
-                f"TokenOutcome {oid} has outcome={outcome.value!r} but error_hash is NULL — "
-                f"audit integrity violation ({outcome.name} requires error_hash)"
-            )
-        if outcome in (RowOutcome.FAILED, RowOutcome.QUARANTINED) and row.error_hash is None:
-            raise AuditIntegrityError(
-                f"TokenOutcome {oid} has outcome={outcome.value!r} but error_hash is NULL — "
-                f"audit integrity violation (FAILED/QUARANTINED require error_hash)"
-            )
-        if outcome in (RowOutcome.CONSUMED_IN_BATCH, RowOutcome.BUFFERED) and row.batch_id is None:
-            raise AuditIntegrityError(
-                f"TokenOutcome {oid} has outcome={outcome.value!r} but batch_id is NULL — "
-                f"audit integrity violation (CONSUMED_IN_BATCH/BUFFERED require batch_id)"
-            )
-        if outcome == RowOutcome.DROPPED_BY_FILTER:
-            pass
+
+        pair: tuple[TerminalOutcome | None, TerminalPath] = (outcome, path)
+        constraints = _TERMINAL_PAIR_FIELD_CONSTRAINTS[pair]
+        field_values = {
+            "sink_name": row.sink_name,
+            "batch_id": row.batch_id,
+            "fork_group_id": row.fork_group_id,
+            "join_group_id": row.join_group_id,
+            "expand_group_id": row.expand_group_id,
+            "error_hash": row.error_hash,
+        }
+        for field_name in constraints.required:
+            if field_values[field_name] is None:
+                raise AuditIntegrityError(
+                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) requires {field_name} but DB has NULL — audit integrity violation"
+                )
+        for field_name, expected in constraints.exact.items():
+            if field_values[field_name] != expected:
+                raise AuditIntegrityError(
+                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) requires "
+                    f"{field_name}={expected!r}, got {field_values[field_name]!r} — "
+                    "audit integrity violation"
+                )
+        for field_name in constraints.forbidden:
+            if field_values[field_name] is not None:
+                raise AuditIntegrityError(
+                    f"TokenOutcome {oid}: ({outcome!r}, {path!r}) forbids {field_name}, "
+                    f"got {field_values[field_name]!r} — audit integrity violation"
+                )
 
         return TokenOutcome(
-            outcome_id=row.outcome_id,
+            outcome_id=oid,
             run_id=row.run_id,
             token_id=row.token_id,
             outcome=outcome,
-            is_terminal=is_terminal,  # DB stores as Integer, now fully validated
+            path=path,
+            completed=completed,
             recorded_at=row.recorded_at,
             sink_name=row.sink_name,
             batch_id=row.batch_id,

@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from elspeth.contracts import GateEvaluated, TokenCompleted, TokenUsage
-from elspeth.contracts.enums import RoutingMode, RowOutcome, RunStatus
+from elspeth.contracts.enums import RoutingMode, RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.events import (
     RunFinished,
     RunStarted,
@@ -521,7 +521,8 @@ class TestDatadogExporterTagSerialization:
             run_id="run-123",
             row_id="row-1",
             token_id="token-1",
-            outcome=RowOutcome.FAILED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
             sink_name=None,
         )
         exporter.export(event)

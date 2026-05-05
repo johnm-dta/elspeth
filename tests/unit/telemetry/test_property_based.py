@@ -25,9 +25,10 @@ from elspeth.contracts.enums import (
     CallType,
     NodeStateStatus,
     RoutingMode,
-    RowOutcome,
     RunStatus,
     TelemetryGranularity,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.events import (
     GateEvaluated,
@@ -210,7 +211,8 @@ def make_token_completed(run_id: str, row_id: str, timestamp: datetime | None = 
         run_id=run_id,
         row_id=row_id,
         token_id=f"token-{row_id}",
-        outcome=RowOutcome.COMPLETED,
+        outcome=TerminalOutcome.SUCCESS,
+        path=TerminalPath.DEFAULT_FLOW,
         sink_name="output",
     )
 

@@ -163,11 +163,13 @@ class LineageTextFormatter:
             lines.append("--- Outcome ---")
             # Direct access to .name - Tier 1 trust (our audit data)
             # If outcome.outcome is not an Enum, that's a bug we want to crash on
-            # Using .name gives uppercase (COMPLETED) which is more readable in CLI output
-            lines.append(f"Outcome: {result.outcome.outcome.name}")
+            # Using .name gives uppercase values that are more readable in CLI output.
+            outcome_name = result.outcome.outcome.name if result.outcome.outcome else "NULL"
+            lines.append(f"Outcome: {outcome_name}")
+            lines.append(f"Path: {result.outcome.path.name}")
             if result.outcome.sink_name:
                 lines.append(f"Sink: {result.outcome.sink_name}")
-            lines.append(f"Terminal: {result.outcome.is_terminal}")
+            lines.append(f"Completed: {result.outcome.completed}")
             lines.append("")
 
         # Node states

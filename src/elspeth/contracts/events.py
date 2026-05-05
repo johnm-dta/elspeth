@@ -20,8 +20,9 @@ from elspeth.contracts.enums import (
     CallType,
     NodeStateStatus,
     RoutingMode,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.freeze import freeze_fields, require_int
 from elspeth.contracts.token_usage import TokenUsage
@@ -241,11 +242,12 @@ class GateEvaluated(TelemetryEvent):
 
 @dataclass(frozen=True, slots=True)
 class TokenCompleted(TelemetryEvent):
-    """Emitted when a token reaches its terminal state."""
+    """Emitted when a token reaches its terminal state (ADR-019 two-axis)."""
 
     row_id: str
     token_id: str
-    outcome: RowOutcome
+    outcome: TerminalOutcome | None
+    path: TerminalPath
     sink_name: str | None
 
 

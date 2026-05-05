@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from elspeth.contracts import NodeType, RowOutcome, RunStatus
+from elspeth.contracts import NodeType, RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
@@ -59,7 +59,8 @@ def _create_completed_run_with_quarantine(
     token = factory.data_flow.create_token(row.row_id)
     factory.data_flow.record_token_outcome(
         ref=TokenRef(token_id=token.token_id, run_id=run_id),
-        outcome=RowOutcome.QUARANTINED,
+        outcome=TerminalOutcome.FAILURE,
+        path=TerminalPath.QUARANTINED_AT_SOURCE,
         error_hash="deadbeef" * 8,
     )
     factory.run_lifecycle.complete_run(run_id, RunStatus.COMPLETED)

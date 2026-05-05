@@ -8,6 +8,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.engine.url import make_url
 
+from elspeth.contracts.audit import DISCARD_SINK_NAME
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
     token_outcomes_table,
@@ -18,7 +19,6 @@ from elspeth.web.config import WebSettings
 from elspeth.web.execution.schemas import DiscardSummary
 
 DISCARD_DESTINATION = "discard"
-DISCARD_SINK_NAME = "__discard__"
 
 
 def load_discard_summaries_for_settings(
@@ -89,7 +89,7 @@ def load_discard_summaries_from_db(
             select(token_outcomes_table.c.run_id, func.count().label("count"))
             .where(token_outcomes_table.c.run_id.in_(run_ids))
             .where(token_outcomes_table.c.sink_name == DISCARD_SINK_NAME)
-            .where(token_outcomes_table.c.is_terminal == 1)
+            .where(token_outcomes_table.c.completed == 1)
             .group_by(token_outcomes_table.c.run_id)
         )
         for run_id, count in conn.execute(sink_query):

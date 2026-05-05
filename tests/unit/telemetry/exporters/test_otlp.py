@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from elspeth.contracts import TokenCompleted, TokenUsage
-from elspeth.contracts.enums import RowOutcome, RunStatus
+from elspeth.contracts.enums import RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.events import (
     RunFinished,
     RunStarted,
@@ -432,7 +432,8 @@ class TestOTLPExporterSpanConversion:
             run_id="run-123",
             row_id="row-1",
             token_id="token-1",
-            outcome=RowOutcome.FAILED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
             sink_name=None,
         )
         exporter.export(event)

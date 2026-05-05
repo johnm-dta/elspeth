@@ -30,8 +30,9 @@ from elspeth.contracts.enums import (
     CallType,
     NodeStateStatus,
     RoutingMode,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.events import (
     ExternalCallCompleted,
@@ -145,7 +146,8 @@ def _create_sample_event(event_class: type[TelemetryEvent]) -> TelemetryEvent:
             **base_kwargs,
             row_id="row-001",
             token_id="token-001",
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
     elif event_class is ExternalCallCompleted:

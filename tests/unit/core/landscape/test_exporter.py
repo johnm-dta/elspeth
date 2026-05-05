@@ -46,8 +46,9 @@ from elspeth.contracts.enums import (
     NodeType,
     ReproducibilityGrade,
     RoutingMode,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
 )
 from elspeth.core.landscape.exporter import LandscapeExporter
@@ -279,8 +280,9 @@ _TOKEN_OUTCOME = TokenOutcome(
     outcome_id="outcome-1",
     run_id="run-1",
     token_id="tok-1",
-    outcome=RowOutcome.COMPLETED,
-    is_terminal=True,
+    outcome=TerminalOutcome.SUCCESS,
+    path=TerminalPath.DEFAULT_FLOW,
+    completed=True,
     recorded_at=_DT2,
     sink_name="output",
 )
@@ -705,8 +707,9 @@ class TestTokenOutcomeRecords:
         assert o["outcome_id"] == "outcome-1"
         assert o["run_id"] == "run-1"
         assert o["token_id"] == "tok-1"
-        assert o["outcome"] == "completed"
-        assert o["is_terminal"] is True
+        assert o["outcome"] == "success"
+        assert o["path"] == "default_flow"
+        assert o["completed"] is True
         assert o["recorded_at"] == _DT2.isoformat()
         assert o["sink_name"] == "output"
         assert o["batch_id"] is None

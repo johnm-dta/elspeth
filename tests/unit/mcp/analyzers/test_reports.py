@@ -3,7 +3,7 @@
 Bug fixes covered:
 - Phase 0 fix #10: MCP Mermaid non-unique IDs (node_id[:8] truncation)
 - P1-2026-02-14: get_performance_report truncates node_id
-- P1-2026-02-14: get_outcome_analysis returns is_terminal as DB integer
+- P1-2026-02-14: get_outcome_analysis returns completed as DB integer
 
 Coverage additions:
 - get_error_analysis: corruption guard, validation/transform grouping, sample data, run not found
@@ -146,24 +146,26 @@ class TestPerformanceReportNodeId:
         assert "..." not in node_perf[0]["node_id"]
 
 
-class TestOutcomeAnalysisIsTerminal:
-    """Verify get_outcome_analysis returns is_terminal as bool.
+class TestOutcomeAnalysisCompleted:
+    """Verify get_outcome_analysis returns completed as bool.
 
-    Regression: P1-2026-02-14 — is_terminal was returned as DB integer (0/1)
+    Regression: P1-2026-02-14 — terminal state was returned as DB integer (0/1)
     instead of bool, violating the OutcomeDistributionEntry contract.
     """
 
-    def test_is_terminal_is_bool_not_int(self) -> None:
-        """is_terminal must be a Python bool, not an integer 0/1."""
-        # Mock outcome rows with integer is_terminal (as from SQLite)
+    def test_completed_is_bool_not_int(self) -> None:
+        """completed must be a Python bool, not an integer 0/1."""
+        # Mock outcome rows with integer completed (as from SQLite)
         outcome_row_terminal = MagicMock()
-        outcome_row_terminal.outcome = "COMPLETED"
-        outcome_row_terminal.is_terminal = 1  # DB integer
+        outcome_row_terminal.outcome = "success"
+        outcome_row_terminal.path = "default_flow"
+        outcome_row_terminal.completed = 1  # DB integer
         outcome_row_terminal.count = 10
 
         outcome_row_non_terminal = MagicMock()
-        outcome_row_non_terminal.outcome = "BUFFERED"
-        outcome_row_non_terminal.is_terminal = 0  # DB integer
+        outcome_row_non_terminal.outcome = None
+        outcome_row_non_terminal.path = "buffered"
+        outcome_row_non_terminal.completed = 0  # DB integer
         outcome_row_non_terminal.count = 3
 
         # Mock sink rows (empty)
@@ -210,36 +212,37 @@ class TestOutcomeAnalysisIsTerminal:
         assert len(outcomes) == 2
 
         for outcome in outcomes:
-            assert isinstance(outcome["is_terminal"], bool), f"is_terminal must be bool, got {type(outcome['is_terminal']).__name__}"
+            assert isinstance(outcome["completed"], bool), f"completed must be bool, got {type(outcome['completed']).__name__}"
 
         # Verify correct boolean values
-        terminal = next(o for o in outcomes if o["outcome"] == "COMPLETED")
-        non_terminal = next(o for o in outcomes if o["outcome"] == "BUFFERED")
-        assert terminal["is_terminal"] is True
-        assert non_terminal["is_terminal"] is False
+        terminal = next(o for o in outcomes if o["path"] == "default_flow")
+        non_terminal = next(o for o in outcomes if o["path"] == "buffered")
+        assert terminal["completed"] is True
+        assert non_terminal["completed"] is False
 
-    def test_routed_on_error_outcome_preserved_in_distribution(self) -> None:
-        """ROUTED_ON_ERROR (elspeth-5069612f3c) is surfaced as its own bucket.
+    def test_routed_on_error_path_preserved_in_distribution(self) -> None:
+        """ON_ERROR_ROUTED is surfaced as its own path-aware bucket.
 
-        MCP does NOT split historical "routed" rows into success/failure
-        buckets — the runbook/ADR handles the upgrade-boundary limitation.
-        ROUTED_ON_ERROR rows pass through as the "routed_on_error" bucket
-        (terminal), separate from the legacy "routed" bucket.
+        ADR-019 makes outcome insufficient by itself: both default-flow and
+        gate-routed successes have outcome="success", and routed errors have
+        outcome="failure" with path="on_error_routed".
         """
-        # Mock terminal outcomes including ROUTED_ON_ERROR
-        outcome_row_completed = MagicMock()
-        outcome_row_completed.outcome = "COMPLETED"
-        outcome_row_completed.is_terminal = 1
-        outcome_row_completed.count = 5
+        outcome_row_default = MagicMock()
+        outcome_row_default.outcome = "success"
+        outcome_row_default.path = "default_flow"
+        outcome_row_default.completed = 1
+        outcome_row_default.count = 5
 
-        outcome_row_routed = MagicMock()
-        outcome_row_routed.outcome = "ROUTED"
-        outcome_row_routed.is_terminal = 1
-        outcome_row_routed.count = 3
+        outcome_row_gate = MagicMock()
+        outcome_row_gate.outcome = "success"
+        outcome_row_gate.path = "gate_routed"
+        outcome_row_gate.completed = 1
+        outcome_row_gate.count = 3
 
         outcome_row_routed_on_error = MagicMock()
-        outcome_row_routed_on_error.outcome = "ROUTED_ON_ERROR"
-        outcome_row_routed_on_error.is_terminal = 1
+        outcome_row_routed_on_error.outcome = "failure"
+        outcome_row_routed_on_error.path = "on_error_routed"
+        outcome_row_routed_on_error.completed = 1
         outcome_row_routed_on_error.count = 2
 
         mock_conn = MagicMock()
@@ -251,8 +254,8 @@ class TestOutcomeAnalysisIsTerminal:
             result = MagicMock()
             if call_count == 1:
                 result.fetchall.return_value = [
-                    outcome_row_completed,
-                    outcome_row_routed,
+                    outcome_row_default,
+                    outcome_row_gate,
                     outcome_row_routed_on_error,
                 ]
             elif call_count == 2:
@@ -278,13 +281,14 @@ class TestOutcomeAnalysisIsTerminal:
 
         assert "error" not in result
         outcomes = result["outcome_distribution"]
-        outcome_keys = {o["outcome"] for o in outcomes}
-        assert "ROUTED_ON_ERROR" in outcome_keys, "ROUTED_ON_ERROR must surface as its own outcome_distribution bucket"
-        # Legacy ROUTED bucket is preserved separately.
-        assert "ROUTED" in outcome_keys
-        routed_on_error = next(o for o in outcomes if o["outcome"] == "ROUTED_ON_ERROR")
+        outcome_keys = {(o["outcome"], o["path"]) for o in outcomes}
+        assert ("failure", "on_error_routed") in outcome_keys, (
+            "ON_ERROR_ROUTED must surface as its own path-aware outcome_distribution bucket"
+        )
+        assert ("success", "gate_routed") in outcome_keys
+        routed_on_error = next(o for o in outcomes if o["path"] == "on_error_routed")
         assert routed_on_error["count"] == 2
-        assert routed_on_error["is_terminal"] is True
+        assert routed_on_error["completed"] is True
 
 
 class TestHighVarianceZeroDuration:

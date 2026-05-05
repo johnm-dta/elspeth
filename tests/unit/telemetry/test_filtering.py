@@ -11,9 +11,10 @@ from elspeth.contracts.enums import (
     CallType,
     NodeStateStatus,
     RoutingMode,
-    RowOutcome,
     RunStatus,
     TelemetryGranularity,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.events import (
     ExternalCallCompleted,
@@ -29,6 +30,7 @@ from elspeth.contracts.events import (
     TransformCompleted,
 )
 from elspeth.telemetry.filtering import should_emit
+from elspeth.telemetry.serialization import serialize_event_attributes
 
 # =============================================================================
 # Constants and Factories
@@ -110,7 +112,8 @@ def _token_completed() -> TokenCompleted:
         run_id=_RUN_ID,
         row_id="row-1",
         token_id="tok-1",
-        outcome=RowOutcome.COMPLETED,
+        outcome=TerminalOutcome.SUCCESS,
+        path=TerminalPath.DEFAULT_FLOW,
         sink_name="output",
     )
 
@@ -202,6 +205,14 @@ class TestRowEventsFilteredByGranularity:
 
     def test_token_completed_emits_at_full(self) -> None:
         assert should_emit(_token_completed(), FULL) is True
+
+    def test_token_completed_serializes_outcome_and_path(self) -> None:
+        attrs = serialize_event_attributes(_token_completed())
+
+        assert attrs["event_type"] == "TokenCompleted"
+        assert attrs["outcome"] == "success"
+        assert attrs["path"] == "default_flow"
+        assert attrs["sink_name"] == "output"
 
     def test_field_resolution_applied_suppressed_at_lifecycle(self) -> None:
         assert should_emit(_field_resolution_applied(), LIFECYCLE) is False

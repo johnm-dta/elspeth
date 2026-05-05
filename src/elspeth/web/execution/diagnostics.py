@@ -167,7 +167,7 @@ def load_run_diagnostics_from_db(
                     and_(
                         token_outcomes_table.c.token_id == tokens_table.c.token_id,
                         token_outcomes_table.c.run_id == tokens_table.c.run_id,
-                        token_outcomes_table.c.is_terminal == 1,
+                        token_outcomes_table.c.completed == 1,
                     ),
                 )
             )

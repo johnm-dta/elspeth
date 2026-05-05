@@ -17,7 +17,7 @@ from io import StringIO
 
 import pytest
 
-from elspeth.contracts.enums import NodeStateStatus, RoutingMode, RowOutcome
+from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
 from elspeth.contracts.events import (
     GateEvaluated,
     TokenCompleted,
@@ -170,7 +170,8 @@ class TestConsoleExporterExportBehavior:
             run_id="run-789",
             row_id="row-3",
             token_id="token-3",
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output_sink",
         )
 
@@ -180,7 +181,8 @@ class TestConsoleExporterExportBehavior:
         parsed = json.loads(output)
 
         assert parsed["event_type"] == "TokenCompleted"
-        assert parsed["outcome"] == "completed"  # Enum serialized
+        assert parsed["outcome"] == "success"  # Enum serialized
+        assert parsed["path"] == "default_flow"
         assert parsed["sink_name"] == "output_sink"
 
     def test_pretty_format_includes_timestamp_and_event_type(self) -> None:
@@ -229,7 +231,8 @@ class TestConsoleExporterExportBehavior:
             run_id="run-minimal",
             row_id="row-x",
             token_id="token-x",
-            outcome=RowOutcome.QUARANTINED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
             sink_name=None,
         )
 
@@ -240,7 +243,8 @@ class TestConsoleExporterExportBehavior:
         assert "[2026-01-15T11:00:00+00:00]" in output
         assert "TokenCompleted" in output
         assert "run-minimal" in output
-        assert "outcome=quarantined" in output
+        assert "outcome=failure" in output
+        assert "path=quarantined_at_source" in output
         # sink_name=None should not appear in details
         assert "sink_name=None" not in output
 
@@ -562,7 +566,8 @@ class TestConsoleExporterEdgeCases:
             run_id="run-default",
             row_id="row-1",
             token_id="token-1",
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
 

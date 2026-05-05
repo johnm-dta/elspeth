@@ -527,7 +527,7 @@ class TestLineageTextFormatter:
 
     def test_formats_with_outcome(self) -> None:
         """Includes outcome when present."""
-        from elspeth.contracts import RowLineage, RowOutcome, Token, TokenOutcome
+        from elspeth.contracts import RowLineage, TerminalOutcome, TerminalPath, Token, TokenOutcome
         from elspeth.core.landscape.formatters import LineageTextFormatter
         from elspeth.core.landscape.lineage import LineageResult
 
@@ -552,9 +552,10 @@ class TestLineageTextFormatter:
                 outcome_id="out-1",
                 token_id="tok-123",
                 run_id="run-789",
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                completed=True,
                 sink_name="output",
-                is_terminal=True,
                 recorded_at=now,
             ),
         )
@@ -562,7 +563,10 @@ class TestLineageTextFormatter:
         formatter = LineageTextFormatter()
         text = formatter.format(result)
 
-        assert "Outcome: COMPLETED" in text
+        assert "Outcome: SUCCESS" in text
+        assert "Path: DEFAULT_FLOW" in text
+        assert "Completed: True" in text
+        assert "Terminal:" not in text
         assert "Sink: output" in text
 
     def test_formats_missing_latency_as_na(self) -> None:

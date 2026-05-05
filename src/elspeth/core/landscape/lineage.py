@@ -115,7 +115,7 @@ def explain(
             return None  # Row not found or no outcomes recorded yet
 
         # Filter to terminal outcomes only
-        terminal_outcomes = [o for o in outcomes if o.is_terminal]
+        terminal_outcomes = [o for o in outcomes if o.completed]
 
         if not terminal_outcomes:
             # All tokens are non-terminal (e.g., BUFFERED awaiting aggregation)

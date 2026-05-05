@@ -151,6 +151,8 @@ from elspeth.contracts.enums import (
     RunMode,
     RunStatus,
     TelemetryGranularity,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
     error_edge_label,
 )
@@ -389,6 +391,8 @@ __all__ = [  # Grouped by category for readability
     "RunMode",
     "RunStatus",
     "TelemetryGranularity",
+    "TerminalOutcome",
+    "TerminalPath",
     "TriggerType",
     "error_edge_label",
     # identity

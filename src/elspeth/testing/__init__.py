@@ -24,6 +24,8 @@ from elspeth.contracts import (
     PipelineRow,
     SourceRow,
 )
+from elspeth.contracts.enums import RowOutcome as RowOutcome
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 
 if TYPE_CHECKING:
@@ -32,7 +34,6 @@ if TYPE_CHECKING:
         CallStatus,
         CallType,
         NodeStateStatus,
-        RowOutcome,
         RunStatus,
     )
     from elspeth.contracts.errors import TransformErrorReason, TransformSuccessReason
@@ -504,29 +505,40 @@ def make_execution_counters(**overrides: int) -> ExecutionCounters:
 def make_row_result(
     data: dict[str, Any] | None = None,
     *,
-    outcome: RowOutcome | None = None,
+    outcome: TerminalOutcome | None = None,
+    path: TerminalPath | None = None,
     sink_name: str | None = None,
     error: Any | None = None,
 ) -> RowResult:
     """Build a RowResult (final row outcome).
 
-    COMPLETED, ROUTED, and COALESCED outcomes require sink_name
-    (enforced by RowResult.__post_init__).
-    Defaults to "default" when not explicitly provided for these outcomes.
+    Defaults to the ADR-019 happy path pair: (SUCCESS, DEFAULT_FLOW).
+    Sink-targeting paths default sink_name to "default" for test convenience.
     """
-    from elspeth.contracts.enums import RowOutcome
     from elspeth.contracts.results import RowResult
 
-    resolved_outcome = outcome or RowOutcome.COMPLETED
-    # Sink-targeting outcomes require sink_name — default for test convenience
-    _SINK_OUTCOMES = {
-        RowOutcome.COMPLETED,
-        RowOutcome.ROUTED,
-        RowOutcome.ROUTED_ON_ERROR,
-        RowOutcome.COALESCED,
+    if outcome is None and path is None:
+        resolved_outcome = TerminalOutcome.SUCCESS
+        resolved_path = TerminalPath.DEFAULT_FLOW
+    elif outcome is None:
+        if path != TerminalPath.BUFFERED:
+            raise TypeError("make_row_result requires outcome when path is not BUFFERED")
+        resolved_outcome = None
+        resolved_path = path
+    elif path is None:
+        raise TypeError("make_row_result requires path when outcome is provided")
+    else:
+        resolved_outcome = outcome
+        resolved_path = path
+
+    _SINK_PATHS = {
+        TerminalPath.DEFAULT_FLOW,
+        TerminalPath.GATE_ROUTED,
+        TerminalPath.ON_ERROR_ROUTED,
+        TerminalPath.COALESCED,
     }
     resolved_sink_name = sink_name
-    if resolved_outcome in _SINK_OUTCOMES and resolved_sink_name is None:
+    if resolved_path in _SINK_PATHS and resolved_sink_name is None:
         resolved_sink_name = "default"
 
     token = make_token_info()
@@ -534,6 +546,7 @@ def make_row_result(
         token=token,
         final_data=make_pipeline_row(data) if data is not None else make_pipeline_row({"_result": True}),
         outcome=resolved_outcome,
+        path=resolved_path,
         sink_name=resolved_sink_name,
         error=error,
     )
@@ -718,14 +731,14 @@ def make_token_completed(
     *,
     row_id: str = "row-1",
     token_id: str = "tok-1",
-    outcome: RowOutcome | None = None,
+    outcome: TerminalOutcome | None = None,
+    path: TerminalPath | None = None,
     sink_name: str | None = "default",
     run_id: str = "test-run",
 ) -> TokenCompleted:
     """Build TokenCompleted event."""
     from datetime import UTC, datetime
 
-    from elspeth.contracts.enums import RowOutcome
     from elspeth.contracts.events import TokenCompleted
 
     return TokenCompleted(
@@ -733,7 +746,8 @@ def make_token_completed(
         run_id=run_id,
         row_id=row_id,
         token_id=token_id,
-        outcome=outcome or RowOutcome.COMPLETED,
+        outcome=outcome or TerminalOutcome.SUCCESS,
+        path=path or TerminalPath.DEFAULT_FLOW,
         sink_name=sink_name,
     )
 

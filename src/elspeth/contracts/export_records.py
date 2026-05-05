@@ -141,8 +141,9 @@ class TokenOutcomeExportRecord(TypedDict):
     run_id: str
     outcome_id: str
     token_id: str
-    outcome: str
-    is_terminal: bool
+    outcome: str | None
+    path: str
+    completed: bool
     recorded_at: str
     sink_name: str | None
     batch_id: str | None

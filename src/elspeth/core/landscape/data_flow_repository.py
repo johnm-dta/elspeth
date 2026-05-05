@@ -21,7 +21,6 @@ from elspeth.contracts import (
     NonCanonicalMetadata,
     RoutingMode,
     Row,
-    RowOutcome,
     Token,
     TokenOutcome,
     TransformErrorReason,
@@ -29,7 +28,8 @@ from elspeth.contracts import (
     ValidationErrorRecord,
     ValidationErrorWithContract,
 )
-from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.audit import _TERMINAL_PAIR_FIELD_CONSTRAINTS, TokenRef
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import repr_hash
@@ -202,7 +202,8 @@ class DataFlowRepository:
 
     def _validate_outcome_fields(
         self,
-        outcome: RowOutcome,
+        outcome: TerminalOutcome | None,
+        path: TerminalPath,
         *,
         sink_name: str | None,
         batch_id: str | None,
@@ -211,100 +212,46 @@ class DataFlowRepository:
         expand_group_id: str | None,
         error_hash: str | None,
     ) -> None:
-        """Validate required fields are present for each outcome type.
+        """Validate discriminator fields for the (outcome, path) pair.
 
-        Enforces the token outcome contract from docs/contracts/token-outcomes/00-token-outcome-contract.md.
-        This is defense-in-depth: callers SHOULD pass correct fields, but this catches bugs.
-
-        Raises:
-            ValueError: If a required field is missing for the outcome type
+        Per ADR-019, producers declare both axes; the recorder must crash before
+        writing an ambiguous audit row if the pair is illegal or if required,
+        exact, or forbidden discriminator fields are violated.
         """
-        # Map outcome to required field(s)
-        # Contract: Each outcome type has specific required fields
-        if outcome == RowOutcome.COMPLETED:
-            if sink_name is None:
-                raise ValueError(
-                    "COMPLETED outcome requires sink_name but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.ROUTED:
-            if sink_name is None:
-                raise ValueError(
-                    "ROUTED outcome requires sink_name but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.ROUTED_ON_ERROR:
-            if sink_name is None:
-                raise ValueError(
-                    "ROUTED_ON_ERROR outcome requires sink_name but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-            if error_hash is None:
-                raise ValueError(
-                    "ROUTED_ON_ERROR outcome requires error_hash but got None. "
-                    "Mirrors DIVERTED's contract — both outcomes are failure-handling "
-                    "redirects with an originating error that must be captured on the "
-                    "outcome record for single-hop audit attributability. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.FORKED:
-            if fork_group_id is None:
-                raise ValueError(
-                    "FORKED outcome requires fork_group_id but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.FAILED:
-            if error_hash is None:
-                raise ValueError(
-                    "FAILED outcome requires error_hash but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.QUARANTINED:
-            if error_hash is None:
-                raise ValueError(
-                    "QUARANTINED outcome requires error_hash but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.CONSUMED_IN_BATCH:
-            if batch_id is None:
-                raise ValueError(
-                    "CONSUMED_IN_BATCH outcome requires batch_id but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.DROPPED_BY_FILTER:
-            pass
-        elif outcome == RowOutcome.COALESCED:
-            if join_group_id is None:
-                raise ValueError(
-                    "COALESCED outcome requires join_group_id but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.EXPANDED:
-            if expand_group_id is None:
-                raise ValueError(
-                    "EXPANDED outcome requires expand_group_id but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.DIVERTED:
-            if sink_name is None:
-                raise ValueError(
-                    "DIVERTED outcome requires sink_name but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-            if error_hash is None:
-                raise ValueError(
-                    "DIVERTED outcome requires error_hash but got None. "
-                    "Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        elif outcome == RowOutcome.BUFFERED:
-            if batch_id is None:
-                raise ValueError(
-                    "BUFFERED outcome requires batch_id but got None. Contract violation - see docs/contracts/token-outcomes/00-token-outcome-contract.md"
-                )
-        else:
+        pair = (outcome, path)
+        if pair not in _TERMINAL_PAIR_FIELD_CONSTRAINTS:
             raise ValueError(
-                f"Unhandled RowOutcome variant in validation: {outcome!r}. Add required-field validation for this outcome type."
+                f"Unhandled (outcome, path) pair in validation: {pair!r}. "
+                "See ADR-019 mapping table and update _TERMINAL_PAIR_FIELD_CONSTRAINTS."
             )
+        constraints = _TERMINAL_PAIR_FIELD_CONSTRAINTS[pair]
+        field_values = {
+            "sink_name": sink_name,
+            "batch_id": batch_id,
+            "fork_group_id": fork_group_id,
+            "join_group_id": join_group_id,
+            "expand_group_id": expand_group_id,
+            "error_hash": error_hash,
+        }
+        pair_label = f"({outcome.name if outcome else 'NULL'}, {path.name})"
+        for field_name in constraints.required:
+            if field_values[field_name] is None:
+                raise ValueError(
+                    f"{pair_label} outcome requires {field_name} but got None. Contract violation — see ADR-019 Implementation Notes."
+                )
+        for field_name, expected in constraints.exact.items():
+            if field_values[field_name] != expected:
+                raise ValueError(
+                    f"{pair_label} outcome requires {field_name}={expected!r}, "
+                    f"got {field_values[field_name]!r}. "
+                    "Contract violation — see ADR-019 Implementation Notes."
+                )
+        for field_name in constraints.forbidden:
+            if field_values[field_name] is not None:
+                raise ValueError(
+                    f"{pair_label} outcome forbids {field_name}, got {field_values[field_name]!r}. "
+                    "Contract violation — see ADR-019 Implementation Notes."
+                )
 
     # ── Token recording: public methods ──────────────────────────────────
 
@@ -569,8 +516,9 @@ class DataFlowRepository:
                     outcome_id=outcome_id,
                     run_id=parent_ref.run_id,
                     token_id=parent_ref.token_id,
-                    outcome=RowOutcome.FORKED,
-                    is_terminal=1,
+                    outcome=TerminalOutcome.TRANSIENT.value,
+                    path=TerminalPath.FORK_PARENT.value,
+                    completed=1,
                     recorded_at=now(),
                     fork_group_id=fork_group_id,
                     expected_branches_json=json.dumps(branches, allow_nan=False),
@@ -784,8 +732,9 @@ class DataFlowRepository:
                         outcome_id=outcome_id,
                         run_id=parent_ref.run_id,
                         token_id=parent_ref.token_id,
-                        outcome=RowOutcome.EXPANDED,
-                        is_terminal=1,
+                        outcome=TerminalOutcome.TRANSIENT.value,
+                        path=TerminalPath.EXPAND_PARENT.value,
+                        completed=1,
                         recorded_at=now(),
                         expand_group_id=expand_group_id,
                         # Store expected count for recovery validation
@@ -802,9 +751,12 @@ class DataFlowRepository:
     def record_token_outcome(
         self,
         ref: TokenRef,
-        outcome: RowOutcome,
+        outcome: TerminalOutcome | None,
+        path: TerminalPath,
         *,
         sink_name: str | None = None,
+        sink_node_id: str | None = None,
+        artifact_id: str | None = None,
         batch_id: str | None = None,
         fork_group_id: str | None = None,
         join_group_id: str | None = None,
@@ -812,24 +764,29 @@ class DataFlowRepository:
         error_hash: str | None = None,
         context: Mapping[str, object] | None = None,
     ) -> str:
-        """Record a token's outcome in the audit trail.
+        """Record a token's (outcome, path) audit terminal in the audit trail.
 
-        Called at the moment the outcome is determined in processor.py.
-        For BUFFERED tokens, a second call records the terminal outcome
-        when the batch flushes.
+        Called at the moment the producer determines the terminal pair. For
+        BUFFERED tokens (outcome=None, path=BUFFERED), a second call records
+        the actual lifecycle terminal when the batch flushes.
 
         Validates that the token belongs to the specified run_id before recording.
         Cross-run contamination crashes immediately per Tier 1 trust model.
 
         Args:
             ref: TokenRef bundling token_id and run_id
-            outcome: The RowOutcome enum value
-            sink_name: For ROUTED/COMPLETED - which sink (REQUIRED)
-            batch_id: For CONSUMED_IN_BATCH/BUFFERED - which batch (REQUIRED)
-            fork_group_id: For FORKED - the fork group (REQUIRED)
-            join_group_id: For COALESCED - the join group (REQUIRED)
-            expand_group_id: For EXPANDED - the expand group (REQUIRED)
-            error_hash: For FAILED/QUARANTINED - hash of error details (REQUIRED)
+            outcome: TerminalOutcome lifecycle answer, or None for BUFFERED
+            path: TerminalPath provenance answer (always required)
+            sink_name: For paths that reach a sink (REQUIRED for those)
+            sink_node_id: Forward-compatible Phase 4 witness keyword for
+                failsink-paired outcomes. Accepted but not written in Phase 1.
+            artifact_id: Forward-compatible Phase 4 witness keyword for
+                failsink-paired outcomes. Accepted but not written in Phase 1.
+            batch_id: For BATCH_CONSUMED / BUFFERED (REQUIRED)
+            fork_group_id: For FORK_PARENT (REQUIRED)
+            join_group_id: For COALESCED (REQUIRED)
+            expand_group_id: For EXPAND_PARENT (REQUIRED)
+            error_hash: Error witness for failure/transient error paths
             context: Optional additional context (stored as JSON)
 
         Returns:
@@ -840,10 +797,10 @@ class DataFlowRepository:
             AuditIntegrityError: If token does not belong to the specified run
             IntegrityError: If terminal outcome already exists for token
         """
-        # Validate required fields per outcome type (contract enforcement)
-        # See docs/contracts/token-outcomes/00-token-outcome-contract.md
+        _ = sink_node_id, artifact_id
         self._validate_outcome_fields(
-            outcome=outcome,
+            outcome,
+            path,
             sink_name=sink_name,
             batch_id=batch_id,
             fork_group_id=fork_group_id,
@@ -856,7 +813,7 @@ class DataFlowRepository:
         self._validate_token_run_ownership(ref)
 
         outcome_id = f"out_{generate_id()[:12]}"
-        is_terminal = outcome.is_terminal
+        completed = outcome is not None
         context_json = canonical_json(context) if context is not None else None
 
         self._ops.execute_insert(
@@ -864,8 +821,9 @@ class DataFlowRepository:
                 outcome_id=outcome_id,
                 run_id=ref.run_id,
                 token_id=ref.token_id,
-                outcome=outcome,
-                is_terminal=1 if is_terminal else 0,
+                outcome=outcome.value if outcome is not None else None,
+                path=path.value,
+                completed=1 if completed else 0,
                 recorded_at=now(),
                 sink_name=sink_name,
                 batch_id=batch_id,
@@ -896,7 +854,7 @@ class DataFlowRepository:
             select(token_outcomes_table)
             .where(token_outcomes_table.c.token_id == token_id)
             .order_by(
-                token_outcomes_table.c.is_terminal.desc(),  # Terminal first
+                token_outcomes_table.c.completed.desc(),  # Terminal first
                 token_outcomes_table.c.recorded_at.desc(),  # Then by time
             )
             .limit(1)
@@ -927,7 +885,8 @@ class DataFlowRepository:
                 token_outcomes_table.c.run_id,
                 token_outcomes_table.c.token_id,
                 token_outcomes_table.c.outcome,
-                token_outcomes_table.c.is_terminal,
+                token_outcomes_table.c.path,
+                token_outcomes_table.c.completed,
                 token_outcomes_table.c.recorded_at,
                 token_outcomes_table.c.sink_name,
                 token_outcomes_table.c.batch_id,

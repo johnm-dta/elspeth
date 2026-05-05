@@ -861,6 +861,8 @@ class TestIDORCoverageDrift:
             "get_run_status",
             "get_run_diagnostics",
             "evaluate_run_diagnostics",
+            "get_run_outputs",
+            "get_run_output_content",
             "cancel_run",
             "get_run_results",
         }

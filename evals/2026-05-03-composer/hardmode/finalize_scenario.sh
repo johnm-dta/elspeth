@@ -34,6 +34,26 @@ if [[ "$is_valid" == "true" ]]; then
     curl -fsS -H "Authorization: Bearer $J" \
       "https://elspeth.foundryside.dev/api/runs/$rid/diagnostics" \
       -o $out/diagnostics.json 2>/dev/null || true
+
+    # Outputs manifest + per-artifact content fetch.
+    # The manifest endpoint returns the FULL artifact list (no preview cap)
+    # with content_hash + exists_now. Each artifact's bytes are then pulled
+    # via the content endpoint, which path-allowlists against
+    # data_dir/{outputs,blobs}.
+    mkdir -p $out/outputs
+    curl -fsS -H "Authorization: Bearer $J" \
+      "https://elspeth.foundryside.dev/api/runs/$rid/outputs" \
+      -o $out/outputs/MANIFEST.json 2>/dev/null \
+      || echo '{"artifacts":[]}' > $out/outputs/MANIFEST.json
+
+    jq -r '.artifacts[]? | "\(.artifact_id)\t\(.path_or_uri | sub("^file://"; "") | split("/") | .[-1])"' \
+      $out/outputs/MANIFEST.json | while IFS=$'\t' read -r aid name; do
+      [ -z "$aid" ] && continue
+      curl -fsS -H "Authorization: Bearer $J" \
+        "https://elspeth.foundryside.dev/api/runs/$rid/outputs/$aid/content" \
+        -o "$out/outputs/$name" 2>/dev/null \
+        || echo "[$scenario_id] failed to fetch artifact $aid" >&2
+    done
   fi
 fi
 
@@ -93,6 +113,25 @@ if run_path.exists() and run_path.read_text().strip():
 val = json.loads((out/"validate.json").read_text() or "{}")
 checks = val.get("checks") or []
 ledger["failed_validate_checks"] = [c.get("name") for c in checks if c.get("passed") is False]
+
+# Outputs summary (manifest + bytes — Phase D.1, elspeth-77d2641032)
+manifest_path = out/"outputs"/"MANIFEST.json"
+if manifest_path.exists():
+    manifest = json.loads(manifest_path.read_text())
+    artifacts = manifest.get("artifacts", [])
+    ledger["artifacts_count"] = len(artifacts)
+    ledger["artifacts"] = [
+        {
+            "sink_node_id": a["sink_node_id"],
+            "size_bytes": a["size_bytes"],
+            "exists_now": a["exists_now"],
+            "content_hash": a["content_hash"],
+        }
+        for a in artifacts
+    ]
+else:
+    ledger["artifacts_count"] = 0
+    ledger["artifacts"] = []
 
 (out/"ledger.json").write_text(json.dumps(ledger, indent=2))
 print(json.dumps(ledger, indent=2))

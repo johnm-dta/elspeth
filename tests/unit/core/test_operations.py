@@ -7,7 +7,6 @@ from typing import Any, cast
 
 import pytest
 
-from elspeth.contracts import BatchPendingError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.operations import track_operation
 from tests.fixtures.factories import make_context
@@ -84,27 +83,6 @@ def test_track_operation_records_completed_status_and_output_data() -> None:
     assert factory.begin_calls[0]["input_data"] == {"source": "csv"}
     assert factory.complete_calls[0]["status"] == "completed"
     assert factory.complete_calls[0]["output_data"] == {"rows_loaded": 3}
-
-
-def test_track_operation_marks_pending_for_batch_pending_error() -> None:
-    factory = _FakeFactory()
-    ctx = make_context()
-
-    with (
-        pytest.raises(BatchPendingError),
-        track_operation(
-            recorder=cast(ExecutionRepository, factory),
-            run_id="run-001",
-            node_id="node-001",
-            operation_type="sink_write",
-            ctx=ctx,
-        ),
-    ):
-        raise BatchPendingError("batch-001", "submitted")
-
-    assert factory.complete_calls[0]["status"] == "pending"
-    assert factory.complete_calls[0]["error"] is None
-    assert ctx.operation_id is None
 
 
 def test_track_operation_marks_failed_for_exception() -> None:

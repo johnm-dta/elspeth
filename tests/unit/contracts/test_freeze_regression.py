@@ -3,7 +3,6 @@
 Each test verifies that a specific freeze bypass is closed:
 - Node.schema_fields: tuple of mutable dicts was not deep-frozen
 - RowLineage.source_data: shallow MappingProxyType left nested containers mutable
-- BatchCheckpointState.template_errors: list elements inside tuple not coerced to tuples
 - HTTPCallResponse.body: non-dict Mapping types bypassed freeze guard
 - GracefulShutdownError.routed_destinations: MappingProxyType wrapped without copy
 - PendingOutcome._REQUIRES_ERROR_HASH_OUTCOMES: class-level frozenset (not per-instance set)
@@ -19,7 +18,6 @@ from typing import Any
 import pytest
 
 from elspeth.contracts.audit import Node, RowLineage
-from elspeth.contracts.batch_checkpoint import BatchCheckpointState, RowMappingEntry
 from elspeth.contracts.call_data import HTTPCallResponse
 from elspeth.contracts.engine import PendingOutcome
 from elspeth.contracts.enums import Determinism, NodeType, TerminalOutcome, TerminalPath
@@ -58,20 +56,6 @@ def _make_lineage(**kwargs: object) -> RowLineage:
     }
     defaults.update(kwargs)
     return RowLineage(**defaults)
-
-
-def _make_checkpoint(template_errors: object) -> BatchCheckpointState:
-    # arg-type suppression below is intentional — we pass invalid types
-    # to test that __post_init__ coerces them.
-    return BatchCheckpointState(
-        batch_id="batch-1",
-        input_file_id="file-1",
-        row_mapping={"cid-1": RowMappingEntry(index=0, variables_hash="h1")},
-        template_errors=template_errors,  # type: ignore[arg-type]
-        submitted_at="2026-01-01T00:00:00Z",
-        row_count=1,
-        requests={"cid-1": {"model": "gpt-4"}},
-    )
 
 
 class _CustomMapping(Mapping[str, object]):
@@ -178,50 +162,6 @@ class TestRowLineageDeepFreeze:
         lineage = _make_lineage(source_data=None, payload_available=False)
         assert lineage.source_data is None
 
-
-# ── BatchCheckpointState.template_errors ────────────────────────────────────
-
-
-class TestBatchCheckpointTemplateErrorsFreeze:
-    """Bug: list elements inside tuple not coerced to tuples."""
-
-    def test_list_elements_become_tuples(self) -> None:
-        cp = _make_checkpoint([[0, "error msg"]])
-        assert isinstance(cp.template_errors, tuple)
-        assert isinstance(cp.template_errors[0], tuple)
-        assert cp.template_errors[0] == (0, "error msg")
-
-    def test_tuple_of_lists_gets_inner_frozen(self) -> None:
-        cp = _make_checkpoint(([0, "err1"], [1, "err2"]))
-        assert all(isinstance(e, tuple) for e in cp.template_errors)
-
-    def test_already_frozen_is_unchanged(self) -> None:
-        cp = _make_checkpoint(((0, "err1"),))
-        assert cp.template_errors == ((0, "err1"),)
-
-    def test_empty_template_errors(self) -> None:
-        cp = _make_checkpoint([])
-        assert cp.template_errors == ()
-
-    def test_empty_tuple_passes_through(self) -> None:
-        cp = _make_checkpoint(())
-        assert cp.template_errors == ()
-
-    def test_wrong_arity_crashes(self) -> None:
-        """A 3-element tuple must crash — not silently persist to checkpoint."""
-        with pytest.raises(ValueError, match=r"must be \(int, str\)"):
-            _make_checkpoint([(0, "err", "extra")])
-
-    def test_wrong_index_type_crashes(self) -> None:
-        with pytest.raises(ValueError, match="must be int"):
-            _make_checkpoint([("zero", "err")])
-
-    def test_wrong_message_type_crashes(self) -> None:
-        with pytest.raises(ValueError, match="must be str"):
-            _make_checkpoint([(0, 42)])
-
-
-# ── HTTPCallResponse.body ───────────────────────────────────────────────────
 
 
 class TestHTTPCallResponseBodyFreeze:
@@ -451,23 +391,6 @@ class TestFreezeFieldsUtility:
         """freeze_fields on a None-valued field is a no-op."""
         lineage = _make_lineage(source_data=None, payload_available=False)
         assert lineage.source_data is None
-
-    def test_multiple_fields_in_one_call(self) -> None:
-        """freeze_fields can freeze multiple fields in a single call."""
-        cp = BatchCheckpointState(
-            batch_id="b1",
-            input_file_id="f1",
-            row_mapping={"cid": RowMappingEntry(index=0, variables_hash="h")},
-            template_errors=[(0, "err")],
-            submitted_at="2026-01-01T00:00:00Z",
-            row_count=1,
-            requests={"cid": {"model": "gpt-4"}},
-        )
-        # All three container fields should be frozen
-        assert isinstance(cp.row_mapping, MappingProxyType)
-        assert isinstance(cp.template_errors, tuple)
-        assert isinstance(cp.requests, MappingProxyType)
-
 
 # ── Nested Mutation Rejection Tests ─────────────────────────────────────────
 #

@@ -10,7 +10,6 @@ This module provides the track_operation context manager which handles:
 - Exception capture with proper status
 - Guaranteed completion (even on DB failure)
 - Context cleanup (clears operation_id after completion)
-- BatchPendingError handling (marks as 'pending', not 'failed')
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal
 
 import elspeth.contracts.errors as contract_errors
-from elspeth.contracts import BatchPendingError
 
 if TYPE_CHECKING:
     from elspeth.contracts import Operation
@@ -143,18 +141,12 @@ def track_operation(
     ctx.operation_id = operation.operation_id
 
     start_time = time.perf_counter()
-    status: Literal["completed", "failed", "pending"] = "completed"
+    status: Literal["completed", "failed"] = "completed"
     error_msg: str | None = None
     original_exception: BaseException | None = None
 
     try:
         yield handle
-    except BatchPendingError:
-        # BatchPendingError is a CONTROL-FLOW SIGNAL, not an error.
-        # A batch transform needs to wait for async results.
-        # Mark as "pending" to distinguish from actual failures.
-        status = "pending"
-        raise
     except Exception as e:
         status = "failed"
         error_msg = _render_exception(e)

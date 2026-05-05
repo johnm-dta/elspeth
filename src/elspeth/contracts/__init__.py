@@ -55,7 +55,6 @@ from elspeth.contracts.audit import (
     TransformErrorRecord,
     ValidationErrorRecord,
 )
-from elspeth.contracts.batch_checkpoint import BatchCheckpointState, RowMappingEntry
 from elspeth.contracts.call_data import (
     CallPayload,
     HTTPCallError,
@@ -157,7 +156,6 @@ from elspeth.contracts.enums import (
 )
 from elspeth.contracts.errors import (
     # Tier 1 guard tuple — single source of truth for "never catch" exceptions
-    BatchPendingError,
     CoalesceFailureReason,
     CommencementGateFailedError,
     ConfigGateReason,
@@ -298,7 +296,6 @@ __all__ = [  # Grouped by category for readability
     "Artifact",
     "Operation",
     # errors
-    "BatchPendingError",
     "CommencementGateFailedError",
     "DependencyFailedError",
     "DuplicateDocumentError",
@@ -395,9 +392,6 @@ __all__ = [  # Grouped by category for readability
     "error_edge_label",
     # identity
     "TokenInfo",
-    # batch checkpoint
-    "BatchCheckpointState",
-    "RowMappingEntry",
     # checkpoint
     "AggregationCheckpointState",
     "AggregationNodeCheckpoint",

@@ -349,8 +349,7 @@ class AggregationExecutor:
             input_data=batch_input,
             attempt=0,
         ) as guard:
-            # Set state_id and node_id on context for external call recording
-            # and batch checkpoint lookup (node_id required for _batch_checkpoints keying)
+            # Set state_id and node_id on context for external call recording.
             ctx.state_id = guard.state_id
             ctx.node_id = node_id
             # Note: call_index allocation handled by ExecutionRepository.allocate_call_index()

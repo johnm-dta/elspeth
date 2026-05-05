@@ -1,7 +1,7 @@
 """Tests for __post_init__ validations on checkpoint types.
 
-Covers: AggregationTokenCheckpoint, AggregationNodeCheckpoint,
-AggregationCheckpointState, RowMappingEntry, BatchCheckpointState.
+Covers: AggregationTokenCheckpoint, AggregationNodeCheckpoint, and
+AggregationCheckpointState.
 """
 
 from collections import OrderedDict
@@ -13,7 +13,6 @@ from elspeth.contracts.aggregation_checkpoint import (
     AggregationNodeCheckpoint,
     AggregationTokenCheckpoint,
 )
-from elspeth.contracts.batch_checkpoint import BatchCheckpointState, RowMappingEntry
 
 
 class TestAggregationTokenCheckpointPostInit:
@@ -232,82 +231,6 @@ class TestAggregationCheckpointStatePostInit:
 
         state = AggregationCheckpointState(version="4.0", nodes={})
         assert isinstance(state.nodes, MappingProxyType)
-
-
-class TestRowMappingEntryPostInit:
-    def test_rejects_negative_index(self) -> None:
-        with pytest.raises(ValueError, match="must be >= 0"):
-            RowMappingEntry(index=-1, variables_hash="abc")
-
-    def test_rejects_empty_variables_hash(self) -> None:
-        with pytest.raises(ValueError, match="variables_hash must not be empty"):
-            RowMappingEntry(index=0, variables_hash="")
-
-    def test_accepts_valid(self) -> None:
-        e = RowMappingEntry(index=0, variables_hash="abc123")
-        assert e.index == 0
-
-
-class TestBatchCheckpointStatePostInit:
-    def test_rejects_empty_batch_id(self) -> None:
-        with pytest.raises(ValueError, match="batch_id must not be empty"):
-            BatchCheckpointState(
-                batch_id="",
-                input_file_id="f1",
-                row_mapping={},
-                template_errors=[],
-                submitted_at="2026-01-01T00:00:00Z",
-                row_count=1,
-                requests={},
-            )
-
-    def test_rejects_empty_input_file_id(self) -> None:
-        with pytest.raises(ValueError, match="input_file_id must not be empty"):
-            BatchCheckpointState(
-                batch_id="b1",
-                input_file_id="",
-                row_mapping={},
-                template_errors=[],
-                submitted_at="2026-01-01T00:00:00Z",
-                row_count=1,
-                requests={},
-            )
-
-    def test_rejects_negative_row_count(self) -> None:
-        with pytest.raises(ValueError, match="must be >= 0"):
-            BatchCheckpointState(
-                batch_id="b1",
-                input_file_id="f1",
-                row_mapping={},
-                template_errors=[],
-                submitted_at="2026-01-01T00:00:00Z",
-                row_count=-1,
-                requests={},
-            )
-
-    def test_rejects_empty_submitted_at(self) -> None:
-        with pytest.raises(ValueError, match="submitted_at must not be empty"):
-            BatchCheckpointState(
-                batch_id="b1",
-                input_file_id="f1",
-                row_mapping={},
-                template_errors=[],
-                submitted_at="",
-                row_count=1,
-                requests={},
-            )
-
-    def test_accepts_valid(self) -> None:
-        s = BatchCheckpointState(
-            batch_id="b1",
-            input_file_id="f1",
-            row_mapping={},
-            template_errors=[],
-            submitted_at="2026-01-01T00:00:00Z",
-            row_count=5,
-            requests={},
-        )
-        assert s.batch_id == "b1"
 
 
 class TestAggregationNodeCheckpointTokensFreeze:

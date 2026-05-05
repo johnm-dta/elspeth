@@ -21,6 +21,7 @@ These run immediately with no setup:
 |---------|------|-------|
 | `audit_export` | 8 | Demonstrates audit data export |
 | `batch_aggregation` | 15 | Batch accumulation and trigger |
+| `statistical_batch_plugins` | 8 each | Statistical batch plugin examples; run one `settings_*.yaml` file at a time |
 | `boolean_routing` | 10 | True/false gate routing |
 | `checkpoint_resume` | 20 | Checkpoint/resume on interruption |
 | `database_sink` | 8 | SQLite database output |

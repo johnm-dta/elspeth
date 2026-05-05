@@ -86,6 +86,48 @@ cat runs/$(date -u +%Y-%m-%d)-hardmode/SCORECARD.md
 
 Full step-by-step is in [`hardmode/RUNBOOK.md`](hardmode/RUNBOOK.md).
 
+## Model under test
+
+The model exercised by the eval is **`openai/gpt-5-mini`** (via OpenRouter).
+This name appears in two places that the harness controls:
+
+1. **`scenarios/hardmode/p4_t1_happy_csv_to_jsonl.json`** — Dev (P4) is the only
+   persona who *prescribes* a model. Her opening prompt names
+   `openai/gpt-5-mini` explicitly, so the composer's `final_yaml.json` for that
+   scenario should pin the same id. If it doesn't, that's a probe failure
+   (composer ignored a prescriptive ask).
+
+2. **`personas/p4_adversarial_engineer.md`** — references `openrouter/5-mini`
+   as Dev's habitual shorthand (a misconception probe — does the composer
+   resolve the shorthand or push back?).
+
+For the **P1/P2/P3 scenarios**, the persona deliberately does **not** name a
+model — the test is whether the composer auto-selects something that actually
+works on OpenRouter (this is the failure surface the historical
+`elspeth-obs-f3143acba2` flagged). The harness cannot force the composer's
+auto-pick from outside the running session.
+
+If you want every scenario in the matrix to land on `openai/gpt-5-mini`,
+you need to set the composer's server-side default model to that id before
+running. Two options on the staging deploy:
+
+- **Composer config**: whatever the deploy's composer-LLM-default config key
+  is — depends on the running build of `src/elspeth/web/composer/`.
+- **Environment override on the web service**: if the composer respects an
+  env var for its default model (check the running deploy's systemd unit),
+  set it and `systemctl restart elspeth-web.service` before bootstrapping
+  any scenarios.
+
+The harness will faithfully record whatever model lands in `final_yaml.json`
+per scenario — verify the expected id post-run with:
+
+```bash
+for d in runs/$(date -u +%Y-%m-%d)-hardmode/*/; do
+  echo "=== $(basename "$d") ==="
+  jq -r '.yaml' "$d/final_yaml.json" 2>/dev/null | grep -E '^\s+model:' || echo "(no model in YAML)"
+done
+```
+
 ## What the harness measures (and what it doesn't)
 
 **Authoritative measurements** (read these directly):

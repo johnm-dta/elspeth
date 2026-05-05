@@ -54,7 +54,7 @@ shape or a column list.
   that may have moved).
 - Believes she can use Jinja2 templating in transform expression fields —
   partially true, but with composer-time validation rules she may not know.
-- Thinks the composer should accept her shorthand ("openrouter/4o-mini") and
+- Thinks the composer should accept her shorthand ("openrouter/5-mini") and
   resolve it to a fully-qualified model ID — it may or may not.
 - Thinks she can specify retry semantics inline in the transform options
   rather than going through the retry block.

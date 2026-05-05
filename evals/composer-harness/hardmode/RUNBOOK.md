@@ -199,5 +199,5 @@ with a `replay_summary.json` showing original-vs-replay status delta.
 - Multi-turn edge cases that converge: $0.50-1.20.
 - Convergence-timeouts (180s × multi-step): $1.50-2.00 each.
 
-A full 15-scenario run with the current matrix: **~$8-12** at gpt-4o-mini /
-claude-3.5-sonnet rates.
+A full 15-scenario run with the current matrix: **~$8-12** at openai/gpt-5-mini
+rates (the model under test for this re-run).

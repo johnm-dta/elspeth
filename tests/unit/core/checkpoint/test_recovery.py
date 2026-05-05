@@ -17,6 +17,8 @@ from elspeth.contracts import (
     PluginSchema,
     RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.aggregation_checkpoint import (
     AggregationCheckpointState,
@@ -33,6 +35,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.checkpoint import CheckpointCorruptionError, CheckpointManager, RecoveryManager
 from elspeth.core.checkpoint.manager import IncompatibleCheckpointError
+from elspeth.core.checkpoint.recovery import _DELEGATION_PATHS
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -156,14 +159,62 @@ def _insert_token(conn: Connection, run_id: str, token_id: str, row_id: str) -> 
     )
 
 
-def _insert_terminal_outcome(conn: Connection, run_id: str, token_id: str, *, outcome: RowOutcome = RowOutcome.COMPLETED) -> None:
+def _row_outcome_to_pair(outcome: RowOutcome) -> tuple[TerminalOutcome | None, TerminalPath, bool]:
+    if outcome == RowOutcome.COMPLETED:
+        return TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, True
+    if outcome == RowOutcome.ROUTED:
+        return TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, True
+    if outcome == RowOutcome.ROUTED_ON_ERROR:
+        return TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED, True
+    if outcome == RowOutcome.FORKED:
+        return TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT, True
+    if outcome == RowOutcome.FAILED:
+        return TerminalOutcome.FAILURE, TerminalPath.UNROUTED, True
+    if outcome == RowOutcome.QUARANTINED:
+        return TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE, True
+    if outcome == RowOutcome.DIVERTED:
+        return TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK, True
+    if outcome == RowOutcome.CONSUMED_IN_BATCH:
+        return TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED, True
+    if outcome == RowOutcome.DROPPED_BY_FILTER:
+        return TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED, True
+    if outcome == RowOutcome.COALESCED:
+        return TerminalOutcome.SUCCESS, TerminalPath.COALESCED, True
+    if outcome == RowOutcome.EXPANDED:
+        return TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT, True
+    if outcome == RowOutcome.BUFFERED:
+        return None, TerminalPath.BUFFERED, False
+    raise AssertionError(f"Unhandled RowOutcome in test helper: {outcome!r}")
+
+
+def _insert_terminal_outcome(
+    conn: Connection,
+    run_id: str,
+    token_id: str,
+    *,
+    outcome: TerminalOutcome | RowOutcome | None = TerminalOutcome.SUCCESS,
+    path: TerminalPath | None = None,
+    completed: bool | None = None,
+) -> None:
+    if isinstance(outcome, RowOutcome):
+        resolved_outcome, resolved_path, resolved_completed = _row_outcome_to_pair(outcome)
+    else:
+        resolved_outcome = outcome
+        resolved_path = path or TerminalPath.DEFAULT_FLOW
+        resolved_completed = completed if completed is not None else outcome is not None
+    if path is not None:
+        resolved_path = path
+    if completed is not None:
+        resolved_completed = completed
+
     conn.execute(
         token_outcomes_table.insert().values(
             outcome_id=f"out-{token_id}",
             run_id=run_id,
             token_id=token_id,
-            outcome=outcome.value,
-            is_terminal=1,
+            outcome=resolved_outcome.value if resolved_outcome is not None else None,
+            path=resolved_path.value,
+            completed=1 if resolved_completed else 0,
             recorded_at=datetime.now(UTC),
             sink_name="sink",
         )
@@ -347,6 +398,47 @@ def test_get_resume_point_restores_aggregation_state(
 
 def test_get_unprocessed_rows_returns_empty_when_no_checkpoint(recovery_manager: RecoveryManager) -> None:
     assert recovery_manager.get_unprocessed_rows("missing-run") == []
+
+
+@pytest.mark.parametrize("delegation_path", [TerminalPath.FORK_PARENT, TerminalPath.EXPAND_PARENT])
+def test_get_unprocessed_rows_uses_terminal_path_delegation_set(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+    delegation_path: TerminalPath,
+) -> None:
+    """ADR-019: fork/expand parents are delegation markers by path."""
+    expected_delegation_paths = (
+        TerminalPath.FORK_PARENT.value,
+        TerminalPath.EXPAND_PARENT.value,
+    )
+    assert expected_delegation_paths == _DELEGATION_PATHS
+    run_id = f"run-resume-{delegation_path.value}"
+    graph = _create_graph(node_id="checkpoint-node")
+    with db.connection() as conn:
+        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
+        _insert_node(conn, run_id, "checkpoint-node")
+        _insert_row(conn, run_id, "row-resume-delegation", row_index=0, source_data_ref=None)
+        _insert_token(conn, run_id, "token-resume-delegation-parent", "row-resume-delegation")
+        _insert_terminal_outcome(
+            conn,
+            run_id,
+            "token-resume-delegation-parent",
+            outcome=TerminalOutcome.TRANSIENT,
+            path=delegation_path,
+            completed=True,
+        )
+
+    checkpoint_manager.create_checkpoint(
+        run_id=run_id,
+        token_id="token-resume-delegation-parent",
+        node_id="checkpoint-node",
+        sequence_number=1,
+        graph=graph,
+    )
+
+    assert recovery_manager.get_unprocessed_rows(run_id) == ["row-resume-delegation"]
 
 
 def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(

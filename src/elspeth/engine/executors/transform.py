@@ -24,7 +24,8 @@ from elspeth.contracts.declaration_contracts import (
 from elspeth.contracts.enums import (
     NodeStateStatus,
     RoutingMode,
-    RowOutcome,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.errors import (
     AuditIntegrityError,
@@ -144,7 +145,8 @@ class TransformExecutor:
         try:
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id=run_id),
-                outcome=RowOutcome.FAILED,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
                 error_hash=error_hash,
                 context=audit_context,
             )

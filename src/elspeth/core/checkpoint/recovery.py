@@ -22,9 +22,9 @@ from elspeth.contracts import (
     PluginSchema,
     ResumeCheck,
     ResumePoint,
-    RowOutcome,
     RunStatus,
     SchemaContract,
+    TerminalPath,
 )
 from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
 from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 # SQLite's SQLITE_MAX_VARIABLE_NUMBER defaults to 999. We chunk IN clauses
 # at 500 to leave headroom for other query parameters in the same statement.
 _METADATA_CHUNK_SIZE = 500
+_DELEGATION_PATHS = (TerminalPath.FORK_PARENT.value, TerminalPath.EXPAND_PARENT.value)
 
 __all__ = [
     "RecoveryManager",
@@ -346,16 +347,13 @@ class RecoveryManager:
             # "Leaf" tokens = tokens that are NOT delegation markers.
             #
             # Delegation markers (excluded from completion check):
-            # - FORKED: Fork parent, children carry completion status
-            # - EXPANDED: Deaggregation parent, expanded children carry status
+            # - FORK_PARENT: Fork parent, children carry completion status
+            # - EXPAND_PARENT: Deaggregation parent, expanded children carry status
             #
             # Terminal outcomes (indicate row processing is done):
-            # - COMPLETED: Reached output sink successfully
-            # - ROUTED: Sent to named sink by gate
-            # - QUARANTINED: Failed validation, stored for investigation
-            # - FAILED: Processing failed, not recoverable
-            # - CONSUMED_IN_BATCH: Absorbed into aggregation (batch recovery handles batch)
-            # - COALESCED: Merged in join (merged token carries forward)
+            # - completed=1 marks rows with an outcome decision.
+            # - FORK_PARENT/EXPAND_PARENT paths are excluded because those
+            #   parent outcomes delegate completion to child tokens.
             #
             # A row is "incomplete" (needs reprocessing) if ANY of:
             # 1. No tokens at all (never started processing)
@@ -367,33 +365,20 @@ class RecoveryManager:
             # Failed: If child A completed but child B crashed, row marked done.
             # Fix: "ALL non-delegation tokens must have terminal outcomes"
 
-            # Subquery: Tokens that are delegation markers (FORKED or EXPANDED)
+            # Subquery: Tokens that are delegation markers (FORK_PARENT or EXPAND_PARENT)
             # These delegate completion to their children, so exclude from completion check
             delegation_tokens = (
                 select(token_outcomes_table.c.token_id)
                 .where(token_outcomes_table.c.run_id == run_id)
-                .where(
-                    token_outcomes_table.c.outcome.in_(
-                        [
-                            RowOutcome.FORKED,
-                            RowOutcome.EXPANDED,
-                        ]
-                    )
-                )
+                .where(token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
             ).scalar_subquery()
-
-            # Terminal outcomes that indicate row processing is complete.
-            # Derived from RowOutcome.is_terminal, excluding delegation markers
-            # (FORKED/EXPANDED delegate completion to child tokens).
-            _delegation = {RowOutcome.FORKED, RowOutcome.EXPANDED}
-            terminal_outcome_values = [o for o in RowOutcome if o.is_terminal and o not in _delegation]
 
             # Subquery: Tokens with terminal outcomes
             terminal_tokens = (
                 select(token_outcomes_table.c.token_id)
                 .where(token_outcomes_table.c.run_id == run_id)
-                .where(token_outcomes_table.c.is_terminal == 1)
-                .where(token_outcomes_table.c.outcome.in_(terminal_outcome_values))
+                .where(token_outcomes_table.c.completed == 1)
+                .where(~token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
             ).scalar_subquery()
 
             # Subquery: Rows that have at least one terminal outcome
@@ -407,8 +392,8 @@ class RecoveryManager:
                     )
                 )
                 .where(token_outcomes_table.c.run_id == run_id)
-                .where(token_outcomes_table.c.is_terminal == 1)
-                .where(token_outcomes_table.c.outcome.in_(terminal_outcome_values))
+                .where(token_outcomes_table.c.completed == 1)
+                .where(~token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
             ).scalar_subquery()
 
             # Main query: Find incomplete rows

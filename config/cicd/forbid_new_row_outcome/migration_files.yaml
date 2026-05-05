@@ -15,8 +15,8 @@
 #   together in Stage 3 because the predicate change in Stage 2's
 #   RunResult.__post_init__ is paired with the accumulator's counter
 #   increments.
-# - The producer sites: sink.py, transform.py, processor.py,
-#   coalesce_executor.py emit RowOutcome.X today; they flip in Stage 3.
+# - Producer sites have been removed from this allowlist after the ADR-019
+#   Phase 2 producer flip.
 # - The checkpoint recovery path: recovery.py reads RowOutcome from saved
 #   state to restore in-flight runs; flips in Stage 2 with the recorder.
 # - The testing helpers: testing/__init__.py exposes RowOutcome to
@@ -56,23 +56,11 @@ allowed:
     justification: Recorder writes RowOutcome to token_outcomes today; Stage 2 migrates to (completed, outcome, path) triple.
   - file: src/elspeth/core/landscape/model_loaders.py
     justification: Tier 1 cross-check guards at lines 547-580 enforce per-RowOutcome required-field invariants; Stage 2 re-expresses each in (outcome, path) terms per ADR-019 Implementation Notes table.
-  # Core checkpoint recovery — reads RowOutcome from saved state.
-  - file: src/elspeth/core/checkpoint/recovery.py
-    justification: Resume path reads RowOutcome from checkpoint state to restore in-flight runs; flips in Stage 2 with the recorder migration so the read shape matches the new write shape.
   # Engine accumulator + resume aggregation — predicate-input counters.
   - file: src/elspeth/engine/orchestrator/outcomes.py
     justification: accumulate_row_outcomes contains the per-RowOutcome match arms that increment predicate counters; Stage 3 rewrites as (outcome, path) match plus the two behaviour changes from ADR-019 § Counter derivation contract (GATE_ROUTED → also rows_succeeded; ON_ERROR_ROUTED → also rows_failed).
   - file: src/elspeth/engine/orchestrator/core.py
     justification: _derive_resume_terminal_status_from_audit reads RowOutcome from token_outcomes for resume aggregation; Stage 3 reads the new column pair.
-  # Engine executors — producer sites.
-  - file: src/elspeth/engine/executors/sink.py
-    justification: Sink executor emits the primary terminal outcome at line 635, the failsink-mode DIVERTED at line 952, and the discard-mode DIVERTED at line 998; Stage 3 emits (outcome, path) pairs at all three sites and ships the discard-mode behaviour change from ADR-019 § Sub-decision 5.
-  - file: src/elspeth/engine/executors/transform.py
-    justification: Transform executor emits ROUTED, ROUTED_ON_ERROR, DROPPED_BY_FILTER, FORKED, EXPANDED at producer sites; Stage 3 emits (outcome, path) pairs.
-  - file: src/elspeth/engine/processor.py
-    justification: RowProcessor classifies row terminal states using RowOutcome; flips in Stage 3 alongside the executors so the producer pair is consistent end-to-end.
-  - file: src/elspeth/engine/coalesce_executor.py
-    justification: Coalesce executor emits COALESCED at flush time (with synthesized COMPLETED for batch-result token per ADR-018 line 70-82); flips in Stage 3 to (SUCCESS, COALESCED) pair plus structural rows_coalesced increment.
   # Testing helpers — exposed to plugin-developer scaffolding.
   - file: src/elspeth/testing/__init__.py
     justification: testing pack re-exports RowOutcome for ChaosEngine / plugin-test fixtures; flips in Stage 4 to also expose TerminalOutcome and TerminalPath, then drops RowOutcome in Stage 5.

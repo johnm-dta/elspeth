@@ -14,7 +14,6 @@ from elspeth.contracts import (
     ExecutionError,
     NodeStateOpen,
     PendingOutcome,
-    RowOutcome,
     SinkProtocol,
     TokenInfo,
 )
@@ -26,7 +25,7 @@ from elspeth.contracts.declaration_contracts import (
     DeclarationContractViolation,
 )
 from elspeth.contracts.diversion import SinkWriteResult
-from elspeth.contracts.enums import NodeStateStatus, RoutingMode
+from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     AuditIntegrityError,
     FrameworkBugError,
@@ -298,7 +297,8 @@ class SinkExecutor:
             try:
                 self._data_flow.record_token_outcome(
                     ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                    outcome=RowOutcome.FAILED,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
                     error_hash=error_hash,
                     context=context,
                 )
@@ -633,6 +633,7 @@ class SinkExecutor:
                 self._data_flow.record_token_outcome(
                     ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
                     outcome=pending_outcome.outcome,
+                    path=pending_outcome.path,
                     error_hash=pending_outcome.error_hash,
                     sink_name=sink_name,
                 )
@@ -935,7 +936,7 @@ class SinkExecutor:
 
                 # Register failsink artifact
                 first_fs_state = failsink_states[0][1]
-                self._execution.register_artifact(
+                failsink_artifact = self._execution.register_artifact(
                     run_id=self._run_id,
                     state_id=first_fs_state.state_id,
                     sink_node_id=failsink_node_id,
@@ -951,9 +952,12 @@ class SinkExecutor:
                     error_hash = hashlib.sha256(diversion.reason.encode()).hexdigest()[:16]
                     self._data_flow.record_token_outcome(
                         ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=RowOutcome.DIVERTED,
+                        outcome=TerminalOutcome.TRANSIENT,
+                        path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
                         error_hash=error_hash,
                         sink_name=failsink_name,
+                        sink_node_id=failsink_node_id,
+                        artifact_id=failsink_artifact.artifact_id,
                     )
 
                 # Checkpoint diverted tokens — failsink write is now durable.
@@ -995,9 +999,12 @@ class SinkExecutor:
                     )
 
                     error_hash = hashlib.sha256(diversion.reason.encode()).hexdigest()[:16]
+                    # ADR-019: discard-mode diversions are predicate-input
+                    # failures, not transient failsink bookkeeping.
                     self._data_flow.record_token_outcome(
                         ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=RowOutcome.DIVERTED,
+                        outcome=TerminalOutcome.FAILURE,
+                        path=TerminalPath.SINK_DISCARDED,
                         error_hash=error_hash,
                         sink_name="__discard__",
                     )

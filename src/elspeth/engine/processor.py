@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
-from elspeth.contracts import RouteDestination, RowOutcome, RowResult, SourceRow, TokenInfo, TransformResult
+from elspeth.contracts import RouteDestination, RowResult, SourceRow, TokenInfo, TransformResult
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.freeze import deep_freeze
@@ -46,7 +46,15 @@ from elspeth.contracts.declaration_contracts import (
     BoundaryOutputs,
     DeclarationContractViolation,
 )
-from elspeth.contracts.enums import NodeStateStatus, OutputMode, RoutingKind, RoutingMode, TriggerType
+from elspeth.contracts.enums import (
+    NodeStateStatus,
+    OutputMode,
+    RoutingKind,
+    RoutingMode,
+    TerminalOutcome,
+    TerminalPath,
+    TriggerType,
+)
 from elspeth.contracts.errors import (
     AuditIntegrityError,
     ExecutionError,
@@ -536,7 +544,9 @@ class RowProcessor:
     def _emit_token_completed(
         self,
         token: TokenInfo,
-        outcome: RowOutcome,
+        *,
+        outcome: TerminalOutcome | None,
+        path: TerminalPath,
         sink_name: str | None = None,
     ) -> None:
         """Emit TokenCompleted telemetry event.
@@ -545,7 +555,8 @@ class RowProcessor:
 
         Args:
             token: Token that reached terminal state
-            outcome: Terminal outcome (completed, routed, failed, etc.)
+            outcome: Lifecycle outcome (None for non-terminal BUFFERED)
+            path: Terminal provenance path
             sink_name: Destination sink if applicable
         """
         if self._telemetry_manager is None:
@@ -562,6 +573,7 @@ class RowProcessor:
                 row_id=token.row_id,
                 token_id=token.token_id,
                 outcome=outcome,
+                path=path,
                 sink_name=sink_name,
             )
         )
@@ -679,7 +691,8 @@ class RowProcessor:
             try:
                 self._data_flow.record_token_outcome(
                     ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                    outcome=RowOutcome.FAILED,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
                     error_hash=error_hash,
                 )
             except LandscapeRecordError as record_failure:
@@ -693,7 +706,11 @@ class RowProcessor:
                     f"Original flush error: {fctx.error_msg}"
                 ) from record_failure
             try:
-                self._emit_token_completed(token, RowOutcome.FAILED)
+                self._emit_token_completed(
+                    token,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
+                )
             except Exception as telemetry_failure:
                 logger.exception(
                     "TokenCompleted telemetry failed after batch-flush FAILED audit completion; preserving batch failure outcomes",
@@ -705,7 +722,15 @@ class RowProcessor:
                         "telemetry_error_type": type(telemetry_failure).__name__,
                     },
                 )
-            results.append(RowResult(token=token, final_data=token.row_data, outcome=RowOutcome.FAILED, error=failure))
+            results.append(
+                RowResult(
+                    token=token,
+                    final_data=token.row_data,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
+                    error=failure,
+                )
+            )
 
         return tuple(results)
 
@@ -908,7 +933,8 @@ class RowProcessor:
             try:
                 self._data_flow.record_token_outcome(
                     ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                    outcome=RowOutcome.FAILED,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
                     error_hash=error_hash,
                     context=per_token_audit_payload,
                 )
@@ -923,7 +949,11 @@ class RowProcessor:
                     f"Original violation: {violation!s}"
                 ) from record_failure
             try:
-                self._emit_token_completed(token, RowOutcome.FAILED)
+                self._emit_token_completed(
+                    token,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
+                )
             except Exception as telemetry_failure:
                 logger.exception(
                     "TokenCompleted telemetry failed after batch-flush audit completion; preserving original batch-flush violation",
@@ -948,7 +978,8 @@ class RowProcessor:
         try:
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                outcome=RowOutcome.DROPPED_BY_FILTER,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.FILTER_DROPPED,
             )
         except LandscapeRecordError as record_failure:
             raise AuditIntegrityError(
@@ -979,7 +1010,11 @@ class RowProcessor:
                 path_label="during empty batch flush",
             )
             try:
-                self._emit_token_completed(token, RowOutcome.DROPPED_BY_FILTER)
+                self._emit_token_completed(
+                    token,
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.FILTER_DROPPED,
+                )
             except Exception as telemetry_failure:
                 logger.exception(
                     "TokenCompleted telemetry failed after empty batch-flush audit completion; preserving dropped outcomes",
@@ -995,7 +1030,8 @@ class RowProcessor:
                 RowResult(
                     token=token,
                     final_data=token.row_data,
-                    outcome=RowOutcome.DROPPED_BY_FILTER,
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.FILTER_DROPPED,
                 )
             )
             results.extend(
@@ -1061,7 +1097,8 @@ class RowProcessor:
                     RowResult(
                         token=updated_token,
                         final_data=enriched_data,
-                        outcome=RowOutcome.COMPLETED,
+                        outcome=TerminalOutcome.SUCCESS,
+                        path=TerminalPath.DEFAULT_FLOW,
                         sink_name=fctx.transform.on_success,
                     )
                 )
@@ -1142,17 +1179,27 @@ class RowProcessor:
                     error_hash = hashlib.sha256(f"quarantined_in_batch:{fctx.batch_id}:{i}".encode()).hexdigest()[:16]
                     self._data_flow.record_token_outcome(
                         ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=RowOutcome.QUARANTINED,
+                        outcome=TerminalOutcome.FAILURE,
+                        path=TerminalPath.QUARANTINED_AT_SOURCE,
                         error_hash=error_hash,
                     )
-                    self._emit_token_completed(token, RowOutcome.QUARANTINED)
+                    self._emit_token_completed(
+                        token,
+                        outcome=TerminalOutcome.FAILURE,
+                        path=TerminalPath.QUARANTINED_AT_SOURCE,
+                    )
                 else:
                     self._data_flow.record_token_outcome(
                         ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=RowOutcome.CONSUMED_IN_BATCH,
+                        outcome=TerminalOutcome.TRANSIENT,
+                        path=TerminalPath.BATCH_CONSUMED,
                         batch_id=fctx.batch_id,
                     )
-                    self._emit_token_completed(token, RowOutcome.CONSUMED_IN_BATCH)
+                    self._emit_token_completed(
+                        token,
+                        outcome=TerminalOutcome.TRANSIENT,
+                        path=TerminalPath.BATCH_CONSUMED,
+                    )
 
             # Build triggering RowResult if applicable (count-triggered only).
             # The triggering token is always the last buffered token (buffered
@@ -1161,12 +1208,18 @@ class RowProcessor:
             # QUARANTINED if in quarantined_index_set, CONSUMED_IN_BATCH otherwise.
             if fctx.triggering_token is not None:
                 triggering_index = len(fctx.buffered_tokens) - 1
-                triggering_outcome = RowOutcome.QUARANTINED if triggering_index in quarantined_index_set else RowOutcome.CONSUMED_IN_BATCH
+                if triggering_index in quarantined_index_set:
+                    triggering_outcome = TerminalOutcome.FAILURE
+                    triggering_path = TerminalPath.QUARANTINED_AT_SOURCE
+                else:
+                    triggering_outcome = TerminalOutcome.TRANSIENT
+                    triggering_path = TerminalPath.BATCH_CONSUMED
                 results.append(
                     RowResult(
                         token=fctx.triggering_token,
                         final_data=fctx.triggering_token.row_data,
                         outcome=triggering_outcome,
+                        path=triggering_path,
                     )
                 )
 
@@ -1178,7 +1231,8 @@ class RowProcessor:
                             RowResult(
                                 token=token,
                                 final_data=token.row_data,
-                                outcome=RowOutcome.QUARANTINED,
+                                outcome=TerminalOutcome.FAILURE,
+                                path=TerminalPath.QUARANTINED_AT_SOURCE,
                             )
                         )
 
@@ -1203,7 +1257,8 @@ class RowProcessor:
                         RowResult(
                             token=token,
                             final_data=token.row_data,
-                            outcome=RowOutcome.COMPLETED,
+                            outcome=TerminalOutcome.SUCCESS,
+                            path=TerminalPath.DEFAULT_FLOW,
                             sink_name=fctx.transform.on_success,
                         )
                     )
@@ -1337,7 +1392,8 @@ class RowProcessor:
             raise OrchestrationInvariantError(f"batch_id is None after buffer_row() for node {node_id}")
         self._data_flow.record_token_outcome(
             ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
-            outcome=RowOutcome.BUFFERED,
+            outcome=None,
+            path=TerminalPath.BUFFERED,
             batch_id=buf_batch_id,
         )
 
@@ -1401,7 +1457,8 @@ class RowProcessor:
             RowResult(
                 token=current_token,
                 final_data=current_token.row_data,
-                outcome=RowOutcome.BUFFERED,
+                outcome=None,
+                path=TerminalPath.BUFFERED,
             ),
             child_items,
         )
@@ -1618,7 +1675,8 @@ class RowProcessor:
         try:
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                outcome=RowOutcome.FAILED,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
                 error_hash=error_hash,
                 context=audit_context,
             )
@@ -1649,7 +1707,11 @@ class RowProcessor:
                 f"{type(record_failure).__name__}: {record_failure}. Original {original_label}: {failure!s}"
             ) from record_failure
         try:
-            self._emit_token_completed(token, RowOutcome.FAILED)
+            self._emit_token_completed(
+                token,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
+            )
         except Exception as telemetry_failure:
             logger.exception(
                 "TokenCompleted telemetry failed after source-boundary audit completion; preserving original source-boundary failure",
@@ -1898,7 +1960,8 @@ class RowProcessor:
                     RowResult(
                         token=coalesce_outcome.merged_token,
                         final_data=coalesce_outcome.merged_token.row_data,
-                        outcome=RowOutcome.COALESCED,
+                        outcome=TerminalOutcome.SUCCESS,
+                        path=TerminalPath.COALESCED,
                         sink_name=sink_name,
                     ),
                 )
@@ -1920,18 +1983,24 @@ class RowProcessor:
             if not coalesce_outcome.outcomes_recorded:
                 self._data_flow.record_token_outcome(
                     ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
-                    outcome=RowOutcome.FAILED,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
                     error_hash=error_hash,
                 )
             # Emit TokenCompleted telemetry AFTER Landscape recording
-            self._emit_token_completed(current_token, RowOutcome.FAILED)
+            self._emit_token_completed(
+                current_token,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
+            )
 
             return (
                 True,
                 RowResult(
                     token=current_token,
                     final_data=current_token.row_data,
-                    outcome=RowOutcome.FAILED,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
                     error=FailureInfo(
                         exception_type="CoalesceFailure",
                         message=error_msg,
@@ -2002,7 +2071,8 @@ class RowProcessor:
                     RowResult(
                         token=outcome.merged_token,
                         final_data=outcome.merged_token.row_data,
-                        outcome=RowOutcome.COALESCED,
+                        outcome=TerminalOutcome.SUCCESS,
+                        path=TerminalPath.COALESCED,
                         sink_name=sink_name,
                     ),
                 ]
@@ -2021,12 +2091,17 @@ class RowProcessor:
             # These RowResults propagate to the orchestrator for counter accounting.
             sibling_results: list[RowResult] = []
             for consumed_token in outcome.consumed_tokens:
-                self._emit_token_completed(consumed_token, RowOutcome.FAILED)
+                self._emit_token_completed(
+                    consumed_token,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
+                )
                 sibling_results.append(
                     RowResult(
                         token=consumed_token,
                         final_data=consumed_token.row_data,
-                        outcome=RowOutcome.FAILED,
+                        outcome=TerminalOutcome.FAILURE,
+                        path=TerminalPath.UNROUTED,
                         error=FailureInfo(
                             exception_type="CoalesceFailure",
                             message=outcome.failure_reason,
@@ -2125,11 +2200,16 @@ class RowProcessor:
             error_hash = hashlib.sha256(str(e).encode()).hexdigest()[:16]
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
-                outcome=RowOutcome.FAILED,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
                 error_hash=error_hash,
             )
             # Emit TokenCompleted telemetry AFTER Landscape recording
-            self._emit_token_completed(current_token, RowOutcome.FAILED)
+            self._emit_token_completed(
+                current_token,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
+            )
             # Notify coalesce if this is a forked branch
             sibling_results = self._notify_coalesce_of_lost_branch(
                 current_token,
@@ -2139,7 +2219,8 @@ class RowProcessor:
             current_result = RowResult(
                 token=current_token,
                 final_data=current_token.row_data,
-                outcome=RowOutcome.FAILED,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
                 error=FailureInfo.from_max_retries_exceeded(e),
             )
             if sibling_results:
@@ -2173,7 +2254,11 @@ class RowProcessor:
                     node_id=node_id,
                     path_label="after success_empty()",
                 )
-                self._emit_token_completed(current_token, RowOutcome.DROPPED_BY_FILTER)
+                self._emit_token_completed(
+                    current_token,
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.FILTER_DROPPED,
+                )
                 sibling_results = self._notify_coalesce_of_lost_branch(
                     current_token,
                     "dropped_by_filter",
@@ -2182,7 +2267,8 @@ class RowProcessor:
                 current_result = RowResult(
                     token=current_token,
                     final_data=current_token.row_data,
-                    outcome=RowOutcome.DROPPED_BY_FILTER,
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.FILTER_DROPPED,
                 )
                 if sibling_results:
                     return _TransformTerminal(result=(current_result, *sibling_results))
@@ -2229,7 +2315,8 @@ class RowProcessor:
                 result=RowResult(
                     token=current_token,
                     final_data=current_token.row_data,
-                    outcome=RowOutcome.EXPANDED,
+                    outcome=TerminalOutcome.TRANSIENT,
+                    path=TerminalPath.EXPAND_PARENT,
                 )
             )
 
@@ -2264,11 +2351,16 @@ class RowProcessor:
             quarantine_error_hash = hashlib.sha256(error_detail.encode()).hexdigest()[:16]
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=current_token.token_id, run_id=self._run_id),
-                outcome=RowOutcome.QUARANTINED,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.QUARANTINED_AT_SOURCE,
                 error_hash=quarantine_error_hash,
             )
             # Emit TokenCompleted telemetry AFTER Landscape recording
-            self._emit_token_completed(current_token, RowOutcome.QUARANTINED)
+            self._emit_token_completed(
+                current_token,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.QUARANTINED_AT_SOURCE,
+            )
             # Notify coalesce if this is a forked branch
             sibling_results = self._notify_coalesce_of_lost_branch(
                 current_token,
@@ -2278,7 +2370,8 @@ class RowProcessor:
             current_result = RowResult(
                 token=current_token,
                 final_data=current_token.row_data,
-                outcome=RowOutcome.QUARANTINED,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.QUARANTINED_AT_SOURCE,
             )
             if sibling_results:
                 return _TransformTerminal(result=(current_result, *sibling_results))
@@ -2313,7 +2406,8 @@ class RowProcessor:
         current_result = RowResult(
             token=current_token,
             final_data=current_token.row_data,
-            outcome=RowOutcome.ROUTED_ON_ERROR,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.ON_ERROR_ROUTED,
             sink_name=error_sink,
             error=failure,
         )
@@ -2382,7 +2476,8 @@ class RowProcessor:
             current_result = RowResult(
                 token=current_token,
                 final_data=current_token.row_data,
-                outcome=RowOutcome.ROUTED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_ROUTED,
                 sink_name=outcome.sink_name,
             )
             if sibling_results:
@@ -2495,7 +2590,8 @@ class RowProcessor:
             result=RowResult(
                 token=current_token,
                 final_data=current_token.row_data,
-                outcome=RowOutcome.FORKED,
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.FORK_PARENT,
             )
         )
 
@@ -2573,7 +2669,8 @@ class RowProcessor:
         return RowResult(
             token=current_token,
             final_data=current_token.row_data,
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name=effective_sink,
         )
 

@@ -20,7 +20,7 @@ from elspeth.contracts.coalesce_checkpoint import (
 )
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
 from elspeth.contracts.coalesce_metadata import ArrivalOrderEntry, CoalesceMetadata
-from elspeth.contracts.enums import NodeStateStatus, RowOutcome
+from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     AuditIntegrityError,
     CoalesceCollisionError,
@@ -532,7 +532,8 @@ class CoalesceExecutor:
                 )
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                outcome=RowOutcome.FAILED,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
                 error_hash=error_hash,
             )
 
@@ -725,7 +726,8 @@ class CoalesceExecutor:
                 )
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=entry.token.token_id, run_id=self._run_id),
-                outcome=RowOutcome.FAILED,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
                 error_hash=error_hash,
             )
 
@@ -1010,7 +1012,8 @@ class CoalesceExecutor:
                     )
                 self._data_flow.record_token_outcome(
                     ref=TokenRef(token_id=entry.token.token_id, run_id=self._run_id),
-                    outcome=RowOutcome.COALESCED,
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.COALESCED,
                     join_group_id=merged_token.join_group_id,
                 )
 
@@ -1074,7 +1077,8 @@ class CoalesceExecutor:
                         )
                     self._data_flow.record_token_outcome(
                         ref=TokenRef(token_id=entry.token.token_id, run_id=self._run_id),
-                        outcome=RowOutcome.FAILED,
+                        outcome=TerminalOutcome.FAILURE,
+                        path=TerminalPath.UNROUTED,
                         error_hash=error_hash,
                     )
                 except Exception as cleanup_exc:

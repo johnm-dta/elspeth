@@ -354,8 +354,6 @@ fields = extract_jinja2_fields(template)  # frozenset({'customer_id', 'message_t
 | `llm` | Unified LLM transform (azure/openrouter providers, single/multi-query) |
 | `azure_content_safety` | Detect harmful content via Azure AI |
 | `azure_prompt_shield` | Detect prompt injection via Azure AI |
-| `azure_batch_llm` | Azure Batch API for LLM (50% cost savings) |
-| `openrouter_batch_llm` | OpenRouter Batch HTTP API |
 | `rag_retrieval` | Enriches rows with retrieval-augmented context from search providers |
 
 ---

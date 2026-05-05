@@ -69,8 +69,6 @@
 | Plugin Name | Config Key | Type | Provider | Features |
 |-------------|-----------|------|----------|----------|
 | LLM Transform | `llm` | LLM | Azure OpenAI, OpenRouter | Unified transform with provider dispatch (azure/openrouter), single-query and multi-query strategies, template prompts, structured output |
-| Azure Batch LLM | `azure_batch_llm` | Batch LLM | Azure OpenAI Batch API | 50% cost savings, async processing |
-| OpenRouter Batch LLM | `openrouter_batch_llm` | Batch LLM | OpenRouter Batch HTTP | Batch HTTP processing via OpenRouter |
 
 **LLM Capabilities:**
 - Jinja2 template-based prompting
@@ -560,7 +558,9 @@ All gate plugin infrastructure deliberately removed (~3,000 lines deleted):
 - Unified 6 separate LLM transforms into single `LLMTransform` with provider dispatch
 - Provider selection via config: `azure` or `openrouter`
 - Strategy selection: single-query or multi-query
-- Batch transforms remain separate: `azure_batch_llm`, `openrouter_batch_llm`
+- (Originally retained two batch-LLM plugins separate from the unified
+  transform; both were retired 2026-05-06 per ADR-020 due to conops
+  misalignment with per-row audit attribution.)
 
 ### 8.21 Plugins Restructure — RC-3.3
 

@@ -154,8 +154,6 @@ TRANSFORMS:
   web_scrape           - Fetch webpages, extract content, generate fingerprints.
   azure_content_safety - Analyze content using Azure Content Safety API.
   azure_prompt_shield  - Detect jailbreak attempts and prompt injection using Azure Prompt Shield.
-  azure_batch_llm      - Batch LLM transform using Azure OpenAI Batch API.
-  openrouter_batch_llm - Batch-aware LLM transform using OpenRouter API.
   llm                  - Unified LLM transform with provider dispatch and strategy selection.
   rag_retrieval        - Enriches rows with retrieval-augmented context from search providers.
 

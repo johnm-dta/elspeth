@@ -1,5 +1,13 @@
 # Remaining Transform Invariant Migration Implementation Plan
 
+> **Scope reduction note (2026-05-06):** ADR-020 retired both
+> `AzureBatchLLMTransform` and `OpenRouterBatchLLMTransform`. Sections of
+> this plan that name them as deferred or in-scope migration targets are
+> obsolete; the batch-LLM tranche described as "follow-on" no longer
+> exists. Other transform migrations covered by this plan
+> (`FieldMapper`, `JSONExplode`, `WebScrapeTransform`,
+> `AzureContentSafety`, `AzurePromptShield`, etc.) remain in scope.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Move the remaining eligible transform plugins in epic `elspeth-be398f0bcb` into truthful ADR-009/ADR-010 invariant coverage by classifying each transform honestly, adding hermetic probe support, eliminating the current blind-skip surface at both probe instantiation and probe execution time, explicitly carving out the batch-LLM blocker that still needs separate contract work, and leaving a bounded spike artifact that defines the follow-on batch-LLM tranche.

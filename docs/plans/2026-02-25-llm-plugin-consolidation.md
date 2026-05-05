@@ -299,8 +299,8 @@ live in base `LLMConfig`. Pydantic validator normalizes dict→list for queries.
 | `openrouter_llm` | `llm` with `provider: openrouter` |
 | `azure_multi_query_llm` | `llm` with `provider: azure` + `queries:` |
 | `openrouter_multi_query_llm` | `llm` with `provider: openrouter` + `queries:` |
-| `azure_batch_llm` | Unchanged |
-| `openrouter_batch_llm` | Unchanged |
+| `azure_batch_llm` | Unchanged at the time. *(Retired 2026-05-06 per ADR-020.)* |
+| `openrouter_batch_llm` | Unchanged at the time. *(Retired 2026-05-06 per ADR-020.)* |
 
 Provider routing is internal to `LLMTransform.__init__` via dict lookup.
 Not exposed through pluggy. Old plugin names get a helpful error message,

@@ -80,6 +80,12 @@ for token in work_queue:
 
 **Inside LLM transform plugin (parallel):**
 
+> *Historical note (2026-05-06):* The `AzureBatchLLMTransform` class shown
+> below was retired by ADR-020. The illustration is preserved because the
+> architectural pattern (plugin-level concurrency with internal thread pool)
+> still applies to other batch-aware plugins like `batch_stats` and
+> `batch_replicate`.
+
 ```python
 class AzureBatchLLMTransform:
     def __init__(self, config):

@@ -825,7 +825,7 @@ Code review finding: mypy type narrowing added to `test_create_row_round_trip` (
 
 **Bug found and fixed during migration:**
 
-The `test_azure_batch.py::TestAzureBatchLLMTransformMissingResults` tests (2 tests) created `PluginContext(...)` without a `token` parameter (defaulting to `None`). `make_context()` always creates a default token via `make_token_info()`. The `PluginContext.record_call()` method (added in P2-2026-02-14) validates `ctx.token.token_id` against `landscape.get_node_state(state_id).token_id` — with a `MagicMock` landscape, the auto-generated `.token_id` attribute is a Mock object, not a string, causing `FrameworkBugError`. These 2 tests were reverted to direct `PluginContext(...)` construction. They are candidates for P2 migration when the landscape mocking is replaced with real recorders.
+The `test_azure_batch.py::TestAzureBatchLLMTransformMissingResults` tests (2 tests) created `PluginContext(...)` without a `token` parameter (defaulting to `None`). `make_context()` always creates a default token via `make_token_info()`. The `PluginContext.record_call()` method (added in P2-2026-02-14) validates `ctx.token.token_id` against `landscape.get_node_state(state_id).token_id` — with a `MagicMock` landscape, the auto-generated `.token_id` attribute is a Mock object, not a string, causing `FrameworkBugError`. These 2 tests were reverted to direct `PluginContext(...)` construction. *(Note 2026-05-06: this paragraph is historical — `test_azure_batch.py` was deleted alongside the retirement of `AzureBatchLLMTransform` per ADR-020.)*
 
 **Code review results (3 agents):**
 

@@ -17,8 +17,7 @@ The 7 omitting plugins are the heavyweight ones most likely to have behavioural 
 | `DataverseSink` | Sink | `sinks/dataverse.py` |
 | `RAGRetrievalTransform` | Transform | `transforms/rag/transform.py` |
 | `LLMTransform` | Transform | `transforms/llm/transform.py` |
-| `AzureBatchLLMTransform` | Transform | `transforms/llm/azure_batch.py` |
-| `OpenRouterBatchLLMTransform` | Transform | `transforms/llm/openrouter_batch.py` |
+<!-- AzureBatchLLMTransform / OpenRouterBatchLLMTransform retired 2026-05-06 per ADR-020. -->
 
 ## Design
 

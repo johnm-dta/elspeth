@@ -334,8 +334,6 @@ C4Component
 
     Container_Boundary(llm, "LLM Transforms") {
         Component(llm_transform, "LLMTransform", "Python", "Unified LLM (azure/openrouter providers, single/multi-query)")
-        Component(azure_batch, "AzureBatchLLM", "Python", "Azure Batch API")
-        Component(openrouter_batch, "OpenRouterBatchLLM", "Python", "OpenRouter Batch HTTP")
     }
 
     Container_Boundary(sinks, "Sinks (4)") {
@@ -380,8 +378,8 @@ C4Component
 | **PluginContext** | Runtime context passed to all plugin methods — phase-typed via `SourceContext`, `TransformContext`, `SinkContext`, `LifecycleContext` protocols (defined in `contracts/contexts.py`) |
 | **PluginManager** | pluggy-based discovery and registration |
 | **Sources** | 4 plugins (csv, json, azure_blob, null) |
-| **Transforms** | 13 plugins (field_mapper, passthrough, truncate, keyword_filter, batch_stats, batch_replicate, json_explode, web_scrape, content_safety, prompt_shield, LLM, azure_batch, openrouter_batch) |
-| **LLM Transforms** | Unified LLMTransform (azure/openrouter providers, single/multi-query strategies) + azure_batch + openrouter_batch |
+| **Transforms** | 11 plugins (field_mapper, passthrough, truncate, keyword_filter, batch_stats, batch_replicate, json_explode, web_scrape, content_safety, prompt_shield, LLM) |
+| **LLM Transforms** | Unified LLMTransform (azure/openrouter providers, single/multi-query strategies) |
 | **Sinks** | 4 plugins (csv, json, database, azure_blob) |
 | **Clients** | 4 audited clients (HTTP, LLM, Replayer, Verifier) |
 

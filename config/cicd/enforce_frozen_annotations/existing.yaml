@@ -24,10 +24,6 @@ allow:
   # Pooled executor row context — pipeline row data (Tier 2)
   - key: "src/elspeth/plugins/infrastructure/pooling/executor.py:RowContext:row"
 
-  # LLM batch results — pipeline/API data
-  - key: "src/elspeth/plugins/transforms/llm/openrouter_batch.py:_RowSuccess:row"
-  - key: "src/elspeth/plugins/transforms/llm/openrouter_batch.py:_RowFailure:error"
-
   # LLM transform internals — query templates and results
   - key: "src/elspeth/plugins/transforms/llm/transform.py:MultiQueryStrategy:_query_templates"
   - key: "src/elspeth/plugins/transforms/llm/transform.py:_QuerySuccess:fields"

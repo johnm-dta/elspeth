@@ -159,7 +159,7 @@ def _discover_in_file(py_file: Path, base_class: type) -> list[type]:
             raise
 
         # Also register under the canonical name so that future standard
-        # imports (from elspeth.plugins.transforms.llm.azure_batch import X)
+        # imports (e.g. `from elspeth.plugins.transforms.llm.transform import X`)
         # find the same module object rather than loading a duplicate.
         if canonical_name is not None and canonical_name not in sys.modules:
             sys.modules[canonical_name] = module

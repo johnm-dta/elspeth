@@ -126,6 +126,52 @@ _TRANSFORM_REJECTION_CASES = [
         "collides with outlier annotation output key",
         id="batch_outlier_annotator-value-field-collision",
     ),
+    # ── batch_data_quality_report ────────────────────────────────────────
+    pytest.param(
+        "batch_data_quality_report",
+        {
+            "schema": _make_observed_schema(),
+            "inspect_fields": ["score", "score"],
+        },
+        "Duplicate inspect_fields",
+        id="batch_data_quality_report-duplicate-inspect-fields",
+    ),
+    # ── batch_top_k ──────────────────────────────────────────────────────
+    pytest.param(
+        "batch_top_k",
+        {
+            "schema": _make_observed_schema(),
+            "field": "label",
+            "group_by": "label",
+        },
+        "group_by and field must differ",
+        id="batch_top_k-field-collision",
+    ),
+    # ── batch_threshold_summary ──────────────────────────────────────────
+    pytest.param(
+        "batch_threshold_summary",
+        {
+            "schema": _make_observed_schema(),
+            "value_field": "score",
+            "thresholds": [
+                {"name": "good", "operator": ">=", "value": 0.8},
+                {"name": "good", "operator": "<", "value": 0.5},
+            ],
+        },
+        "Duplicate threshold names",
+        id="batch_threshold_summary-duplicate-threshold-names",
+    ),
+    # ── batch_effect_size ────────────────────────────────────────────────
+    pytest.param(
+        "batch_effect_size",
+        {
+            "schema": _make_observed_schema(),
+            "variant_field": "score",
+            "score_field": "score",
+        },
+        "variant_field and score_field must differ",
+        id="batch_effect_size-field-collision",
+    ),
     # ── field_mapper ──────────────────────────────────────────────────────
     pytest.param(
         "field_mapper",

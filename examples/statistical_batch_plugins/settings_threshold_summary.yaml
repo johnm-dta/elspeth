@@ -1,0 +1,49 @@
+source:
+  plugin: csv
+  on_success: threshold_in
+  options:
+    path: examples/statistical_batch_plugins/threshold_scores.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'prompt_variant: str'
+      - 'quality_score: float'
+      - 'latency_ms: float'
+    on_validation_failure: discard
+aggregations:
+- name: quality_thresholds
+  plugin: batch_threshold_summary
+  input: threshold_in
+  on_success: output
+  on_error: discard
+  trigger:
+    count: 8
+  output_mode: transform
+  options:
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'prompt_variant: str'
+      - 'quality_score: float'
+      - 'latency_ms: float'
+    value_field: quality_score
+    thresholds:
+    - name: production_ready
+      operator: '>='
+      value: 0.8
+    - name: needs_review
+      operator: '<'
+      value: 0.7
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/statistical_batch_plugins/output/threshold_summary.jsonl
+      schema:
+        mode: observed
+      format: jsonl
+landscape:
+  url: sqlite:///examples/statistical_batch_plugins/runs/threshold_summary.db

@@ -1,0 +1,9 @@
+id,prompt_variant,quality_score,latency_ms
+1,control,0.72,940
+2,control,0.81,880
+3,control,0.64,1020
+4,control,0.91,760
+5,treatment,0.88,710
+6,treatment,0.93,690
+7,treatment,0.79,830
+8,treatment,0.96,650

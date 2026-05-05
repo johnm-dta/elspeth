@@ -1,0 +1,44 @@
+source:
+  plugin: csv
+  on_success: top_k_in
+  options:
+    path: examples/statistical_batch_plugins/top_k_labels.csv
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'model: str'
+      - 'predicted_label: str'
+      - 'task_family: str'
+    on_validation_failure: discard
+aggregations:
+- name: label_top_k
+  plugin: batch_top_k
+  input: top_k_in
+  on_success: output
+  on_error: discard
+  trigger:
+    count: 8
+  output_mode: transform
+  options:
+    schema:
+      mode: fixed
+      fields:
+      - 'id: int'
+      - 'model: str'
+      - 'predicted_label: str'
+      - 'task_family: str'
+    field: predicted_label
+    group_by: model
+    k: 2
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/statistical_batch_plugins/output/top_k.jsonl
+      schema:
+        mode: observed
+      format: jsonl
+landscape:
+  url: sqlite:///examples/statistical_batch_plugins/runs/top_k.db

@@ -6,15 +6,9 @@
 # introduces a RowOutcome.X reference fails the lint guard.
 #
 # Allowlist scope at Stage 1 PR time (2026-05-04):
-# - The contracts layer: enums.py defines RowOutcome (until Stage 5);
-#   audit.py, events.py, engine.py, results.py hold dataclass fields typed
-#   as RowOutcome that get retyped in Stage 2 alongside the recorder flip.
-# - The recorder + repository: data_flow_repository.py and model_loaders.py
-#   are the Tier 1 cross-check sites that flip in Stage 2.
-# - The accumulator + resume aggregation: outcomes.py and core.py flip
-#   together in Stage 3 because the predicate change in Stage 2's
-#   RunResult.__post_init__ is paired with the accumulator's counter
-#   increments.
+# - The contracts layer: enums.py defines RowOutcome until Stage 5.
+# - The recorder, repository, contract dataclasses, producers, accumulator,
+#   and resume aggregation have been removed after the ADR-019 Stage 2/3 flip.
 # - Producer sites have been removed from this allowlist after the ADR-019
 #   Phase 2 producer flip.
 # - The checkpoint recovery path: recovery.py reads RowOutcome from saved
@@ -40,27 +34,9 @@
 #   still has work scheduled."
 
 allowed:
-  # Contracts layer — RowOutcome itself + dataclass fields that hold it.
+  # Contracts layer — RowOutcome itself.
   - file: src/elspeth/contracts/enums.py
     justification: ADR-019 migration site — defines RowOutcome (kept through Stage 4); also defines TerminalOutcome / TerminalPath added in Stage 1.
-  - file: src/elspeth/contracts/audit.py
-    justification: TokenOutcome.outcome is typed RowOutcome at line 684; retyped to TerminalOutcome alongside path field in Stage 2.
-  - file: src/elspeth/contracts/events.py
-    justification: TokenCompleted.outcome telemetry payload is typed RowOutcome at line 248; flips in Stage 2 to keep telemetry consumers in sync with the recorder.
-  - file: src/elspeth/contracts/engine.py
-    justification: PendingOutcome.outcome at line 84 plus _REQUIRES_ERROR_HASH_OUTCOMES ClassVar at line 76; both flip in Stage 2.
-  - file: src/elspeth/contracts/results.py
-    justification: RowResult.outcome at line 399 plus __post_init__ guards; flips in Stage 2 alongside RunResult.__post_init__ predicate rewrite.
-  # Core landscape — recorder and Tier 1 cross-check site.
-  - file: src/elspeth/core/landscape/data_flow_repository.py
-    justification: Recorder writes RowOutcome to token_outcomes today; Stage 2 migrates to (completed, outcome, path) triple.
-  - file: src/elspeth/core/landscape/model_loaders.py
-    justification: Tier 1 cross-check guards at lines 547-580 enforce per-RowOutcome required-field invariants; Stage 2 re-expresses each in (outcome, path) terms per ADR-019 Implementation Notes table.
-  # Engine accumulator + resume aggregation — predicate-input counters.
-  - file: src/elspeth/engine/orchestrator/outcomes.py
-    justification: accumulate_row_outcomes contains the per-RowOutcome match arms that increment predicate counters; Stage 3 rewrites as (outcome, path) match plus the two behaviour changes from ADR-019 § Counter derivation contract (GATE_ROUTED → also rows_succeeded; ON_ERROR_ROUTED → also rows_failed).
-  - file: src/elspeth/engine/orchestrator/core.py
-    justification: _derive_resume_terminal_status_from_audit reads RowOutcome from token_outcomes for resume aggregation; Stage 3 reads the new column pair.
   # Testing helpers — exposed to plugin-developer scaffolding.
   - file: src/elspeth/testing/__init__.py
     justification: testing pack re-exports RowOutcome for ChaosEngine / plugin-test fixtures; flips in Stage 4 to also expose TerminalOutcome and TerminalPath, then drops RowOutcome in Stage 5.

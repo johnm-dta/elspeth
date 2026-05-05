@@ -30,6 +30,8 @@ from elspeth.web.sessions.models import (
 )
 from elspeth.web.sessions.protocol import (
     LEGAL_RUN_TRANSITIONS,
+    OPERATOR_COMPLETION_RUN_STATUS_VALUES,
+    SESSION_TERMINAL_RUN_STATUS_VALUES,
     ChatMessageRecord,
     CompositionStateData,
     CompositionStateRecord,
@@ -669,13 +671,13 @@ class SessionServiceImpl:
                 # D4: landscape_run_id is write-once
                 if landscape_run_id is not None and current.landscape_run_id is not None:
                     raise ValueError(f"landscape_run_id already set to {current.landscape_run_id!r}; cannot overwrite")
-                if status == "completed" and not (landscape_run_id or current.landscape_run_id):
-                    raise ValueError("completed status requires landscape_run_id")
+                if status in OPERATOR_COMPLETION_RUN_STATUS_VALUES and not (landscape_run_id or current.landscape_run_id):
+                    raise ValueError(f"{status} status requires landscape_run_id")
                 if status == "failed" and not error:
                     raise ValueError("failed status requires error")
 
                 values: dict[str, Any] = {"status": status}
-                if status in ("completed", "failed", "cancelled"):
+                if status in SESSION_TERMINAL_RUN_STATUS_VALUES:
                     values["finished_at"] = now
                 if error is not None:
                     values["error"] = error

@@ -668,6 +668,36 @@ class TestUpdateRunStatusExpanded:
             await service.update_run_status(run.id, "completed")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["completed", "completed_with_failures", "empty"])
+    async def test_operator_completion_status_requires_landscape_run_id(self, service, status) -> None:
+        session = await service.create_session("alice", "Pipeline", "local")
+        state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(is_valid=True),
+        )
+        run = await service.create_run(session.id, state.id)
+        await service.update_run_status(run.id, "running")
+        with pytest.raises(ValueError, match="landscape_run_id"):
+            await service.update_run_status(run.id, status)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["completed_with_failures", "empty"])
+    async def test_widened_operator_completion_status_stamps_finished_at(self, service, status) -> None:
+        session = await service.create_session("alice", "Pipeline", "local")
+        state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(is_valid=True),
+        )
+        run = await service.create_run(session.id, state.id)
+        await service.update_run_status(run.id, "running")
+        await service.update_run_status(run.id, status, landscape_run_id=f"lscp-{status}")
+
+        fetched = await service.get_run(run.id)
+        assert fetched.status == status
+        assert fetched.finished_at is not None
+        assert fetched.landscape_run_id == f"lscp-{status}"
+
+    @pytest.mark.asyncio
     async def test_failed_requires_error(self, service) -> None:
         session = await service.create_session("alice", "Pipeline", "local")
         state = await service.save_composition_state(

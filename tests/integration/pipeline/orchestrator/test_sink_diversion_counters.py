@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from elspeth.contracts import ArtifactDescriptor, RowOutcome
+from elspeth.contracts import ArtifactDescriptor, TerminalOutcome, TerminalPath
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.core.landscape.schema import token_outcomes_table
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -66,13 +66,16 @@ def test_diverted_sink_rows_do_not_remain_counted_as_success(payload_store, land
 
     assert result.rows_processed == 2
     assert result.rows_succeeded == 1
+    assert result.rows_failed == 1
     assert result.rows_diverted == 1
     assert len(sink.results) == 1
 
     with landscape_db.engine.connect() as conn:
         diverted = conn.execute(
             select(token_outcomes_table).where(
-                (token_outcomes_table.c.run_id == result.run_id) & (token_outcomes_table.c.outcome == RowOutcome.DIVERTED)
+                (token_outcomes_table.c.run_id == result.run_id)
+                & (token_outcomes_table.c.outcome == TerminalOutcome.FAILURE)
+                & (token_outcomes_table.c.path == TerminalPath.SINK_DISCARDED)
             )
         ).fetchall()
 

@@ -666,7 +666,7 @@ def create_execution_router() -> APIRouter:
             except ValueError:
                 await websocket.close(code=4004, reason="Run not found")
                 return
-            if current.status in ("completed", "failed", "cancelled"):
+            if current.status in RUN_STATUS_TERMINAL_VALUES:
                 event = _build_terminal_run_event(current)
                 await websocket.send_json(event.model_dump(mode="json"))
                 await websocket.close(code=1000)
@@ -683,7 +683,7 @@ def create_execution_router() -> APIRouter:
                     except ValueError:
                         await websocket.close(code=4004, reason="Run not found")
                         break
-                    if current.status in ("completed", "failed", "cancelled"):
+                    if current.status in RUN_STATUS_TERMINAL_VALUES:
                         terminal_event = _build_terminal_run_event(current)
                         await websocket.send_json(terminal_event.model_dump(mode="json"))
                         await websocket.close(code=1000)

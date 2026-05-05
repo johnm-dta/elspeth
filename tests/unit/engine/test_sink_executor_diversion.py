@@ -12,10 +12,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth.contracts import PendingOutcome, RowOutcome, TokenInfo
+from elspeth.contracts import PendingOutcome, TokenInfo
 from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
-from elspeth.contracts.enums import NodeStateStatus, RoutingMode
+from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError, PluginContractViolation, SinkRequiredFieldsViolation
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.engine.executors.sink import SinkExecutor
@@ -36,6 +36,10 @@ def _make_token(token_id: str = "tok-1", row_data: dict[str, object] | None = No
 
 def _make_artifact(path: str = "/tmp/test") -> ArtifactDescriptor:
     return ArtifactDescriptor.for_file(path=path, content_hash="a" * 64, size_bytes=100)
+
+
+def _default_pending() -> PendingOutcome:
+    return PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
 
 
 def _make_sink(
@@ -101,12 +105,13 @@ class TestNoDiversions:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
         outcome_calls = data_flow.record_token_outcome.call_args_list
         assert len(outcome_calls) == 3
         for c in outcome_calls:
-            assert c.kwargs["outcome"] == RowOutcome.COMPLETED
+            assert c.kwargs["outcome"] == TerminalOutcome.SUCCESS
+            assert c.kwargs["path"] == TerminalPath.DEFAULT_FLOW
             assert c.kwargs["sink_name"] == "primary"
 
     def test_no_failsink_write_called(self) -> None:
@@ -120,7 +125,7 @@ class TestNoDiversions:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
         )
         failsink.write.assert_not_called()
@@ -129,16 +134,16 @@ class TestNoDiversions:
         executor, _execution, _data_flow = _make_executor()
         sink = _make_sink()
         tokens = [_make_token("t0")]
-        artifact, diversion_count = executor.write(
+        artifact, diversion_counts = executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
         assert artifact is not None
-        assert diversion_count == 0
+        assert diversion_counts.total == 0
 
 
 class TestDiscardMode:
@@ -155,17 +160,19 @@ class TestDiscardMode:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
         outcome_calls = data_flow.record_token_outcome.call_args_list
         assert len(outcome_calls) == 2
         # Build a lookup by token_id for order-independence
         outcomes_by_token = {c.kwargs["ref"].token_id: c.kwargs for c in outcome_calls}
-        # t0 (index 0) → COMPLETED
-        assert outcomes_by_token["t0"]["outcome"] == RowOutcome.COMPLETED
+        # t0 (index 0) -> SUCCESS / DEFAULT_FLOW
+        assert outcomes_by_token["t0"]["outcome"] == TerminalOutcome.SUCCESS
+        assert outcomes_by_token["t0"]["path"] == TerminalPath.DEFAULT_FLOW
         assert outcomes_by_token["t0"]["sink_name"] == "primary"
-        # t1 (index 1) → DIVERTED
-        assert outcomes_by_token["t1"]["outcome"] == RowOutcome.DIVERTED
+        # t1 (index 1) -> FAILURE / SINK_DISCARDED
+        assert outcomes_by_token["t1"]["outcome"] == TerminalOutcome.FAILURE
+        assert outcomes_by_token["t1"]["path"] == TerminalPath.SINK_DISCARDED
         assert outcomes_by_token["t1"]["error_hash"] is not None
         assert outcomes_by_token["t1"]["sink_name"] == "__discard__"
 
@@ -181,7 +188,7 @@ class TestDiscardMode:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
         # Diverted token should get a begin_node_state at the primary sink
         begin_calls = execution.begin_node_state.call_args_list
@@ -209,26 +216,28 @@ class TestDiscardMode:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
         outcome_calls = data_flow.record_token_outcome.call_args_list
-        assert all(c.kwargs["outcome"] == RowOutcome.DIVERTED for c in outcome_calls)
+        assert all(c.kwargs["outcome"] == TerminalOutcome.FAILURE for c in outcome_calls)
+        assert all(c.kwargs["path"] == TerminalPath.SINK_DISCARDED for c in outcome_calls)
 
     def test_returns_no_artifact_when_all_diverted(self) -> None:
         executor, _execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="discard")
         tokens = [_make_token("t0")]
-        artifact, diversion_count = executor.write(
+        artifact, diversion_counts = executor.write(
             sink=sink,
             tokens=tokens,  # type: ignore[arg-type]
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
         assert artifact is None
-        assert diversion_count == 1
+        assert diversion_counts.discard_mode == 1
+        assert diversion_counts.total == 1
 
 
 class TestFailsinkMode:
@@ -283,7 +292,7 @@ class TestFailsinkMode:
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
@@ -293,7 +302,8 @@ class TestFailsinkMode:
         data_flow.record_token_outcome.assert_called_once()
         kwargs = data_flow.record_token_outcome.call_args.kwargs
         assert kwargs["ref"].token_id == "t0"
-        assert kwargs["outcome"] == RowOutcome.FAILED
+        assert kwargs["outcome"] == TerminalOutcome.FAILURE
+        assert kwargs["path"] == TerminalPath.UNROUTED
         assert kwargs["context"]["exception_type"] == "SinkRequiredFieldsViolation"
 
     def test_failsink_write_called_with_enriched_rows(self) -> None:
@@ -308,7 +318,7 @@ class TestFailsinkMode:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
@@ -334,7 +344,7 @@ class TestFailsinkMode:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
@@ -352,7 +362,7 @@ class TestFailsinkMode:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
         )
         failsink.write.assert_not_called()
@@ -369,7 +379,7 @@ class TestFailsinkMode:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
@@ -390,7 +400,7 @@ class TestFailsinkMode:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
@@ -420,7 +430,7 @@ class TestFailsinkMode:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
@@ -441,7 +451,7 @@ class TestFailsinkMode:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
@@ -471,7 +481,7 @@ class TestFailsinkErrorHandling:
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
@@ -501,7 +511,7 @@ class TestFailsinkCleanup:
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
@@ -539,7 +549,7 @@ class TestFailsinkCleanup:
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
@@ -573,7 +583,7 @@ class TestFailsinkCleanup:
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
@@ -599,7 +609,7 @@ class TestFailsinkCleanupEnvelope:
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
@@ -624,7 +634,7 @@ class TestFailsinkCleanupEnvelope:
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
@@ -653,7 +663,7 @@ class TestFailsinkOperationAndSpanRecording:
             ctx=ctx,
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
@@ -692,13 +702,16 @@ class TestNonContiguousDiversions:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
         )
         outcome_calls = data_flow.record_token_outcome.call_args_list
-        outcomes_by_token = {c.kwargs["ref"].token_id: c.kwargs["outcome"] for c in outcome_calls}
-        assert outcomes_by_token["t0"] == RowOutcome.DIVERTED
-        assert outcomes_by_token["t1"] == RowOutcome.COMPLETED
-        assert outcomes_by_token["t2"] == RowOutcome.DIVERTED
+        outcomes_by_token = {c.kwargs["ref"].token_id: c.kwargs for c in outcome_calls}
+        assert outcomes_by_token["t0"]["outcome"] == TerminalOutcome.FAILURE
+        assert outcomes_by_token["t0"]["path"] == TerminalPath.SINK_DISCARDED
+        assert outcomes_by_token["t1"]["outcome"] == TerminalOutcome.SUCCESS
+        assert outcomes_by_token["t1"]["path"] == TerminalPath.DEFAULT_FLOW
+        assert outcomes_by_token["t2"]["outcome"] == TerminalOutcome.FAILURE
+        assert outcomes_by_token["t2"]["path"] == TerminalPath.SINK_DISCARDED
 
 
 class TestEmptyBatch:
@@ -709,18 +722,19 @@ class TestEmptyBatch:
         executor, _execution, data_flow = _make_executor()
         sink = _make_sink(on_write_failure="csv_failsink")
         failsink = _make_failsink()
-        result = executor.write(
+        artifact, diversion_counts = executor.write(
             sink=sink,
             tokens=[],
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
         )
-        assert result == (None, 0)
+        assert artifact is None
+        assert diversion_counts.total == 0
         failsink.write.assert_not_called()
         data_flow.record_token_outcome.assert_not_called()
 
@@ -746,7 +760,7 @@ class TestOnTokenWrittenWithDiversions:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             on_token_written=callback,
         )
         # Both tokens checkpointed: t0 after primary write, t1 after discard
@@ -768,7 +782,7 @@ class TestOnTokenWrittenWithDiversions:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             failsink=failsink,
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
@@ -792,7 +806,7 @@ class TestOnTokenWrittenWithDiversions:
             ctx=MagicMock(run_id="run-1"),
             step_in_pipeline=5,
             sink_name="primary",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=_default_pending(),
             on_token_written=callback,
         )
         # t0 (primary) checkpointed first, t1 (diverted) checkpointed second
@@ -842,7 +856,7 @@ class TestMidLoopAuditRecordingCleanup:
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
@@ -920,7 +934,7 @@ class TestSystemErrorStateCleanup:
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-divert-1",
@@ -971,7 +985,7 @@ class TestSystemErrorStateCleanup:
                 ctx=MagicMock(run_id="run-1"),
                 step_in_pipeline=5,
                 sink_name="primary",
-                pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+                pending_outcome=_default_pending(),
                 failsink=failsink,
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-divert-1",
@@ -997,7 +1011,7 @@ class TestDiversionIndexValidation:
         sink = _make_sink(
             diversions=(RowDiversion(row_index=5, reason="bad", row_data={"x": 1}),),
         )
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises(PluginContractViolation, match=r"row_index=5.*batch has only 2 rows"):
             executor.write(

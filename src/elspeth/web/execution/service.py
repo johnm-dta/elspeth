@@ -629,7 +629,7 @@ class ExecutionServiceImpl:
         else:
             # No event means either pending (not yet started) or already done
             run = await self._session_service.get_run(run_id)
-            if run.status not in ("completed", "failed", "cancelled"):
+            if run.status not in SESSION_TERMINAL_RUN_STATUS_VALUES:
                 await self._session_service.update_run_status(run_id, status="cancelled")
 
     # ── Background Thread ──────────────────────────────────────────────

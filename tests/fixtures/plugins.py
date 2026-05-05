@@ -6,13 +6,13 @@ Eliminates the 3 duplicate ListSource/CollectSink definitions from v1.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any, ClassVar
 
 from pydantic import ConfigDict
 
 from elspeth.contracts import ArtifactDescriptor, PluginSchema, SourceRow
-from elspeth.contracts.diversion import SinkWriteResult
+from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
 from tests.fixtures.base_classes import _TestSchema, _TestSinkBase, _TestSourceBase
@@ -123,6 +123,70 @@ class FailingSink(_TestSinkBase):
 
     def write(self, rows: Any, ctx: Any) -> SinkWriteResult:
         raise RuntimeError(self._error_message)
+
+    def close(self) -> None:
+        pass
+
+
+class DivertingSink(_TestSinkBase):
+    """Sink that diverts the first configured rows and writes the rest.
+
+    This exercises the production ``SinkExecutor`` discard branch: when no
+    failsink is configured for this sink, every returned ``RowDiversion`` is
+    recorded as ``(FAILURE, SINK_DISCARDED)`` with the discard sentinel sink.
+    """
+
+    name = "diverting_sink"
+
+    def __init__(
+        self,
+        config: Mapping[str, Any] | None = None,
+        *,
+        name: str | None = None,
+        divert_count: int | None = None,
+    ) -> None:
+        super().__init__()
+        options = dict(config or {})
+        configured_name = name if name is not None else options.get("name", self.name)
+        self.name = str(configured_name)
+        configured_divert_count = divert_count if divert_count is not None else options.get("divert_count")
+        if configured_divert_count is None:
+            self._divert_count: int | None = None
+        else:
+            self._divert_count = int(configured_divert_count)
+        self.results: list[dict[str, Any]] = []
+        self._artifact_counter = 0
+
+    def on_start(self, ctx: Any) -> None:
+        pass
+
+    def on_complete(self, ctx: Any) -> None:
+        pass
+
+    def write(self, rows: Any, ctx: Any) -> SinkWriteResult:
+        del ctx
+        row_list = list(rows)
+        limit = self._divert_count if self._divert_count is not None else len(row_list)
+        diversions = tuple(
+            RowDiversion(
+                row_index=idx,
+                reason="diverting_sink: forced divert for ADR-019 test",
+                row_data=dict(row),
+            )
+            for idx, row in enumerate(row_list)
+            if idx < limit
+        )
+        primary_rows = [dict(row) for idx, row in enumerate(row_list) if idx >= limit]
+        self.results.extend(primary_rows)
+        self._artifact_counter += 1
+        return SinkWriteResult(
+            artifact=ArtifactDescriptor.for_file(
+                path=f"memory://{self.name}_{self._artifact_counter}",
+                size_bytes=len(str(primary_rows)),
+                content_hash=f"hash_{self._artifact_counter}",
+            ),
+            diversions=diversions,
+        )
 
     def close(self) -> None:
         pass

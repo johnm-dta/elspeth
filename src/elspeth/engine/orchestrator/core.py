@@ -51,7 +51,6 @@ from elspeth.contracts import (
     PendingOutcome,
     PipelineRow,
     RouteDestination,
-    RowOutcome,
     RunStatus,
     SchemaContract,
     SecretResolutionInput,
@@ -70,7 +69,7 @@ from elspeth.contracts.declaration_contracts import (
     freeze_declaration_registry,
     registered_declaration_contracts,
 )
-from elspeth.contracts.enums import NodeStateStatus, RoutingMode
+from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     ExecutionError,
     FrameworkBugError,
@@ -107,6 +106,7 @@ from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.operations import track_operation
+from elspeth.engine.executors.sink import DiversionCounts
 
 # Import module functions from orchestrator submodules
 from elspeth.engine.orchestrator.aggregation import (
@@ -444,8 +444,6 @@ class Orchestrator:
             :class:`elspeth.contracts.run_result.RunResult` would crash).
         """
         outcomes = factory.query.get_all_token_outcomes_for_run(run_id)
-        # The "is_terminal" filter is defensive — non-terminal outcomes
-        # (BUFFERED) are not counted toward terminal totals.
         rows_succeeded = 0
         rows_failed = 0
         rows_quarantined = 0
@@ -453,65 +451,53 @@ class Orchestrator:
         rows_processed = 0
         rows_routed_success = 0
         rows_routed_failure = 0
-        for outcome in outcomes:
-            if not outcome.is_terminal:
+        for outcome_record in outcomes:
+            if not outcome_record.completed:
                 continue
-            match outcome.outcome:
-                case RowOutcome.COMPLETED | RowOutcome.COALESCED | RowOutcome.DROPPED_BY_FILTER:
+            pair = (outcome_record.outcome, outcome_record.path)
+            match pair:
+                case (
+                    (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+                    | (TerminalOutcome.SUCCESS, TerminalPath.COALESCED)
+                    | (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED)
+                ):
                     rows_succeeded += 1
                     rows_processed += 1
-                case RowOutcome.ROUTED:
-                    # Intentional gate MOVE. Keep this aligned with the live
-                    # accumulator: rows_routed_success is the terminal success
-                    # bucket for routed rows, and rows_succeeded remains a
-                    # separate additive terminal bucket.
+                case (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED):
                     rows_routed_success += 1
+                    rows_succeeded += 1
                     rows_processed += 1
-                case RowOutcome.ROUTED_ON_ERROR:
-                    # Transform on_error DIVERT — counts as a failure indicator
-                    # in the predicate (rows_routed_failure > 0).
+                case (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED):
+                    rows_failed += 1
                     rows_routed_failure += 1
                     rows_processed += 1
-                case RowOutcome.FAILED:
+                case (TerminalOutcome.FAILURE, TerminalPath.UNROUTED):
                     rows_failed += 1
                     rows_processed += 1
-                case RowOutcome.QUARANTINED:
+                case (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE):
                     rows_quarantined += 1
+                    rows_failed += 1
                     rows_processed += 1
-                case RowOutcome.DIVERTED:
-                    # Sink-write diversion: counts as processed but neither
-                    # succeeded nor failed in the predicate's sense — the
-                    # row reached a sink (failsink), and rows_diverted is
-                    # tracked separately on RunResult.
+                case (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED):
+                    rows_failed += 1
                     rows_processed += 1
-                case RowOutcome.FORKED | RowOutcome.EXPANDED | RowOutcome.CONSUMED_IN_BATCH:
+                case (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK):
+                    rows_processed += 1
+                case (
+                    (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT)
+                    | (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT)
+                    | (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)
+                ):
                     # Parent-token / aggregation accounting outcomes do not
                     # contribute to the success/failure tally — the child
                     # tokens (FORKED/EXPANDED) and the batch-result token
                     # (CONSUMED_IN_BATCH) carry the row-level counters via
                     # their own terminal outcomes.
                     pass
-                case RowOutcome.BUFFERED:
-                    # Unreachable: the ``if not outcome.is_terminal`` filter
-                    # at line 457 already skips BUFFERED.  Listed explicitly
-                    # to make the closed-set partition exhaustive at the
-                    # match level — a future change that removes the filter
-                    # must consciously decide BUFFERED's accounting here
-                    # rather than have it silently accepted by a wildcard.
-                    pass
                 case _:
-                    # Closed-set guard — every RowOutcome value is enumerated
-                    # above.  A future enum addition that doesn't update this
-                    # match block must fail loudly during resume rather than
-                    # silently miscount.  Mirror of the import-time
-                    # exhaustiveness assertion in contracts/enums.py:
-                    # _TERMINAL_ROW_OUTCOMES partition.
                     raise AssertionError(
-                        "Unhandled RowOutcome in resume aggregation: "
-                        f"{outcome.outcome!r}. Add an explicit case above and "
-                        "decide its predicate accounting (success / failure / "
-                        "neutral) — see contracts/enums.py _TERMINAL_ROW_OUTCOMES "
-                        "for the full closed set."
+                        f"Unhandled (outcome, path) pair in resume aggregation: {pair!r}. "
+                        "Add a case here; see ADR-019 mapping table and the live accumulator."
                     )
         terminal_status = derive_terminal_run_status(
             rows_processed=rows_processed,
@@ -858,7 +844,7 @@ class Orchestrator:
         sink_step: int,
         *,
         on_token_written_factory: Callable[[str], Callable[[TokenInfo], None]] | None = None,
-    ) -> int:
+    ) -> DiversionCounts:
         """Write pending tokens to sinks using SinkExecutor.
 
         Extracted from _execute_run() and _process_resumed_rows() to eliminate
@@ -878,11 +864,11 @@ class Orchestrator:
         """
         from itertools import groupby
 
-        from elspeth.engine.executors import SinkExecutor
+        from elspeth.engine.executors.sink import DiversionCounts, SinkExecutor
 
         sink_executor = SinkExecutor(factory.execution, factory.data_flow, self._span_factory, run_id)
         step = sink_step
-        total_diversions = 0
+        total_diversions = DiversionCounts()
 
         for sink_name, token_outcome_pairs in pending_tokens.items():
             if not token_outcome_pairs:
@@ -925,11 +911,12 @@ class Orchestrator:
             # Group tokens by pending_outcome for separate write() calls
             # (sink_executor.write() takes a single PendingOutcome for all tokens in a batch)
             # PendingOutcome carries error_hash for QUARANTINED tokens
-            def pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str]:
+            def pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str, str]:
                 pending = pair[1]
                 if pending is None:
-                    return (True, "", "")  # None sorts first
-                return (False, pending.outcome.value, pending.error_hash or "")
+                    return (True, "", "", "")  # None sorts first
+                outcome_value = pending.outcome.value if pending.outcome is not None else ""
+                return (False, outcome_value, pending.path.value, pending.error_hash or "")
 
             sorted_pairs = sorted(token_outcome_pairs, key=pending_sort_key)
 
@@ -938,9 +925,11 @@ class Orchestrator:
             if on_token_written_factory is not None:
                 on_token_written = on_token_written_factory(sink_node_id)
 
-            for pending_outcome, group in groupby(sorted_pairs, key=lambda x: x[1]):
-                group_tokens = [token for token, _ in group]
-                _, diversion_count = sink_executor.write(
+            for _group_key, group in groupby(sorted_pairs, key=pending_sort_key):
+                group_pairs = list(group)
+                pending_outcome = group_pairs[0][1]
+                group_tokens = [token for token, _pending in group_pairs]
+                _, diversion_counts = sink_executor.write(
                     sink=sink,
                     tokens=group_tokens,
                     ctx=ctx,
@@ -956,9 +945,12 @@ class Orchestrator:
                     counters=counters,
                     sink_name=sink_name,
                     pending_outcome=pending_outcome,
-                    diversion_count=diversion_count,
+                    diversion_count=diversion_counts.total,
                 )
-                total_diversions += diversion_count
+                total_diversions = DiversionCounts(
+                    failsink_mode=total_diversions.failsink_mode + diversion_counts.failsink_mode,
+                    discard_mode=total_diversions.discard_mode + diversion_counts.discard_mode,
+                )
 
         return total_diversions
 
@@ -2184,7 +2176,7 @@ class Orchestrator:
         """
         counters = loop_ctx.counters
 
-        total_diversions = self._write_pending_to_sinks(
+        diversion_counts = self._write_pending_to_sinks(
             factory=factory,
             run_id=run_id,
             config=loop_ctx.config,
@@ -2196,7 +2188,10 @@ class Orchestrator:
             sink_step=loop_ctx.processor.resolve_sink_step(),
             on_token_written_factory=on_token_written_factory,
         )
-        loop_ctx.counters.rows_diverted += total_diversions
+        # ADR-019: failsink-mode diversions are TRANSIENT structural evidence;
+        # discard-mode diversions are FAILURE predicate inputs as well.
+        loop_ctx.counters.rows_diverted += diversion_counts.total
+        loop_ctx.counters.rows_failed += diversion_counts.discard_mode
 
         # If shutdown interrupted the loop, raise after all pending work is flushed.
         # At this point: sink writes are done, and any buffered aggregation/coalesce
@@ -2274,8 +2269,10 @@ class Orchestrator:
                 f"source._on_validation_failure='{config.source._on_validation_failure}'."
             )
 
-        # Destination validated - increment counter and proceed with routing.
+        # Destination validated. Source quarantine is a FAILURE lifecycle with
+        # a quarantine reporting subset, so bump both counters.
         counters.rows_quarantined += 1
+        counters.rows_failed += 1
         validation_error_id = loop_ctx.ctx.pop_pending_quarantine_validation_error_id(source_item.row)
         # Sanitize quarantine data at Tier-3 boundary: replace non-finite
         # floats (NaN, Infinity) with None so downstream canonical JSON
@@ -2368,7 +2365,16 @@ class Orchestrator:
         quarantine_error_hash = hashlib.sha256(quarantine_error_msg.encode()).hexdigest()[:16]
 
         # Pass PendingOutcome with error_hash - outcome recorded after sink durability
-        pending_tokens[quarantine_sink].append((quarantine_token, PendingOutcome(RowOutcome.QUARANTINED, quarantine_error_hash)))
+        pending_tokens[quarantine_sink].append(
+            (
+                quarantine_token,
+                PendingOutcome(
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.QUARANTINED_AT_SOURCE,
+                    error_hash=quarantine_error_hash,
+                ),
+            )
+        )
 
     def _record_field_resolution(
         self,

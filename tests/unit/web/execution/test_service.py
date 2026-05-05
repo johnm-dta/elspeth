@@ -40,6 +40,7 @@ from elspeth.web.sessions.protocol import (
     LEGAL_RUN_TRANSITIONS,
     IllegalRunTransitionError,
     RunAlreadyActiveError,
+    SessionRunStatus,
 )
 
 # ── Fixtures ───────────────────────────────────────────────────────────
@@ -647,15 +648,17 @@ class TestCancelMechanism:
         await service.cancel(run_id)
         mock_session_service.update_run_status.assert_called()
 
+    @pytest.mark.parametrize("terminal_status", ["completed", "completed_with_failures", "failed", "empty", "cancelled"])
     @pytest.mark.asyncio
     async def test_cancel_terminal_run_is_noop(
         self,
         service: ExecutionServiceImpl,
         mock_session_service: MagicMock,
+        terminal_status: str,
     ) -> None:
-        """Cancelling completed/failed/cancelled run does nothing."""
+        """Cancelling any terminal run does nothing."""
         run_id = uuid4()
-        mock_session_service.get_run.return_value = MagicMock(status="completed")
+        mock_session_service.get_run.return_value = MagicMock(status=terminal_status)
         await service.cancel(run_id)
         mock_session_service.update_run_status.assert_not_called()
 
@@ -1871,14 +1874,14 @@ class TestPostCompletionExceptionRecovery:
         # real ``LEGAL_RUN_TRANSITIONS`` table so the test stays in lockstep
         # with the production validator without duplicating its terminal-set
         # closure.
-        audit_row_status: dict[str, str] = {"current": "pending"}
+        audit_row_status: dict[str, SessionRunStatus] = {"current": "pending"}
 
         def _legal_transitions_update(_run_id: Any, *, status: str, **__: Any) -> None:
             current = audit_row_status["current"]
             allowed = LEGAL_RUN_TRANSITIONS[current]
             if status not in allowed:
                 raise IllegalRunTransitionError(current, status, allowed)
-            audit_row_status["current"] = status
+            audit_row_status["current"] = cast(SessionRunStatus, status)
 
         mock_session_service.update_run_status.side_effect = _legal_transitions_update
 

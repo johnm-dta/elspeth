@@ -7,7 +7,7 @@ import { useSession } from "@/hooks/useSession";
 import { useAuth } from "@/hooks/useAuth";
 import { useExecutionStore } from "@/stores/executionStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import type { Session } from "@/types/index";
+import { isTerminalRunStatus, type Session } from "@/types/index";
 import { relativeTime } from "@/utils/time";
 
 export function SessionSidebar() {
@@ -19,9 +19,7 @@ export function SessionSidebar() {
   const hasActiveRun =
     !!activeRunId &&
     !!progress &&
-    progress.status !== "completed" &&
-    progress.status !== "cancelled" &&
-    progress.status !== "failed";
+    !isTerminalRunStatus(progress.status);
   const [isCreating, setIsCreating] = useState(false);
   const [archiveTarget, setArchiveTarget] = useState<Session | null>(null);
   const [filter, setFilter] = useState("");

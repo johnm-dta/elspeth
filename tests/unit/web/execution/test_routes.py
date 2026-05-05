@@ -631,6 +631,47 @@ class TestWebSocketReconnectTier1Guards:
         app.state.broadcaster = broadcaster
         return app
 
+    @pytest.mark.parametrize(
+        ("terminal_status", "rows_processed", "rows_succeeded", "rows_failed"),
+        [
+            ("completed", 1, 1, 0),
+            ("completed_with_failures", 2, 1, 1),
+            ("empty", 0, 0, 0),
+        ],
+    )
+    def test_operator_completion_statuses_build_completed_terminal_event(
+        self,
+        terminal_status: str,
+        rows_processed: int,
+        rows_succeeded: int,
+        rows_failed: int,
+    ) -> None:
+        """Reconnect/idle replay preserves the widened operator-completion status."""
+        from elspeth.web.execution.routes import _build_terminal_run_event
+
+        run_id = uuid4()
+        event = _build_terminal_run_event(
+            RunStatusResponse(
+                run_id=str(run_id),
+                status=terminal_status,  # type: ignore[arg-type]
+                started_at=datetime.now(tz=UTC),
+                finished_at=datetime.now(tz=UTC),
+                rows_processed=rows_processed,
+                rows_succeeded=rows_succeeded,
+                rows_failed=rows_failed,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+                rows_quarantined=0,
+                error=None,
+                landscape_run_id="land-1",
+            )
+        )
+
+        payload = event.model_dump(mode="json")
+        assert payload["event_type"] == "completed"
+        assert payload["data"]["status"] == terminal_status
+        assert payload["data"]["landscape_run_id"] == "land-1"
+
     def test_completed_run_without_landscape_run_id_raises(self) -> None:
         """Tier 1 anomaly: completed run with NULL landscape_run_id."""
         from starlette.testclient import TestClient

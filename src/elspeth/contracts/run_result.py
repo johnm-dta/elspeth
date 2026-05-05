@@ -54,24 +54,39 @@ class RunResult:
         require_int(self.rows_buffered, "rows_buffered", min_value=0)
         require_int(self.rows_diverted, "rows_diverted", min_value=0)
         freeze_fields(self, "routed_destinations")
+        self._check_subset_counter_invariants()
         self._check_status_invariant()
 
-    def _check_status_invariant(self) -> None:
-        """elspeth-5069612f3c — biconditional invariant linking ``status`` to
-        the row-count shape using unified presence indicators after the
-        rows_routed split.
+    def _check_subset_counter_invariants(self) -> None:
+        """ADR-019: routed/quarantine counters are reporting subsets."""
+        if self.rows_routed_success > self.rows_succeeded:
+            raise ValueError(
+                "RunResult: rows_routed_success must be a subset of rows_succeeded "
+                f"(got rows_routed_success={self.rows_routed_success}, rows_succeeded={self.rows_succeeded})"
+            )
+        if self.rows_routed_failure > self.rows_failed:
+            raise ValueError(
+                "RunResult: rows_routed_failure must be a subset of rows_failed "
+                f"(got rows_routed_failure={self.rows_routed_failure}, rows_failed={self.rows_failed})"
+            )
+        if self.rows_quarantined > self.rows_failed:
+            raise ValueError(
+                "RunResult: rows_quarantined must be a subset of rows_failed "
+                f"(got rows_quarantined={self.rows_quarantined}, rows_failed={self.rows_failed})"
+            )
 
-        success_indicator = rows_succeeded > 0 OR rows_routed_success > 0
-        failure_indicator = rows_failed > 0 OR rows_quarantined > 0
-                            OR rows_coalesce_failed > 0 OR rows_routed_failure > 0
+    def _check_status_invariant(self) -> None:
+        """Biconditional invariant linking ``status`` to ADR-019 row counts.
+
+        ``rows_succeeded`` and ``rows_failed`` are exhaustive lifecycle
+        predicate counters. Routed/quarantine counters are guard-only subsets.
+        ``rows_coalesce_failed`` remains a separate run-level failure signal.
 
         Non-terminal (``RUNNING``) and signal-bounded (``INTERRUPTED``)
         statuses bypass the predicate.
         """
-        success_indicator = self.rows_succeeded > 0 or self.rows_routed_success > 0
-        failure_indicator = (
-            self.rows_failed > 0 or self.rows_quarantined > 0 or self.rows_coalesce_failed > 0 or self.rows_routed_failure > 0
-        )
+        success_indicator = self.rows_succeeded > 0
+        failure_indicator = self.rows_failed > 0 or self.rows_coalesce_failed > 0
 
         match (self.status, self.rows_processed, success_indicator, failure_indicator):
             case (RunStatus.RUNNING, _, _, _):
@@ -83,18 +98,15 @@ class RunResult:
             case (RunStatus.COMPLETED, _, False, _):
                 raise ValueError(
                     f"RunResult: status=COMPLETED requires a success indicator "
-                    f"(rows_succeeded > 0 or rows_routed_success > 0); "
-                    f"got rows_succeeded={self.rows_succeeded}, "
-                    f"rows_routed_success={self.rows_routed_success} "
+                    f"(rows_succeeded > 0); "
+                    f"got rows_succeeded={self.rows_succeeded} "
                     f"(use status=FAILED when no row reached a success path)"
                 )
             case (RunStatus.COMPLETED, _, _, True):
                 raise ValueError(
                     f"RunResult: status=COMPLETED requires no failures "
                     f"(rows_failed={self.rows_failed}, "
-                    f"rows_quarantined={self.rows_quarantined}, "
-                    f"rows_coalesce_failed={self.rows_coalesce_failed}, "
-                    f"rows_routed_failure={self.rows_routed_failure}); "
+                    f"rows_coalesce_failed={self.rows_coalesce_failed}); "
                     f"use status=COMPLETED_WITH_FAILURES when at least one row "
                     f"reached a failure terminal state"
                 )
@@ -103,19 +115,16 @@ class RunResult:
             case (RunStatus.COMPLETED_WITH_FAILURES, _, False, _):
                 raise ValueError(
                     f"RunResult: status=COMPLETED_WITH_FAILURES requires a success indicator "
-                    f"(rows_succeeded > 0 or rows_routed_success > 0); "
-                    f"got rows_succeeded={self.rows_succeeded}, "
-                    f"rows_routed_success={self.rows_routed_success} "
+                    f"(rows_succeeded > 0); "
+                    f"got rows_succeeded={self.rows_succeeded} "
                     f"(use status=FAILED when no row reached a success path)"
                 )
             case (RunStatus.COMPLETED_WITH_FAILURES, _, _, False):
                 raise ValueError(
                     f"RunResult: status=COMPLETED_WITH_FAILURES requires at least one failure indicator "
-                    f"(rows_failed > 0 or rows_quarantined > 0 or rows_coalesce_failed > 0 "
-                    f"or rows_routed_failure > 0); got rows_failed={self.rows_failed}, "
-                    f"rows_quarantined={self.rows_quarantined}, "
-                    f"rows_coalesce_failed={self.rows_coalesce_failed}, "
-                    f"rows_routed_failure={self.rows_routed_failure} "
+                    f"(rows_failed > 0 or rows_coalesce_failed > 0); "
+                    f"got rows_failed={self.rows_failed}, "
+                    f"rows_coalesce_failed={self.rows_coalesce_failed} "
                     f"(use status=COMPLETED for clean runs)"
                 )
             case (RunStatus.FAILED, _, _, _):
@@ -128,18 +137,12 @@ class RunResult:
             case (RunStatus.EMPTY, p, _, _) if p > 0:
                 raise ValueError(f"RunResult: status=EMPTY requires rows_processed == 0, got rows_processed={p}")
             case (RunStatus.EMPTY, _, True, _):
-                raise ValueError(
-                    f"RunResult: status=EMPTY requires no success indicator "
-                    f"(rows_succeeded={self.rows_succeeded}, "
-                    f"rows_routed_success={self.rows_routed_success})"
-                )
+                raise ValueError(f"RunResult: status=EMPTY requires no success indicator (rows_succeeded={self.rows_succeeded})")
             case (RunStatus.EMPTY, _, _, True):
                 raise ValueError(
                     f"RunResult: status=EMPTY requires no failures "
                     f"(rows_failed={self.rows_failed}, "
-                    f"rows_quarantined={self.rows_quarantined}, "
-                    f"rows_coalesce_failed={self.rows_coalesce_failed}, "
-                    f"rows_routed_failure={self.rows_routed_failure}); "
+                    f"rows_coalesce_failed={self.rows_coalesce_failed}); "
                     f"use status=FAILED when the run encountered failures with "
                     f"no successful rows"
                 )
@@ -187,12 +190,10 @@ def derive_terminal_run_status(
     rows_quarantined: int,
     rows_coalesce_failed: int,
 ) -> RunStatus:
-    """elspeth-5069612f3c — pick a terminal RunStatus from row counts using
-    the unified presence-indicator predicate after the rows_routed split.
+    """Pick a terminal RunStatus from ADR-019 lifecycle counters.
 
-    success_indicator = rows_succeeded > 0 OR rows_routed_success > 0
-    failure_indicator = rows_failed > 0 OR rows_quarantined > 0
-                        OR rows_coalesce_failed > 0 OR rows_routed_failure > 0
+    success_indicator = rows_succeeded > 0
+    failure_indicator = rows_failed > 0 OR rows_coalesce_failed > 0
 
     Predicate:
     - rows_processed == 0 AND no failure_indicator -> EMPTY (or FAILED if
@@ -205,8 +206,24 @@ def derive_terminal_run_status(
     (COMPLETED / COMPLETED_WITH_FAILURES / FAILED / EMPTY); callers that
     need INTERRUPTED or RUNNING set those values directly.
     """
-    success_indicator = rows_succeeded > 0 or rows_routed_success > 0
-    failure_indicator = rows_failed > 0 or rows_quarantined > 0 or rows_coalesce_failed > 0 or rows_routed_failure > 0
+    if rows_routed_success > rows_succeeded:
+        raise ValueError(
+            "derive_terminal_run_status: rows_routed_success must be a subset of rows_succeeded "
+            f"(got rows_routed_success={rows_routed_success}, rows_succeeded={rows_succeeded})"
+        )
+    if rows_routed_failure > rows_failed:
+        raise ValueError(
+            "derive_terminal_run_status: rows_routed_failure must be a subset of rows_failed "
+            f"(got rows_routed_failure={rows_routed_failure}, rows_failed={rows_failed})"
+        )
+    if rows_quarantined > rows_failed:
+        raise ValueError(
+            "derive_terminal_run_status: rows_quarantined must be a subset of rows_failed "
+            f"(got rows_quarantined={rows_quarantined}, rows_failed={rows_failed})"
+        )
+
+    success_indicator = rows_succeeded > 0
+    failure_indicator = rows_failed > 0 or rows_coalesce_failed > 0
     if rows_processed == 0 and not success_indicator:
         return RunStatus.FAILED if failure_indicator else RunStatus.EMPTY
     if not success_indicator:

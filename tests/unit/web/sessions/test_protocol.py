@@ -11,6 +11,7 @@ import pytest
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.sessions.protocol import (
     LEGAL_RUN_TRANSITIONS,
+    OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     SESSION_RUN_STATUS_VALUES,
     SESSION_TERMINAL_RUN_STATUS_VALUES,
     ChatMessageRecord,
@@ -153,6 +154,8 @@ class TestRunRecord:
         # `cancelled` as terminal states so operators can distinguish "ran
         # cleanly" from "ran but no row succeeded".
         assert frozenset({"completed", "completed_with_failures", "failed", "empty", "cancelled"}) == SESSION_TERMINAL_RUN_STATUS_VALUES
+        assert frozenset({"completed", "completed_with_failures", "empty"}) == OPERATOR_COMPLETION_RUN_STATUS_VALUES
+        assert OPERATOR_COMPLETION_RUN_STATUS_VALUES.issubset(SESSION_TERMINAL_RUN_STATUS_VALUES)
 
     def test_running_can_transition_to_new_terminal_states(self) -> None:
         """Phase 2.2: `running` MUST be able to transition to every terminal state."""

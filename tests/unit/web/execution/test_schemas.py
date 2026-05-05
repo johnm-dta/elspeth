@@ -201,7 +201,7 @@ class TestRunEvent:
             data=CancelledData(
                 rows_processed=50,
                 rows_succeeded=45,
-                rows_failed=1,
+                rows_failed=2,
                 rows_quarantined=2,
                 rows_routed_success=1,
                 rows_routed_failure=1,
@@ -382,10 +382,10 @@ class TestCompletedDataDecomposition:
                 status="completed_with_failures",
                 rows_processed=100,
                 rows_succeeded=95,
-                rows_failed=5,
+                rows_failed=6,
                 rows_routed_success=0,
                 rows_routed_failure=0,
-                rows_quarantined=3,  # 95 + 5 + 0 + 3 = 103 > 100
+                rows_quarantined=3,  # 95 + 6 = 101 > 100
                 landscape_run_id="lscape-1",
             )
 
@@ -423,7 +423,7 @@ class TestCompletedDataDecomposition:
         )
         assert data.rows_processed == 0
 
-    def test_routed_rows_participate_in_decomposition(self) -> None:
+    def test_routed_rows_report_subset_details(self) -> None:
         data = CompletedData(
             status="completed_with_failures",
             rows_processed=100,
@@ -441,7 +441,7 @@ class TestCompletedDataDecomposition:
         data = CompletedData(
             status="completed",
             rows_processed=1,
-            rows_succeeded=0,
+            rows_succeeded=1,
             rows_failed=0,
             rows_routed_success=1,
             rows_routed_failure=0,
@@ -450,14 +450,14 @@ class TestCompletedDataDecomposition:
         )
 
         assert data.rows_routed_success == 1
-        assert data.rows_succeeded == 0
+        assert data.rows_succeeded == 1
 
-    def test_double_counted_routed_success_rejected(self) -> None:
-        with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
+    def test_routed_success_exceeding_succeeded_rejected(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match="rows_routed_success must be a subset"):
             CompletedData(
                 status="completed",
                 rows_processed=1,
-                rows_succeeded=1,
+                rows_succeeded=0,
                 rows_failed=0,
                 rows_routed_success=1,
                 rows_routed_failure=0,
@@ -882,10 +882,10 @@ class TestRunStatusDecomposition:
                 finished_at=datetime.now(tz=UTC),
                 rows_processed=100,
                 rows_succeeded=95,
-                rows_failed=5,
+                rows_failed=6,
                 rows_routed_success=0,
                 rows_routed_failure=0,
-                rows_quarantined=3,  # 95 + 5 + 0 + 3 = 103 > 100
+                rows_quarantined=3,  # 95 + 6 = 101 > 100
                 error=None,
                 landscape_run_id="lscape-1",
             )
@@ -938,10 +938,10 @@ class TestRunStatusDecomposition:
                 finished_at=datetime.now(tz=UTC),
                 rows_processed=50,
                 rows_succeeded=30,
-                rows_failed=10,
+                rows_failed=25,
                 rows_routed_success=20,
                 rows_routed_failure=0,
-                rows_quarantined=5,  # 30 + 10 + 20 + 5 = 65 > 50
+                rows_quarantined=5,  # 30 + 25 = 55 > 50
                 error=None,
                 landscape_run_id=None,
             )
@@ -1070,13 +1070,13 @@ class TestRunResultsDecomposition:
         with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
             RunResultsResponse(
                 run_id="r1",
-                status="completed",
+                status="completed_with_failures",
                 rows_processed=100,
                 rows_succeeded=50,
-                rows_failed=20,
+                rows_failed=60,
                 rows_routed_success=40,
                 rows_routed_failure=0,
-                rows_quarantined=10,  # 50 + 20 + 40 + 10 = 120 > 100
+                rows_quarantined=10,  # 50 + 60 = 110 > 100
                 landscape_run_id="lscape-1",
                 error=None,
             )
@@ -1269,7 +1269,7 @@ class TestRunStatusResponseStatusInvariant:
             status="failed",
             rows_processed=6,
             rows_succeeded=0,
-            rows_failed=0,
+            rows_failed=6,
             rows_routed_success=0,
             rows_routed_failure=6,
             error="LLM transform diverted every row to on_error",

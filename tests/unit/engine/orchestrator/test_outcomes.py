@@ -10,11 +10,13 @@ _execute_run() and _process_resumed_rows(). These tests verify that:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import Mock
 
 import pytest
 
 from elspeth.contracts import PendingOutcome, RowOutcome, TokenInfo
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
@@ -36,11 +38,30 @@ def _make_result(
     token: TokenInfo | None = None,
     sink_name: str | None = None,
 ) -> Mock:
-    """Create a mock RowResult with the given outcome."""
+    """Create a mock RowResult with the terminal-pair mapped outcome."""
+    outcome_pair: dict[RowOutcome, tuple[TerminalOutcome | None, TerminalPath]] = {
+        RowOutcome.COMPLETED: (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW),
+        RowOutcome.ROUTED: (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED),
+        RowOutcome.ROUTED_ON_ERROR: (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED),
+        RowOutcome.FAILED: (TerminalOutcome.FAILURE, TerminalPath.UNROUTED),
+        RowOutcome.QUARANTINED: (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE),
+        RowOutcome.FORKED: (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT),
+        RowOutcome.CONSUMED_IN_BATCH: (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED),
+        RowOutcome.DROPPED_BY_FILTER: (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED),
+        RowOutcome.COALESCED: (TerminalOutcome.SUCCESS, TerminalPath.COALESCED),
+        RowOutcome.EXPANDED: (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT),
+        RowOutcome.BUFFERED: (None, TerminalPath.BUFFERED),
+    }
+    terminal_outcome, path = outcome_pair[outcome]
+    result_token = token or make_token_info()
+    if path == TerminalPath.COALESCED and result_token.join_group_id is None:
+        result_token = replace(result_token, join_group_id="join-1")
     result = Mock()
-    result.outcome = outcome
-    result.token = token or make_token_info()
+    result.outcome = terminal_outcome
+    result.path = path
+    result.token = result_token
     result.sink_name = sink_name
+    result.error = None
     return result
 
 
@@ -79,7 +100,8 @@ class TestAccumulateRowOutcomesCompleted:
         assert len(pending["output"]) == 1
         pending_outcome = pending["output"][0][1]
         assert pending_outcome is not None
-        assert pending_outcome.outcome == RowOutcome.COMPLETED
+        assert pending_outcome.outcome == TerminalOutcome.SUCCESS
+        assert pending_outcome.path == TerminalPath.DEFAULT_FLOW
 
     def test_completed_ignores_branch_name_and_uses_result_sink(self) -> None:
         """COMPLETED routing uses result.sink_name, not token.branch_name."""
@@ -116,7 +138,7 @@ class TestAccumulateRowOutcomesRouted:
         accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_routed_success == 1
-        assert counters.rows_succeeded == 0
+        assert counters.rows_succeeded == 1
         assert counters.rows_routed_failure == 0
 
     def test_routed_tracks_destination(self) -> None:
@@ -138,7 +160,8 @@ class TestAccumulateRowOutcomesRouted:
         assert len(pending["risk_sink"]) == 1
         pending_outcome = pending["risk_sink"][0][1]
         assert pending_outcome is not None
-        assert pending_outcome.outcome == RowOutcome.ROUTED
+        assert pending_outcome.outcome == TerminalOutcome.SUCCESS
+        assert pending_outcome.path == TerminalPath.GATE_ROUTED
 
     def test_routed_without_sink_name_crashes(self) -> None:
         """ROUTED outcome without sink_name is a contract violation."""
@@ -165,7 +188,8 @@ class TestAccumulateRowOutcomesRoutedOnError:
         from elspeth.contracts.results import FailureInfo
 
         result = Mock()
-        result.outcome = RowOutcome.ROUTED_ON_ERROR
+        result.outcome = TerminalOutcome.FAILURE
+        result.path = TerminalPath.ON_ERROR_ROUTED
         result.token = token or make_token_info()
         result.sink_name = sink_name
         result.error = FailureInfo(
@@ -186,6 +210,7 @@ class TestAccumulateRowOutcomesRoutedOnError:
         accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_routed_failure == 1
+        assert counters.rows_failed == 1
         assert counters.rows_routed_success == 0
 
     def test_routed_increments_routed_success_not_failure(self) -> None:
@@ -200,7 +225,7 @@ class TestAccumulateRowOutcomesRoutedOnError:
         accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_routed_success == 1
-        assert counters.rows_succeeded == 0
+        assert counters.rows_succeeded == 1
         assert counters.rows_routed_failure == 0
 
 
@@ -225,6 +250,7 @@ class TestAccumulateRowOutcomesTerminal:
         accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_quarantined == 1
+        assert counters.rows_failed == 1
 
     def test_forked_increments_counter(self) -> None:
         counters = _make_counters()
@@ -299,22 +325,16 @@ class TestAccumulateRowOutcomesCoalesced:
         assert len(pending["output"]) == 1
         pending_outcome = pending["output"][0][1]
         assert pending_outcome is not None
-        assert pending_outcome.outcome == RowOutcome.COMPLETED
+        assert pending_outcome.outcome == TerminalOutcome.SUCCESS
+        assert pending_outcome.path == TerminalPath.COALESCED
 
 
 class TestAccumulateRowOutcomesExclusiveCounters:
-    """Mutation-killing tests: each variant increments ONLY its counter(s).
+    """Mutation-killing tests: each terminal pair increments only its counters.
 
-    These tests kill `==` -> `>=` mutants on RowOutcome comparisons.
-    RowOutcome is a StrEnum, so `>=` compares string values alphabetically:
-      buffered < coalesced < completed < consumed_in_batch < expanded
-      < failed < forked < quarantined < routed
-
-    If `== COMPLETED` mutates to `>= COMPLETED`, then CONSUMED_IN_BATCH,
-    EXPANDED, FAILED, FORKED, QUARANTINED, ROUTED would all incorrectly
-    enter the COMPLETED branch, incrementing rows_succeeded instead of
-    their own counter. By asserting every counter field per variant,
-    the wrong increment is caught.
+    The legacy RowOutcome fixtures are mapped to ADR-019 terminal pairs by the
+    helper above. Asserting every counter field per variant catches accidental
+    fallthrough in the pair switch.
     """
 
     def _assert_counters(
@@ -357,13 +377,8 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         self._assert_counters(counters, succeeded=1)
         assert len(pending["output"]) == 1
 
-    def test_routed_increments_routed_success_only(self) -> None:
-        """ROUTED is a terminal success indicator without double-counting.
-
-        The web terminal decomposition treats ``rows_succeeded`` and
-        ``rows_routed_success`` as additive buckets, so a gate MOVE belongs
-        only in the routed-success bucket.
-        """
+    def test_routed_increments_success_and_routed_success_only(self) -> None:
+        """GATE_ROUTED is a success terminal with a reporting subset counter."""
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "risk": []}
         accumulate_row_outcomes(
@@ -371,7 +386,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
             counters,
             pending,
         )
-        self._assert_counters(counters, succeeded=0, routed_success=1)
+        self._assert_counters(counters, succeeded=1, routed_success=1)
         assert counters.routed_destinations["risk"] == 1
         assert len(pending["risk"]) == 1
         assert len(pending["output"]) == 0
@@ -395,7 +410,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
             counters,
             pending,
         )
-        self._assert_counters(counters, quarantined=1)
+        self._assert_counters(counters, failed=1, quarantined=1)
         assert len(pending["output"]) == 0
 
     def test_forked_only_increments_forked(self) -> None:
@@ -611,7 +626,7 @@ class TestAccumulateRowOutcomesMixed:
         accumulate_row_outcomes(results, counters, pending)
 
         assert counters.rows_succeeded == 2
-        assert counters.rows_failed == 1
+        assert counters.rows_failed == 2
         assert counters.rows_quarantined == 1
         assert len(pending["output"]) == 2
 
@@ -630,12 +645,7 @@ class TestReconcileSinkWriteDiversions:
     """Tests for post-sink durable counter reconciliation."""
 
     def test_routed_diversion_decrements_routed_counters(self) -> None:
-        """A routed-success sink diversion decrements only routed counters.
-
-        ``rows_succeeded`` is a separate additive terminal bucket, so
-        reconciling a diverted gate MOVE must not subtract from unrelated
-        ordinary successes.
-        """
+        """A routed-success sink diversion decrements success and routed subsets."""
         counters = _make_counters()
         counters.rows_succeeded = 7
         counters.rows_routed_success = 1
@@ -644,16 +654,16 @@ class TestReconcileSinkWriteDiversions:
         reconcile_sink_write_diversions(
             counters,
             sink_name="risk_sink",
-            pending_outcome=PendingOutcome(RowOutcome.ROUTED),
+            pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.GATE_ROUTED),
             diversion_count=1,
         )
 
-        assert counters.rows_succeeded == 7
+        assert counters.rows_succeeded == 6
         assert counters.rows_routed_success == 0
         assert counters.rows_routed_failure == 0
         assert counters.routed_destinations == {}
 
-    def test_terminal_coalesced_diversion_preserves_coalesced_but_not_success(self) -> None:
+    def test_terminal_coalesced_diversion_decrements_coalesced_and_success(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
@@ -665,11 +675,11 @@ class TestReconcileSinkWriteDiversions:
         reconcile_sink_write_diversions(
             counters,
             sink_name="output",
-            pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+            pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.COALESCED),
             diversion_count=1,
         )
 
-        assert counters.rows_coalesced == 1
+        assert counters.rows_coalesced == 0
         assert counters.rows_succeeded == 0
 
 
@@ -858,7 +868,8 @@ class TestHandleCoalesceTimeouts:
         emitted = [call.args[0] for call in ctx.telemetry_emit.call_args_list]
         assert [event.token_id for event in emitted] == ["token-1", "token-2"]
         assert all(event.run_id == "run-1" for event in emitted)
-        assert all(event.outcome == RowOutcome.FAILED for event in emitted)
+        assert all(event.outcome == TerminalOutcome.FAILURE for event in emitted)
+        assert all(event.path == TerminalPath.UNROUTED for event in emitted)
 
 
 # =============================================================================
@@ -1014,7 +1025,8 @@ class TestFlushCoalescePending:
         emitted = [call.args[0] for call in ctx.telemetry_emit.call_args_list]
         assert [event.token_id for event in emitted] == ["token-1", "token-2"]
         assert all(event.run_id == "run-1" for event in emitted)
-        assert all(event.outcome == RowOutcome.FAILED for event in emitted)
+        assert all(event.outcome == TerminalOutcome.FAILURE for event in emitted)
+        assert all(event.path == TerminalPath.UNROUTED for event in emitted)
 
     def test_empty_flush_is_noop(self) -> None:
         """No pending coalesces means nothing happens."""

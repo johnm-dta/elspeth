@@ -4,6 +4,7 @@ import hashlib
 import logging
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from pydantic import ValidationError
@@ -47,6 +48,18 @@ from elspeth.engine.spans import SpanFactory
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class DiversionCounts:
+    """Split sink diversion counts by ADR-019 terminal flavor."""
+
+    failsink_mode: int = 0
+    discard_mode: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.failsink_mode + self.discard_mode
+
+
 class SinkExecutor:
     """Executes sinks with artifact recording.
 
@@ -70,7 +83,7 @@ class SinkExecutor:
 
     Example:
         executor = SinkExecutor(execution, data_flow, span_factory, run_id)
-        artifact, diversion_count = executor.write(
+        artifact, diversion_counts = executor.write(
             sink=my_sink,
             tokens=tokens_to_write,
             ctx=ctx,
@@ -78,6 +91,7 @@ class SinkExecutor:
             sink_name="output",
             pending_outcome=pending,
         )
+        print(diversion_counts.total)
     """
 
     def __init__(
@@ -351,7 +365,7 @@ class SinkExecutor:
         failsink_name: str | None = None,
         failsink_edge_id: str | None = None,
         on_token_written: Callable[[TokenInfo], None] | None = None,
-    ) -> tuple[Artifact | None, int]:
+    ) -> tuple[Artifact | None, DiversionCounts]:
         """Write tokens to sink with artifact recording and failsink routing.
 
         CRITICAL: Creates a node_state for EACH token written AND records
@@ -387,13 +401,13 @@ class SinkExecutor:
                              after Phase 2, diverted tokens after Phase 3.
 
         Returns:
-            Tuple of (Artifact if tokens were written else None, diversion count)
+            Tuple of (Artifact if tokens were written else None, diversion counts)
 
         Raises:
             Exception: Propagated from sink.write(), sink.flush(), or failsink.write()
         """
         if not tokens:
-            return None, 0
+            return None, DiversionCounts()
 
         # pending_outcome is required for all sink-bound tokens.
         # PendingTokenMap allows None in its type alias, but _route_to_sink()
@@ -628,14 +642,24 @@ class SinkExecutor:
                 size_bytes=artifact_info.size_bytes,
             )
 
-            # Record COMPLETED outcomes for primary tokens
+            # Record durable outcomes for primary tokens.
             for token, _ in primary_states:
+                join_group_id: str | None = None
+                if pending_outcome.path == TerminalPath.COALESCED:
+                    join_group_id = token.join_group_id
+                    if join_group_id is None:
+                        raise OrchestrationInvariantError(
+                            f"(SUCCESS, COALESCED) pending outcome for token {token.token_id!r} "
+                            "requires token.join_group_id before sink recording"
+                        )
+                outcome_sink_name = None if pending_outcome.path == TerminalPath.QUARANTINED_AT_SOURCE else sink_name
                 self._data_flow.record_token_outcome(
                     ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
                     outcome=pending_outcome.outcome,
                     path=pending_outcome.path,
                     error_hash=pending_outcome.error_hash,
-                    sink_name=sink_name,
+                    sink_name=outcome_sink_name,
+                    join_group_id=join_group_id,
                 )
 
             # Checkpoint callback — only for primary tokens.
@@ -662,7 +686,8 @@ class SinkExecutor:
         # the pre-phase. These are the routing anchors — routing_event.state_id
         # points here. Failsink-mode tokens ALSO get a NEW state at the
         # failsink node (the destination).
-        diversion_count = len(diverted_tokens)
+        failsink_count = 0
+        discard_count = 0
         if diverted_tokens:
             diversion_by_index = {d.row_index: d for d in diversions}
 
@@ -815,7 +840,11 @@ class SinkExecutor:
                             token_id=token.token_id,
                             node_id=failsink_node_id,
                             run_id=ctx.run_id,
-                            step_index=step_in_pipeline,
+                            # Failsink handling is a second sink visit for the
+                            # same token. Record it at the next path position
+                            # so it cannot collide with the primary sink
+                            # node_state's (token_id, step_index, attempt).
+                            step_index=step_in_pipeline + 1,
                             input_data=input_dict,
                         )
                         failsink_states.append((token, state))
@@ -959,6 +988,7 @@ class SinkExecutor:
                         sink_node_id=failsink_node_id,
                         artifact_id=failsink_artifact.artifact_id,
                     )
+                    failsink_count += 1
 
                 # Checkpoint diverted tokens — failsink write is now durable.
                 # Without this, a crash after failsink write but before the next
@@ -1008,6 +1038,7 @@ class SinkExecutor:
                         error_hash=error_hash,
                         sink_name="__discard__",
                     )
+                    discard_count += 1
 
                 # Checkpoint diverted tokens — discard recording is now durable.
                 # Discard is idempotent, but checkpointing keeps resume state consistent.
@@ -1023,4 +1054,4 @@ class SinkExecutor:
                                 f"Original error: {type(exc).__name__}: {exc}"
                             ) from exc
 
-        return artifact, diversion_count
+        return artifact, DiversionCounts(failsink_mode=failsink_count, discard_mode=discard_count)

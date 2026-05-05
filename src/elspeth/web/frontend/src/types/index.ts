@@ -376,6 +376,12 @@ export const TERMINAL_RUN_STATUS_VALUES = [
 ] as const;
 export type TerminalRunStatus = (typeof TERMINAL_RUN_STATUS_VALUES)[number];
 
+export function isTerminalRunStatus(
+  status: RunStatus,
+): status is TerminalRunStatus {
+  return (TERMINAL_RUN_STATUS_VALUES as readonly RunStatus[]).includes(status);
+}
+
 // Compile-time assertion: TerminalRunStatus must be a subset of RunStatus.
 // If a future widening adds a terminal value to TERMINAL_RUN_STATUS_VALUES
 // without adding it to RUN_STATUS_VALUES, this fails to compile.

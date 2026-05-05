@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import Any
 
 import pytest
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from elspeth.contracts.enums import RunStatus
@@ -184,7 +184,7 @@ class TestRunResultFactory:
             run_id="custom-run",
             status=RunStatus.FAILED,
             rows_processed=100,
-            rows_succeeded=0,
+            rows_succeeded=5,
             rows_failed=100,
             rows_routed_success=5,
             rows_routed_failure=0,
@@ -212,18 +212,16 @@ class TestRunResultStatusInvariant:
     +-------------------------+----------------------------------------------+
     | Status                  | Required shape                               |
     +=========================+==============================================+
-    | ``COMPLETED``           | rows_processed>0, rows_succeeded>0,          |
-    |                         | rows_failed=0, rows_quarantined=0,           |
-    |                         | rows_coalesce_failed=0                       |
+        | ``COMPLETED``           | rows_succeeded>0, rows_failed=0,             |
+        |                         | rows_coalesce_failed=0                       |
     +-------------------------+----------------------------------------------+
-    | ``COMPLETED_WITH_FAIL`` | rows_processed>0, rows_succeeded>0,          |
-    | ``URES``                | at least one of (rows_failed/rows_quarantined|
-    |                         | /rows_coalesce_failed) > 0                   |
+        | ``COMPLETED_WITH_FAIL`` | rows_succeeded>0 and at least one of         |
+        | ``URES``                | rows_failed / rows_coalesce_failed > 0       |
     +-------------------------+----------------------------------------------+
     | ``FAILED``              | rows_succeeded == 0 (rows_processed any)     |
     +-------------------------+----------------------------------------------+
-    | ``EMPTY``               | rows_processed==0, rows_succeeded==0,        |
-    |                         | rows_failed=0, rows_quarantined=0,           |
+        | ``EMPTY``               | rows_processed==0, rows_succeeded=0,         |
+        |                         | rows_failed=0,                               |
     |                         | rows_coalesce_failed=0                       |
     +-------------------------+----------------------------------------------+
 
@@ -282,6 +280,7 @@ class TestRunResultStatusInvariant:
             status=RunStatus.COMPLETED_WITH_FAILURES,
             rows_processed=10,
             rows_succeeded=7,
+            rows_failed=3,
             rows_quarantined=3,
         )
         assert result.status == RunStatus.COMPLETED_WITH_FAILURES
@@ -350,7 +349,13 @@ class TestRunResultStatusInvariant:
 
     def test_completed_rejects_quarantine(self) -> None:
         with pytest.raises(ValueError, match=r"COMPLETED.*requires no failures"):
-            self._build(status=RunStatus.COMPLETED, rows_processed=10, rows_succeeded=7, rows_quarantined=3)
+            self._build(
+                status=RunStatus.COMPLETED,
+                rows_processed=10,
+                rows_succeeded=7,
+                rows_failed=3,
+                rows_quarantined=3,
+            )
 
     def test_completed_with_failures_rejects_zero_succeeded(self) -> None:
         """COMPLETED_WITH_FAILURES requires rows_succeeded > 0 (else it's FAILED)."""
@@ -403,12 +408,12 @@ class TestRunResultStatusInvariant:
 
 
 class TestRunStatusRowsRoutedSplitPredicate:
-    """elspeth-5069612f3c — predicate behavior for the split rows_routed counters.
+    """elspeth-5069612f3c / ADR-019 — predicate behavior for split routed counters.
 
-    These tests pin the post-split semantics: rows_routed_success counts toward
-    the success indicator (gate MOVE pipelines complete cleanly), and
-    rows_routed_failure counts toward the failure indicator (on_error DIVERT
-    pipelines fail, distinct from rows_failed but predicate-equivalent).
+    The routed counters are reporting subsets. ``rows_succeeded`` and
+    ``rows_failed`` remain the lifecycle counters that drive the status
+    predicate; rows_routed_* explain which of those terminal rows used MOVE or
+    DIVERT paths.
 
     REPLACES the older test_runstatus_rows_routed_only_classifies_as_failed
     pattern at lines 289-295 of this file, which asserted FAILED for the
@@ -441,14 +446,12 @@ class TestRunStatusRowsRoutedSplitPredicate:
 
     def test_gate_routed_only_classifies_as_completed(self) -> None:
         """User reproducer shape: csv -> gate -> sink_a/sink_b, every row
-        intentionally gate-routed (RowOutcome.ROUTED via MOVE). rows_succeeded
-        is 0 because the orchestrator's success-path counter never increments
-        for terminally-gate-routed rows; the new rows_routed_success counter
-        carries the structural success signal.
+        intentionally gate-routed (MOVE). ``rows_routed_success`` reports that
+        all successful rows used a gate route.
         """
         derived = derive_terminal_run_status(
             rows_processed=8,
-            rows_succeeded=0,
+            rows_succeeded=8,
             rows_failed=0,
             rows_routed_success=8,
             rows_routed_failure=0,
@@ -456,25 +459,24 @@ class TestRunStatusRowsRoutedSplitPredicate:
             rows_coalesce_failed=0,
         )
         assert derived == RunStatus.COMPLETED
-        # The biconditional invariant accepts the (COMPLETED, 8, 0, 8, 0, 0, 0) shape.
+        # The biconditional invariant accepts routed success as a success subset.
         result = self._build(
             status=RunStatus.COMPLETED,
             rows_processed=8,
-            rows_succeeded=0,
+            rows_succeeded=8,
             rows_routed_success=8,
         )
         assert result.status == RunStatus.COMPLETED
 
     def test_on_error_routed_only_classifies_as_failed(self) -> None:
         """S1A reproducer shape: every row triggers a transform exception, all
-        routed via on_error to a quarantine/error sink (RowOutcome.ROUTED_ON_ERROR
-        via DIVERT). rows_routed_failure carries the structural failure signal;
-        no success indicator is present.
+        routed via on_error to a quarantine/error sink (DIVERT).
+        ``rows_routed_failure`` reports that all failed rows used on_error.
         """
         derived = derive_terminal_run_status(
             rows_processed=2,
             rows_succeeded=0,
-            rows_failed=0,
+            rows_failed=2,
             rows_routed_success=0,
             rows_routed_failure=2,
             rows_quarantined=0,
@@ -490,8 +492,8 @@ class TestRunStatusRowsRoutedSplitPredicate:
         """
         derived = derive_terminal_run_status(
             rows_processed=10,
-            rows_succeeded=0,
-            rows_failed=0,
+            rows_succeeded=7,
+            rows_failed=3,
             rows_routed_success=7,
             rows_routed_failure=3,
             rows_quarantined=0,
@@ -539,7 +541,7 @@ class TestRunStatusRowsRoutedSplitPredicate:
         derived = derive_terminal_run_status(
             rows_processed=0,
             rows_succeeded=3,
-            rows_failed=0,
+            rows_failed=1,
             rows_routed_success=0,
             rows_routed_failure=1,
             rows_quarantined=0,
@@ -550,6 +552,7 @@ class TestRunStatusRowsRoutedSplitPredicate:
             status=RunStatus.COMPLETED_WITH_FAILURES,
             rows_processed=0,
             rows_succeeded=3,
+            rows_failed=1,
             rows_routed_failure=1,
         )
         assert result.status == RunStatus.COMPLETED_WITH_FAILURES
@@ -574,7 +577,7 @@ class TestRunStatusRowsRoutedSplitPredicate:
         derived = derive_terminal_run_status(
             rows_processed=10,
             rows_succeeded=7,
-            rows_failed=0,
+            rows_failed=3,
             rows_routed_success=0,
             rows_routed_failure=3,
             rows_quarantined=0,
@@ -586,6 +589,7 @@ class TestRunStatusRowsRoutedSplitPredicate:
             status=RunStatus.COMPLETED_WITH_FAILURES,
             rows_processed=10,
             rows_succeeded=7,
+            rows_failed=3,
             rows_routed_failure=3,
         )
         assert result.status == RunStatus.COMPLETED_WITH_FAILURES
@@ -599,7 +603,7 @@ class TestRunStatusRowsRoutedSplitPredicate:
         """
         derived = derive_terminal_run_status(
             rows_processed=10,
-            rows_succeeded=0,
+            rows_succeeded=6,
             rows_failed=4,
             rows_routed_success=6,
             rows_routed_failure=0,
@@ -611,6 +615,7 @@ class TestRunStatusRowsRoutedSplitPredicate:
         result = self._build(
             status=RunStatus.COMPLETED_WITH_FAILURES,
             rows_processed=10,
+            rows_succeeded=6,
             rows_failed=4,
             rows_routed_success=6,
         )
@@ -647,8 +652,8 @@ class TestRunStatusRowsRoutedSplitPredicate:
     def test_gate_routed_with_quarantined_rows_classifies_as_completed_with_failures(self) -> None:
         derived = derive_terminal_run_status(
             rows_processed=8,
-            rows_succeeded=0,
-            rows_failed=0,
+            rows_succeeded=5,
+            rows_failed=3,
             rows_routed_success=5,
             rows_routed_failure=0,
             rows_quarantined=3,
@@ -658,6 +663,8 @@ class TestRunStatusRowsRoutedSplitPredicate:
         result = self._build(
             status=RunStatus.COMPLETED_WITH_FAILURES,
             rows_processed=8,
+            rows_succeeded=5,
+            rows_failed=3,
             rows_routed_success=5,
             rows_quarantined=3,
         )
@@ -666,7 +673,7 @@ class TestRunStatusRowsRoutedSplitPredicate:
     def test_gate_routed_with_coalesce_failures_classifies_as_completed_with_failures(self) -> None:
         derived = derive_terminal_run_status(
             rows_processed=8,
-            rows_succeeded=0,
+            rows_succeeded=5,
             rows_failed=0,
             rows_routed_success=5,
             rows_routed_failure=0,
@@ -677,6 +684,7 @@ class TestRunStatusRowsRoutedSplitPredicate:
         result = self._build(
             status=RunStatus.COMPLETED_WITH_FAILURES,
             rows_processed=8,
+            rows_succeeded=5,
             rows_routed_success=5,
             rows_coalesce_failed=3,
         )
@@ -686,7 +694,7 @@ class TestRunStatusRowsRoutedSplitPredicate:
         derived = derive_terminal_run_status(
             rows_processed=8,
             rows_succeeded=0,
-            rows_failed=0,
+            rows_failed=6,
             rows_routed_success=0,
             rows_routed_failure=4,
             rows_quarantined=2,
@@ -696,6 +704,7 @@ class TestRunStatusRowsRoutedSplitPredicate:
         result = self._build(
             status=RunStatus.FAILED,
             rows_processed=8,
+            rows_failed=6,
             rows_routed_failure=4,
             rows_quarantined=2,
             rows_coalesce_failed=2,
@@ -740,6 +749,9 @@ class TestRunStatusRowsRoutedSplitPredicate:
             "rows_quarantined": rows_quarantined,
             "rows_coalesce_failed": rows_coalesce_failed,
         }
+        assume(rows_routed_success <= rows_succeeded)
+        assume(rows_routed_failure <= rows_failed)
+        assume(rows_quarantined <= rows_failed)
         derived = derive_terminal_run_status(**counters)
         result = self._build(status=derived, **counters)
         assert result.status == derived
@@ -821,5 +833,6 @@ class TestRunStatusRowsRoutedSplitPredicate:
             self._build(
                 status=RunStatus.EMPTY,
                 rows_processed=0,
+                rows_succeeded=1,
                 rows_routed_success=1,  # Success indicator contradicts EMPTY.
             )

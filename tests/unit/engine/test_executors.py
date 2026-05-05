@@ -76,7 +76,8 @@ from elspeth.contracts.enums import (
     NodeType,
     RoutingKind,
     RoutingMode,
-    RowOutcome,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
 )
 from elspeth.contracts.errors import (
@@ -296,6 +297,10 @@ def _make_sink(
     return sink
 
 
+def _default_pending() -> PendingOutcome:
+    return PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
+
+
 # =============================================================================
 # TestMissingEdgeError
 # =============================================================================
@@ -488,7 +493,8 @@ class TestTransformExecutor:
         factory.data_flow.record_token_outcome.assert_called_once()
         kwargs = factory.data_flow.record_token_outcome.call_args.kwargs
         assert kwargs["ref"].token_id == "tok_declared_required"
-        assert kwargs["outcome"] == RowOutcome.FAILED
+        assert kwargs["outcome"] == TerminalOutcome.FAILURE
+        assert kwargs["path"] == TerminalPath.UNROUTED
         assert kwargs["context"]["exception_type"] == "DeclaredRequiredInputFieldsViolation"
 
     def test_type_coerce_fixed_schema_accepts_pre_coercion_input_and_succeeds(self) -> None:
@@ -2812,9 +2818,9 @@ class TestSinkExecutor:
         executor = SinkExecutor(factory.execution, factory.data_flow, _make_span_factory(), run_id="test-run")
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
-        result = executor.write(
+        artifact, diversion_counts = executor.write(
             sink,
             [],
             ctx,
@@ -2823,7 +2829,8 @@ class TestSinkExecutor:
             pending_outcome=pending,
         )
 
-        assert result == (None, 0)
+        assert artifact is None
+        assert diversion_counts.total == 0
         sink.write.assert_not_called()
 
     # --- No node_id ---
@@ -2834,7 +2841,7 @@ class TestSinkExecutor:
         sink = _make_sink(node_id=None)
         token = _make_token()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises(OrchestrationInvariantError, match="without node_id"):
             executor.write(
@@ -2861,7 +2868,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         sink.input_schema = StrictSinkSchema
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises(PluginContractViolation, match="input validation failed"):
             executor.write(
@@ -2885,7 +2892,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         sink.declared_required_fields = frozenset({"id", "name"})
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         def _raise_sink_required_fields(
             *,
@@ -2941,7 +2948,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         sink.declared_required_fields = frozenset({"id", "name"})
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         def _raise_sink_required_fields(
             *,
@@ -2986,7 +2993,8 @@ class TestSinkExecutor:
         assert factory.data_flow.record_token_outcome.call_count == 2
         for call in factory.data_flow.record_token_outcome.call_args_list:
             kwargs = call.kwargs
-            assert kwargs["outcome"] == RowOutcome.FAILED
+            assert kwargs["outcome"] == TerminalOutcome.FAILURE
+            assert kwargs["path"] == TerminalPath.UNROUTED
             assert kwargs["context"]["exception_type"] == "SinkRequiredFieldsViolation"
 
     def test_layer1_boundary_failure_does_not_reclean_terminal_states(self) -> None:
@@ -3021,7 +3029,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         sink.declared_required_fields = frozenset({"id", "name"})
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         def _raise_sink_required_fields(
             *,
@@ -3086,7 +3094,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         sink.declared_required_fields = frozenset({"id", "name"})
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises(SinkTransactionalInvariantError, match=r"optional in the row's schema contract.*coalesce merge"):
             executor.write(
@@ -3162,7 +3170,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         sink.declared_required_fields = frozenset({"customer_id"})
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises(SinkTransactionalInvariantError, match=r"optional in the row's schema contract.*coalesce merge"):
             executor.write(
@@ -3215,7 +3223,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         sink.declared_required_fields = frozenset({"id", "name"})
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         original_run_boundary_checks = SinkExecutor._run_sink_boundary_checks
 
@@ -3254,7 +3262,8 @@ class TestSinkExecutor:
         sink.write.assert_not_called()
         factory.data_flow.record_token_outcome.assert_called_once()
         kwargs = factory.data_flow.record_token_outcome.call_args.kwargs
-        assert kwargs["outcome"] == RowOutcome.FAILED
+        assert kwargs["outcome"] == TerminalOutcome.FAILURE
+        assert kwargs["path"] == TerminalPath.UNROUTED
         assert kwargs["context"]["exception_type"] == "SinkTransactionalInvariantError"
 
     # --- Successful write ---
@@ -3270,9 +3279,9 @@ class TestSinkExecutor:
         ]
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
-        artifact = executor.write(
+        artifact, diversion_counts = executor.write(
             sink,
             tokens,
             ctx,
@@ -3282,6 +3291,7 @@ class TestSinkExecutor:
         )
 
         assert artifact is not None
+        assert diversion_counts.total == 0
         # 2 begin_node_state calls (one per token)
         assert factory.execution.begin_node_state.call_count == 2
         # 2 complete_node_state with COMPLETED (one per token)
@@ -3294,7 +3304,8 @@ class TestSinkExecutor:
         # Token outcomes recorded
         assert factory.data_flow.record_token_outcome.call_count == 2
         for c in factory.data_flow.record_token_outcome.call_args_list:
-            assert c[1]["outcome"] == RowOutcome.COMPLETED
+            assert c[1]["outcome"] == TerminalOutcome.SUCCESS
+            assert c[1]["path"] == TerminalPath.DEFAULT_FLOW
             assert c[1]["sink_name"] == "out"
 
     def test_successful_write_calls_sink_flush(self) -> None:
@@ -3304,7 +3315,7 @@ class TestSinkExecutor:
         token = _make_token()
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         executor.write(
             sink,
@@ -3325,7 +3336,7 @@ class TestSinkExecutor:
         token = _make_token(data={"value": "test"})
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         executor.write(
             sink,
@@ -3370,7 +3381,7 @@ class TestSinkExecutor:
         ]
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises((ContractMergeError, FrameworkBugError)):
             executor.write(
@@ -3402,7 +3413,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         sink.write.side_effect = OSError("disk full")
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises(OSError, match="disk full"):
             executor.write(
@@ -3435,7 +3446,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         sink.flush.side_effect = OSError("flush failed")
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises(OSError, match="flush failed"):
             executor.write(
@@ -3467,7 +3478,7 @@ class TestSinkExecutor:
         ]
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
         callback = MagicMock()
 
         executor.write(
@@ -3498,7 +3509,7 @@ class TestSinkExecutor:
         token = _make_token()
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
         callback = MagicMock(side_effect=RuntimeError("checkpoint failed"))
 
         with pytest.raises(AuditIntegrityError, match="checkpoint") as exc_info:
@@ -3517,14 +3528,14 @@ class TestSinkExecutor:
 
     # --- PendingOutcome ---
 
-    def test_pending_outcome_used_for_token_outcome(self) -> None:
-        """pending_outcome.outcome and error_hash propagated to record_token_outcome."""
+    def test_source_quarantine_pending_outcome_clears_sink_name(self) -> None:
+        """Source quarantine outcomes are not attributed to a sink."""
         factory = _make_factory()
         executor = SinkExecutor(factory.execution, factory.data_flow, _make_span_factory(), run_id="test-run")
         token = _make_token()
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.QUARANTINED, error_hash="err_hash_123")
+        pending = PendingOutcome(outcome=TerminalOutcome.FAILURE, path=TerminalPath.QUARANTINED_AT_SOURCE, error_hash="err_hash_123")
 
         executor.write(
             sink,
@@ -3537,9 +3548,10 @@ class TestSinkExecutor:
 
         factory.data_flow.record_token_outcome.assert_called_once()
         kwargs = factory.data_flow.record_token_outcome.call_args[1]
-        assert kwargs["outcome"] == RowOutcome.QUARANTINED
+        assert kwargs["outcome"] == TerminalOutcome.FAILURE
+        assert kwargs["path"] == TerminalPath.QUARANTINED_AT_SOURCE
         assert kwargs["error_hash"] == "err_hash_123"
-        assert kwargs["sink_name"] == "quarantine"
+        assert kwargs["sink_name"] is None
 
     # --- Artifact registration ---
 
@@ -3558,7 +3570,7 @@ class TestSinkExecutor:
         ]
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         executor.write(
             sink,
@@ -3587,7 +3599,7 @@ class TestSinkExecutor:
         ]
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         executor.write(
             sink,
@@ -3623,7 +3635,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         sink.write.side_effect = OSError("disk full")
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises(OSError):
             executor.write(
@@ -3652,7 +3664,7 @@ class TestSinkExecutor:
         sink = _make_sink()
         sink.flush.side_effect = OSError("flush failed")
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises(OSError):
             executor.write(
@@ -3676,7 +3688,7 @@ class TestSinkExecutor:
         token = _make_token()
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         executor.write(
             sink,
@@ -3703,7 +3715,7 @@ class TestSinkExecutor:
         token = _make_token(data={"value": "test"})
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         executor.write(
             sink,
@@ -3728,7 +3740,7 @@ class TestSinkExecutor:
         token = _make_token(data={"value": "test"})
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         executor.write(
             sink,
@@ -3756,7 +3768,7 @@ class TestSinkExecutor:
         token = _make_token(data=row_data, contract=contract)
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         executor.write(
             sink,
@@ -3812,7 +3824,7 @@ class TestSinkExecutor:
 
         ctx = make_context()
         ctx.contract = stale_contract
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         executor.write(
             sink,
@@ -3890,7 +3902,7 @@ class TestSinkExecutor:
 
         ctx = make_context()
         ctx.contract = _make_contract()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         executor.write(
             sink,
@@ -4788,7 +4800,7 @@ class TestSinkExecutorTerminality:
         ]
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises(RuntimeError, match="DB connection lost"):
             executor.write(
@@ -4821,7 +4833,7 @@ class TestSinkExecutorTerminality:
         token = _make_token()
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises(RuntimeError, match="DB down from start"):
             executor.write(
@@ -4858,7 +4870,7 @@ class TestSinkExecutorTerminality:
         ]
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         with pytest.raises(RuntimeError, match="out of IDs"):
             executor.write(
@@ -4898,7 +4910,7 @@ class TestSinkExecutorTerminality:
         ]
         sink = _make_sink()
         ctx = make_context()
-        pending = PendingOutcome(outcome=RowOutcome.COMPLETED)
+        pending = _default_pending()
 
         # Original error ("DB down") must propagate, NOT the cleanup error
         with pytest.raises(RuntimeError, match="DB down"):
@@ -5603,7 +5615,8 @@ class TestPassThroughCrossCheck:
         factory.data_flow.record_token_outcome.assert_called_once()
         kwargs = factory.data_flow.record_token_outcome.call_args.kwargs
         assert kwargs["ref"].token_id == "tok_7"
-        assert kwargs["outcome"] == RowOutcome.FAILED
+        assert kwargs["outcome"] == TerminalOutcome.FAILURE
+        assert kwargs["path"] == TerminalPath.UNROUTED
         assert kwargs["context"]["exception_type"] == "PassThroughContractViolation"
 
     def test_cross_check_raises_when_payload_drops_key_but_contract_unchanged(self) -> None:

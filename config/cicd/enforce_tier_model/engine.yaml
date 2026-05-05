@@ -108,30 +108,30 @@ allow_hits:
     \ cleanup failure from masking original merge exception"
   safety: Logs error with state_id and cleanup exception details; always re-raises the original error
   expires: null
-- key: engine/executors/sink.py:R4:SinkExecutor:_best_effort_cleanup:fp=8222c68f9d57e8b4
+- key: engine/executors/sink.py:R4:SinkExecutor:_best_effort_cleanup:fp=1b066df6010227f2
   owner: architecture
   reason: "Best-effort cleanup of OPEN node_states before system error crash \u2014 broad catch prevents\
     \ cleanup failure from masking original FrameworkBugError/AuditIntegrityError"
   safety: Logs warning with cleanup exception details; always re-raises the original system error
   expires: null
-- key: engine/executors/sink.py:R4:SinkExecutor:write:fp=84c71e1b5c77f36b
+- key: engine/executors/sink.py:R4:SinkExecutor:write:fp=7484e4d5a8bb7618
   owner: architecture
   reason: Cleanup of OPEN pre-phase states after begin_node_state failure must not mask original error
   safety: Logs warning with cleanup exception details; always re-raises the original error
   expires: null
-- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=ee203332826e6fd2
+- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=8ae24dda2209d609
   owner: bugfix
   reason: "Offensive isinstance \u2014 validates sink.write() returns SinkWriteResult, not a bare ArtifactDescriptor\
     \ or other type"
   safety: Crashes immediately with PluginContractViolation identifying the buggy sink plugin
   expires: null
-- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=b12197151a5f1e19
+- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=333193edcab82132
   owner: bugfix
   reason: "Offensive isinstance \u2014 validates plugin return type to crash with PluginContractViolation\
     \ instead of opaque AttributeError"
   safety: Crashes immediately with clear error identifying the buggy sink plugin
   expires: null
-- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=24b32b1d4dc40b85
+- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=6bf4f058589b3c6f
   owner: bugfix
   reason: "Offensive isinstance \u2014 validates failsink.write() returns SinkWriteResult, crashing with\
     \ PluginContractViolation identifying the buggy failsink plugin instead of propagating an opaque AttributeError\
@@ -139,7 +139,7 @@ allow_hits:
   safety: Crashes immediately with PluginContractViolation naming the failsink and observed return type;
     no silent coercion
   expires: null
-- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=8c66dfa7710892e5
+- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=00755313e7e139d5
   owner: bugfix
   reason: "Offensive isinstance \u2014 validates the artifact attached to the failsink's SinkWriteResult\
     \ is an ArtifactDescriptor, crashing with PluginContractViolation identifying the buggy failsink plugin\
@@ -268,81 +268,81 @@ allow_hits:
     at loop end; no silent drops. AggregateDeclarationContractViolation is a Tier-1 class, preserving
     the propagation guarantee.
   expires: null
-- key: engine/orchestrator/core.py:R4:Orchestrator:_emit_phase_error:fp=adf79f0d8a6d5559
+- key: engine/orchestrator/core.py:R4:Orchestrator:_emit_phase_error:fp=cab50eae89f3249e
   owner: architecture
   reason: "Best-effort PhaseError emission \u2014 event-bus handler bugs must not mask the original pipeline\
     \ exception"
   safety: Catches and logs; original exception always re-raised by caller
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=324661596c041a33
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=0d0b1eb3b4f92a33
   owner: architecture
   reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
   safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=2c0471821857d00d
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=e0b048192deddd39
   owner: architecture
   reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
   safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=1c0ba262eec4ed6b
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=db2ae34810f92d23
   owner: architecture
   reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
   safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=5d093ea8791b3e5a
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=1b053ba4a7cbdc5b
   owner: architecture
   reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
   safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=d8f34a78c20bff01
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=d9ee180af5910d7e
   owner: architecture
   reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
   safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=0066715d1d9b4210
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=b80f81fbf2620f92
   owner: architecture
   reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
   safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_execute_export_phase:fp=573736428c184f32
+- key: engine/orchestrator/core.py:R4:Orchestrator:_execute_export_phase:fp=dbfcd5e7f93971c0
   owner: architecture
   reason: "Best-effort export status recording \u2014 must not mask original export exception"
   safety: Catches and logs; original export exception always re-raised
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:run:fp=df3b2029c2f76153
+- key: engine/orchestrator/core.py:R4:Orchestrator:run:fp=65ba39251c36143a
   owner: architecture
   reason: "Best-effort interrupted ceremony \u2014 GracefulShutdownError must not be masked by ceremony\
     \ failure"
   safety: Catches and logs; original shutdown exception always re-raised
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:run:fp=53406a215db39b9b
+- key: engine/orchestrator/core.py:R4:Orchestrator:run:fp=a5ec2df0f8e9eb6a
   owner: architecture
   reason: "Best-effort interrupted ceremony \u2014 GracefulShutdownError must not be masked by ceremony\
     \ failure"
   safety: Catches and logs; original shutdown exception always re-raised
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:run:fp=df5e77afacdc9230
+- key: engine/orchestrator/core.py:R4:Orchestrator:run:fp=4f1e5413515c0713
   owner: architecture
   reason: "Best-effort interrupted ceremony \u2014 GracefulShutdownError must not be masked by ceremony\
     \ failure"
   safety: Catches and logs; original shutdown exception always re-raised
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=77d6eb0bf5cd62c4
+- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=32dc28317bbe1b95
   owner: bugfix
   reason: "Tier-3 boundary \u2014 quarantined row data may contain NaN/Infinity that stable_hash rejects"
   safety: Falls back to repr_hash with debug logging; audit trail uses separate hashing path
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=600aabc6c7289ad6
+- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=14489290ea1bf14b
   owner: architecture
   reason: "Best-effort interrupted ceremony on resume \u2014 must not mask original shutdown exception"
   safety: Catches and logs; original exception always re-raised
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=7747e6152f663cdc
+- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=6626c501c1ba9413
   owner: architecture
   reason: "Best-effort interrupted ceremony on resume \u2014 must not mask original shutdown exception"
   safety: Catches and logs; original exception always re-raised
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=5791202686852736
+- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=f41c66873c4d7bca
   owner: architecture
   reason: "Best-effort interrupted ceremony on resume \u2014 must not mask original shutdown exception"
   safety: Catches and logs; original exception always re-raised

@@ -13,7 +13,11 @@ from typing import Any, ClassVar, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from elspeth.web.sessions.protocol import SessionRunStatus, TerminalSessionRunStatus
+from elspeth.web.sessions.protocol import (
+    OPERATOR_COMPLETION_RUN_STATUS_VALUES,
+    SessionRunStatus,
+    TerminalSessionRunStatus,
+)
 
 
 class _StrictResponse(BaseModel):
@@ -99,14 +103,12 @@ class ProgressData(_StrictResponse):
     fabrication test.  Mid-run, an operator must be able to distinguish
     "no rows have succeeded yet" from "the field was never populated".
 
-    The sum-invariant
-        rows_succeeded + rows_failed + rows_routed_success
-            + rows_routed_failure + rows_quarantined  <=  rows_processed
-    is intentionally NOT enforced here.  Non-terminal counts are allowed
-    transient inconsistency while the orchestrator is mid-flight: a row may
-    be marked processed before being categorised into one of the five
-    terminal-state buckets.  Naming the unenforced sum here keeps the
-    relaxation discoverable rather than implicit.  See
+    The sum-invariant ``rows_succeeded + rows_failed <= rows_processed`` is
+    intentionally NOT enforced here.  Non-terminal counts are allowed transient
+    inconsistency while the orchestrator is mid-flight: a row may be marked
+    processed before being categorised into one of the lifecycle terminal-state
+    buckets.  Naming the unenforced sum here keeps the relaxation discoverable
+    rather than implicit.  See
     ``RunStatusResponse._check_row_decomposition`` for the matching
     rationale on non-terminal status responses.
     """
@@ -139,14 +141,11 @@ def _validate_row_decomposition(
     rows_processed: int,
     rows_succeeded: int,
     rows_failed: int,
-    rows_routed_success: int,
-    rows_routed_failure: int,
-    rows_quarantined: int,
 ) -> None:
-    """Enforce rows_processed >= succeeded + failed + routed_success + routed_failure + quarantined.
+    """Enforce rows_processed >= succeeded + failed.
 
-    elspeth-5069612f3c — rows_routed split into rows_routed_success (MOVE) and
-    rows_routed_failure (DIVERT). Both contribute to terminal-state counts.
+    ADR-019 makes rows_routed_* and rows_quarantined reporting subsets of the
+    exhaustive lifecycle counters. They must not be added into this sum.
 
     NARROW INVARIANT (elspeth-31d53c7493 carry-forward). The original equality
     formulation does not hold for any DAG with aggregation, fork, expansion,
@@ -157,16 +156,39 @@ def _validate_row_decomposition(
     in elspeth-cf84eb1b52. When that lands, this inequality is replaced by
     the full balance.
     """
-    sum_terminal = rows_succeeded + rows_failed + rows_routed_success + rows_routed_failure + rows_quarantined
+    sum_terminal = rows_succeeded + rows_failed
     if rows_processed < sum_terminal:
         raise ValueError(
             f"Row count decomposition mismatch (over-counting): rows_processed={rows_processed} "
             f"< rows_succeeded({rows_succeeded}) + rows_failed({rows_failed}) "
-            f"+ rows_routed_success({rows_routed_success}) "
-            f"+ rows_routed_failure({rows_routed_failure}) "
-            f"+ rows_quarantined({rows_quarantined}) = {sum_terminal}. "
+            f"= {sum_terminal}. "
             f"Tier 1 anomaly: orchestrator emitted more terminal-state counts than input rows. "
             f"See elspeth-cf84eb1b52 for the full DAG-aware balance equation."
+        )
+
+
+def _validate_response_counter_subsets(
+    *,
+    rows_succeeded: int,
+    rows_failed: int,
+    rows_routed_success: int,
+    rows_routed_failure: int,
+    rows_quarantined: int,
+) -> None:
+    """ADR-019: response structural counters are subsets of base counters."""
+    if rows_routed_success > rows_succeeded:
+        raise ValueError(
+            f"rows_routed_success must be a subset of rows_succeeded "
+            f"(got rows_routed_success={rows_routed_success}, rows_succeeded={rows_succeeded})"
+        )
+    if rows_routed_failure > rows_failed:
+        raise ValueError(
+            f"rows_routed_failure must be a subset of rows_failed "
+            f"(got rows_routed_failure={rows_routed_failure}, rows_failed={rows_failed})"
+        )
+    if rows_quarantined > rows_failed:
+        raise ValueError(
+            f"rows_quarantined must be a subset of rows_failed (got rows_quarantined={rows_quarantined}, rows_failed={rows_failed})"
         )
 
 
@@ -187,7 +209,7 @@ def _require_terminal_run_fields(
     # have one — the engine can take the failed path on exceptions before
     # the Landscape audit row is created, and cancelled runs are signal-
     # bounded with similar timing.
-    if status in {"completed", "completed_with_failures", "empty"} and not landscape_run_id:
+    if status in OPERATOR_COMPLETION_RUN_STATUS_VALUES and not landscape_run_id:
         raise ValueError(f"status={status!r} requires landscape_run_id")
     if status == "failed" and not error:
         raise ValueError("status='failed' requires error")
@@ -202,12 +224,10 @@ def _check_status_row_count_invariant(
     rows_routed_failure: int,
     rows_quarantined: int,
 ) -> None:
-    """elspeth-5069612f3c — Pydantic mirror of the L0 biconditional after the
-    rows_routed split.
+    """Pydantic mirror of the ADR-019 L0 status predicate.
 
-    success_indicator = rows_succeeded > 0 OR rows_routed_success > 0
-    failure_indicator = rows_failed > 0 OR rows_quarantined > 0
-                        OR rows_routed_failure > 0
+    success_indicator = rows_succeeded > 0
+    failure_indicator = rows_failed > 0
 
     The Pydantic mirror does NOT see rows_coalesce_failed (the API schema
     does not surface it) — see the original docstring for the rationale;
@@ -217,8 +237,8 @@ def _check_status_row_count_invariant(
     Non-terminal (running / pending) and signal-bounded (cancelled) statuses
     bypass the predicate.
     """
-    success_indicator = rows_succeeded > 0 or rows_routed_success > 0
-    failure_indicator = rows_failed > 0 or rows_quarantined > 0 or rows_routed_failure > 0
+    success_indicator = rows_succeeded > 0
+    failure_indicator = rows_failed > 0
 
     if status in {"running", "pending", "cancelled"}:
         return
@@ -227,37 +247,27 @@ def _check_status_row_count_invariant(
         if not success_indicator:
             raise ValueError(
                 f"status='completed' requires a success indicator "
-                f"(rows_succeeded > 0 or rows_routed_success > 0); "
-                f"got rows_succeeded={rows_succeeded}, "
-                f"rows_routed_success={rows_routed_success} "
+                f"(rows_succeeded > 0); "
+                f"got rows_succeeded={rows_succeeded} "
                 f"(use status='empty' for ingested-zero-rows runs, "
                 f"'failed' when rows were processed but none reached a success path)"
             )
         if failure_indicator:
-            raise ValueError(
-                f"status='completed' requires no failures "
-                f"(rows_failed={rows_failed}, "
-                f"rows_quarantined={rows_quarantined}, "
-                f"rows_routed_failure={rows_routed_failure}); "
-                f"use status='completed_with_failures'"
-            )
+            raise ValueError(f"status='completed' requires no failures (rows_failed={rows_failed}); use status='completed_with_failures'")
         return
 
     if status == "completed_with_failures":
         if not success_indicator:
             raise ValueError(
                 f"status='completed_with_failures' requires a success indicator "
-                f"(rows_succeeded > 0 or rows_routed_success > 0); "
-                f"got rows_succeeded={rows_succeeded}, "
-                f"rows_routed_success={rows_routed_success} "
+                f"(rows_succeeded > 0); "
+                f"got rows_succeeded={rows_succeeded} "
                 f"(use status='failed' when no row reached a success path)"
             )
         if not failure_indicator:
             raise ValueError(
                 f"status='completed_with_failures' requires at least one failure indicator "
-                f"(rows_failed > 0 or rows_quarantined > 0 or rows_routed_failure > 0); "
-                f"got rows_failed={rows_failed}, rows_quarantined={rows_quarantined}, "
-                f"rows_routed_failure={rows_routed_failure} "
+                f"(rows_failed > 0); got rows_failed={rows_failed} "
                 f"(use status='completed' for clean runs)"
             )
         return
@@ -269,15 +279,10 @@ def _check_status_row_count_invariant(
         if rows_processed != 0:
             raise ValueError(f"status='empty' requires rows_processed == 0, got {rows_processed}")
         if success_indicator:
-            raise ValueError(
-                f"status='empty' requires no success indicator (rows_succeeded={rows_succeeded}, rows_routed_success={rows_routed_success})"
-            )
+            raise ValueError(f"status='empty' requires no success indicator (rows_succeeded={rows_succeeded})")
         if failure_indicator:
             raise ValueError(
-                f"status='empty' requires no failures "
-                f"(rows_failed={rows_failed}, "
-                f"rows_quarantined={rows_quarantined}, "
-                f"rows_routed_failure={rows_routed_failure}); "
+                f"status='empty' requires no failures (rows_failed={rows_failed}); "
                 f"use status='failed' when the run encountered failures with no successful rows"
             )
         return
@@ -309,9 +314,13 @@ class CompletedData(_StrictResponse):
             self.rows_processed,
             self.rows_succeeded,
             self.rows_failed,
-            self.rows_routed_success,
-            self.rows_routed_failure,
-            self.rows_quarantined,
+        )
+        _validate_response_counter_subsets(
+            rows_succeeded=self.rows_succeeded,
+            rows_failed=self.rows_failed,
+            rows_routed_success=self.rows_routed_success,
+            rows_routed_failure=self.rows_routed_failure,
+            rows_quarantined=self.rows_quarantined,
         )
         return self
 
@@ -622,9 +631,13 @@ class RunStatusResponse(_StrictResponse):
                 self.rows_processed,
                 self.rows_succeeded,
                 self.rows_failed,
-                self.rows_routed_success,
-                self.rows_routed_failure,
-                self.rows_quarantined,
+            )
+            _validate_response_counter_subsets(
+                rows_succeeded=self.rows_succeeded,
+                rows_failed=self.rows_failed,
+                rows_routed_success=self.rows_routed_success,
+                rows_routed_failure=self.rows_routed_failure,
+                rows_quarantined=self.rows_quarantined,
             )
             _require_terminal_run_fields(
                 self.status,
@@ -666,9 +679,13 @@ class RunResultsResponse(_StrictResponse):
             self.rows_processed,
             self.rows_succeeded,
             self.rows_failed,
-            self.rows_routed_success,
-            self.rows_routed_failure,
-            self.rows_quarantined,
+        )
+        _validate_response_counter_subsets(
+            rows_succeeded=self.rows_succeeded,
+            rows_failed=self.rows_failed,
+            rows_routed_success=self.rows_routed_success,
+            rows_routed_failure=self.rows_routed_failure,
+            rows_quarantined=self.rows_quarantined,
         )
         _require_terminal_run_fields(
             self.status,

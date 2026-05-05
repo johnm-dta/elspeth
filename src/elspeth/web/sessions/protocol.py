@@ -30,10 +30,12 @@ ChatMessageRole = Literal["user", "assistant", "system", "tool"]
 # RunRecord.__post_init__.
 SessionRunStatus = Literal["pending", "running", "completed", "completed_with_failures", "failed", "empty", "cancelled"]
 TerminalSessionRunStatus = Literal["completed", "completed_with_failures", "failed", "empty", "cancelled"]
+OperatorCompletionSessionRunStatus = Literal["completed", "completed_with_failures", "empty"]
 
 CHAT_MESSAGE_ROLE_VALUES: frozenset[str] = frozenset(get_args(ChatMessageRole))
 SESSION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(SessionRunStatus))
 SESSION_TERMINAL_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(TerminalSessionRunStatus))
+OPERATOR_COMPLETION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(OperatorCompletionSessionRunStatus))
 
 # Legal run status transitions. Implementations MUST reject any
 # transition not in this table.

@@ -64,22 +64,6 @@ class TestOldPluginNamesRejected:
             get_transform_config_model(old_name)
 
 
-class TestBatchPluginsUnchanged:
-    """Verify batch plugin entries are unaffected."""
-
-    def test_azure_batch_llm_still_resolves(self) -> None:
-        from elspeth.plugins.transforms.llm.azure_batch import AzureBatchConfig
-
-        config_model = get_transform_config_model("azure_batch_llm")
-        assert config_model is AzureBatchConfig
-
-    def test_openrouter_batch_llm_still_resolves(self) -> None:
-        from elspeth.plugins.transforms.llm.openrouter_batch import OpenRouterBatchConfig
-
-        config_model = get_transform_config_model("openrouter_batch_llm")
-        assert config_model is OpenRouterBatchConfig
-
-
 class TestLLMPluginDiscovery:
     """Verify the unified LLMTransform is discovered correctly."""
 

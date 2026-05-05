@@ -150,6 +150,18 @@ cython_debug/
 test-results.txt
 instantiation-*.txt
 
+# Playwright (frontend E2E)
+# Generated artefacts from src/elspeth/web/frontend Playwright runs.
+# - test-results/      per-test traces, videos, screenshots on failure
+# - playwright-report/ HTML reporter output
+# - .e2e-data/         disposable backend ELSPETH_DATA_DIR (SQLite, blob store)
+# - tests/e2e/.auth/   saved storageState (logged-in cookies, JWT) — never commit
+src/elspeth/web/frontend/test-results/
+src/elspeth/web/frontend/playwright-report/
+src/elspeth/web/frontend/.e2e-data/
+src/elspeth/web/frontend/tests/e2e/.auth/
+src/elspeth/web/frontend/playwright/.cache/
+
 # Secrets - NEVER commit these
 .env.local
 .env.*.local

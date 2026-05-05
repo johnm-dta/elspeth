@@ -22,7 +22,6 @@ from elspeth.contracts.freeze import deep_freeze
 if TYPE_CHECKING:
     from elspeth.contracts import Call, CallStatus, CallType, TransformErrorReason
     from elspeth.contracts.audit_protocols import PluginAuditWriter
-    from elspeth.contracts.batch_checkpoint import BatchCheckpointState
     from elspeth.contracts.config.runtime import RuntimeConcurrencyConfig
     from elspeth.contracts.errors import ContractViolation
     from elspeth.contracts.identity import TokenInfo
@@ -126,19 +125,6 @@ class PluginContext:
     # Plugins ALWAYS call this after successful Landscape recording - no None checks.
     telemetry_emit: Callable[[Any], None] = field(default=lambda event: None)
 
-    # === Checkpoint API ===
-    # Used by batch transforms (e.g., azure_batch_llm) for crash recovery.
-    # The checkpoint stores batch_id, row_mapping, etc. as a typed
-    # BatchCheckpointState (frozen dataclass) between invocations.
-    #
-    # Checkpoints are keyed by node_id to support multiple batch transforms.
-    # The orchestrator restores these from the BatchPendingError.checkpoint
-    # when scheduling retries.
-    _checkpoint: BatchCheckpointState | None = field(default=None)
-
-    # Batch checkpoints restored from previous BatchPendingError
-    # Maps node_id -> typed checkpoint state for each batch transform
-    _batch_checkpoints: dict[str, BatchCheckpointState] = field(default_factory=dict)
     # Validation errors that must later be linked to a persisted quarantine row.
     # Entries are (match_key, error_id), where match_key hashes the raw row payload
     # before orchestrator normalization/wrapping.
@@ -169,54 +155,6 @@ class PluginContext:
                 del self._pending_quarantine_validation_errors[index]
                 return error_id
         return None
-
-    def get_checkpoint(self) -> BatchCheckpointState | None:
-        """Get checkpoint state for batch transforms.
-
-        Used by batch transforms to recover state after crashes.
-        Returns None if no checkpoint exists.
-
-        First checks for a restored batch checkpoint (from a previous
-        BatchPendingError), then falls back to the local checkpoint.
-
-        Returns:
-            BatchCheckpointState with batch state, or None if empty
-        """
-        # First check for restored batch checkpoint (keyed by node_id)
-        if self.node_id and self.node_id in self._batch_checkpoints:
-            return self._batch_checkpoints[self.node_id]
-
-        # Fall back to local checkpoint
-        return self._checkpoint
-
-    def set_checkpoint(self, state: BatchCheckpointState) -> None:
-        """Set checkpoint state for batch transforms.
-
-        Replaces the checkpoint with the provided typed state.
-        Writes to the restored batch checkpoint slot (if present for
-        this node), or the local checkpoint otherwise.
-
-        Args:
-            state: Typed checkpoint state (BatchCheckpointState)
-        """
-        if self.node_id and self.node_id in self._batch_checkpoints:
-            self._batch_checkpoints[self.node_id] = state
-        else:
-            self._checkpoint = state
-
-    def clear_checkpoint(self) -> None:
-        """Clear checkpoint state after batch completion.
-
-        Called when batch processing completes successfully
-        or when starting fresh after a failure.
-
-        Clears both the local checkpoint and any restored batch checkpoint
-        for the current node to prevent stale data on subsequent batches.
-        """
-        self._checkpoint = None
-        # Also clear restored batch checkpoint to prevent stale resume data
-        if self.node_id and self.node_id in self._batch_checkpoints:
-            del self._batch_checkpoints[self.node_id]
 
     def record_call(
         self,

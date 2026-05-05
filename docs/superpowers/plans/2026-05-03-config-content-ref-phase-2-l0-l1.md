@@ -15,10 +15,10 @@
 - [ ] **Step 1: Confirm P1 has merged**
 
 ```bash
-git log --oneline --all | grep "ADR-020"
+git log --oneline --all | grep "ADR-021"
 ```
 
-Expected: at least one commit landing `docs/architecture/adr/019-config-content-ref.md`.
+Expected: at least one commit landing `docs/architecture/adr/021-config-content-ref.md`.
 
 - [ ] **Step 2: Confirm L0/L1 module paths are free**
 
@@ -419,7 +419,7 @@ ContentEncoding = Literal["utf-8", "utf-8-sig", "utf-16", "latin-1"]
 Strict UTF-8 is the default (spec §4 M2 reconciliation); the explicit
 encoding field exists as an escape hatch for content that legitimately
 isn't UTF-8 (e.g. legacy regex libraries authored in latin-1). Adding
-a member requires an ADR-020 amendment per the no-new-ref-forms rule.
+a member requires an ADR-021 amendment per the no-new-ref-forms rule.
 """
 
 ALLOWED_CONTENT_ENCODINGS: frozenset[str] = frozenset(get_args(ContentEncoding))
@@ -454,7 +454,7 @@ def _validate_field_path(owner: str, field_path: str) -> None:
     if not _FIELD_PATH_PATTERN.fullmatch(field_path):
         raise ValueError(
             f"{owner}: field_path {field_path!r} does not match canonical format "
-            f"(source|node:<id>|output:<name>).options.<key>[.<sub>...] — see ADR-020 §6"
+            f"(source|node:<id>|output:<name>).options.<key>[.<sub>...] — see ADR-021 §6"
         )
 
 
@@ -979,7 +979,7 @@ def _walk_options(
 def _malformed_reason(obj: Mapping[str, Any]) -> str:
     """Best-effort diagnostic reason for a marker that failed recognition."""
     if "mode" not in obj:
-        return "missing mode key (required per ADR-020 §6)"
+        return "missing mode key (required per ADR-021 §6)"
     mode = obj.get("mode")
     if mode not in ("bind_source", "inline_content"):
         return f"unknown mode {mode!r}"
@@ -1501,8 +1501,8 @@ async def _validate_blob_content_refs(
     config: dict[str, Any],
     *,
     user_id: str,
-    per_ref_byte_cap: int | None = None,  # if None, uses ADR-020 cap
-    aggregate_byte_cap: int | None = None,  # if None, uses ADR-020 cap
+    per_ref_byte_cap: int | None = None,  # if None, uses ADR-021 cap
+    aggregate_byte_cap: int | None = None,  # if None, uses ADR-021 cap
 ) -> list[BlobInlineValidationViolation]:
     """Validate-path helper per spec §6.4.
 

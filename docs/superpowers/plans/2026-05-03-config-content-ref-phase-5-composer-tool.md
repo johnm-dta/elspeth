@@ -641,7 +641,7 @@ merged_options = {
     **mime_extra,
     "path": blob["storage_path"],
     "blob_ref": blob["id"],
-    "mode": "bind_source",  # NEW — explicit mode per ADR-020 closure rule
+    "mode": "bind_source",  # NEW — explicit mode per ADR-021 closure rule
 }
 ```
 

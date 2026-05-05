@@ -233,7 +233,7 @@ In `src/elspeth/web/execution/validation.py::validate_pipeline`, locate the secr
 ```python
 # After the existing secret-ref block, before YAML generation:
 
-# Step 1c: Inline-content blob validation per spec §6.4 / ADR-020
+# Step 1c: Inline-content blob validation per spec §6.4 / ADR-021
 #
 # IMPORTANT — async/sync boundary:
 #
@@ -368,7 +368,7 @@ ADR_019_PER_REF_CAP: int  # populated from the spec/ADR — one-line module cons
 ADR_019_AGGREGATE_CAP: int
 ```
 
-The actual numeric values land via P1's ADR. Until P1 is merged, leave them as `# noqa: pending ADR-020` and the test uses smaller caps via direct kwarg override.
+The actual numeric values land via P1's ADR. Until P1 is merged, leave them as `# noqa: pending ADR-021` and the test uses smaller caps via direct kwarg override.
 
 - [ ] **Step 5: Run tests**
 

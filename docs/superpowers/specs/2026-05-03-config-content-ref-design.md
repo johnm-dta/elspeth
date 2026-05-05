@@ -629,7 +629,7 @@ Each fix-site PR carries the revert-and-observe documentation in its test docstr
 
 | Phase | File | What it delivers | Risk profile |
 |---|---|---|---|
-| P1 | `2026-05-03-config-content-ref-phase-1-adr.md` | ADR-020 with VAL-data-grounded numeric caps; closure rule "no new ref forms without ADR amendment"; H4 LLM visibility model; M2 encoding decision; `direction='input'` reuse rationale | Markdown only |
+| P1 | `2026-05-03-config-content-ref-phase-1-adr.md` | ADR-021 with VAL-data-grounded numeric caps; closure rule "no new ref forms without ADR amendment"; H4 LLM visibility model; M2 encoding decision; `direction='input'` reuse rationale | Markdown only |
 | P2 | `2026-05-03-config-content-ref-phase-2-l0-l1.md` | `contracts/blobs_inline.py` (L0): `WidenedBlobRefShape`, `ResolvedBlobContent`, `BlobInlineRef`, `BlobContentResolutionError`, `ContentEncoding`, `is_widened_blob_ref`; relocate `AllowedMimeType` from `web/blobs/protocol.py` to L0; `core/blobs_inline.py` (L1): three-function resolver split + tree-walk parity tests | No behavior change; unit tests only |
 | P2b | `2026-05-03-config-content-ref-phase-2b-state-adapter.md` | Extract `generate_pipeline_dict(state) -> dict` from `yaml_generator.generate_yaml` (`generate_yaml` becomes a one-line `yaml.dump` wrapper); round-trip identity property test (`yaml.safe_load(generate_yaml(state)) == generate_pipeline_dict(state)` AND `state == state_from_record(record_for(state))`); explicit YAML-shape snapshot pin; migrate `delete_blob`'s pre-link active-run guard at `web/blobs/service.py:467-513` to consume the adapter (`generate_pipeline_dict(state_from_record(record))`) instead of `composition_states.source` directly; bug-verification at the migration site (manual revert leaves the four existing `active_run` pinning tests passing — proof of shape-preserving migration); closes architectural gap `elspeth-be405bac87` | Shape-preserving refactor; unit tests only |
 | P3 | `2026-05-03-config-content-ref-phase-3-runtime-preflight.md` | Direction-reuse verification gate; `blob_inline_resolutions` table + `record_blob_inline_resolutions` service method; resolver wired into `_run_pipeline` after `resolve_secret_refs`; lifecycle pinning extended to walk the full config tree at submit time (walker consumes `generate_pipeline_dict(state_from_record(record))` from P2b); audit-write primacy; Tier-1 escape paths verified; bug-verification at runtime-resolver-wiring + audit-write-primacy fix sites | Fail-closed; nothing emits inline_content refs yet |
@@ -657,7 +657,7 @@ The whole work closes when:
 3. Shape 9 (sub-pins A, B, C) passes in `tests/integration/pipeline/test_composer_runtime_agreement.py`.
 4. The lifecycle-pinning round-trip integration test passes (a referenced blob cannot be GC'd while the run is pending/running).
 5. The hash-determinism property test passes (audit-row hash equals re-derived hash).
-6. ADR-020 is committed, with VAL-data citations for every numeric cap in §1.4.
+6. ADR-021 is committed, with VAL-data citations for every numeric cap in §1.4.
 7. The OTel counter post-conditions hold across the property-test campaign (`composer.blob_inline.hash_mismatch_total == 0`, `composer.blob_inline.audit_row_tier1_violation_total == 0`).
 8. P2b PR is merged, retiring `elspeth-be405bac87` (canonical `composition_state` adapter shipped as `generate_pipeline_dict`).
 

@@ -544,6 +544,38 @@ class RunDiagnosticArtifact(_StrictResponse):
     created_at: datetime
 
 
+class RunOutputArtifact(_StrictResponse):
+    """One sink-write artefact in the run's full outputs manifest.
+
+    Distinct from ``RunDiagnosticArtifact`` (UI preview, capped at 20):
+    this is the audit-evidence retrieval shape — full per-run list, with
+    ``content_hash`` and ``exists_now`` fields suited to backfill /
+    re-fetch flows. Returned by ``/api/runs/{rid}/outputs``.
+    """
+
+    artifact_id: str
+    sink_node_id: str
+    artifact_type: str
+    path_or_uri: str
+    content_hash: str
+    size_bytes: int = Field(ge=0)
+    created_at: datetime
+    exists_now: bool
+
+
+class RunOutputsResponse(_StrictResponse):
+    """REST response for ``GET /api/runs/{rid}/outputs`` — full audit-evidence
+    manifest of every sink-write artefact this run produced.
+
+    Unlike the diagnostics ``artifacts`` field (capped for operator-UI
+    pacing), this list is unbounded — sized to the actual write count.
+    """
+
+    run_id: str
+    landscape_run_id: str
+    artifacts: list[RunOutputArtifact]
+
+
 class RunDiagnosticSummary(_StrictResponse):
     """Aggregate counts for a run diagnostics snapshot."""
 

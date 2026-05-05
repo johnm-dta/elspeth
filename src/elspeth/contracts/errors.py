@@ -1566,3 +1566,71 @@ class DuplicateDocumentError(Exception):
         self.collection = collection
         self.duplicate_ids = tuple(duplicate_ids)
         super().__init__(f"Duplicate document IDs in collection {collection!r}: {list(self.duplicate_ids)}")
+
+
+# Capacity error classification for pooled API transforms.
+#
+# Capacity errors are transient overload conditions that should be retried
+# with AIMD throttling. They are distinct from "normal" errors (auth failures,
+# malformed requests) which use standard retry limits.
+#
+# HTTP Status Codes:
+# - 429: Too Many Requests (universal)
+# - 503: Service Unavailable (universal)
+# - 529: Overloaded (Azure, some other providers)
+#
+# Lives in contracts/ (L0) so engine retry classification can import it without
+# crossing the L2→L3 layer boundary; pooled transforms in plugins/ raise it.
+
+CAPACITY_ERROR_CODES: frozenset[int] = frozenset({429, 503, 529})
+
+
+def is_capacity_error(status_code: int) -> bool:
+    """Check if HTTP status code indicates a capacity error.
+
+    Capacity errors are transient overload conditions that should trigger
+    AIMD throttle backoff and be retried with increasing delays.
+    """
+    return status_code in CAPACITY_ERROR_CODES
+
+
+# TIER-2: pooled-API capacity/rate-limit signal — transient overload, retried until budget exhausted.
+class CapacityError(Exception):
+    """Exception for capacity/rate limit errors.
+
+    Raised when an API call fails due to capacity limits.
+    These errors trigger AIMD throttle and are retried until
+    max_capacity_retry_seconds is exceeded.
+
+    Attributes:
+        status_code: HTTP status code that triggered this error
+        retryable: Always True for capacity errors
+    """
+
+    def __init__(self, status_code: int, message: str) -> None:
+        if not (100 <= status_code <= 599):
+            raise ValueError(f"CapacityError.status_code must be a valid HTTP status (100-599), got {status_code}")
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = True
+
+
+# TIER-2: telemetry-subsystem configuration/initialization failure.
+# Lives in contracts/ so the engine can reference it without crossing the
+# L2→L3 layer boundary; the telemetry package re-exports it for its
+# internal subsystem consumers.
+class TelemetryExporterError(Exception):
+    """Raised when an exporter encounters a configuration or initialization error.
+
+    This is raised during exporter setup (configure/initialization), NOT during
+    export operations. Export operations must not raise — they log errors instead.
+
+    Attributes:
+        exporter_name: Name of the exporter that failed
+        message: Human-readable error description
+    """
+
+    def __init__(self, exporter_name: str, message: str) -> None:
+        self.exporter_name = exporter_name
+        self.message = message
+        super().__init__(f"Exporter '{exporter_name}' failed: {message}")

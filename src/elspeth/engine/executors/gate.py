@@ -353,9 +353,10 @@ class GateExecutor:
         typed_node_id = NodeID(node_id)
         if len(action.destinations) == 1:
             dest = action.destinations[0]
-            edge_id = self._edge_map.get((typed_node_id, dest))
-            if edge_id is None:
-                raise MissingEdgeError(node_id=typed_node_id, label=dest)
+            try:
+                edge_id = self._edge_map[(typed_node_id, dest)]
+            except KeyError as exc:
+                raise MissingEdgeError(node_id=typed_node_id, label=dest) from exc
 
             self._execution.record_routing_event(
                 state_id=state_id,
@@ -367,9 +368,10 @@ class GateExecutor:
             # Multiple destinations (fork)
             routes = []
             for dest in action.destinations:
-                edge_id = self._edge_map.get((typed_node_id, dest))
-                if edge_id is None:
-                    raise MissingEdgeError(node_id=typed_node_id, label=dest)
+                try:
+                    edge_id = self._edge_map[(typed_node_id, dest)]
+                except KeyError as exc:
+                    raise MissingEdgeError(node_id=typed_node_id, label=dest) from exc
                 routes.append(RoutingSpec(edge_id=edge_id, mode=action.mode))
 
             self._execution.record_routing_events(

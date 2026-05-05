@@ -211,17 +211,17 @@ allow_hits:
   reason: setdefault for lazy initialization
   safety: Code reviewed - legitimate pattern
   expires: '2026-07-02'
-- key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_batch_locked:fp=4c7380952efbd74a
+- key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_batch_locked:fp=4b8cc1b6067415ff
   owner: bugfix
   reason: Thread pool may be shut down concurrently during submit(); RuntimeError is translated into deterministic per-row shutdown results so submission-order slots are still completed
   safety: Catch scope is RuntimeError-only; reserved buffer slots are completed with explicit shutdown_requested errors while unrelated exception types still propagate
   expires: '2026-05-17'
-- key: plugins/infrastructure/pooling/executor.py:R5:PooledExecutor:_build_retry_timeout_result:fp=01bb7c2c355b4459
+- key: plugins/infrastructure/pooling/executor.py:R5:PooledExecutor:_build_retry_timeout_result:fp=5ce04fa54ab80b94
   owner: bugfix
   reason: Nominal discriminated-union dispatch — retryable_error is PluginRetryableError | CapacityError and only CapacityError carries a status_code. isinstance narrows the union so the status_code field is only populated when it exists, rather than probing with getattr.
   safety: Non-CapacityError branch omits status_code entirely (explicit None semantics); no silent coercion or fabrication
   expires: null
-- key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_single:fp=0fa942b6de024d61
+- key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_single:fp=71e586ef9fbea49d
   owner: bugfix
   reason: CapacityError is one arm of the retryable-error control flow — caught so the worker can release the semaphore, throttle, and retry within the capacity-retry budget. This is explicit retry orchestration, not silent swallowing.
   safety: CapacityError is assigned to retryable_error and drives the retry loop; if the retry budget expires it is raised as a retry_timeout TransformResult via _build_retry_timeout_result, and if interrupted it surfaces via _build_interrupted_result. No path silently drops the error.

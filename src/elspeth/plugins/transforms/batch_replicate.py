@@ -18,11 +18,11 @@ from pydantic import Field, model_validator
 
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import PluginContractViolation, TransformSuccessReason
+from elspeth.contracts.field_collision import detect_field_collisions
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import PluginConfigError, TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
-from elspeth.plugins.transforms.field_collision import detect_field_collisions
 
 
 class BatchReplicateConfig(TransformDataConfig):
@@ -95,7 +95,7 @@ class BatchReplicate(BaseTransform):
 
     name = "batch_replicate"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:9f9762854c289fdd"
+    source_file_hash: str | None = "sha256:fb88a2970208439a"
     config_model = BatchReplicateConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
 

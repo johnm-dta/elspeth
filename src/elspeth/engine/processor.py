@@ -24,6 +24,7 @@ from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.freeze import deep_freeze
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID, SinkName, StepResolver
+from elspeth.engine._best_effort import best_effort
 from elspeth.engine.dag_navigator import DAGNavigator, WorkItem
 
 if TYPE_CHECKING:
@@ -57,6 +58,7 @@ from elspeth.contracts.enums import (
 )
 from elspeth.contracts.errors import (
     AuditIntegrityError,
+    CapacityError,
     ExecutionError,
     FrameworkBugError,
     MaxRetriesExceeded,
@@ -84,7 +86,6 @@ from elspeth.engine.executors.declaration_dispatch import run_batch_flush_checks
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenManager
-from elspeth.plugins.infrastructure.pooling import CapacityError
 
 # Iteration guard to prevent infinite loops from bugs.
 # This counts dequeued work items, so it must exceed the largest supported
@@ -705,22 +706,17 @@ class RowProcessor:
                     f"Recorder failure: {type(record_failure).__name__}: {record_failure}. "
                     f"Original flush error: {fctx.error_msg}"
                 ) from record_failure
-            try:
+            with best_effort(
+                "TokenCompleted telemetry after batch-flush FAILED audit",
+                run_id=self._run_id,
+                token_id=token.token_id,
+                transform_node_id=fctx.node_id,
+                transform_name=fctx.transform.name,
+            ):
                 self._emit_token_completed(
                     token,
                     outcome=TerminalOutcome.FAILURE,
                     path=TerminalPath.UNROUTED,
-                )
-            except Exception as telemetry_failure:
-                logger.exception(
-                    "TokenCompleted telemetry failed after batch-flush FAILED audit completion; preserving batch failure outcomes",
-                    extra={
-                        "run_id": self._run_id,
-                        "token_id": token.token_id,
-                        "transform_node_id": fctx.node_id,
-                        "transform_name": fctx.transform.name,
-                        "telemetry_error_type": type(telemetry_failure).__name__,
-                    },
                 )
             results.append(
                 RowResult(
@@ -948,22 +944,17 @@ class RowProcessor:
                     f"Recorder failure: {type(record_failure).__name__}: {record_failure}. "
                     f"Original violation: {violation!s}"
                 ) from record_failure
-            try:
+            with best_effort(
+                "TokenCompleted telemetry after batch-flush violation audit",
+                run_id=self._run_id,
+                token_id=token.token_id,
+                transform_node_id=fctx.node_id,
+                transform_name=fctx.transform.name,
+            ):
                 self._emit_token_completed(
                     token,
                     outcome=TerminalOutcome.FAILURE,
                     path=TerminalPath.UNROUTED,
-                )
-            except Exception as telemetry_failure:
-                logger.exception(
-                    "TokenCompleted telemetry failed after batch-flush audit completion; preserving original batch-flush violation",
-                    extra={
-                        "run_id": self._run_id,
-                        "token_id": token.token_id,
-                        "transform_node_id": fctx.node_id,
-                        "transform_name": fctx.transform.name,
-                        "telemetry_error_type": type(telemetry_failure).__name__,
-                    },
                 )
 
     def _record_dropped_by_filter_outcome(
@@ -1009,22 +1000,17 @@ class RowProcessor:
                 node_id=fctx.node_id,
                 path_label="during empty batch flush",
             )
-            try:
+            with best_effort(
+                "TokenCompleted telemetry after empty batch-flush audit",
+                run_id=self._run_id,
+                token_id=token.token_id,
+                transform_node_id=fctx.node_id,
+                transform_name=fctx.transform.name,
+            ):
                 self._emit_token_completed(
                     token,
                     outcome=TerminalOutcome.SUCCESS,
                     path=TerminalPath.FILTER_DROPPED,
-                )
-            except Exception as telemetry_failure:
-                logger.exception(
-                    "TokenCompleted telemetry failed after empty batch-flush audit completion; preserving dropped outcomes",
-                    extra={
-                        "run_id": self._run_id,
-                        "token_id": token.token_id,
-                        "transform_node_id": fctx.node_id,
-                        "transform_name": fctx.transform.name,
-                        "telemetry_error_type": type(telemetry_failure).__name__,
-                    },
                 )
             results.append(
                 RowResult(
@@ -1706,21 +1692,16 @@ class RowProcessor:
                 f"the FAILED source node state may be missing. Recorder failure: "
                 f"{type(record_failure).__name__}: {record_failure}. Original {original_label}: {failure!s}"
             ) from record_failure
-        try:
+        with best_effort(
+            "TokenCompleted telemetry after source-boundary FAILED audit",
+            run_id=self._run_id,
+            token_id=token.token_id,
+            source_node_id=self._source_node_id,
+        ):
             self._emit_token_completed(
                 token,
                 outcome=TerminalOutcome.FAILURE,
                 path=TerminalPath.UNROUTED,
-            )
-        except Exception as telemetry_failure:
-            logger.exception(
-                "TokenCompleted telemetry failed after source-boundary audit completion; preserving original source-boundary failure",
-                extra={
-                    "run_id": self._run_id,
-                    "token_id": token.token_id,
-                    "source_node_id": self._source_node_id,
-                    "telemetry_error_type": type(telemetry_failure).__name__,
-                },
             )
 
     def _record_source_and_start_traversal(

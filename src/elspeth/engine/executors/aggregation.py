@@ -15,6 +15,7 @@ from elspeth.contracts import (
     PipelineRow,
     SchemaContract,
     TokenInfo,
+    TransformResult,
 )
 from elspeth.contracts.aggregation_checkpoint import (
     AggregationCheckpointState,
@@ -43,7 +44,6 @@ from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.executors.state_guard import NodeStateGuard
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.triggers import TriggerEvaluator
-from elspeth.plugins.infrastructure.results import TransformResult
 
 if TYPE_CHECKING:
     from elspeth.engine.clock import Clock

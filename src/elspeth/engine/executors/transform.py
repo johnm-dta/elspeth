@@ -11,6 +11,7 @@ from elspeth.contracts import (
     ExecutionError,
     TokenInfo,
     TransformProtocol,
+    TransformResult,
 )
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.declaration_contracts import (
@@ -48,7 +49,6 @@ from elspeth.engine.executors.declaration_dispatch import (
 from elspeth.engine.executors.state_guard import NodeStateGuard
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.infrastructure.batching.mixin import BatchTransformMixin
-from elspeth.plugins.infrastructure.results import TransformResult
 
 if TYPE_CHECKING:
     from elspeth.engine.batch_adapter import SharedBatchAdapter
@@ -289,7 +289,7 @@ class TransformExecutor:
             # This prevents wasted API calls AND makes collision detection mandatory
             # (not opt-in per plugin).
             if transform.declared_output_fields:
-                from elspeth.plugins.transforms.field_collision import detect_field_collisions
+                from elspeth.contracts.field_collision import detect_field_collisions
 
                 collisions = detect_field_collisions(
                     set(input_dict.keys()),

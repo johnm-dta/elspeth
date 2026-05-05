@@ -29,43 +29,43 @@ class TestValidationErrorPostInit:
 
 class TestCapacityErrorInit:
     def test_rejects_invalid_status_code(self) -> None:
-        from elspeth.plugins.infrastructure.pooling.errors import CapacityError
+        from elspeth.contracts.errors import CapacityError
 
         with pytest.raises(ValueError, match="valid HTTP status"):
             CapacityError(status_code=0, message="bad")
 
     def test_rejects_negative_status_code(self) -> None:
-        from elspeth.plugins.infrastructure.pooling.errors import CapacityError
+        from elspeth.contracts.errors import CapacityError
 
         with pytest.raises(ValueError, match="valid HTTP status"):
             CapacityError(status_code=-1, message="bad")
 
     def test_rejects_above_599(self) -> None:
-        from elspeth.plugins.infrastructure.pooling.errors import CapacityError
+        from elspeth.contracts.errors import CapacityError
 
         with pytest.raises(ValueError, match="valid HTTP status"):
             CapacityError(status_code=600, message="bad")
 
     def test_accepts_429(self) -> None:
-        from elspeth.plugins.infrastructure.pooling.errors import CapacityError
+        from elspeth.contracts.errors import CapacityError
 
         e = CapacityError(status_code=429, message="rate limit")
         assert e.status_code == 429
 
     def test_accepts_boundary_100(self) -> None:
-        from elspeth.plugins.infrastructure.pooling.errors import CapacityError
+        from elspeth.contracts.errors import CapacityError
 
         e = CapacityError(status_code=100, message="continue")
         assert e.status_code == 100
 
     def test_accepts_boundary_599(self) -> None:
-        from elspeth.plugins.infrastructure.pooling.errors import CapacityError
+        from elspeth.contracts.errors import CapacityError
 
         e = CapacityError(status_code=599, message="network error")
         assert e.status_code == 599
 
     def test_rejects_boundary_99(self) -> None:
-        from elspeth.plugins.infrastructure.pooling.errors import CapacityError
+        from elspeth.contracts.errors import CapacityError
 
         with pytest.raises(ValueError, match="valid HTTP status"):
             CapacityError(status_code=99, message="bad")

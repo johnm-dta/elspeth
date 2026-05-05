@@ -2,7 +2,14 @@
 
 These exceptions are for telemetry subsystem errors only.
 They should NOT be raised for pipeline execution errors.
+
+``TelemetryExporterError`` lives in :mod:`elspeth.contracts.errors` (L0) so the
+engine layer can reference it without crossing the L2→L3 layer boundary. It is
+re-exported here for callers within the telemetry subsystem; the class object
+is identical, so ``isinstance``/``except`` identity is preserved.
 """
+
+from elspeth.contracts.errors import TelemetryExporterError
 
 # Exceptions that represent transport/IO failures — safe to swallow during telemetry export.
 # Everything else is a programming error that must crash.
@@ -14,18 +21,4 @@ TELEMETRY_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
-class TelemetryExporterError(Exception):
-    """Raised when an exporter encounters a configuration or initialization error.
-
-    This is raised during exporter setup (configure/initialization), NOT during
-    export operations. Export operations must not raise - they log errors instead.
-
-    Attributes:
-        exporter_name: Name of the exporter that failed
-        message: Human-readable error description
-    """
-
-    def __init__(self, exporter_name: str, message: str) -> None:
-        self.exporter_name = exporter_name
-        self.message = message
-        super().__init__(f"Exporter '{exporter_name}' failed: {message}")
+__all__ = ["TELEMETRY_TRANSPORT_ERRORS", "TelemetryExporterError"]

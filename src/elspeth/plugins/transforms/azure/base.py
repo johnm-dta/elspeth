@@ -25,12 +25,11 @@ from pydantic import Field, field_validator
 from elspeth.contracts import Determinism
 from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
-from elspeth.contracts.errors import FrameworkBugError, PluginRetryableError
+from elspeth.contracts.errors import CapacityError, FrameworkBugError, PluginRetryableError, is_capacity_error
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.batching import BatchTransformMixin, OutputPort
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
-from elspeth.plugins.infrastructure.pooling import CapacityError, is_capacity_error
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.transforms.azure.errors import MalformedResponseError

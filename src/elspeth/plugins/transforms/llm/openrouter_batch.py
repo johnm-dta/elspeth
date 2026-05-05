@@ -30,6 +30,7 @@ from pydantic import Field, field_validator
 from elspeth.contracts import CallStatus, CallType, Determinism, TransformResult, TransformSuccessReason
 from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
+from elspeth.contracts.errors import is_capacity_error
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -41,7 +42,6 @@ from elspeth.contracts.value_source import (
 )
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
-from elspeth.plugins.infrastructure.pooling import is_capacity_error
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.infrastructure.templates import TemplateError
 from elspeth.plugins.transforms.llm import (
@@ -206,7 +206,7 @@ class OpenRouterBatchLLMTransform(BaseTransform):
 
     name = "openrouter_batch_llm"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a614e6f15393a170"
+    source_file_hash: str | None = "sha256:0c357d45472d58bf"
     is_batch_aware = True  # Engine passes list[dict] for batch processing
     config_model = OpenRouterBatchConfig
 

@@ -1138,18 +1138,23 @@ class CoalesceExecutor:
         # Rebuild precomputed fields with original names from winning branches
         merged_fields: list[FieldContract] = []
         for fc in precomputed.fields:
-            # Use original_name from winning branch if field had collision,
-            # otherwise fall back to first-seen semantics
-            winning_branch = field_origins.get(fc.normalized_name)
-            if winning_branch is not None:
-                # Field had collision: use winning branch's original_name
-                original_name = branch_original_names.get(
-                    (fc.normalized_name, winning_branch),
-                    fc.normalized_name,  # Defensive fallback (shouldn't happen)
-                )
+            # _merge_data populates field_origins[name] for every contributed field
+            # under union semantics (not just collisions — it tracks the winning
+            # branch for every field). branch_original_names is built from the same
+            # branch contracts, so (normalized_name, winning_branch) MUST be present
+            # whenever the field is in field_origins. Direct indexing — a missing
+            # key would be an audit-load-bearing schema/contract integrity violation
+            # (precomputed and branch contracts diverged) and must crash, not coerce.
+            if fc.normalized_name in field_origins:
+                winning_branch = field_origins[fc.normalized_name]
+                original_name = branch_original_names[(fc.normalized_name, winning_branch)]
             else:
-                # No collision: use fallback (first-seen)
-                original_name = fallback_original_names.get(fc.normalized_name, fc.normalized_name)
+                # Precomputed-declared field not contributed by any branch
+                # (e.g., nullable field with no data this row). fallback_original_names
+                # is built from every branch contract's fields, so a precomputed field
+                # absent here means precomputed and branch contracts disagree on
+                # schema — crash on the integrity violation.
+                original_name = fallback_original_names[fc.normalized_name]
             merged_fields.append(
                 FieldContract(
                     normalized_name=fc.normalized_name,

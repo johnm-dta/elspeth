@@ -649,35 +649,35 @@ allow_hits:
   safety: Cleanup failure attached as RecoveryFailed[<type>] note on primary_exc with orphan blob_id and target session_id;
     storage file unlinked best-effort; primary copy exception remains the headline
   expires: null
-- key: web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=2695aa4a742eae91
+- key: web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=4ab3f7e9e6db955b
   owner: web-sessions
   reason: Type check for envelope format in composition state deserialization
   safety: Handles both raw and enveloped formats
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:save_composition_state:_sync:fp=698026777ed0a04c
+- key: web/sessions/service.py:R6:SessionServiceImpl:save_composition_state:_sync:fp=5492067170547ec7
   owner: web-sessions
   reason: IntegrityError on duplicate version is expected race condition
   safety: Upsert-or-skip
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:set_active_state:_sync:fp=e7ac75dd5f140dcc
+- key: web/sessions/service.py:R6:SessionServiceImpl:set_active_state:_sync:fp=083a91bb5f9558d5
   owner: web-sessions
   reason: IntegrityError on duplicate active state is expected race condition
   safety: Upsert-or-skip
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=bf04b9fc319a2611
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=9e6d620e8c66e0c9
   owner: web-sessions
   reason: Narrow OSError during staged blob-directory restore after archive rollback — compensation disk faults must not bury
     the primary archive failure
   safety: Restore failure is attached via add_note() to primary_exc and the original archive exception is re-raised unchanged
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=4eb8d408d680acc6
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=a993a0b8253a45c8
   owner: web-sessions
   reason: Narrow OSError around post-commit quarantine purge — once session rows are deleted, staged blob cleanup is best-effort
     only
   safety: Returns after leaving the staged directory in quarantine for manual cleanup; it does not fabricate a rollback or
     mask the already-completed archive
   expires: null
-- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=405e736aebf0bc7c
+- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=22760e1163ff05ab
   owner: web-sessions
   reason: Best-effort quarantine-root cleanup after staged blob purge — the parent directory may still contain other files
     or be recreated concurrently
@@ -1028,12 +1028,12 @@ allow_hits:
   safety: Cleanup failure attached as RecoveryFailed[<type>] note on primary_exc with orphan sessions.id; bare `raise` preserves
     primary_exc and its original traceback as the headline (regression-tested by test_fork_cleanup_failure_preserves_primary_exception_with_note)
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=17378531bc04d849
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=2d5441fcfe90acf5
   owner: web-sessions
   reason: derived_from_map.get() on seed_id — seed may not exist in derived_from_map (states without derived_from parents)
   safety: Returns None, while-loop terminates naturally
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=7414fdec789846ef
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=3cca7fd69ef2859f
   owner: web-sessions
   reason: derived_from_map.get() traversing parent chain — parent may reference state outside session or not in map
   safety: Returns None, terminates transitive closure walk

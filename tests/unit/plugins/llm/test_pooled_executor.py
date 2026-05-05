@@ -9,7 +9,8 @@ from typing import Any
 import pytest
 
 from elspeth.contracts import TransformResult
-from elspeth.plugins.infrastructure.pooling import BufferEntry, CapacityError, PoolConfig, PooledExecutor, RowContext
+from elspeth.contracts.errors import CapacityError
+from elspeth.plugins.infrastructure.pooling import BufferEntry, PoolConfig, PooledExecutor, RowContext
 from elspeth.testing import make_pipeline_row
 
 

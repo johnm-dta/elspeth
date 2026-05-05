@@ -1,10 +1,19 @@
 per_file_rules:
-- pattern: engine/*
+- pattern: engine/executors/transform.py
   rules:
   - L1
-  reason: 'Engine imports plugin infrastructure: TransformResult (results.py), BatchTransformMixin (batching/mixin.py),
-    CapacityError (pooling/). Protocols moved to contracts/ (2026-03-01).'
-  expires: '2026-09-01'
+  reason: "Engine imports BatchTransformMixin from plugins/infrastructure/batching/
+    for the row-pipelining concurrency contract (TransformExecutor inspects mixin
+    state via isinstance + _pool_size/_batch_wait_timeout to coordinate accept()/
+    wait()/evict_submission() with backpressure). The full Protocol-extraction +
+    mixin/ports/row_reorder_buffer relocation is its own large refactor (~1100 LOC
+    across batching/) tracked separately. TransformResult and CapacityError have
+    already been relocated to contracts/; this targeted entry replaces the previous
+    umbrella ``engine/* L1`` exemption so any NEW L1 violation in engine/ now fails
+    CI rather than being silently waived. Burndown predecessor: filigree
+    elspeth-30f4e36f09 (closed); follow-up tracks the mixin Protocol extraction."
+  max_hits: 1
+  expires: null
 - pattern: engine/batch_adapter.py
   rules:
   - R5
@@ -152,37 +161,6 @@ allow_hits:
   reason: "TYPE_CHECKING import of TelemetryManager \u2014 RowProcessor emits telemetry events"
   safety: "No runtime coupling \u2014 annotation-only import behind TYPE_CHECKING guard"
   expires: null
-- key: engine/processor.py:R4:RowProcessor:_record_source_boundary_failure:fp=83b8970724893970
-  owner: architecture
-  reason: Best-effort TokenCompleted telemetry after source-boundary audit completion must not mask the
-    original Tier-1 source-boundary failure
-  safety: Telemetry runs only after both FAILED audit writes succeed; failures are logged and the original
-    failure continues to propagate
-  expires: '2026-07-10'
-- key: engine/processor.py:R4:RowProcessor:_record_flush_violation:fp=fa466d76f5232435
-  owner: architecture
-  reason: Best-effort TokenCompleted telemetry after batch-flush FAILED audit completion must not mask
-    the original batch-flush violation
-  safety: Telemetry runs only after the FAILED outcome is recorded for that token; failures are logged
-    and the original violation continues to propagate
-  expires: '2026-07-10'
-- key: engine/processor.py:R4:RowProcessor:_handle_flush_error:fp=71d8fabe1b48000a
-  owner: architecture
-  reason: "Best-effort TokenCompleted telemetry after batch-flush FAILED audit completion in _handle_flush_error\
-    \ \u2014 same pattern as the sibling _record_flush_violation entry; telemetry runs only after the\
-    \ FAILED recorder write succeeds, and its failure must not strand buffered tokens or mask the original\
-    \ flush error."
-  safety: Telemetry runs only after the per-token FAILED outcome is durably recorded; failures are logged
-    with structured context and the original batch flush error continues to propagate via RowResult(outcome=FAILED,
-    error=failure)
-  expires: '2026-07-10'
-- key: engine/processor.py:R4:RowProcessor:_route_empty_emission_results:fp=e70811d518b4d79a
-  owner: architecture
-  reason: Best-effort TokenCompleted telemetry after zero-row batch flush must not strand buffered tokens
-    without terminal dropped outcomes
-  safety: Telemetry runs only after DROPPED_BY_FILTER is recorded for that token; failures are logged
-    and processing continues to terminalize the remaining buffered tokens
-  expires: '2026-07-10'
 - key: engine/commencement.py:R5:evaluate_commencement_gates:fp=18ca009ccd49b5e0
   owner: architecture
   reason: "Offensive isinstance check \u2014 gate results must be bool before recording in audit trail.\
@@ -195,32 +173,6 @@ allow_hits:
     \ span emission"
   safety: "No runtime coupling \u2014 annotation-only import behind TYPE_CHECKING guard"
   expires: null
-- key: engine/executors/gate.py:R1:GateExecutor:_record_routing:fp=38dabd7f2719bfd0
-  owner: architecture
-  reason: Optional edge_id lookup - edge map may not have all node combinations during routing
-  safety: Falls back to generating edge_id when not in prebuilt map
-  expires: '2026-05-13'
-- key: engine/executors/gate.py:R1:GateExecutor:_record_routing:fp=7957c7b3993f565b
-  owner: architecture
-  reason: Optional edge_id lookup - edge map may not have all node combinations during routing
-  safety: Falls back to generating edge_id when not in prebuilt map
-  expires: '2026-05-13'
-- key: engine/coalesce_executor.py:R1:CoalesceExecutor:_merge_with_original_names:fp=30128c9248e78bd6
-  owner: architecture
-  reason: Optional collision lookup - field_origins only contains fields that had collisions, None means
-    no collision
-  safety: Explicit None check triggers first-seen fallback path; no silent coercion
-  expires: '2026-05-12'
-- key: engine/coalesce_executor.py:R1:CoalesceExecutor:_merge_with_original_names:fp=8107fa6b3e882ecd
-  owner: architecture
-  reason: Defensive fallback for branch original name - map may be incomplete in edge cases
-  safety: Falls back to normalized_name with comment explaining this shouldn't happen
-  expires: '2026-05-12'
-- key: engine/coalesce_executor.py:R1:CoalesceExecutor:_merge_with_original_names:fp=4fc905549bb6ef1f
-  owner: architecture
-  reason: First-seen original name fallback - not all fields have explicit mapping in fallback dict
-  safety: Falls back to normalized_name when original name unknown
-  expires: '2026-05-12'
 - key: engine/executors/state_guard.py:R5:NodeStateGuard:_extract_audit_evidence_context:fp=86d1554e15f3f1f6
   owner: architecture
   reason: 'ADR-010 Decision 1 nominal isinstance check -- discriminates AuditEvidenceBase subclasses so
@@ -268,83 +220,47 @@ allow_hits:
     at loop end; no silent drops. AggregateDeclarationContractViolation is a Tier-1 class, preserving
     the propagation guarantee.
   expires: null
-- key: engine/orchestrator/core.py:R4:Orchestrator:_emit_phase_error:fp=cab50eae89f3249e
+- key: engine/_best_effort.py:R4:best_effort:fp=73f1c2a6f5351479
   owner: architecture
-  reason: "Best-effort PhaseError emission \u2014 event-bus handler bugs must not mask the original pipeline\
-    \ exception"
-  safety: Catches and logs; original exception always re-raised by caller
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=0d0b1eb3b4f92a33
+  reason: "best_effort() is the canonical post-audit ceremony helper for the engine
+    layer. Its single broad-except is the entire reason this helper exists \u2014 it
+    collapses 14 previously-scattered ``try/except Exception:`` blocks across
+    processor.py and orchestrator/core.py into one reviewable surface. Per the
+    helper's docstring, it MUST run after the primary audit-load-bearing event has
+    been recorded; failures of the ceremony body are logged but never replace the
+    in-flight event. CLAUDE.md logging-telemetry-policy: logger is the recovery
+    path of last resort when telemetry/ceremony itself is the failing system."
+  safety: "Failures are logged with structured context (operation label + caller-
+    supplied kwargs) at warning level; the in-flight exception (if any) continues
+    to propagate unchanged. The helper performs no work itself \u2014 only the body
+    can fail. Burndown: filigree elspeth-550362f760 (closed)."
+  expires: null
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:run_hook:fp=64aa6bffa9e759d1
   owner: architecture
-  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
-  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=e0b048192deddd39
-  owner: architecture
-  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
-  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=db2ae34810f92d23
-  owner: architecture
-  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
-  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=1b053ba4a7cbdc5b
-  owner: architecture
-  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
-  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=d9ee180af5910d7e
-  owner: architecture
-  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
-  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:fp=b80f81fbf2620f92
-  owner: architecture
-  reason: Plugin cleanup must attempt all closures; broad catch collects errors then raises
-  safety: Code reviewed - collects all cleanup errors into list, raises ExceptionGroup after all attempted
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:_execute_export_phase:fp=dbfcd5e7f93971c0
-  owner: architecture
-  reason: "Best-effort export status recording \u2014 must not mask original export exception"
-  safety: Catches and logs; original export exception always re-raised
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:run:fp=65ba39251c36143a
-  owner: architecture
-  reason: "Best-effort interrupted ceremony \u2014 GracefulShutdownError must not be masked by ceremony\
-    \ failure"
-  safety: Catches and logs; original shutdown exception always re-raised
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:run:fp=a5ec2df0f8e9eb6a
-  owner: architecture
-  reason: "Best-effort interrupted ceremony \u2014 GracefulShutdownError must not be masked by ceremony\
-    \ failure"
-  safety: Catches and logs; original shutdown exception always re-raised
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:run:fp=4f1e5413515c0713
-  owner: architecture
-  reason: "Best-effort interrupted ceremony \u2014 GracefulShutdownError must not be masked by ceremony\
-    \ failure"
-  safety: Catches and logs; original shutdown exception always re-raised
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=32dc28317bbe1b95
+  reason: "Plugin cleanup MUST attempt every hook even when individual hooks fail \u2014
+    the broad catch is required by contract (close()/on_complete() are best-effort
+    by lifecycle design). The nested run_hook helper collapses what was previously
+    6 separate try/except blocks into one. record_cleanup_error() re-raises Tier-1
+    errors (FrameworkBugError, AuditIntegrityError) before downgrading anything to
+    a cleanup warning. Non-Tier-1 failures are appended to cleanup_errors and
+    folded into a single RuntimeError chained from the pending exception (if any)
+    after every hook has been attempted."
+  safety: "Tier-1 errors (TIER_1_ERRORS tuple) bypass the catch entirely and
+    propagate. Other exceptions are collected and surface as RuntimeError after
+    all hooks attempted, with cause chained to the pending exception so the audit
+    trail preserves both. No silent drops. Burndown: filigree elspeth-550362f760
+    (closed)."
+  expires: null
+- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=caf0857946e52341
   owner: bugfix
-  reason: "Tier-3 boundary \u2014 quarantined row data may contain NaN/Infinity that stable_hash rejects"
-  safety: Falls back to repr_hash with debug logging; audit trail uses separate hashing path
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=a97bc640dca2b843
-  owner: architecture
-  reason: "Best-effort interrupted ceremony on resume \u2014 must not mask original shutdown exception"
-  safety: Catches and logs; original exception always re-raised
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=4f63bd35ea46f972
-  owner: architecture
-  reason: "Best-effort failed ceremony on resume partial-result failure \u2014 must not mask the original\
-    \ pipeline exception"
-  safety: Catches and logs; original pipeline exception is re-raised with its original traceback
-  expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=2648fcbeba680386
-  owner: architecture
-  reason: "Best-effort failed ceremony on resume generic failure \u2014 must not mask the original exception"
-  safety: Catches and logs; original exception always re-raised
-  expires: '2026-07-10'
+  reason: "Tier-3 quarantine boundary \u2014 quarantined row data may contain NaN/Infinity
+    rejected by stable_hash. Coercion at the source/quarantine boundary is the one
+    Tier-3 location where canonical hashing must accept non-canonical floats. The
+    catch is narrow (ValueError, TypeError) and the fallback (repr_hash) is itself
+    deterministic on the row contents \u2014 the audit trail records which hashing path
+    was used, so an auditor can always tell whether stable_hash or repr_hash produced
+    the recorded value."
+  safety: "Narrow catch on (ValueError, TypeError) only \u2014 anything else propagates.
+    repr_hash is deterministic and recorded as the fallback path; the quarantine
+    audit row carries which hash path produced the value."
+  expires: null

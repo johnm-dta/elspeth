@@ -8,6 +8,7 @@ from datetime import datetime
 import pytest
 from sqlalchemy.pool import StaticPool
 
+from elspeth.web.execution.schemas import RunStatusResponse
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import (
     ChatMessageRecord,
@@ -649,6 +650,100 @@ class TestUpdateRunStatusExpanded:
         assert fetched.rows_routed_success == 4
         assert fetched.rows_routed_failure == 0
         assert fetched.rows_failed == 3
+
+
+class TestAdr019LegacyCounterReadCompatibility:
+    """Pre-ADR-019 sessions.db rows used disjoint routed/quarantine counters."""
+
+    @staticmethod
+    def _status_response_from_run(run: RunRecord) -> RunStatusResponse:
+        return RunStatusResponse(
+            run_id=str(run.id),
+            status=run.status,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            rows_processed=run.rows_processed,
+            rows_succeeded=run.rows_succeeded,
+            rows_failed=run.rows_failed,
+            rows_routed_success=run.rows_routed_success,
+            rows_routed_failure=run.rows_routed_failure,
+            rows_quarantined=run.rows_quarantined,
+            error=run.error,
+            landscape_run_id=run.landscape_run_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_run_normalizes_legacy_gate_routed_success_counter(self, service) -> None:
+        session = await service.create_session("alice", "Pipeline", "local")
+        state = await service.save_composition_state(session.id, CompositionStateData(is_valid=True))
+        run = await service.create_run(session.id, state.id)
+        await service.update_run_status(run.id, "running")
+        await service.update_run_status(
+            run.id,
+            "completed",
+            landscape_run_id="lscp-legacy-gate",
+            rows_processed=4,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=4,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+        )
+
+        fetched = await service.get_run(run.id)
+
+        assert fetched.rows_succeeded == 4
+        assert fetched.rows_routed_success == 4
+        response = self._status_response_from_run(fetched)
+        assert response.status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_get_run_normalizes_legacy_quarantine_failure_counter(self, service) -> None:
+        session = await service.create_session("alice", "Pipeline", "local")
+        state = await service.save_composition_state(session.id, CompositionStateData(is_valid=True))
+        run = await service.create_run(session.id, state.id)
+        await service.update_run_status(run.id, "running")
+        await service.update_run_status(
+            run.id,
+            "completed_with_failures",
+            landscape_run_id="lscp-legacy-quarantine",
+            rows_processed=3,
+            rows_succeeded=1,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=2,
+        )
+
+        fetched = await service.get_run(run.id)
+
+        assert fetched.rows_failed == 2
+        assert fetched.rows_quarantined == 2
+        response = self._status_response_from_run(fetched)
+        assert response.status == "completed_with_failures"
+
+    @pytest.mark.asyncio
+    async def test_get_run_leaves_current_subset_counters_unchanged(self, service) -> None:
+        session = await service.create_session("alice", "Pipeline", "local")
+        state = await service.save_composition_state(session.id, CompositionStateData(is_valid=True))
+        run = await service.create_run(session.id, state.id)
+        await service.update_run_status(run.id, "running")
+        await service.update_run_status(
+            run.id,
+            "completed",
+            landscape_run_id="lscp-current-gate",
+            rows_processed=4,
+            rows_succeeded=4,
+            rows_failed=0,
+            rows_routed_success=2,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+        )
+
+        fetched = await service.get_run(run.id)
+
+        assert fetched.rows_succeeded == 4
+        assert fetched.rows_routed_success == 2
 
     @pytest.mark.asyncio
     async def test_update_not_found_raises(self, service) -> None:

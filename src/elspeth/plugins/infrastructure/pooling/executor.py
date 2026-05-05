@@ -19,10 +19,9 @@ from typing import Any
 
 from elspeth.contracts import TransformErrorReason, TransformResult
 from elspeth.contracts.engine import BufferEntry
-from elspeth.contracts.errors import PluginRetryableError
+from elspeth.contracts.errors import CapacityError, PluginRetryableError
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.plugins.infrastructure.pooling.config import PoolConfig
-from elspeth.plugins.infrastructure.pooling.errors import CapacityError
 from elspeth.plugins.infrastructure.pooling.reorder_buffer import ReorderBuffer
 from elspeth.plugins.infrastructure.pooling.throttle import AIMDThrottle
 

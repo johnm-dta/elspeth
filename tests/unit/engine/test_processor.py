@@ -34,6 +34,7 @@ from elspeth.contracts.enums import (
 )
 from elspeth.contracts.errors import (
     AuditIntegrityError,
+    CapacityError,
     FrameworkBugError,
     MaxRetriesExceeded,
     OrchestrationInvariantError,
@@ -59,7 +60,6 @@ from elspeth.engine.processor import (
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.infrastructure.clients.llm import LLMClientError
-from elspeth.plugins.infrastructure.pooling import CapacityError
 from elspeth.plugins.transforms.batch_replicate import BatchReplicateConfig
 from elspeth.testing import make_contract, make_pipeline_row, make_row, make_source_row, make_token_info
 from tests.fixtures.factories import make_context

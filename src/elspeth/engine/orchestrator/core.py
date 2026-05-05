@@ -76,14 +76,20 @@ from elspeth.contracts.errors import (
     GracefulShutdownError,
     OrchestrationInvariantError,
     SourceQuarantineReason,
+    TelemetryExporterError,
 )
 from elspeth.contracts.events import (
+    FieldResolutionApplied,
     PhaseAction,
+    PhaseChanged,
     PhaseCompleted,
     PhaseError,
     PhaseStarted,
     PipelinePhase,
+    RowCreated,
     RunCompletionStatus,
+    RunFinished,
+    RunStarted,
     RunSummary,
 )
 from elspeth.contracts.hashing import repr_hash
@@ -106,6 +112,7 @@ from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.operations import track_operation
+from elspeth.engine._best_effort import best_effort
 from elspeth.engine.executors.sink import DiversionCounts
 
 # Import module functions from orchestrator submodules
@@ -384,14 +391,13 @@ class Orchestrator:
         must take precedence — observable telemetry is secondary to preserving
         the actual error.
         """
-        try:
+        with best_effort(
+            "PhaseError emission",
+            phase=phase.value,
+            original_error=type(error).__name__,
+            target=target,
+        ):
             self._events.emit(PhaseError(phase=phase, error=error, target=target))
-        except Exception:
-            slog.debug(
-                "PhaseError emission failed — original exception preserved",
-                phase=phase.value,
-                original_error=type(error).__name__,
-            )
 
     def _safe_flush_telemetry(self) -> None:
         """Flush telemetry in a finally block, preserving any pending exception.
@@ -401,8 +407,6 @@ class Orchestrator:
         must not mask run errors.
         """
         import sys
-
-        from elspeth.telemetry.errors import TelemetryExporterError
 
         logger = slog
         pending_exc = sys.exc_info()[0]
@@ -557,7 +561,6 @@ class Orchestrator:
         Shared between run() and resume() — the interrupted ceremony is identical
         in both paths: finalize as INTERRUPTED, emit RunFinished, emit RunSummary.
         """
-        from elspeth.telemetry import RunFinished
 
         total_duration = time.perf_counter() - start_time
         factory.run_lifecycle.finalize_run(run_id, status=RunStatus.INTERRUPTED)
@@ -601,7 +604,6 @@ class Orchestrator:
         with the best available metrics. Shared between run() (when
         run_completed=False) and resume().
         """
-        from elspeth.telemetry import RunFinished
 
         failed_result = result or RunResult(
             run_id=run_id,
@@ -1011,44 +1013,42 @@ class Orchestrator:
             )
             cleanup_errors.append(f"{hook}({plugin_name}): {type(error).__name__}: {error}")
 
-        # Call on_complete for all plugins (even on error)
-        # Base classes provide no-op implementations, so no hasattr needed
+        def run_hook(hook_label: str, plugin_name: str, fn: Callable[[], None]) -> None:
+            # Single broad-catch surface for plugin cleanup. Per the policy
+            # documented above, plugin cleanup MUST attempt every hook even when
+            # one fails — broad catch is required by contract. Tier-1 errors are
+            # re-raised inside record_cleanup_error; everything else is collected
+            # and folded into the RuntimeError raised after all hooks finish.
+            try:
+                fn()
+            except Exception as exc:
+                record_cleanup_error(hook_label, plugin_name, exc)
+
+        # Call on_complete for all plugins (even on error).
+        # Base classes provide no-op implementations, so no hasattr needed.
+        # functools.partial preserves the bound-method type for mypy and avoids
+        # the loop-variable closure trap that lambdas would otherwise need
+        # default-argument workarounds for.
+        from functools import partial
+
         for transform in config.transforms:
-            try:
-                transform.on_complete(ctx)
-            except Exception as e:
-                record_cleanup_error("transform.on_complete", transform.name, e)
+            run_hook("transform.on_complete", transform.name, partial(transform.on_complete, ctx))
         for sink in config.sinks.values():
-            try:
-                sink.on_complete(ctx)
-            except Exception as e:
-                record_cleanup_error("sink.on_complete", sink.name, e)
+            run_hook("sink.on_complete", sink.name, partial(sink.on_complete, ctx))
         if include_source:
-            try:
-                config.source.on_complete(ctx)
-            except Exception as e:
-                record_cleanup_error("source.on_complete", config.source.name, e)
+            run_hook("source.on_complete", config.source.name, partial(config.source.on_complete, ctx))
 
         # Close source (if included) and all sinks
         if include_source:
-            try:
-                config.source.close()
-            except Exception as e:
-                record_cleanup_error("source.close", config.source.name, e)
+            run_hook("source.close", config.source.name, config.source.close)
 
         # Close all transforms (release resources - file handles, connections, etc.)
         for transform in config.transforms:
-            try:
-                transform.close()
-            except Exception as e:
-                record_cleanup_error("transform.close", transform.name, e)
+            run_hook("transform.close", transform.name, transform.close)
 
         # Close all sinks
         for sink in config.sinks.values():
-            try:
-                sink.close()
-            except Exception as e:
-                record_cleanup_error("sink.close", sink.name, e)
+            run_hook("sink.close", sink.name, sink.close)
 
         if cleanup_errors:
             error_summary = "; ".join(cleanup_errors)
@@ -1354,7 +1354,6 @@ class Orchestrator:
         Raises:
             Exception: Re-raises any database connection or initialization failure.
         """
-        from elspeth.telemetry import RunStarted
 
         phase_start = time.perf_counter()
         try:
@@ -1421,7 +1420,6 @@ class Orchestrator:
         Raises:
             Exception: Re-raises any export failure (run is still "completed" in Landscape).
         """
-        from elspeth.telemetry import PhaseChanged
 
         export_config = settings.landscape.export
         factory.run_lifecycle.set_export_status(
@@ -1451,17 +1449,15 @@ class Orchestrator:
             self._events.emit(PhaseCompleted(phase=PipelinePhase.EXPORT, duration_seconds=time.perf_counter() - phase_start))
         except Exception as export_error:
             self._emit_phase_error(PipelinePhase.EXPORT, export_error, target=export_config.sink)
-            try:
+            with best_effort(
+                "Export status FAILED recording",
+                run_id=run_id,
+                original_error=type(export_error).__name__,
+            ):
                 factory.run_lifecycle.set_export_status(
                     run_id,
                     status=ExportStatus.FAILED,
                     error=str(export_error),
-                )
-            except Exception:
-                slog.debug(
-                    "Export status recording failed — original exception preserved",
-                    run_id=run_id,
-                    original_error=type(export_error).__name__,
                 )
             # Re-raise so caller knows export failed
             # (run is still "completed" in Landscape)
@@ -1538,8 +1534,6 @@ class Orchestrator:
                 run_id=run.run_id,
                 preflight=preflight_results,
             )
-
-        from elspeth.telemetry import RunFinished
 
         run_completed = False
         run_start_time = time.perf_counter()
@@ -1636,13 +1630,15 @@ class Orchestrator:
             # Re-raise for caller to schedule retry based on check_after_seconds.
             raise
         except GracefulShutdownError as shutdown_exc:
-            try:
+            with best_effort("Interrupted ceremony on graceful shutdown", run_id=run.run_id):
                 self._emit_interrupted_ceremony(run.run_id, factory, shutdown_exc, run_start_time)
-            except Exception:
-                slog.debug("Interrupted ceremony failed — original exception preserved", run_id=run.run_id)
             raise  # Propagate to CLI
         except _RunFailedWithPartialResultError as failed_exc:
-            try:
+            with best_effort(
+                "Failed/partial-result ceremony on run failure",
+                run_id=run.run_id,
+                run_completed=run_completed,
+            ):
                 if run_completed:
                     # Export failed after successful run — emit PARTIAL status.
                     # RunFinished was already emitted before the export attempt,
@@ -1670,12 +1666,16 @@ class Orchestrator:
                         run_start_time,
                         failed_exc.partial_result,
                     )
-            except Exception:
-                slog.debug("Failure ceremony failed — original exception preserved", run_id=run.run_id)
             raise failed_exc.original_error.with_traceback(failed_exc.original_traceback) from None
         except Exception:
-            # Emit RunSummary with failure status — best-effort, must not mask
-            try:
+            # Outer broad-except: any unhandled exception type is a run failure
+            # requiring a RunSummary. The inner ceremony is best-effort and must
+            # not mask the original; the outer catch re-raises after.
+            with best_effort(
+                "Generic failure ceremony on run failure",
+                run_id=run.run_id,
+                run_completed=run_completed,
+            ):
                 if run_completed:
                     # Export failed after successful run — emit PARTIAL status.
                     # RunFinished was already emitted before the export attempt,
@@ -1698,8 +1698,6 @@ class Orchestrator:
                     )
                 else:
                     self._emit_failed_ceremony(run.run_id, factory, run_start_time)
-            except Exception:
-                slog.debug("Failure ceremony failed — original exception preserved", run_id=run.run_id)
             raise  # CRITICAL: Always re-raise - observability doesn't suppress errors
         finally:
             self._safe_flush_telemetry()
@@ -1817,7 +1815,6 @@ class Orchestrator:
         Returns:
             GraphArtifacts with edge_map, source_id, and all ID mappings
         """
-        from elspeth.telemetry import PhaseChanged
 
         # Get execution order from graph
         execution_order = graph.topological_order()
@@ -2240,7 +2237,6 @@ class Orchestrator:
         7. Compute error_hash
         8. Append to pending_tokens with PendingOutcome
         """
-        from elspeth.telemetry import RowCreated
 
         config = loop_ctx.config
         counters = loop_ctx.counters
@@ -2391,8 +2387,6 @@ class Orchestrator:
         Returns:
             True if field resolution was recorded, False otherwise.
         """
-        from elspeth.telemetry import FieldResolutionApplied
-
         field_resolution = config.source.get_field_resolution()
         if field_resolution is None:
             return False
@@ -2619,7 +2613,6 @@ class Orchestrator:
         SOURCE phase is complete when this method returns. Errors during load()
         (file not found, auth failure) are emitted as PhaseError before re-raising.
         """
-        from elspeth.telemetry import PhaseChanged
 
         phase_start = time.perf_counter()
         self._events.emit(PhaseStarted(phase=PipelinePhase.SOURCE, action=PhaseAction.INITIALIZING, target=config.source.name))
@@ -2666,7 +2659,6 @@ class Orchestrator:
         Final progress emission and PhaseCompleted(PROCESS) are emitted by the
         caller AFTER sink writes, using the timing state in LoopResult.
         """
-        from elspeth.telemetry import PhaseChanged
 
         # Destructure loop_ctx for local access
         config = loop_ctx.config
@@ -3260,7 +3252,6 @@ class Orchestrator:
         resume_start_time = time.perf_counter()
 
         # 5. Process unprocessed rows (with graceful shutdown support)
-        from elspeth.telemetry import RunFinished
 
         # When shutdown_event is provided (testing), skip signal handler
         # installation and use the caller's event directly.
@@ -3404,29 +3395,24 @@ class Orchestrator:
 
             return result
         except GracefulShutdownError as shutdown_exc:
-            try:
+            with best_effort("Interrupted ceremony on resume graceful shutdown", run_id=run_id):
                 self._emit_interrupted_ceremony(run_id, factory, shutdown_exc, resume_start_time)
-            except Exception:
-                slog.debug("Interrupted ceremony failed — original exception preserved", run_id=run_id)
             raise  # Propagate to CLI
         except _RunFailedWithPartialResultError as failed_exc:
-            try:
+            with best_effort("Partial-result failure ceremony on resume", run_id=run_id):
                 self._emit_failed_ceremony(
                     run_id,
                     factory,
                     resume_start_time,
                     failed_exc.partial_result,
                 )
-            except Exception:
-                slog.debug("Failure ceremony failed — original exception preserved", run_id=run_id)
             raise failed_exc.original_error.with_traceback(failed_exc.original_traceback) from None
         except Exception:
             # Finalize as FAILED to prevent the run from being stuck in RUNNING
-            # permanently (which blocks future resume attempts).
-            try:
+            # permanently (which blocks future resume attempts). The outer broad-except
+            # is justified — any unhandled exception during resume needs ceremony.
+            with best_effort("Generic failure ceremony on resume", run_id=run_id):
                 self._emit_failed_ceremony(run_id, factory, resume_start_time)
-            except Exception:
-                slog.debug("Failure ceremony failed — original exception preserved", run_id=run_id)
             raise
         finally:
             self._safe_flush_telemetry()

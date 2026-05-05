@@ -551,8 +551,6 @@ If the user's intent matches a known pattern, use its safe defaults and build im
 | `llm` | Send row data to an LLM via template | no | yes | yes | Adds `llm_response` field (or custom `response_field`) |
 | `azure_content_safety` | Content moderation via Azure AI | no | yes | yes | Adds safety category scores |
 | `azure_prompt_shield` | Jailbreak/injection detection | no | yes | yes | Adds shield result fields |
-| `azure_batch_llm` | Azure OpenAI batch processing | no | yes | yes | Adds response field (batch mode) |
-| `openrouter_batch_llm` | OpenRouter batch processing | no | yes | yes | Adds response field (batch mode) |
 | `rag_retrieval` | Retrieve similar documents from vector store | no | yes | depends | Adds retrieval results field |
 | `type_coerce` | Convert field types (str→int/float/bool, *→str) | no | no | no | Coerces specified fields in-place |
 | `value_transform` | Compute new/modified fields via expressions | no | no | no | Adds or modifies fields per expression |

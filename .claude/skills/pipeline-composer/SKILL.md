@@ -184,8 +184,6 @@ Invalid text-column keyword example:
 | `llm` | Send row data to LLM via template | no | yes | yes | Adds `llm_response` field |
 | `azure_content_safety` | Content moderation | no | yes | yes | Adds safety scores |
 | `azure_prompt_shield` | Jailbreak detection | no | yes | yes | Adds shield results |
-| `azure_batch_llm` | Azure batch LLM processing | no | yes | yes | Adds response field |
-| `openrouter_batch_llm` | OpenRouter batch processing | no | yes | yes | Adds response field |
 | `rag_retrieval` | Retrieve from vector store | no | yes | depends | Adds retrieval results |
 | `type_coerce` | Convert field types | no | no | no | Coerces in-place |
 | `value_transform` | Compute fields via expressions | no | no | no | Adds/modifies fields |

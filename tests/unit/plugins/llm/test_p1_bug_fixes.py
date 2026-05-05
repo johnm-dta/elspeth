@@ -13,12 +13,9 @@ transforms and were removed alongside ADR-020.)
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import Mock, patch
 
-from elspeth.contracts import CallStatus, CallType
-from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.transforms.llm import (
     _build_augmented_output_schema,
@@ -27,7 +24,7 @@ from elspeth.plugins.transforms.llm.transform import LLMTransform
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
 
-from .conftest import DYNAMIC_SCHEMA, make_token
+from .conftest import DYNAMIC_SCHEMA
 
 # ---------------------------------------------------------------------------
 # Bug 1: Azure process_row uses mutable ctx.state_id in cleanup

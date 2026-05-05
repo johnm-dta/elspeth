@@ -1,12 +1,11 @@
 # tests/property/core/test_operations_properties.py
 """Property-based tests for operation lifecycle management (track_operation).
 
-The track_operation context manager has 5 exit paths:
+The track_operation context manager has 4 exit paths:
 1. Normal exit → status="completed"
-2. BatchPendingError → status="pending" (control flow, not error)
-3. Exception → status="failed"
-4. BaseException (KeyboardInterrupt, SystemExit) → status="failed"
-5. DB failure in finally → original exception propagates (or DB error if no original)
+2. Exception → status="failed"
+3. BaseException (KeyboardInterrupt, SystemExit) → status="failed"
+4. DB failure in finally → original exception propagates (or DB error if no original)
 
 Properties tested:
 - Context restoration: ctx.operation_id always restored regardless of exit path
@@ -27,7 +26,6 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from elspeth.contracts import BatchPendingError
 from elspeth.contracts.audit import Operation
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.core.landscape import ExecutionRepository
@@ -180,18 +178,6 @@ class TestContextRestorationProperties:
 
     @given(prev_op_id=previous_op_ids)
     @settings(max_examples=50)
-    def test_batch_pending_restores_context(self, prev_op_id: str | None) -> None:
-        """Property: BatchPendingError exit restores previous operation_id."""
-        recorder = FakeRecorder()
-        ctx = FakePluginContext(operation_id=prev_op_id)
-
-        with pytest.raises(BatchPendingError), track_operation(_as_execution_repo(recorder), "run-1", "node-1", "sink_write", _as_ctx(ctx)):
-            raise BatchPendingError("batch-001", "submitted")
-
-        assert ctx.operation_id == prev_op_id
-
-    @given(prev_op_id=previous_op_ids)
-    @settings(max_examples=50)
     def test_keyboard_interrupt_restores_context(self, prev_op_id: str | None) -> None:
         """Property: KeyboardInterrupt (BaseException) restores context."""
         recorder = FakeRecorder()
@@ -257,19 +243,6 @@ class TestStatusCorrectnessProperties:
         assert len(recorder.completions) == 1
         assert recorder.completions[0].status == "failed"
         assert recorder.completions[0].error == str(exc)
-
-    def test_batch_pending_status_pending(self) -> None:
-        """Property: BatchPendingError produces status='pending'."""
-        recorder = FakeRecorder()
-        ctx = FakePluginContext()
-
-        with pytest.raises(BatchPendingError), track_operation(_as_execution_repo(recorder), "run-1", "node-1", "sink_write", _as_ctx(ctx)):
-            raise BatchPendingError("batch-001", "submitted")
-
-        assert len(recorder.completions) == 1
-        assert recorder.completions[0].status == "pending"
-        # BatchPendingError is NOT an error - error field should be None
-        assert recorder.completions[0].error is None
 
     def test_keyboard_interrupt_status_failed(self) -> None:
         """Property: KeyboardInterrupt produces status='failed'."""

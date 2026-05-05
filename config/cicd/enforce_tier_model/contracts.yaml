@@ -40,12 +40,6 @@ per_file_rules:
   reason: Deep-freeze guards and enum validation at construction
   expires: null
   max_hits: 5
-- pattern: contracts/batch_checkpoint.py
-  rules:
-  - R5
-  reason: Deep-freeze guards, Tier 1 from_dict type validation, template error tuple validation, and requests entry validation
-  expires: null
-  max_hits: 10
 - pattern: contracts/checkpoint.py
   rules:
   - R5
@@ -204,16 +198,16 @@ allow_hits:
   owner: bugfix
   reason: Type annotation objects (e.g. list[str]) may not have __name__ attribute - getattr is needed for safe error messages
   safety: Falls back to str(a) for display purposes only; used in error message, not logic
-- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=22d4f26cb3699036
+- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=5f98b5ff50815b81
   owner: architecture
   reason: Tier 3 boundary — response_snapshot.get('usage') accesses external LLM response data
   safety: Missing key returns None; no fabrication
-- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=8e778be81081e126
+- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=e521b01314bc1086
   owner: tier1-hygiene-cleanup
   reason: Telemetry transport failures (OSError, ConnectionError, TimeoutError, KeyError) are expected and must not corrupt the audit call recording
   safety: Exception logged via structlog; call recording completes without telemetry; no data loss
   expires: '2026-10-08'
-- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=4646eaced1ba4d4b
+- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=0a4ebf6ba2f86eb1
   owner: architecture
   reason: Tier 3 boundary — ValueError/TypeError from stable_hash on non-canonical data falls back to repr_hash
   safety: Warning logged (without row content); row_id still generated via repr_hash for audit trail continuity

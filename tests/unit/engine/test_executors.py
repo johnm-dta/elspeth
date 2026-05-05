@@ -2424,69 +2424,6 @@ class TestAggregationExecutor:
         # batch_token_ids must be None after error, not stale ["t1", "t2"]
         assert ctx.batch_token_ids is None
 
-    def test_execute_flush_batch_pending_clears_batch_token_ids(self) -> None:
-        """BatchPendingError path clears ctx.batch_token_ids.
-
-        Regression: Same stale-ID leakage as the exception path — the
-        BatchPendingError control flow signal re-raised before cleanup.
-        """
-        from elspeth.contracts.errors import BatchPendingError
-
-        executor, _factory, nid = self._make_agg_executor(count=2)
-        contract = _make_contract()
-
-        executor.buffer_row(nid, _make_token(data={"v": "a"}, token_id="t1", contract=contract))
-        executor.buffer_row(nid, _make_token(data={"v": "b"}, token_id="t2", contract=contract))
-
-        transform = MagicMock()
-        transform.name = "agg"
-        transform.process.side_effect = BatchPendingError("batch-123", "submitted")
-        ctx = make_context()
-
-        with pytest.raises(BatchPendingError):
-            executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
-
-        # batch_token_ids must be None after pending, not stale ["t1", "t2"]
-        assert ctx.batch_token_ids is None
-
-    def test_execute_flush_preserves_batch_state_on_post_pending_failure(self) -> None:
-        """Post-submission execution repo failure must NOT wipe in-memory batch state.
-
-        Regression: If BatchPendingError is caught (batch submitted to external
-        service), guard transitions to PENDING, but update_batch_status() fails
-        (e.g., DB write error). The exception falls to the outer except handler.
-        That handler must NOT reset node batch state/buffers — the external batch is
-        already submitted and needs to be polled/reconciled on retry.
-        """
-        from elspeth.contracts.errors import BatchPendingError
-
-        factory = _make_factory()
-        # Make update_batch_status succeed on the first call (EXECUTING transition)
-        # but fail on the second call (post-BatchPendingError status link).
-        # This exercises the actual post-submission failure path.
-        factory.execution.update_batch_status.side_effect = [None, RuntimeError("DB write failed")]
-        executor, _, nid = self._make_agg_executor(factory=factory, count=2)
-        contract = _make_contract()
-
-        executor.buffer_row(nid, _make_token(data={"v": "a"}, token_id="t1", contract=contract))
-        executor.buffer_row(nid, _make_token(data={"v": "b"}, token_id="t2", contract=contract))
-
-        transform = MagicMock()
-        transform.name = "agg"
-        transform.process.side_effect = BatchPendingError("batch-123", "submitted")
-        ctx = make_context()
-
-        batch_id_before = executor.get_batch_id(nid)
-        assert batch_id_before is not None
-
-        with pytest.raises(RuntimeError, match="DB write failed"):
-            executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
-
-        # Critical: batch state must be PRESERVED (not wiped)
-        assert executor.get_batch_id(nid) == batch_id_before
-        # batch_token_ids should still be cleared (no stale leakage)
-        assert ctx.batch_token_ids is None
-
     def test_execute_flush_resets_batch_state(self) -> None:
         """After flush, batch state is reset (new batch on next row)."""
         executor, _factory, nid = self._make_agg_executor(count=1)

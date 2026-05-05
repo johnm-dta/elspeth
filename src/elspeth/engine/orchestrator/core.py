@@ -45,7 +45,6 @@ import elspeth.engine.executors.declaration_contract_bootstrap  # noqa: F401
 from elspeth import __version__ as ENGINE_VERSION
 from elspeth.contracts import (
     BatchCheckpointState,
-    BatchPendingError,
     ExportStatus,
     NodeType,
     PendingOutcome,
@@ -1622,13 +1621,6 @@ class Orchestrator:
 
             return result
 
-        except BatchPendingError:
-            # BatchPendingError is a CONTROL-FLOW SIGNAL, not an error.
-            # A batch transform has submitted work that isn't complete yet.
-            # DO NOT mark run as failed - it's pending, not failed.
-            # DO NOT emit RunSummary - run isn't done yet.
-            # Re-raise for caller to schedule retry based on check_after_seconds.
-            raise
         except GracefulShutdownError as shutdown_exc:
             with best_effort("Interrupted ceremony on graceful shutdown", run_id=run.run_id):
                 self._emit_interrupted_ceremony(run.run_id, factory, shutdown_exc, run_start_time)
@@ -2818,8 +2810,6 @@ class Orchestrator:
                     interrupted_by_shutdown=interrupted_by_shutdown,
                 )
 
-            except BatchPendingError:
-                raise  # Control-flow signal, not an error
             except Exception as e:
                 self._emit_phase_error(PipelinePhase.PROCESS, e, target=config.source.name)
                 raise
@@ -3079,8 +3069,6 @@ class Orchestrator:
                 )
 
             self._events.emit(PhaseCompleted(phase=PipelinePhase.PROCESS, duration_seconds=current_time - loop_result.phase_start))
-        except BatchPendingError:
-            raise
         except GracefulShutdownError:
             raise
         except Exception as exc:

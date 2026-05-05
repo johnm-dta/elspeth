@@ -9,7 +9,6 @@ import structlog
 
 import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import (
-    BatchPendingError,
     BatchTransformProtocol,
     ExecutionError,
     PipelineRow,
@@ -365,10 +364,6 @@ class AggregationExecutor:
             # Track whether the batch was finalized (COMPLETED or FAILED).
             # Used by the outer except to decide whether to fail the batch.
             batch_finalized = False
-            # Track whether the batch reached PENDING state (submitted to external service).
-            # If True, the outer except must NOT wipe in-memory batch state because the
-            # external batch is already submitted and needs to be polled/reconciled later.
-            batch_pending = False
 
             try:
                 with self._spans.aggregation_span(
@@ -383,35 +378,6 @@ class AggregationExecutor:
                         # Pass reconstructed PipelineRow objects to batch-aware transform
                         result = transform.process(pipeline_rows, ctx)
                         duration_ms = (time.perf_counter() - start) * 1000
-                    except BatchPendingError:
-                        # BatchPendingError is a CONTROL-FLOW SIGNAL, not an error.
-                        # The batch has been submitted but isn't complete yet.
-                        # Complete node_state with PENDING status and link batch for audit trail, then re-raise.
-                        duration_ms = (time.perf_counter() - start) * 1000
-                        batch_pending = True
-
-                        # Close node_state with "pending" status - the submission succeeded
-                        # but the result isn't available yet. This prevents orphaned OPEN states.
-                        guard.complete(
-                            NodeStateStatus.PENDING,
-                            duration_ms=duration_ms,
-                        )
-
-                        # Link batch to the aggregation state for traceability.
-                        # Keep status as "executing" but set aggregation_state_id.
-                        self._execution.update_batch_status(
-                            batch_id=batch_id,
-                            status=BatchStatus.EXECUTING,
-                            state_id=guard.state_id,
-                        )
-
-                        # Clear batch_token_ids before re-raise to prevent stale IDs
-                        # leaking to subsequent calls (PluginContext is reused).
-                        ctx.batch_token_ids = None
-
-                        # Re-raise for orchestrator to schedule retry.
-                        # The batch remains in "executing" status, checkpoint is preserved.
-                        raise
                     except contract_errors.TIER_1_ERRORS:
                         raise  # Tier 1 errors must crash — never record as row FAILED
                     except Exception as e:
@@ -511,20 +477,9 @@ class AggregationExecutor:
                     )
                     batch_finalized = True
 
-            except BatchPendingError:
-                raise  # Already handled above, just propagate
             except contract_errors.TIER_1_ERRORS:
                 raise  # Tier 1 errors must crash — skip batch cleanup
             except Exception:
-                if batch_pending:
-                    # Batch was already submitted to external service. Post-submission
-                    # bookkeeping failed (e.g., update_batch_status DB write error), but
-                    # the external batch exists and must be polled/reconciled on retry.
-                    # Do NOT wipe in-memory batch state — it's the only link to the
-                    # externally-submitted batch. Let the exception propagate so the
-                    # orchestrator can schedule a retry that picks up the pending batch.
-                    ctx.batch_token_ids = None
-                    raise
                 # Batch cleanup on ANY failure (guard handles node state).
                 # Only attempt to fail the batch if it wasn't already finalized
                 # (avoids double-write if complete_batch itself raised).

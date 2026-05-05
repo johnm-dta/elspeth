@@ -582,16 +582,7 @@ class TestCompleteOperationWithPayloadStore:
                 duration_ms=100.0,
             )
 
-    def test_complete_operation_pending_status(self) -> None:
-        """complete_operation with pending status (BatchPendingError scenario)."""
-        _db, repo, _fac, _tok = _make_repo_with_token()
-        op = repo.begin_operation("run-1", "source-0", "source_load")
-        repo.complete_operation(op.operation_id, "pending", duration_ms=5.0)
-        result = repo.get_operation(op.operation_id)
-        assert result is not None
-        assert result.status == "pending"
-
-    @pytest.mark.parametrize("invalid_status", ["open", "bogus"])
+    @pytest.mark.parametrize("invalid_status", ["open", "bogus", "pending"])
     def test_complete_operation_rejects_invalid_runtime_statuses(self, invalid_status: str) -> None:
         """complete_operation must reject runtime status strings outside the terminal allowlist."""
         _db, repo, _fac, _tok = _make_repo_with_token()

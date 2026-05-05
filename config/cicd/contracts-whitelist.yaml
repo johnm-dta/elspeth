@@ -299,10 +299,6 @@ allowed_dict_patterns:
   # LLM tracing config
   - "src/elspeth/plugins/transforms/llm/tracing.py:parse_tracing_config:config"
 
-  # Azure batch LLM (checkpoint params typed as BatchCheckpointState — only config/return remain)
-  - "src/elspeth/plugins/transforms/llm/azure_batch.py:AzureBatchLLMTransform.__init__:config"
-  - "src/elspeth/plugins/transforms/llm/azure_batch.py:AzureBatchLLMTransform.azure_config:return"
-
   # Unified LLM transform (T10 consolidation — dispatches to Azure/OpenRouter providers)
   - "src/elspeth/plugins/transforms/llm/transform.py:LLMTransform.__init__:config"
 
@@ -481,9 +477,6 @@ allowed_dict_patterns:
 
   # Multi-query config base (JSON schema building for LLM structured output)
   - "src/elspeth/plugins/transforms/llm/multi_query.py:OutputFieldConfig.to_json_schema:return"
-
-  # OpenRouter batch LLM (async batch API)
-  - "src/elspeth/plugins/transforms/llm/openrouter_batch.py:OpenRouterBatchLLMTransform.__init__:config"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # PRE-FLIGHT CONTEXT (COMMENCEMENT GATES)

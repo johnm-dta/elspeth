@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from elspeth.contracts import Call, CallStatus, CallType
     from elspeth.contracts.audit_protocols import PluginAuditWriter
-    from elspeth.contracts.batch_checkpoint import BatchCheckpointState
     from elspeth.contracts.config.runtime import RuntimeConcurrencyConfig
     from elspeth.contracts.identity import TokenInfo
     from elspeth.contracts.payload_store import PayloadStore
@@ -123,12 +122,6 @@ class TransformContext(Protocol):
         *,
         provider: str = "unknown",
     ) -> Call | None: ...
-
-    def get_checkpoint(self) -> BatchCheckpointState | None: ...
-
-    def set_checkpoint(self, state: BatchCheckpointState) -> None: ...
-
-    def clear_checkpoint(self) -> None: ...
 
 
 @runtime_checkable

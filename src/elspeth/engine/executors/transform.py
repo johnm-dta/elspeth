@@ -350,8 +350,7 @@ class TransformExecutor:
                     f"Transform '{transform.name}' input validation failed: {e}. This indicates an upstream transform/source schema bug."
                 ) from e
 
-            # Set state_id and node_id on context for external call recording
-            # and batch checkpoint lookup (node_id required for _batch_checkpoints keying)
+            # Set state_id and node_id on context for external call recording.
             ctx.state_id = guard.state_id
             ctx.node_id = transform.node_id
             # Note: call_index allocation is handled by ExecutionRepository.allocate_call_index()

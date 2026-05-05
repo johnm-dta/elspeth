@@ -92,7 +92,7 @@ Used by the `llm` transform (provider: openrouter).
 | `AZURE_OPENAI_API_KEY` | API key for Azure OpenAI service |
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource endpoint URL |
 
-Used by `llm` (provider: azure) and `azure_batch_llm` transforms.
+Used by `llm` (provider: azure) transforms.
 
 **Endpoint format:** `https://your-resource.openai.azure.com`
 
@@ -199,7 +199,7 @@ ELSPETH_SIGNING_KEY=your-signing-key
 # OpenRouter (for llm transform with provider: openrouter)
 OPENROUTER_API_KEY=sk-or-v1-your-key-here
 
-# Azure OpenAI (for llm (provider: azure) and azure_batch_llm transforms)
+# Azure OpenAI (for llm (provider: azure) transforms)
 AZURE_OPENAI_API_KEY=your-azure-key
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
 

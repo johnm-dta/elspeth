@@ -27,7 +27,6 @@ FrameworkBugError = tier_1_error(
 )(_FrameworkBugError)
 
 if TYPE_CHECKING:
-    from elspeth.contracts.batch_checkpoint import BatchCheckpointState
     from elspeth.contracts.coalesce_metadata import CoalesceMetadata
 
 
@@ -258,8 +257,8 @@ class RowErrorEntry(TypedDict):
     """Entry in row_errors list for batch processing failures.
 
     The ``error`` field accepts both simple strings and structured dicts.
-    Batch plugins (e.g., azure_batch) may store structured error bodies
-    from external APIs, which are persisted as-is in the audit trail.
+    Plugins handling external-API responses may store structured error
+    bodies, which are persisted as-is in the audit trail.
     """
 
     row_index: int
@@ -641,79 +640,11 @@ class MaxRetriesExceeded(Exception):
         super().__init__(f"Max retries ({attempts}) exceeded: {last_error}")
 
 
-# TIER-2: Control-flow signal for async batch polling — not an error condition; tells the engine to schedule a retry check.
-class BatchPendingError(Exception):
-    """Raised when batch is submitted but not yet complete.
-
-    This is NOT an error condition - it's a control flow signal
-    telling the engine to schedule a retry check later.
-
-    The exception carries the checkpoint state so the caller can persist
-    it and restore it when scheduling a retry. This enables crash recovery
-    and correct resume behavior.
-
-    Attributes:
-        batch_id: Azure batch job ID
-        status: Current batch status (e.g., "submitted", "in_progress")
-        check_after_seconds: When to check again (default 300s = 5 min)
-        checkpoint: Typed checkpoint state for retry (BatchCheckpointState)
-        node_id: Transform node ID that raised this (for checkpoint keying)
-
-    Example:
-        # Phase 1: Submit batch
-        batch_id = client.batches.create(...)
-        state = BatchCheckpointState(batch_id=batch_id, ...)
-        ctx.set_checkpoint(state)
-        raise BatchPendingError(
-            batch_id, "submitted",
-            check_after_seconds=300,
-            checkpoint=state,
-            node_id=self.node_id,
-        )
-
-        # Caller catches, persists checkpoint.to_dict(), schedules retry
-
-        # Phase 2: Resume and check (caller passes checkpoint back via orchestrator)
-        checkpoint = ctx.get_checkpoint()
-        if checkpoint is not None:
-            status = client.batches.retrieve(checkpoint.batch_id).status
-            if status == "in_progress":
-                raise BatchPendingError(checkpoint.batch_id, "in_progress", checkpoint=checkpoint)
-            elif status == "completed":
-                # Download results and return
-    """
-
-    def __init__(
-        self,
-        batch_id: str,
-        status: str,
-        *,
-        check_after_seconds: int = 300,
-        checkpoint: "BatchCheckpointState | None" = None,
-        node_id: str | None = None,
-    ) -> None:
-        """Initialize BatchPendingError.
-
-        Args:
-            batch_id: Azure batch job ID
-            status: Current batch status
-            check_after_seconds: Seconds until next check (default 300)
-            checkpoint: Typed checkpoint state for retry (BatchCheckpointState)
-            node_id: Transform node ID (for checkpoint keying)
-        """
-        self.batch_id = batch_id
-        self.status = status
-        self.check_after_seconds = check_after_seconds
-        self.checkpoint = checkpoint
-        self.node_id = node_id
-        super().__init__(f"Batch {batch_id} is {status}, check after {check_after_seconds}s")
-
-
 # TIER-2: Control-flow signal for interrupted runs (SIGINT/SIGTERM) — run is resumable; not a system corruption or framework bug.
 class GracefulShutdownError(Exception):
     """Raised when a pipeline run is interrupted by a shutdown signal.
 
-    This is a CONTROL-FLOW SIGNAL, like BatchPendingError. It indicates the
+    This is a CONTROL-FLOW SIGNAL. It indicates the
     orchestrator stopped processing new rows due to SIGINT/SIGTERM but
     completed all in-flight work (aggregation flush, sink writes, checkpoints).
 

@@ -91,12 +91,6 @@ class TestProtocolDiscrimination:
 
             def record_call(self, *a: object, **kw: object) -> None: ...
 
-            def get_checkpoint(self) -> None: ...
-
-            def set_checkpoint(self, state: object) -> None: ...
-
-            def clear_checkpoint(self) -> None: ...
-
         obj = MinimalTransform()
         # Intentional runtime protocol structural subtyping checks (see above).
         assert isinstance(obj, TransformContext), "MinimalTransform should satisfy TransformContext"  # type: ignore[unreachable]
@@ -126,8 +120,6 @@ class TestProtocolDiscrimination:
 # link a validation error audit record to the later persisted quarantine row.
 EXECUTOR_ONLY_FIELDS = {
     "config",
-    "_checkpoint",
-    "_batch_checkpoints",
     "_pending_quarantine_validation_errors",
 }
 

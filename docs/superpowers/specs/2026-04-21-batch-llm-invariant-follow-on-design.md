@@ -1,6 +1,6 @@
 # Batch LLM Invariant Follow-on Design — Azure Batch and OpenRouter Batch
 
-**Status:** Spike
+**Status:** Superseded by ADR-020 (`docs/architecture/adr/020-retire-batch-llm-transforms.md`) — 2026-05-06. The fix path described below was not pursued; the targets were retired instead.
 **Date:** 2026-04-21
 **Relates to:** `elspeth-be398f0bcb`
 **Scope:** Deferred batch-LLM tranche after the remaining transform invariant migration

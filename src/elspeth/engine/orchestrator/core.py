@@ -44,8 +44,6 @@ import elspeth.contracts.errors as contract_errors
 import elspeth.engine.executors.declaration_contract_bootstrap  # noqa: F401
 from elspeth import __version__ as ENGINE_VERSION
 from elspeth.contracts import (
-    BatchCheckpointState,
-    BatchPendingError,
     ExportStatus,
     NodeType,
     PendingOutcome,
@@ -1468,7 +1466,6 @@ class Orchestrator:
         config: PipelineConfig,
         graph: ExecutionGraph | None = None,
         settings: ElspethSettings | None = None,
-        batch_checkpoints: dict[str, BatchCheckpointState] | None = None,
         *,
         payload_store: PayloadStore,
         secret_resolutions: list[SecretResolutionInput] | None = None,
@@ -1483,10 +1480,6 @@ class Orchestrator:
             config: Pipeline configuration with plugins
             graph: Pre-validated execution graph (required)
             settings: Full settings (for post-run hooks like export)
-            batch_checkpoints: Typed batch transform checkpoints to restore
-                (from previous BatchPendingError). Maps node_id ->
-                BatchCheckpointState. Used when retrying a run after a batch
-                transform raised BatchPendingError.
             payload_store: PayloadStore for persisting source row payloads.
             secret_resolutions: Optional secret resolution records from
                 load_secrets_from_config(). Recorded in audit trail after run creation.
@@ -1548,7 +1541,6 @@ class Orchestrator:
                     config,
                     graph,
                     settings,
-                    batch_checkpoints,
                     payload_store=payload_store,
                     shutdown_event=active_event,
                 )
@@ -1622,13 +1614,6 @@ class Orchestrator:
 
             return result
 
-        except BatchPendingError:
-            # BatchPendingError is a CONTROL-FLOW SIGNAL, not an error.
-            # A batch transform has submitted work that isn't complete yet.
-            # DO NOT mark run as failed - it's pending, not failed.
-            # DO NOT emit RunSummary - run isn't done yet.
-            # Re-raise for caller to schedule retry based on check_after_seconds.
-            raise
         except GracefulShutdownError as shutdown_exc:
             with best_effort("Interrupted ceremony on graceful shutdown", run_id=run.run_id):
                 self._emit_interrupted_ceremony(run.run_id, factory, shutdown_exc, run_start_time)
@@ -1969,7 +1954,6 @@ class Orchestrator:
         graph: ExecutionGraph,
         settings: ElspethSettings | None,
         artifacts: GraphArtifacts,
-        batch_checkpoints: dict[str, BatchCheckpointState] | None,
         payload_store: PayloadStore,
         *,
         include_source_on_start: bool = True,
@@ -2007,7 +1991,6 @@ class Orchestrator:
         )
 
         # Create context with the PluginAuditWriter
-        # Restore batch checkpoints if provided (from previous BatchPendingError)
         ctx = PluginContext(
             run_id=run_id,
             config=config.config,
@@ -2015,7 +1998,6 @@ class Orchestrator:
             payload_store=factory.payload_store,
             rate_limit_registry=self._rate_limit_registry,
             concurrency_config=self._concurrency_config,
-            _batch_checkpoints=batch_checkpoints or {},
             telemetry_emit=self._emit_telemetry,
         )
 
@@ -2818,8 +2800,6 @@ class Orchestrator:
                     interrupted_by_shutdown=interrupted_by_shutdown,
                 )
 
-            except BatchPendingError:
-                raise  # Control-flow signal, not an error
             except Exception as e:
                 self._emit_phase_error(PipelinePhase.PROCESS, e, target=config.source.name)
                 raise
@@ -2974,7 +2954,6 @@ class Orchestrator:
         config: PipelineConfig,
         graph: ExecutionGraph,
         settings: ElspethSettings | None = None,
-        batch_checkpoints: dict[str, BatchCheckpointState] | None = None,
         *,
         payload_store: PayloadStore,
         shutdown_event: threading.Event | None = None,
@@ -2998,7 +2977,6 @@ class Orchestrator:
             graph,
             settings,
             artifacts,
-            batch_checkpoints,
             payload_store,
         )
 
@@ -3079,8 +3057,6 @@ class Orchestrator:
                 )
 
             self._events.emit(PhaseCompleted(phase=PipelinePhase.PROCESS, duration_seconds=current_time - loop_result.phase_start))
-        except BatchPendingError:
-            raise
         except GracefulShutdownError:
             raise
         except Exception as exc:
@@ -3464,7 +3440,6 @@ class Orchestrator:
             graph,
             settings,
             artifacts,
-            None,  # batch_checkpoints
             payload_store,
             include_source_on_start=False,
             restored_aggregation_state=restored_aggregation_state,

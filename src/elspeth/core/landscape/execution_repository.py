@@ -75,7 +75,7 @@ if TYPE_CHECKING:
 
 _TERMINAL_BATCH_STATUSES = frozenset({BatchStatus.COMPLETED, BatchStatus.FAILED})
 _TERMINAL_NODE_STATE_STATUSES = frozenset({NodeStateStatus.COMPLETED, NodeStateStatus.FAILED})
-_COMPLETABLE_OPERATION_STATUSES = frozenset({"completed", "failed", "pending"})
+_COMPLETABLE_OPERATION_STATUSES = frozenset({"completed", "failed"})
 
 
 class _PreparedCallData(NamedTuple):
@@ -893,7 +893,7 @@ class ExecutionRepository:
     def complete_operation(
         self,
         operation_id: str,
-        status: Literal["completed", "failed", "pending"],
+        status: Literal["completed", "failed"],
         *,
         output_data: Mapping[str, object] | None = None,
         error: str | None = None,
@@ -903,7 +903,7 @@ class ExecutionRepository:
 
         Args:
             operation_id: Operation to complete
-            status: Final status ('completed', 'failed', or 'pending' for BatchPendingError)
+            status: Final status ('completed' or 'failed')
             output_data: Optional output context
             error: Error message if failed
             duration_ms: Operation duration

@@ -207,10 +207,8 @@ class TestDiscoverAllPlugins:
         transform_names = [cls.name for cls in discovered["transforms"]]  # type: ignore[attr-defined]
         assert "passthrough" in transform_names
         assert "field_mapper" in transform_names
-        # LLM transforms live in plugins/llm/ - verify unified + batch are discovered
+        # LLM transforms live in plugins/llm/ - verify unified is discovered
         assert "llm" in transform_names, f"Missing llm in {transform_names}"
-        assert "azure_batch_llm" in transform_names, f"Missing azure_batch_llm in {transform_names}"
-        assert "openrouter_batch_llm" in transform_names, f"Missing openrouter_batch_llm in {transform_names}"
         # Azure transforms live in plugins/transforms/azure/ (subdirectory!)
         assert "azure_content_safety" in transform_names, f"Missing azure_content_safety in {transform_names}"
         assert "azure_prompt_shield" in transform_names, f"Missing azure_prompt_shield in {transform_names}"
@@ -250,7 +248,7 @@ class TestDiscoverAllPlugins:
         # Expected counts verified during migration from hookimpl files
         EXPECTED_SOURCE_COUNT = 6  # csv, json, null, azure_blob, dataverse, text
         EXPECTED_TRANSFORM_COUNT = (
-            17  # 11 standard transforms + 2 azure safety + llm + azure_batch_llm + openrouter_batch_llm + rag_retrieval
+            15  # 11 standard transforms + 2 azure safety + llm + rag_retrieval
         )
         EXPECTED_SINK_COUNT = 6  # csv, json, database, azure_blob, dataverse, chroma_sink
 
@@ -619,12 +617,12 @@ class TestCanonicalModuleName:
     def test_nested_plugin_path(self) -> None:
         """A file in a subdirectory (llm/) returns the full dotted path."""
         plugins_root = Path(__file__).parent.parent.parent.parent / "src" / "elspeth" / "plugins"
-        azure_batch = plugins_root / "transforms" / "llm" / "azure_batch.py"
-        assert azure_batch.exists(), f"Test fixture missing: {azure_batch}"
+        multi_query = plugins_root / "transforms" / "llm" / "multi_query.py"
+        assert multi_query.exists(), f"Test fixture missing: {multi_query}"
 
-        result = _canonical_module_name(azure_batch)
+        result = _canonical_module_name(multi_query)
 
-        assert result == "elspeth.plugins.transforms.llm.azure_batch"
+        assert result == "elspeth.plugins.transforms.llm.multi_query"
 
     def test_non_elspeth_path_returns_none(self, tmp_path: Path) -> None:
         """A file outside the elspeth package tree returns None."""

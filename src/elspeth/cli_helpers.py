@@ -106,8 +106,8 @@ def instantiate_plugins_from_config(
                     f"Aggregation '{agg_config.name}' uses transform '{agg_config.plugin}' "
                     f"which has is_batch_aware=False. Aggregations require batch-aware "
                     f"transforms that can process multiple rows at once. "
-                    f"Use a batch-aware transform like 'azure_batch_llm', 'batch_stats', "
-                    f"or 'batch_replicate', or set is_batch_aware=True on your custom transform."
+                    f"Use a batch-aware transform like 'batch_stats' or 'batch_replicate', "
+                    f"or set is_batch_aware=True on your custom transform."
                 )
 
             aggregations[agg_config.name] = (transform, agg_config)

@@ -195,7 +195,6 @@ class TestBuildProcessorCallsCleanupOnFailure:
                 graph,
                 settings,
                 artifacts,
-                None,  # batch_checkpoints
                 payload_store,
                 include_source_on_start=True,
             )

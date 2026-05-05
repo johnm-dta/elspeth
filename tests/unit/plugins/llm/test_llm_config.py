@@ -305,22 +305,6 @@ class TestOpenRouterConfig:
         assert config.model == "openai/gpt-4o"
 
 
-class TestOpenRouterBatchConfigModelRequired:
-    """OpenRouterBatchConfig must reject model=None."""
-
-    def test_rejects_none_model(self) -> None:
-        from elspeth.plugins.transforms.llm.openrouter_batch import OpenRouterBatchConfig
-
-        with pytest.raises((ValidationError, ValueError)):
-            OpenRouterBatchConfig(  # type: ignore[call-arg]  # intentionally missing model
-                api_key="key",
-                template="hello",
-                schema_config=_OBSERVED_SCHEMA,
-                required_input_fields=[],
-                # model not provided
-            )
-
-
 # ---------------------------------------------------------------------------
 # Domain-agnostic QuerySpec
 # ---------------------------------------------------------------------------

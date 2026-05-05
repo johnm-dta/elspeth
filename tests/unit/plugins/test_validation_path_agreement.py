@@ -401,8 +401,6 @@ def test_all_plugins_with_model_validators_have_agreement_cases():
     EXEMPT = {
         "null",  # NullSource: no config_model
         "llm",  # LLMTransform: provider-dispatched, tested via provider-specific tests
-        "azure_batch_llm",  # Batch LLM: tested via LLM provider tests
-        "openrouter_batch_llm",  # Batch LLM: tested via LLM provider tests
         "rag_retrieval",  # RAG: provider-dispatched config validation
         "azure_content_safety",  # Azure safety: endpoint/api_key field validators only
         "azure_prompt_shield",  # Azure safety: endpoint/api_key field validators only

@@ -510,8 +510,9 @@ For each plugin, add `source_file_hash = "sha256:<computed>"` after the `plugin_
 - `transforms/azure/prompt_shield.py` (AzurePromptShield)
 - `transforms/rag/transform.py` (RAGRetrievalTransform)
 - `transforms/llm/transform.py` (LLMTransform)
-- `transforms/llm/azure_batch.py` (AzureBatchLLMTransform)
-- `transforms/llm/openrouter_batch.py` (OpenRouterBatchLLMTransform)
+<!-- transforms/llm/azure_batch.py (AzureBatchLLMTransform) and
+     transforms/llm/openrouter_batch.py (OpenRouterBatchLLMTransform)
+     were retired 2026-05-06 per ADR-020 and removed from this list. -->
 
 For these, add both lines after the `name = "..."` attribute:
 ```python

@@ -644,6 +644,18 @@ class TestValidateOutcomeFields:
         )
         assert outcome_id is not None
 
+    def test_quarantined_accepts_error_hash_and_sink_name(self):
+        _db, factory = _setup()
+        _row, token = _make_row(factory)
+        outcome_id = factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            error_hash="abc123",
+            sink_name="quarantine",
+        )
+        assert outcome_id is not None
+
     def test_consumed_in_batch_requires_batch_id(self):
         _db, factory = _setup()
         _row, token = _make_row(factory)
@@ -685,6 +697,17 @@ class TestValidateOutcomeFields:
             outcome=TerminalOutcome.SUCCESS,
             path=TerminalPath.COALESCED,
             sink_name="output",
+            join_group_id="jg-1",
+        )
+        assert outcome_id is not None
+
+    def test_coalesced_accepts_join_group_id_without_sink_name(self):
+        _db, factory = _setup()
+        _row, token = _make_row(factory)
+        outcome_id = factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.COALESCED,
             join_group_id="jg-1",
         )
         assert outcome_id is not None

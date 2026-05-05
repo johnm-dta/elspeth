@@ -652,13 +652,12 @@ class SinkExecutor:
                             f"(SUCCESS, COALESCED) pending outcome for token {token.token_id!r} "
                             "requires token.join_group_id before sink recording"
                         )
-                outcome_sink_name = None if pending_outcome.path == TerminalPath.QUARANTINED_AT_SOURCE else sink_name
                 self._data_flow.record_token_outcome(
                     ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
                     outcome=pending_outcome.outcome,
                     path=pending_outcome.path,
                     error_hash=pending_outcome.error_hash,
-                    sink_name=outcome_sink_name,
+                    sink_name=sink_name,
                     join_group_id=join_group_id,
                 )
 

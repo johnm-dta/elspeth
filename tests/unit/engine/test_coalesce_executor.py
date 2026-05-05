@@ -161,6 +161,46 @@ def _make_executor(
     return executor, execution, data_flow, token_manager, clock
 
 
+def _make_raw_executor(
+    clock: MockClock | None = None, max_completed_keys: int = 10000
+) -> tuple[CoalesceExecutor, MagicMock, MagicMock, MagicMock, MockClock]:
+    """Build the production CoalesceExecutor without the test on_success shim."""
+    execution = MagicMock(spec=ExecutionRepository)
+    execution.begin_node_state.side_effect = lambda **kw: Mock(state_id=_next_state_id())
+    execution.get_completed_row_ids_for_nodes.return_value = set()
+    data_flow = MagicMock(spec=DataFlowRepository)
+    span_factory = MagicMock()
+    token_manager = MagicMock()
+
+    def coalesce_tokens_impl(parents, merged_data, node_id, run_id):
+        return TokenInfo(
+            row_id=parents[0].row_id,
+            token_id=f"merged_{uuid4().hex[:8]}",
+            row_data=merged_data,
+            join_group_id=f"join_{uuid4().hex[:8]}",
+        )
+
+    token_manager.coalesce_tokens.side_effect = coalesce_tokens_impl
+
+    if clock is None:
+        clock = MockClock(start=100.0)
+
+    def step_resolver(node_id: str) -> int:
+        return 5
+
+    executor = CoalesceExecutor(
+        execution,
+        span_factory,
+        token_manager,
+        "run_1",
+        step_resolver=step_resolver,
+        clock=clock,
+        max_completed_keys=max_completed_keys,
+        data_flow=data_flow,
+    )
+    return executor, execution, data_flow, token_manager, clock
+
+
 def _settings(
     name: str = "merge",
     branches: list[str] | None = None,
@@ -417,6 +457,50 @@ class TestRequireAllPolicy:
         for c in outcome_calls:
             assert c.kwargs["outcome"] == TerminalOutcome.SUCCESS
             assert c.kwargs["path"] == TerminalPath.COALESCED
+
+    def test_non_terminal_coalesce_records_absorbed_branches_without_sink_witness(self):
+        """Downstream coalesce flows have no terminal sink witness at merge time."""
+        executor, _, data_flow, _, _ = _make_raw_executor()
+        settings = _settings(branches=["a", "b"], policy="require_all")
+        executor.register_coalesce(
+            settings,
+            "node_1",
+            output_schema=SchemaContract(mode="OBSERVED", fields=(), locked=False),
+        )
+
+        executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
+        outcome = executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
+
+        assert outcome.merged_token is not None
+        outcome_calls = data_flow.record_token_outcome.call_args_list
+        assert len(outcome_calls) == 2
+        for c in outcome_calls:
+            assert c.kwargs["outcome"] == TerminalOutcome.SUCCESS
+            assert c.kwargs["path"] == TerminalPath.COALESCED
+            assert c.kwargs["sink_name"] is None
+            assert c.kwargs["join_group_id"] == outcome.merged_token.join_group_id
+
+    def test_terminal_coalesce_does_not_tag_absorbed_branches_with_sink_witness(self):
+        """Only the merged token's later sink write should carry the sink discriminator."""
+        executor, _, data_flow, _, _ = _make_raw_executor()
+        settings = _settings(branches=["a", "b"], policy="require_all").model_copy(update={"on_success": "output"})
+        executor.register_coalesce(
+            settings,
+            "node_1",
+            output_schema=SchemaContract(mode="OBSERVED", fields=(), locked=False),
+        )
+
+        executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
+        outcome = executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
+
+        assert outcome.merged_token is not None
+        outcome_calls = data_flow.record_token_outcome.call_args_list
+        assert len(outcome_calls) == 2
+        for c in outcome_calls:
+            assert c.kwargs["outcome"] == TerminalOutcome.SUCCESS
+            assert c.kwargs["path"] == TerminalPath.COALESCED
+            assert c.kwargs["sink_name"] is None
+            assert c.kwargs["join_group_id"] == outcome.merged_token.join_group_id
 
     def test_token_manager_coalesce_tokens_called(self):
         executor, _, _, tm, _ = self._setup()

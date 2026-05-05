@@ -3528,8 +3528,8 @@ class TestSinkExecutor:
 
     # --- PendingOutcome ---
 
-    def test_source_quarantine_pending_outcome_clears_sink_name(self) -> None:
-        """Source quarantine outcomes are not attributed to a sink."""
+    def test_source_quarantine_pending_outcome_preserves_sink_name(self) -> None:
+        """Quarantine outcomes keep the sink witness after durable sink write."""
         factory = _make_factory()
         executor = SinkExecutor(factory.execution, factory.data_flow, _make_span_factory(), run_id="test-run")
         token = _make_token()
@@ -3551,7 +3551,7 @@ class TestSinkExecutor:
         assert kwargs["outcome"] == TerminalOutcome.FAILURE
         assert kwargs["path"] == TerminalPath.QUARANTINED_AT_SOURCE
         assert kwargs["error_hash"] == "err_hash_123"
-        assert kwargs["sink_name"] is None
+        assert kwargs["sink_name"] == "quarantine"
 
     # --- Artifact registration ---
 

@@ -399,7 +399,7 @@ class TestQuarantineHappyPath:
 
         outcome = quarantined_outcomes[0]
         assert outcome.completed == 1, "QUARANTINED must be a terminal outcome"
-        assert outcome.sink_name is None, "QUARANTINED_AT_SOURCE records source-boundary evidence, not sink routing"
+        assert outcome.sink_name == "quarantine", "QUARANTINED_AT_SOURCE preserves the durable quarantine sink witness"
         assert outcome.error_hash is not None, "QUARANTINED outcome must have error_hash"
 
     def test_mixed_valid_and_quarantined_rows_full_audit(self, payload_store) -> None:
@@ -474,7 +474,7 @@ class TestQuarantineHappyPath:
         # QUARANTINED outcomes have error_hash, COMPLETED do not
         for qo in quarantined_outcomes:
             assert qo.error_hash is not None, "QUARANTINED must have error_hash"
-            assert qo.sink_name is None, "QUARANTINED_AT_SOURCE records source-boundary evidence, not sink routing"
+            assert qo.sink_name == "quarantine", "QUARANTINED_AT_SOURCE preserves the durable quarantine sink witness"
         for co in completed_outcomes:
             assert co.sink_name == "default"
 

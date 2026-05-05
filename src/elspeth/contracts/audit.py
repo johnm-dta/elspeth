@@ -772,7 +772,7 @@ _TERMINAL_PAIR_FIELD_CONSTRAINTS: dict[
         forbidden=_DISCRIMINATOR_FIELDS,
     ),
     (TerminalOutcome.SUCCESS, TerminalPath.COALESCED): TerminalPairFieldConstraints(
-        required=("sink_name", "join_group_id"),
+        required=("join_group_id",),
         forbidden=_forbid_except("sink_name", "join_group_id"),
     ),
     (TerminalOutcome.FAILURE, TerminalPath.UNROUTED): TerminalPairFieldConstraints(
@@ -781,7 +781,7 @@ _TERMINAL_PAIR_FIELD_CONSTRAINTS: dict[
     ),
     (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE): TerminalPairFieldConstraints(
         required=("error_hash",),
-        forbidden=_forbid_except("error_hash"),
+        forbidden=_forbid_except("sink_name", "error_hash"),
     ),
     (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK): TerminalPairFieldConstraints(
         required=("sink_name", "error_hash"),

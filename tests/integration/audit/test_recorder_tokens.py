@@ -785,7 +785,6 @@ class TestAtomicTokenOperations:
                 ref=TokenRef(token_id=child.token_id, run_id=run.run_id),
                 outcome=TerminalOutcome.SUCCESS,
                 path=TerminalPath.COALESCED,
-                sink_name="output",
                 join_group_id=merged.join_group_id,
             )
 
@@ -795,7 +794,7 @@ class TestAtomicTokenOperations:
             assert outcome is not None, f"Parent {child.token_id} should have COALESCED outcome"
             assert outcome.outcome == TerminalOutcome.SUCCESS
             assert outcome.path == TerminalPath.COALESCED
-            assert outcome.sink_name == "output"
+            assert outcome.sink_name is None
             assert outcome.join_group_id == merged.join_group_id
             assert outcome.completed is True
 

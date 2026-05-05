@@ -2,39 +2,47 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this phase task-by-task.
 >
-> **CRITICAL — atomic merge:** This phase is part of a five-phase plan ([overview](2026-05-04-adr-019-stage-2-3-overview.md)). Phases sequence as commits within ONE PR; Phase 1 alone leaves the engine module non-importable because every producer site still passes `RowOutcome` to `record_token_outcome`. Do NOT propose to land this commit alone. Phase 2 must follow in the same PR.
+> **CRITICAL — atomic merge:** This phase is part of a five-phase plan ([overview](2026-05-04-adr-019-stage-2-3-overview.md)). Phase 1 is a local checkpoint only, not a git commit boundary: it leaves the engine module non-importable because every producer site still passes `RowOutcome` to `record_token_outcome`. Do NOT commit, push, or propose to land Phase 1 alone. Continue directly to Phase 2, and create the first git commit only after Phase 3 completes the atomic Stage 2/3 migration.
 
 **Goal:** Flip the audit foundation — DB schema (`is_terminal` → `completed`, add `path` column, repurpose `outcome` value space), the four contract dataclasses (`TokenOutcome`, `RowResult`, `PendingOutcome`, `TokenCompleted`), the recorder write path (`record_token_outcome` signature + `_validate_outcome_fields` rewrite), and the loader read path (`TokenOutcomeLoader.load` cross-checks per ADR-019 § Implementation Notes invariant-translation table).
 
 **Files touched in this phase:**
 
 Core schema + recorder + dataclasses:
+- Create: `scripts/cicd/adr019_symbol_inventory.py` (AST-backed source inventory; must exist before every phase boundary)
+- Create: `config/cicd/adr019_symbol_inventory/` (temporary migration-window allowlist directory; at minimum `migration_files.yaml`)
+- Test: `tests/unit/scripts/cicd/test_adr019_symbol_inventory.py`
 - Modify: `src/elspeth/core/landscape/schema.py:180-216` (table definition)
+- Modify: `src/elspeth/core/landscape/database.py:26-70, 427-441` (schema compatibility guard: epoch + required columns)
 - Modify: `src/elspeth/contracts/audit.py:673-703` (TokenOutcome dataclass)
 - Modify: `src/elspeth/contracts/results.py:379-421` (RowResult dataclass)
 - Modify: `src/elspeth/contracts/engine.py:46-100` (PendingOutcome dataclass)
 - Modify: `src/elspeth/contracts/events.py:242-249` (TokenCompleted dataclass)
+- Modify: `src/elspeth/contracts/__init__.py` (runtime re-export `TerminalOutcome`/`TerminalPath` beside `RowOutcome`; explicit package-boundary decision)
 - Modify: `src/elspeth/core/landscape/data_flow_repository.py:203-307, 570-580, 785-795, 802-880, 895-940` (recorder + internal FORKED/EXPANDED callers + read-side query column-rename sites at 899/930)
 - Modify: `src/elspeth/core/landscape/model_loaders.py:525-609` (loader)
 - Modify: `src/elspeth/testing/__init__.py:31-45, 507-540, 715-740` (test helpers re-export `TerminalOutcome`/`TerminalPath`)
+- Create: `docs/operator/migrations/adr-019.md` (operator-facing migration guide stub; Phase 5 expands it, but Phase 1 error paths must never point to a missing document)
 
 **Downstream consumers of the audit schema (added 2026-05-05 after consumer-surface sweep — the original plan missed these and Phase 1 would crash MCP/Web at deploy without them):**
-- Modify: `src/elspeth/mcp/types.py:364` (TypedDict `OutcomeDistributionEntry` — wire-schema field rename `is_terminal` → `completed`, add `path: str`)
-- Modify: `src/elspeth/mcp/analyzers/reports.py:659, 663, 700, 708, 709` (5 sites in `get_outcome_analysis` — SQL column rename + dict-key rename + add path grouping)
+- Modify: `src/elspeth/mcp/types.py:204-214, 360` (`RunSummaryReport.outcome_distribution` plus `OutcomeDistributionEntry` — wire-schema field rename `is_terminal` → `completed`, add `path: str`, change collapsed dict to path-aware entry list)
+- Modify: `src/elspeth/mcp/analyzers/reports.py:120-127, 157, 659, 663, 700, 708, 709` (`get_run_summary` outcome distribution and `get_outcome_analysis` both become path-aware)
 - Modify: `src/elspeth/mcp/analyzers/diagnostics.py:181` (hardcoded `outcome == "quarantined"` → `path == "quarantined_at_source"` — silent-zero-quarantine bug per CLAUDE.md Tier 1 audit integrity)
 - Modify: `src/elspeth/web/execution/diagnostics.py:170` (JOIN condition `is_terminal == 1` → `completed == 1`)
 - Modify: `src/elspeth/web/execution/discard_summary.py:92` (WHERE filter `is_terminal == 1` → `completed == 1`)
+- Modify: `src/elspeth/contracts/export_records.py:139-154` (`TokenOutcomeExportRecord` TypedDict — add `path`, rename `is_terminal` → `completed`, allow `outcome: str | None`)
 - Modify: `src/elspeth/core/landscape/exporter.py:430` (JSONL token_outcome export field `is_terminal` → `completed`, add `path` field)
 - Modify: `src/elspeth/core/landscape/lineage.py:118` (property read `o.is_terminal` → `o.completed` on `TokenOutcome` dataclass)
 - Modify: `src/elspeth/core/landscape/formatters.py:170` (CLI formatter — print `path.name` alongside `outcome.name`; `is_terminal` line becomes `completed`)
 
 Tests:
+- Test: `tests/unit/core/landscape/test_database_compatibility_guards.py` (extend with stale ADR-018 token_outcomes schema rejection)
 - Test: `tests/unit/core/landscape/test_data_flow_repository.py` (new tests for the (outcome, path) write path)
 - Test: `tests/unit/core/landscape/test_token_outcome_loader.py` (new tests for the new cross-checks)
 - Test: `tests/unit/contracts/test_audit.py` (TokenOutcome construction tests for the new shape)
 - Test: `tests/unit/mcp/test_outcome_analysis.py` (new — verifies wire-schema rename + path column)
 - Test: `tests/unit/mcp/test_diagnose_quarantine_count.py` (new — RED-first regression test for B3)
-- Test: `tests/unit/web/execution/test_discard_summary.py` (existing — schema-dependent fixup)
+- Test: `tests/unit/web/execution/test_discard_summary.py` (new) OR extend existing `tests/unit/web/execution/test_diagnostics.py` if the discard-summary fixture belongs with the current web execution diagnostics coverage
 - Test: `tests/unit/core/landscape/test_exporter.py` (existing — JSONL output assertion fixup)
 
 **Background reading:** ADR-019 lines 99-115 (mapping table — the canonical contract), lines 237-269 (cross-check invariants), lines 638-660 (Implementation Notes table). The Stage 1 closed-set partition at `src/elspeth/contracts/enums.py::_LEGAL_TERMINAL_PAIRS` is THE source of truth for legal `(outcome, path)` pairs — every cross-check in this phase consults it.
@@ -63,11 +71,132 @@ The same column is REUSED, not added. The schema migration is: rename one column
 
 ### 4. DB migration is delete-and-recreate
 
-Per `MEMORY.md::project_db_migration_policy`, ELSPETH does not run Alembic. The metadata defines the new schema; `metadata.create_all()` creates the new tables on engine startup. Operators delete `audit.db` and `sessions.db` between this PR and any pre-Stage-2 state.
+Per ELSPETH's project DB migration policy recorded for this plan, ELSPETH does not run Alembic. The metadata defines the new schema; `metadata.create_all()` creates the new tables on engine startup. Operators delete `audit.db` and `sessions.db` between this PR and any pre-Stage-2 state.
+
+**Mechanical guard, not just docs:** `LandscapeDB` validates an existing database before `metadata.create_all()` and `create_all()` will not alter old tables. Therefore this phase must also bump `SQLITE_SCHEMA_EPOCH` and validate the full `token_outcomes` ADR-019 shape for existing schemas: `token_outcomes.completed` plus `token_outcomes.path` exist, `token_outcomes.outcome` is nullable, stale `token_outcomes.is_terminal` is rejected as an old-shape witness, and the terminal unique-index predicate uses `completed == 1` rather than `is_terminal == 1` wherever the dialect exposes the predicate. An existing epoch-6 ADR-018 database must fail fast with an operator-actionable `SchemaCompatibilityError`, before any recorder or query path can hit a late SQL/AttributeError. The same shape scan must run for non-SQLite backends when Landscape tables already exist; Postgres has no `PRAGMA user_version`, but it is equally vulnerable to `create_all()` silently leaving stale columns/indexes in place. The error must name the stale shape and point at an existing `docs/operator/migrations/adr-019.md` so staging/prod operators know this is the ADR-019 delete-and-recreate boundary, not a mysterious mid-pipeline crash. **Important ordering:** the epoch-incompatible branch must not short-circuit before the ADR-019 shape scan can contribute the migration-specific message.
 
 ---
 
 ## Tasks
+
+### Task 1.0: Add AST-backed ADR-019 source inventory before touching schema
+
+**Files:**
+- Create: `scripts/cicd/adr019_symbol_inventory.py`
+- Create: `config/cicd/adr019_symbol_inventory/`
+- Create: `tests/unit/scripts/cicd/test_adr019_symbol_inventory.py`
+
+**Why this task is first:** the overview's D7 closeout gate is load-bearing at
+every phase boundary. The tool cannot be introduced in Phase 5, because the
+Phases 1-3 atomic commit and the Phase 4 commit already depend on it to catch
+missed `is_terminal` / hardcoded RowOutcome-value surfaces. Implement this
+inventory before the schema rename so every later checkpoint can run it.
+
+**Step 1: Implement the AST visitor**
+
+The script walks Python files under a root (default `src/elspeth`) and reports
+non-allowlisted findings as JSON lines plus a non-zero exit code. Use `ast.parse`;
+do not tokenize with regex.
+
+Minimum finding kinds:
+
+```python
+class FindingKind(StrEnum):
+    IS_TERMINAL_ANNOTATION = "is_terminal_annotation"
+    IS_TERMINAL_ATTRIBUTE = "is_terminal_attribute"
+    IS_TERMINAL_KEYWORD = "is_terminal_keyword"
+    IS_TERMINAL_DICT_KEY = "is_terminal_dict_key"
+    ROW_OUTCOME_STRING_COMPARE = "row_outcome_string_compare"
+    TERMINAL_OUTCOME_STRING_COMPARE = "terminal_outcome_string_compare"
+    TERMINAL_PATH_STRING_COMPARE = "terminal_path_string_compare"
+```
+
+`ROW_OUTCOME_STRING_COMPARE` is the migration-window guard for old
+`RowOutcome` value strings. The two terminal-value finding kinds are the
+post-migration guard: any direct comparison to known `TerminalOutcome` values
+(`"success"`, `"failure"`, `"transient"`) or `TerminalPath` values
+(`"default_flow"`, `"gate_routed"`, `"on_error_routed"`,
+`"filter_dropped"`, `"coalesced"`, `"unrouted"`,
+`"quarantined_at_source"`, `"sink_fallback_to_failsink"`,
+`"sink_discarded"`, `"fork_parent"`, `"expand_parent"`,
+`"batch_consumed"`, `"buffered"`) must be flagged unless it is in the enum
+definition or an explicitly allowlisted migration fixture. This prevents
+replacing brittle `RowOutcome` string checks with equally brittle
+`TerminalOutcome` / `TerminalPath` string checks.
+
+Report fields: `kind`, `path`, `line`, `col`, `symbol`, and a short `context`
+from `ast.unparse(node)` when available.
+
+**Step 2: Add focused tests**
+
+The unit test must cover every finding kind plus false-positive guards:
+
+```python
+class OutcomeDistributionEntry(TypedDict):
+    is_terminal: bool
+
+record.is_terminal
+record_token_outcome(is_terminal=True)
+{"is_terminal": True}
+outcome == "quarantined"
+outcome == "failure"
+path == "quarantined_at_source"
+
+terminal = True
+payload = {"completed": True}
+outcome in {"completed", "failed"}
+```
+
+Use the existing CICD-script test style under `tests/unit/scripts/cicd/`, but
+do not rely only on inline snippets. Add a committed fixture corpus under
+`tests/fixtures/cicd/adr019_symbol_inventory/` with:
+
+- positive fixtures for every finding kind,
+- negative fixtures for the false-positive guards above,
+- at least one fixture that imports `TerminalOutcome` and `TerminalPath` so the
+  script proves it flags brittle string comparisons even when the enum imports
+  are present, and
+- a CLI test that points `--allowlist` at the directory
+  `config/cicd/adr019_symbol_inventory` rather than a flat YAML file.
+
+The unit tests should load the fixture corpus, call the inventory function
+directly for exact findings, and exercise the CLI `check` command once.
+
+**Step 3: Seed the temporary allowlist**
+
+Allow only deliberate migration-window files, with one-line justifications:
+
+- `src/elspeth/contracts/enums.py` while `RowOutcome` still exists until Stage 5.
+- `src/elspeth/testing/__init__.py` while it re-exports `RowOutcome` through the
+  remaining RowOutcome-retention window. Phase 5 removes pytest-blocking
+  assertions; Stage 5 removes the enum/re-export.
+
+Do not allowlist MCP, Web, exporter, formatter, or Landscape consumer files.
+Those are real missed consumers and must be fixed in this PR.
+
+**Step 4: Verify the tool is usable before schema edits**
+
+```bash
+.venv/bin/python -m pytest tests/unit/scripts/cicd/test_adr019_symbol_inventory.py -v
+.venv/bin/python scripts/cicd/adr019_symbol_inventory.py check \
+  --root src/elspeth \
+  --allowlist config/cicd/adr019_symbol_inventory
+```
+
+The first command must pass. The second may report known pre-migration findings
+before Phase 1's consumer edits, but the output format and allowlist behavior
+must be correct. After Phase 1 Task 1.9 and before the atomic Phases 1-3 commit,
+the check must exit 0.
+
+**Definition of Done:**
+- [ ] AST inventory script created and covered by unit tests
+- [ ] Temporary allowlist directory exists and is limited to deliberate migration-window files
+- [ ] Fixture corpus covers positive/negative AST inventory cases and an import-presence case
+- [ ] Script detects annotations, attributes, kwargs, dict keys, and hardcoded RowOutcome value comparisons
+- [ ] Script exits non-zero for non-allowlisted findings
+- [ ] Atomic Phases 1-3 commit staging includes the script, config, and tests
+
+---
 
 ### Task 1.1: Update `token_outcomes` schema definition
 
@@ -185,6 +314,273 @@ Expected output:
 
 ---
 
+### Task 1.1a: Update Landscape schema compatibility guard
+
+**Files:**
+- Modify: `src/elspeth/core/landscape/schema.py:27-48`
+- Modify: `src/elspeth/core/landscape/database.py:26-70`
+- Test: `tests/unit/core/landscape/test_database_compatibility_guards.py`
+
+**Why this task exists:** the migration policy is delete-and-recreate, but the runtime must still reject stale databases mechanically. Current startup validates before `metadata.create_all()`, and `create_all()` never mutates existing tables. Without this task, an epoch-6 SQLite database or a stale Postgres database with `token_outcomes.is_terminal` and no `path`/`completed` columns can pass compatibility checks and fail later on first write/read. That is an auditability failure: the operator sees a pipeline crash instead of a startup-time instruction to replace the pre-ADR-019 database.
+
+**Step 1: Write the stale-schema RED test FIRST**
+
+Extend `tests/unit/core/landscape/test_database_compatibility_guards.py` with a test that creates an ADR-018-shaped `token_outcomes` table, stamps it with the previous epoch, and asserts `LandscapeDB(...)` raises `SchemaCompatibilityError` naming both missing columns:
+
+```python
+def test_validate_schema_rejects_adr018_token_outcomes_shape(self, tmp_path: Path) -> None:
+    db_path = tmp_path / "adr018_audit.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        conn.exec_driver_sql("PRAGMA user_version = 6")
+        conn.execute(
+            text(
+                """
+                CREATE TABLE token_outcomes (
+                    outcome_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    token_id TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    is_terminal INTEGER NOT NULL,
+                    recorded_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+    engine.dispose()
+
+    with pytest.raises(SchemaCompatibilityError) as exc_info:
+        LandscapeDB(f"sqlite:///{db_path}")
+
+    msg = str(exc_info.value)
+    assert "Landscape database schema is outdated." in msg
+    assert "token_outcomes.completed" in msg
+    assert "token_outcomes.path" in msg
+    assert "docs/operator/migrations/adr-019.md" in msg
+```
+
+**Step 2: Bump the SQLite schema epoch**
+
+In `src/elspeth/core/landscape/schema.py`, add an epoch-history entry and set:
+
+```python
+#   7 -> ADR-019 Stage 2/3: token_outcomes stores the two-axis terminal model
+#        (`outcome`, `path`, `completed`) instead of RowOutcome + is_terminal.
+SQLITE_SCHEMA_EPOCH = 7
+```
+
+**Step 3: Add the new required columns**
+
+In `src/elspeth/core/landscape/database.py::_REQUIRED_COLUMNS`, add:
+
+```python
+# ADR-019 two-axis terminal model: old `is_terminal` DBs must fail fast.
+("token_outcomes", "completed"),
+("token_outcomes", "path"),
+```
+
+Do not remove the existing `("token_outcomes", "expected_branches_json")` guard.
+
+**Step 3a: Make the stale-ADR-019 error operator-actionable and avoid epoch short-circuit**
+
+Live `_validate_schema()` currently rejects incompatible SQLite epochs before it
+collects missing required columns. After the epoch bump to 7, the RED test above
+would otherwise take the generic epoch error branch and never mention
+`token_outcomes.completed`, `token_outcomes.path`, or the ADR-019 migration
+guide. Fix the ordering as part of this task:
+
+1. Inspect tables and collect `_REQUIRED_COLUMNS` failures before raising for an
+   incompatible non-zero epoch, OR
+2. Preserve the epoch check but make it include the already-collected missing
+   ADR-019 columns when present.
+
+The required behavior is that an epoch-6 ADR-018-shaped DB reports both the epoch
+mismatch and the ADR-019 missing-column action. Do not weaken the epoch check;
+augment the error so operators get the specific remediation.
+
+Extend the stale-schema message when the missing columns include
+`token_outcomes.completed` or `token_outcomes.path`:
+
+```python
+if ("token_outcomes", "completed") in missing_columns or (
+    "token_outcomes",
+    "path",
+) in missing_columns:
+    error_parts.append(
+        "ADR-019 changed token_outcomes from RowOutcome/is_terminal to "
+        "(TerminalOutcome, TerminalPath, completed). See "
+        "docs/operator/migrations/adr-019.md and replace the stale audit.db "
+        "before starting this ELSPETH version."
+    )
+```
+
+Keep the exception type as `SchemaCompatibilityError`; existing callers/tests
+already treat schema incompatibility as that fail-fast startup class. The
+important behaviour is timing and message quality: stale DBs fail during
+`LandscapeDB(...)`, before any recorder write, loader query, MCP analyzer, or
+web request can crash with a late `AttributeError`.
+
+**Step 3b: Make required-column validation backend-agnostic**
+
+Do not leave `_validate_schema()` as "SQLite full validation, non-SQLite table
+existence only." Extract the required-column scan into a helper that accepts a
+SQLAlchemy inspector and works for SQLite and Postgres:
+
+```python
+def _collect_missing_required_columns(inspector: Inspector) -> list[tuple[str, str]]:
+    existing_tables = set(inspector.get_table_names())
+    missing: list[tuple[str, str]] = []
+    for table_name, column_name in _REQUIRED_COLUMNS:
+        if table_name not in existing_tables:
+            continue
+        existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+        if column_name not in existing_columns:
+            missing.append((table_name, column_name))
+    return missing
+```
+
+Required behavior:
+
+1. New empty databases still reach `metadata.create_all()`.
+2. Existing non-Landscape databases opened with `_require_existing_schema=True`
+   still fail with the existing "does not contain any Landscape tables" message.
+3. Existing SQLite or Postgres databases that contain any Landscape table and a
+   stale `token_outcomes` table missing `completed` or `path` fail before
+   `create_all()` with the ADR-019 operator-actionable `SchemaCompatibilityError`.
+
+Add a dialect-agnostic unit test without requiring a live Postgres service:
+monkeypatch SQLAlchemy inspection so `_validate_schema()` sees
+`engine.dialect.name == "postgresql"`, `get_table_names()` returning
+`["runs", "token_outcomes"]`, and `get_columns("token_outcomes")` returning the
+ADR-018 column set. Assert the same `SchemaCompatibilityError` details as the
+SQLite test: `token_outcomes.completed`, `token_outcomes.path`, and
+`docs/operator/migrations/adr-019.md`.
+
+**Step 3c: Validate the full ADR-019 token_outcomes shape, not just column names**
+
+Column presence is not sufficient for an existing database. ADR-019 also changes
+`token_outcomes.outcome` from `nullable=False` to `nullable=True` and changes the
+terminal unique-index predicate from `is_terminal == 1` to `completed == 1`.
+Implement a second helper that reports stale-shape failures separately from
+missing-column failures:
+
+```python
+def _collect_token_outcomes_shape_errors(inspector: Inspector) -> list[str]:
+    """Return ADR-019 shape errors for existing token_outcomes tables."""
+    existing_tables = set(inspector.get_table_names())
+    if "token_outcomes" not in existing_tables:
+        return []
+
+    columns = {column["name"]: column for column in inspector.get_columns("token_outcomes")}
+    errors: list[str] = []
+
+    if "is_terminal" in columns:
+        errors.append("token_outcomes.is_terminal is stale; ADR-019 uses completed")
+    if "outcome" in columns and columns["outcome"].get("nullable") is False:
+        errors.append("token_outcomes.outcome must be nullable for BUFFERED rows")
+
+    # Inspect index predicate where SQLAlchemy exposes dialect-specific options.
+    # SQLite may require querying sqlite_master by index name from the live
+    # connection; Postgres may expose the predicate through dialect_options.
+    # If the predicate cannot be introspected, do not guess. Report only the
+    # stale `is_terminal` column and nullable outcome failures above.
+    ...
+    return errors
+```
+
+Add RED tests for all mechanically inspectable stale-shape cases:
+
+1. Existing SQLite table with `completed` and `path` present but `outcome TEXT NOT NULL`
+   still fails with `SchemaCompatibilityError`.
+2. Existing SQLite table with both `completed` and stale `is_terminal` still
+   fails; this catches partial/manual schema edits that only add new columns.
+3. Existing SQLite partial unique index whose SQL predicate still references
+   `is_terminal` fails and names the stale predicate.
+4. Existing dialect-agnostic/Postgres-shaped inspector data with stale
+   `is_terminal` and `outcome nullable=False` fails without needing a live
+   Postgres service.
+
+Required error behavior:
+
+- Include `docs/operator/migrations/adr-019.md` in every ADR-019 shape error.
+- Include the specific stale witness (`token_outcomes.is_terminal`,
+  `token_outcomes.outcome nullable`, or the stale index predicate) so operators
+  can distinguish "wrong DB" from "application bug."
+- Do not silently pass a table that has the new column names but the old
+  nullability/predicate semantics.
+
+**Step 4: GREEN**
+
+Run:
+
+```bash
+.venv/bin/python -m pytest tests/unit/core/landscape/test_database_compatibility_guards.py -v
+```
+
+**Definition of Done:**
+- [ ] `SQLITE_SCHEMA_EPOCH` bumped and epoch history updated
+- [ ] `_REQUIRED_COLUMNS` includes `token_outcomes.completed` and `token_outcomes.path`
+- [ ] `_validate_schema()` does not raise the generic epoch-only error before collecting/reporting the ADR-019 missing-column details
+- [ ] `_collect_token_outcomes_shape_errors()` rejects stale `is_terminal`, non-nullable `outcome`, and inspectable stale terminal-index predicates
+- [ ] ADR-018-shaped SQLite stale DB fails with `SchemaCompatibilityError` before `create_all()`
+- [ ] Partially edited SQLite stale DBs fail when `completed`/`path` exist but `outcome` is still NOT NULL or `is_terminal` remains present
+- [ ] Stale terminal unique-index predicates that still reference `is_terminal` fail where the dialect exposes the predicate
+- [ ] ADR-018-shaped Postgres/non-SQLite stale schema fails with the same ADR-019 missing-column `SchemaCompatibilityError`
+- [ ] Stale-DB error names `token_outcomes.completed`, `token_outcomes.path`, stale-shape witnesses when present, and `docs/operator/migrations/adr-019.md`
+- [ ] Compatibility guard tests pass
+
+---
+
+### Task 1.1b: Create the operator migration guide stub before any error path links to it
+
+**Files:**
+- Create: `docs/operator/migrations/adr-019.md`
+
+**Why this task exists:** Task 1.1a deliberately points stale-schema failures at
+`docs/operator/migrations/adr-019.md`. The first legal commit is the atomic
+Phases 1-3 commit, while the original plan created the operator guide in Phase 5.
+That leaves a valid intermediate commit where fail-fast runtime errors point at
+a missing remediation document. Create the durable stub in Phase 1 and let Phase
+5 expand it into the full deployment runbook.
+
+**Step 1: Create the minimal operator-facing document**
+
+```markdown
+# ADR-019 Operator Migration Guide
+
+**Status:** Stub created by Phase 1. Phase 5 expands this into the complete
+deployment, verification, and rollback runbook before the PR opens.
+
+ADR-019 replaces the single-axis `RowOutcome` audit DB encoding with the
+two-axis `(TerminalOutcome, TerminalPath, completed)` model. Existing
+pre-ADR-019 `audit.db` / audit-store schemas are intentionally incompatible.
+ELSPETH does not run Alembic migrations for this project; operators must replace
+the audit and sessions stores at the ADR-019 deployment boundary.
+
+If startup raises `SchemaCompatibilityError` naming `token_outcomes.completed`,
+`token_outcomes.path`, stale `token_outcomes.is_terminal`, or a stale terminal
+index predicate, stop the service and follow the full Phase 5 runbook before
+deploying this PR.
+
+See [ADR-019](../../architecture/adr/019-two-axis-terminal-model.md) for the
+canonical mapping table and behaviour-change rationale.
+```
+
+**Step 2: Verify the link target exists**
+
+```bash
+test -f docs/operator/migrations/adr-019.md
+grep -Fq "ADR-019 Operator Migration Guide" docs/operator/migrations/adr-019.md
+grep -Fq "../../architecture/adr/019-two-axis-terminal-model.md" docs/operator/migrations/adr-019.md
+```
+
+**Definition of Done:**
+- [ ] `docs/operator/migrations/adr-019.md` exists in the atomic Phases 1-3 commit
+- [ ] Stale-schema error messages introduced by Task 1.1a point to an existing file
+- [ ] Phase 5 Task 5.4 is updated to expand, not first-create, this document
+
+---
+
 ### Task 1.2: Retype `TokenOutcome` dataclass
 
 **Files:**
@@ -200,9 +596,11 @@ Create or extend: `tests/unit/contracts/test_audit.py`
 from datetime import datetime, timezone
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from elspeth.contracts.audit import TokenOutcome
-from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath, _LEGAL_TERMINAL_PAIRS
 
 
 class TestTokenOutcomeTwoAxis:
@@ -278,13 +676,54 @@ class TestTokenOutcomeTwoAxis:
                 completed=True,
                 recorded_at=datetime.now(timezone.utc),
             )
+
+    @given(
+        outcome=st.sampled_from(list(TerminalOutcome)),
+        path=st.sampled_from(list(TerminalPath)),
+    )
+    def test_all_illegal_completed_pairs_rejected(
+        self,
+        outcome: TerminalOutcome,
+        path: TerminalPath,
+    ) -> None:
+        """Tier 1: every pair outside _LEGAL_TERMINAL_PAIRS is rejected."""
+        if (outcome, path) in _LEGAL_TERMINAL_PAIRS:
+            return
+
+        with pytest.raises(ValueError):
+            TokenOutcome(
+                outcome_id="out_prop_illegal",
+                run_id="run_001",
+                token_id="tok_001",
+                outcome=outcome,
+                path=path,
+                completed=True,
+                recorded_at=datetime.now(timezone.utc),
+            )
+
+    @given(pair=st.sampled_from(list(_LEGAL_TERMINAL_PAIRS)))
+    def test_all_legal_pairs_accepted(
+        self,
+        pair: tuple[TerminalOutcome | None, TerminalPath],
+    ) -> None:
+        """Tier 1: every closed-set legal pair is accepted."""
+        outcome, path = pair
+        TokenOutcome(
+            outcome_id="out_prop_legal",
+            run_id="run_001",
+            token_id="tok_001",
+            outcome=outcome,
+            path=path,
+            completed=outcome is not None,
+            recorded_at=datetime.now(timezone.utc),
+        )
 ```
 
 **Step 2: Run the tests to verify they fail (RED)**
 
 Run: `.venv/bin/python -m pytest tests/unit/contracts/test_audit.py::TestTokenOutcomeTwoAxis -v`
 
-Expected: All five tests fail with `TypeError` ("unexpected keyword argument 'path'") — the dataclass doesn't have the new fields yet.
+Expected: All seven tests fail with `TypeError` ("unexpected keyword argument 'path'") — the dataclass doesn't have the new fields yet. The Hypothesis property tests may report a single shrunk example; the important RED signal is that every generated valid and invalid pair currently reaches the old dataclass shape.
 
 **Step 3: Update the dataclass**
 
@@ -415,16 +854,16 @@ from elspeth.contracts.enums import (
 
 Run: `.venv/bin/python -m pytest tests/unit/contracts/test_audit.py::TestTokenOutcomeTwoAxis -v`
 
-Expected: All five tests pass.
+Expected: All seven tests pass.
 
 **Step 5: Verify other tests in the contracts test suite still pass**
 
 Run: `.venv/bin/python -m pytest tests/unit/contracts/test_audit.py -v`
 
-Expected: every existing test that constructs `TokenOutcome` will fail because the old shape (`outcome=RowOutcome.X, is_terminal=True`) is gone. Update each existing test fixture in this file in the same commit to use `(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, completed=True)` style. This is schema-dependent test fixup per Phase 5 § Test triage; do NOT defer to Stage 4.
+Expected: every existing test that constructs `TokenOutcome` will fail because the old shape (`outcome=RowOutcome.X, is_terminal=True`) is gone. Update each existing test fixture in this file in the same commit to use `(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, completed=True)` style. This is schema-dependent test fixup per Phase 5 § Test triage; do not defer it.
 
 **Definition of Done:**
-- [ ] Five new tests in `TestTokenOutcomeTwoAxis` pass
+- [ ] Seven new tests in `TestTokenOutcomeTwoAxis` pass, including Hypothesis sweeps over every legal pair in `_LEGAL_TERMINAL_PAIRS` and every illegal `(TerminalOutcome, TerminalPath)` pair outside it
 - [ ] All pre-existing tests in `test_audit.py` updated and passing
 - [ ] `TokenOutcome.__post_init__` enforces all four I0 invariants
 - [ ] No `RowOutcome` references remain in `contracts/audit.py` (grep verifies)
@@ -442,6 +881,13 @@ Expected: every existing test that constructs `TokenOutcome` will fail because t
 Extend `tests/unit/contracts/test_results.py` with:
 
 ```python
+from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+
+
+def _pipeline_row(data: dict[str, object]) -> PipelineRow:
+    return PipelineRow(data, SchemaContract(mode="OBSERVED", fields=(), locked=False))
+
+
 class TestRowResultTwoAxis:
     """ADR-019 Phase 1: RowResult carries (outcome, path) at the producer site."""
 
@@ -449,7 +895,7 @@ class TestRowResultTwoAxis:
         token = TokenInfo(token_id="tok_001", row_id="row_001", run_id="run_001")
         result = RowResult(
             token=token,
-            final_data=PipelineRow(row={"k": "v"}, contract=None),
+            final_data=_pipeline_row({"k": "v"}),
             outcome=TerminalOutcome.SUCCESS,
             path=TerminalPath.DEFAULT_FLOW,
             sink_name="primary",
@@ -462,7 +908,7 @@ class TestRowResultTwoAxis:
         with pytest.raises(OrchestrationInvariantError, match="ON_ERROR_ROUTED"):
             RowResult(
                 token=token,
-                final_data=PipelineRow(row={"k": "v"}, contract=None),
+                final_data=_pipeline_row({"k": "v"}),
                 outcome=TerminalOutcome.FAILURE,
                 path=TerminalPath.ON_ERROR_ROUTED,
                 sink_name="error_sink",
@@ -473,12 +919,23 @@ class TestRowResultTwoAxis:
         token = TokenInfo(token_id="tok_001", row_id="row_001", run_id="run_001")
         result = RowResult(
             token=token,
-            final_data=PipelineRow(row={"k": "v"}, contract=None),
+            final_data=_pipeline_row({"k": "v"}),
             outcome=None,
             path=TerminalPath.BUFFERED,
         )
         assert result.outcome is None
         assert result.path == TerminalPath.BUFFERED
+
+    def test_illegal_completed_pair_rejected_before_recording(self) -> None:
+        token = TokenInfo(token_id="tok_001", row_id="row_001", run_id="run_001")
+        with pytest.raises(OrchestrationInvariantError, match="legal"):
+            RowResult(
+                token=token,
+                final_data=_pipeline_row({"k": "v"}),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.UNROUTED,
+                sink_name="primary",
+            )
 ```
 
 **Step 2: Run RED**
@@ -521,6 +978,10 @@ class RowResult:
         # catch obvious construction-site bugs early. The post-Stage-2 contract
         # is: every legal terminal pair has its required fields documented in
         # the ADR Implementation Notes table; we mirror those here.
+        if self.outcome is not None and (self.outcome, self.path) not in _LEGAL_TERMINAL_PAIRS:
+            raise OrchestrationInvariantError(
+                f"RowResult: illegal (outcome, path) pair: ({self.outcome!r}, {self.path!r})"
+            )
         if self.outcome is None and self.path != TerminalPath.BUFFERED:
             raise OrchestrationInvariantError(
                 f"RowResult: outcome=None requires path=BUFFERED, got path={self.path!r}"
@@ -528,6 +989,10 @@ class RowResult:
         if self.outcome is not None and self.path == TerminalPath.BUFFERED:
             raise OrchestrationInvariantError(
                 f"RowResult: path=BUFFERED requires outcome=None, got outcome={self.outcome!r}"
+            )
+        if self.outcome is None and self.path == TerminalPath.BUFFERED and self.sink_name is not None:
+            raise OrchestrationInvariantError(
+                "RowResult: BUFFERED rows must not set sink_name before terminal recording"
             )
 
         # Per-pair sink_name and error invariants
@@ -560,22 +1025,25 @@ class RowResult:
             )
 ```
 
-Update imports — replace `from elspeth.contracts.enums import RowOutcome` with `from elspeth.contracts.enums import TerminalOutcome, TerminalPath`.
+Update imports — replace `from elspeth.contracts.enums import RowOutcome` with
+`from elspeth.contracts.enums import TerminalOutcome, TerminalPath, _LEGAL_TERMINAL_PAIRS`.
+This is an intentional use of the Stage 1 closed-set partition; do not duplicate
+or rederive the legal-pair set locally.
 
 **Step 4: GREEN**
 
 Run: `.venv/bin/python -m pytest tests/unit/contracts/test_results.py::TestRowResultTwoAxis -v`
 
-Expected: all three tests pass.
+Expected: all four tests pass.
 
 **Step 5: Update existing RowResult tests in this file**
 
 Pre-existing test fixtures construct `RowResult(outcome=RowOutcome.X, ...)`. Update each to the new shape with the canonical pair from `tests/unit/contracts/test_enums.py::_ROW_OUTCOME_TO_TWO_AXIS_MAPPING`. This is schema-dependent test fixup per Phase 5; do NOT defer.
 
 **Definition of Done:**
-- [ ] Three new TestRowResultTwoAxis tests pass
+- [ ] Four new TestRowResultTwoAxis tests pass
 - [ ] All pre-existing RowResult tests updated and passing
-- [ ] `__post_init__` enforces (outcome, path) consistency invariants
+- [ ] `__post_init__` enforces membership in `_LEGAL_TERMINAL_PAIRS` plus BUFFERED/non-terminal consistency invariants
 - [ ] mypy passes
 - [ ] No `RowOutcome` references remain in `contracts/results.py` (grep verifies)
 
@@ -634,6 +1102,24 @@ class TestPendingOutcomeTwoAxis:
                 path=TerminalPath.DEFAULT_FLOW,
                 error_hash="abcd1234abcd1234",
             )
+
+    def test_pending_outcome_rejects_illegal_completed_pair(self) -> None:
+        with pytest.raises(ValueError, match="legal"):
+            PendingOutcome(
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.UNROUTED,
+            )
+
+    def test_pending_outcome_none_requires_buffered_path(self) -> None:
+        with pytest.raises(ValueError, match="BUFFERED"):
+            PendingOutcome(
+                outcome=None,
+                path=TerminalPath.DEFAULT_FLOW,
+            )
+
+    def test_pending_outcome_is_keyword_only(self) -> None:
+        with pytest.raises(TypeError):
+            PendingOutcome(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
 ```
 
 **Step 2: Run RED**
@@ -648,7 +1134,7 @@ Apply edit at `src/elspeth/contracts/engine.py:46-100`:
 
 ```python
 # Replace the entire PendingOutcome class:
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PendingOutcome:
     """Pending token outcome waiting for sink durability confirmation (ADR-019).
 
@@ -680,6 +1166,16 @@ class PendingOutcome:
     error_hash: str | None = None
 
     def __post_init__(self) -> None:
+        if self.outcome is None:
+            if self.path != TerminalPath.BUFFERED:
+                raise ValueError(
+                    f"PendingOutcome with outcome=None requires path=BUFFERED, got {self.path.name}"
+                )
+        elif (self.outcome, self.path) not in _LEGAL_TERMINAL_PAIRS:
+            raise ValueError(
+                f"PendingOutcome has illegal (outcome, path) pair: ({self.outcome.name}, {self.path.name})"
+            )
+
         if self.path in self._REQUIRES_ERROR_HASH_PATHS and (
             self.error_hash is None or not self.error_hash.strip()
         ):
@@ -692,13 +1188,17 @@ class PendingOutcome:
             )
 ```
 
-Update imports: replace `from elspeth.contracts.enums import RowOutcome` with `from elspeth.contracts.enums import TerminalOutcome, TerminalPath`.
+Update imports: replace `from elspeth.contracts.enums import RowOutcome` with
+`from elspeth.contracts.enums import TerminalOutcome, TerminalPath, _LEGAL_TERMINAL_PAIRS`.
+This is load-bearing because `SinkExecutor.write()` consumes `PendingOutcome`
+before the recorder's final `record_token_outcome(...)` call. Illegal pairs must
+crash at PendingOutcome construction time, before any sink side effect can run.
 
 **Step 4: GREEN**
 
 Run: `.venv/bin/python -m pytest tests/unit/contracts/test_engine_contracts.py::TestPendingOutcomeTwoAxis -v`
 
-Expected: five tests pass.
+Expected: eight tests pass.
 
 **Step 5: Commit so far**
 
@@ -709,7 +1209,9 @@ git add src/elspeth/contracts/audit.py src/elspeth/contracts/results.py src/elsp
 ```
 
 **Definition of Done:**
-- [ ] Five new TestPendingOutcomeTwoAxis tests pass
+- [ ] Eight new TestPendingOutcomeTwoAxis tests pass
+- [ ] `PendingOutcome` is keyword-only so old positional call sites fail clearly instead of silently shifting `error_hash` into `path`
+- [ ] `PendingOutcome.__post_init__` enforces membership in `_LEGAL_TERMINAL_PAIRS` before sink side effects
 - [ ] mypy passes
 - [ ] No `RowOutcome` references remain in `contracts/engine.py`
 
@@ -725,11 +1227,15 @@ git add src/elspeth/contracts/audit.py src/elspeth/contracts/results.py src/elsp
 Extend `tests/unit/contracts/test_events.py`:
 
 ```python
+from datetime import datetime, timezone
+
+
 class TestTokenCompletedTwoAxis:
     """ADR-019 Phase 1: TokenCompleted telemetry event carries (outcome, path)."""
 
     def test_token_completed_carries_outcome_and_path(self) -> None:
         evt = TokenCompleted(
+            timestamp=datetime.now(timezone.utc),
             run_id="run_001",
             row_id="row_001",
             token_id="tok_001",
@@ -786,11 +1292,28 @@ Telemetry consumers that read `TokenCompleted.outcome` and downstream-produce `R
 grep -rn "TokenCompleted" src/ tests/
 ```
 
-For each consumer, update field reads from `evt.outcome.X` (RowOutcome) to `(evt.outcome, evt.path)` pair handling. Most telemetry consumers will simply log both fields verbatim — minimal behavioural change.
+For each pure telemetry consumer, update field reads from `evt.outcome.X`
+(RowOutcome) to `(evt.outcome, evt.path)` pair handling. Telemetry exporters may
+serialize both fields as telemetry attributes. Include `tests/unit/telemetry/`
+coverage for any serializer/filtering helper that accepts `TokenCompleted`
+directly.
+
+**Important phase boundary:** engine producer helpers that construct
+`TokenCompleted` from row execution state (`processor.py`,
+`engine/orchestrator/outcomes.py`, and any sink/transform producer helper) are
+owned by Phase 2 alongside the `record_token_outcome(...)` producer-site flip.
+Do not declare the engine producer surface green in Phase 1. Phase 1 proves the
+event contract and pure telemetry consumers; Phase 2 must include the engine
+producer tests that exercise `_emit_token_completed` with the new pair.
+
+Do not add logger/structlog calls for row-level lifecycle decisions; the
+Landscape audit trail remains the source of truth and telemetry is the
+operational visibility channel.
 
 **Definition of Done:**
 - [ ] TestTokenCompletedTwoAxis passes
-- [ ] All TokenCompleted consumers in src/ updated
+- [ ] Pure telemetry consumers in src/ updated; Phase 2 explicitly owns engine producer helpers
+- [ ] `tests/unit/telemetry/` coverage updated when any telemetry serializer/filter reads `TokenCompleted`
 - [ ] mypy passes
 
 ---
@@ -811,43 +1334,55 @@ Create or extend `tests/unit/core/landscape/test_data_flow_repository.py` with:
 class TestRecordTokenOutcomeTwoAxis:
     """ADR-019 Phase 1: recorder writes (outcome, path, completed) triple."""
 
-    def test_record_completed_default_flow(self, audit_repo, run_id, token_ref) -> None:
-        outcome_id = audit_repo.record_token_outcome(
+    def test_record_completed_default_flow(self) -> None:
+        _db, repo, _factory, _row_id, token_id = _make_repo_with_token()
+        token_ref = TokenRef(token_id=token_id, run_id="run-1")
+
+        outcome_id = repo.record_token_outcome(
             ref=token_ref,
             outcome=TerminalOutcome.SUCCESS,
             path=TerminalPath.DEFAULT_FLOW,
             sink_name="primary",
         )
-        loaded = audit_repo.get_token_outcome(token_ref.token_id)
+        loaded = repo.get_token_outcome(token_ref.token_id)
         assert loaded is not None
         assert loaded.outcome == TerminalOutcome.SUCCESS
         assert loaded.path == TerminalPath.DEFAULT_FLOW
         assert loaded.completed is True
 
-    def test_record_buffered(self, audit_repo, run_id, token_ref) -> None:
-        outcome_id = audit_repo.record_token_outcome(
+    def test_record_buffered(self) -> None:
+        _db, repo, _factory, _row_id, token_id = _make_repo_with_token()
+        token_ref = TokenRef(token_id=token_id, run_id="run-1")
+
+        outcome_id = repo.record_token_outcome(
             ref=token_ref,
             outcome=None,
             path=TerminalPath.BUFFERED,
             batch_id="batch_001",
         )
-        loaded = audit_repo.get_token_outcome(token_ref.token_id)
+        loaded = repo.get_token_outcome(token_ref.token_id)
         assert loaded.outcome is None
         assert loaded.path == TerminalPath.BUFFERED
         assert loaded.completed is False
 
-    def test_record_illegal_pair_crashes(self, audit_repo, run_id, token_ref) -> None:
+    def test_record_illegal_pair_crashes(self) -> None:
+        _db, repo, _factory, _row_id, token_id = _make_repo_with_token()
+        token_ref = TokenRef(token_id=token_id, run_id="run-1")
+
         with pytest.raises(ValueError, match="legal"):
-            audit_repo.record_token_outcome(
+            repo.record_token_outcome(
                 ref=token_ref,
                 outcome=TerminalOutcome.SUCCESS,
                 path=TerminalPath.UNROUTED,  # illegal pair
                 sink_name="x",
             )
 
-    def test_record_default_flow_requires_sink_name(self, audit_repo, run_id, token_ref) -> None:
+    def test_record_default_flow_requires_sink_name(self) -> None:
+        _db, repo, _factory, _row_id, token_id = _make_repo_with_token()
+        token_ref = TokenRef(token_id=token_id, run_id="run-1")
+
         with pytest.raises(ValueError, match="sink_name"):
-            audit_repo.record_token_outcome(
+            repo.record_token_outcome(
                 ref=token_ref,
                 outcome=TerminalOutcome.SUCCESS,
                 path=TerminalPath.DEFAULT_FLOW,
@@ -856,7 +1391,16 @@ class TestRecordTokenOutcomeTwoAxis:
 
     # Plus tests for every (outcome, path) → required_fields row from the ADR
     # Implementation Notes table at lines 638-660.
+    #
+    # Named coverage anchors required by the review:
+    # - test_record_filter_dropped_requires_no_extra_fields
+    # - test_record_expand_parent_requires_expand_group_id
 ```
+
+Use the live helper shape in `tests/unit/core/landscape/test_data_flow_repository.py`:
+`_make_repo_with_token()` returns `(db, repo, factory, row_id, token_id)`. Do not
+invent `audit_repo`, `run_id`, or `token_ref` pytest fixtures unless the plan
+also adds them explicitly.
 
 **Step 2: Run RED**
 
@@ -948,6 +1492,8 @@ def record_token_outcome(
     path: TerminalPath,
     *,
     sink_name: str | None = None,
+    sink_node_id: str | None = None,
+    artifact_id: str | None = None,
     batch_id: str | None = None,
     fork_group_id: str | None = None,
     join_group_id: str | None = None,
@@ -973,6 +1519,16 @@ def record_token_outcome(
         outcome: TerminalOutcome lifecycle answer, or None for BUFFERED
         path: TerminalPath provenance answer (always required)
         sink_name: For paths that reach a sink (REQUIRED for those)
+        sink_node_id: Producer-declared sink node witness for failsink-paired
+            outcomes. Phase 1 accepts it as a forward-compatible keyword only;
+            Phase 4 makes it load-bearing for I1c real-time validation. It is
+            not inserted into token_outcomes because the structural witness
+            remains the node_states/artifacts rows.
+        artifact_id: Producer-declared artifact witness for failsink-paired
+            outcomes. Phase 1 accepts it as a forward-compatible keyword only;
+            Phase 4 requires it for I1c so the recorder checks the exact
+            artifact returned by the failsink write, not "any artifact for this
+            run/sink." It is not inserted into token_outcomes.
         batch_id: For BATCH_CONSUMED / BUFFERED (REQUIRED)
         fork_group_id: For FORK_PARENT (REQUIRED)
         join_group_id: For COALESCED (REQUIRED)
@@ -1028,27 +1584,45 @@ def record_token_outcome(
     return outcome_id
 ```
 
-**Step 5: Update the two internal recorder callers (FORKED at line 572, EXPANDED at line 787)**
+**Step 5: Update the two atomic internal recorder inserts (FORKED at line 572, EXPANDED at line 787)**
 
-These two call `record_token_outcome` with `outcome=RowOutcome.FORKED` / `RowOutcome.EXPANDED`. Update to:
+These two sites do **not** call `record_token_outcome` today; they intentionally insert into `token_outcomes_table` inside the same `with self._db.connection() as conn:` transaction that creates the child tokens and `token_parents` rows. Preserve that atomicity. Do **not** replace these direct inserts with `self.record_token_outcome(...)`, because that would open a separate repository operation and reintroduce the crash window the current code explicitly avoids.
+
+Update only the inserted column/value shape inside the existing transaction:
 
 ```python
-# Line ~572 (FORKED parent recording):
-self.record_token_outcome(
-    ref=parent_ref,
-    outcome=TerminalOutcome.TRANSIENT,
-    path=TerminalPath.FORK_PARENT,
-    fork_group_id=fork_group_id,
+# Line ~572 (FORKED parent recording inside fork_token's existing transaction):
+result = conn.execute(
+    token_outcomes_table.insert().values(
+        outcome_id=outcome_id,
+        run_id=parent_ref.run_id,
+        token_id=parent_ref.token_id,
+        outcome=TerminalOutcome.TRANSIENT.value,
+        path=TerminalPath.FORK_PARENT.value,
+        completed=1,
+        recorded_at=now(),
+        fork_group_id=fork_group_id,
+        expected_branches_json=json.dumps(branches, allow_nan=False),
+    )
 )
 
-# Line ~787 (EXPANDED parent recording):
-self.record_token_outcome(
-    ref=parent_ref,
-    outcome=TerminalOutcome.TRANSIENT,
-    path=TerminalPath.EXPAND_PARENT,
-    expand_group_id=expand_group_id,
+# Line ~787 (EXPANDED parent recording inside expand_token's existing transaction):
+result = conn.execute(
+    token_outcomes_table.insert().values(
+        outcome_id=outcome_id,
+        run_id=parent_ref.run_id,
+        token_id=parent_ref.token_id,
+        outcome=TerminalOutcome.TRANSIENT.value,
+        path=TerminalPath.EXPAND_PARENT.value,
+        completed=1,
+        recorded_at=now(),
+        expand_group_id=expand_group_id,
+        expected_branches_json=json.dumps({"count": count}, allow_nan=False),
+    )
 )
 ```
+
+Keep the existing `rowcount == 0` checks after each insert. Add a focused test that monkeypatches the second write in each transaction to fail and proves children plus parent outcome do not commit partially.
 
 **Step 5b: Rename `is_terminal` → `completed` in the read-side query sites (lines 899 and 930)**
 
@@ -1107,6 +1681,7 @@ Expected: all tests pass.
 - [ ] `_validate_outcome_fields` rewritten with `_REQUIRED_FIELDS_BY_PAIR` table
 - [ ] `record_token_outcome` signature flipped to `(outcome, path)`
 - [ ] Internal recorder callers updated for FORK_PARENT / EXPAND_PARENT
+- [ ] Recorder tests include explicit FILTER_DROPPED and EXPAND_PARENT coverage anchors
 - [ ] Read-side queries renamed: `get_token_outcome` ORDER BY (line ~899) and `get_token_outcomes_for_row` SELECT column list (line ~930) use `completed` (was `is_terminal`); SELECT list includes the new `path` column
 - [ ] All TestRecordTokenOutcomeTwoAxis tests pass
 - [ ] mypy passes
@@ -1295,62 +1870,45 @@ Expected: all tests pass.
 
 ---
 
-### Task 1.8: Update package re-exports — `contracts/__init__.py` and `testing/__init__.py`
+### Task 1.8: Update public enum re-exports — `contracts/__init__.py` and `testing/__init__.py`
 
-**Why this task exists:** Stage 1 added `TerminalOutcome` and `TerminalPath` to `src/elspeth/contracts/enums.py` but did NOT add them to the public `contracts/__init__.py` re-export block (only `RowOutcome` is currently re-exported there). Phase 2 producer-flip imports use the broad `from elspeth.contracts import RowResult, TerminalOutcome, TerminalPath, ...` pattern (mirroring the existing `from elspeth.contracts import RowOutcome` shape); without the re-exports, every Phase 2 import fails with `ImportError: cannot import name 'TerminalOutcome' from 'elspeth.contracts'`. **Verified 2026-05-05** against current HEAD `60d30551`: `grep "Terminal" src/elspeth/contracts/__init__.py` returns empty.
+**Why this task exists:** Stage 1 added `TerminalOutcome` and `TerminalPath` to `src/elspeth/contracts/enums.py`. They are now cross-boundary contract types, while `RowOutcome` remains publicly exported from `elspeth.contracts` during the migration window. Make the public export decision explicit: add `TerminalOutcome` and `TerminalPath` to `contracts/__init__.py` beside `RowOutcome`, and add the testing-pack runtime exports used by fixtures.
+
+The `elspeth.testing` package currently imports many contract enums only under `if TYPE_CHECKING`, which is **not** a runtime re-export surface; `from elspeth.testing import RowOutcome` fails on current HEAD. This task creates explicit runtime exports because several scaffolding helpers also need the enum defaults.
 
 **Files:**
-- Modify: `src/elspeth/contracts/__init__.py` (re-export block around line 150 and `__all__` block around line 388)
+- Modify: `src/elspeth/contracts/__init__.py`
 - Modify: `src/elspeth/testing/__init__.py:31-45, 507-540, 715-740`
 
-**Step 1a: Add `TerminalOutcome` / `TerminalPath` to `contracts/__init__.py`**
+**Step 1: Add runtime enum imports for the contracts package**
 
-Find the existing `RowOutcome` re-export (line ~150 of `contracts/__init__.py`) and add the two new enums alongside in the same import block:
-
-```python
-# OLD (around line 145-152):
-from elspeth.contracts.enums import (
-    ...,
-    RowOutcome,
-    ...,
-)
-
-# NEW:
-from elspeth.contracts.enums import (
-    ...,
-    RowOutcome,
-    TerminalOutcome,
-    TerminalPath,
-    ...,
-)
-```
-
-Find the `__all__` block (line ~388) and add the two new names alongside `"RowOutcome"`:
+In `src/elspeth/contracts/__init__.py`, import and list `TerminalOutcome` and
+`TerminalPath` anywhere `RowOutcome` is already re-exported:
 
 ```python
+from elspeth.contracts.enums import RowOutcome, TerminalOutcome, TerminalPath
+
 __all__ = [
-    ...,
+    ...
     "RowOutcome",
     "TerminalOutcome",
     "TerminalPath",
-    ...,
+    ...
 ]
 ```
 
-**Verify the re-export:**
+Verify:
 
 ```bash
-.venv/bin/python -c "from elspeth.contracts import TerminalOutcome, TerminalPath, RowOutcome; print('OK')"
+.venv/bin/python -c "from elspeth.contracts import TerminalOutcome, TerminalPath; print('contracts: OK')"
 ```
 
-Expected: `OK`. Without this, Phase 2 producer imports crash with `ImportError`.
+**Step 2: Add runtime enum imports for the testing pack**
 
-**Step 1b: Add `TerminalOutcome` and `TerminalPath` to the testing pack re-exports**
-
-Lines 31-45 of `testing/__init__.py` contain a list of re-exports for `from elspeth.testing import ...`. Add the two new enum types alongside `RowOutcome` (RowOutcome stays — Stage 5 deletes it).
+Do not edit only the `if TYPE_CHECKING:` block. Add real module-level imports near the existing runtime imports so `from elspeth.testing import TerminalOutcome, TerminalPath, RowOutcome` works:
 
 ```python
-# Around line 35:
+# Near the existing runtime imports, outside `if TYPE_CHECKING:`
 from elspeth.contracts.enums import (
     RowOutcome,
     TerminalOutcome,
@@ -1358,7 +1916,7 @@ from elspeth.contracts.enums import (
 )
 ```
 
-**Step 2: Update default-outcome callsites in testing helper builders**
+**Step 3: Update default-outcome callsites in testing helper builders**
 
 Lines 507-540 and 715-740 use `outcome or RowOutcome.COMPLETED` defaults in test scaffolding helpers. Update each to construct the (outcome, path) pair:
 
@@ -1379,19 +1937,18 @@ else:
 
 The signature of these helpers will need a `path: TerminalPath | None = None` parameter alongside the existing `outcome` parameter. Each helper should accept both for caller flexibility.
 
-**Step 3: Verify both re-exports work**
+**Step 4: Verify the testing re-export works**
 
 ```bash
-.venv/bin/python -c "from elspeth.contracts import TerminalOutcome, TerminalPath, RowOutcome; print('contracts: OK')"
 .venv/bin/python -c "from elspeth.testing import TerminalOutcome, TerminalPath, RowOutcome; print('testing: OK')"
 ```
 
-Expected output: both `OK` lines.
+Expected output: `testing: OK`.
 
 **Definition of Done:**
-- [ ] `TerminalOutcome` and `TerminalPath` re-exported from `elspeth.contracts` (the broad `from elspeth.contracts import ...` pattern used in Phase 2 producer files now works)
-- [ ] `TerminalOutcome` and `TerminalPath` re-exported from `elspeth.testing`
-- [ ] Both names appear in `contracts/__init__.py::__all__` and the corresponding `testing/__init__.py` exports list
+- [ ] `TerminalOutcome` and `TerminalPath` import at runtime from `elspeth.contracts`
+- [ ] `TerminalOutcome`, `TerminalPath`, and `RowOutcome` import at runtime from `elspeth.testing`
+- [ ] The enum imports are outside `if TYPE_CHECKING`
 - [ ] Helper defaults updated to construct (outcome, path) pairs
 - [ ] mypy passes
 - [ ] ChaosEngine fixtures (in `tests/`) that depend on these helpers still compile
@@ -1400,7 +1957,7 @@ Expected output: both `OK` lines.
 
 ### Task 1.9: Fix downstream schema consumers (MCP analyzers, Web execution, exporter, lineage, formatters)
 
-**Why this task exists:** Phase 1 changes the `token_outcomes` schema (column rename + new column + `outcome` value space). EIGHT downstream consumers in the MCP analyzer pack, the Web execution layer, the JSONL exporter, the lineage helper, and the CLI formatter read those columns directly via SQL or via the `TokenOutcome` dataclass's `is_terminal` property. The original plan missed these — they were discovered during a 2026-05-05 consumer-surface sweep. Without them in Phase 1, MCP `diagnose()` silently returns zero quarantines (Tier 1 audit-integrity violation per CLAUDE.md), the Web run-diagnostics view crashes on the renamed column, and the discard-summary widget under-counts.
+**Why this task exists:** Phase 1 changes the `token_outcomes` schema (column rename + new column + `outcome` value space). Downstream consumers in the MCP analyzer pack, the Web execution layer, the JSONL export contract/exporter, the lineage helper, and the CLI formatter read those columns directly via SQL or via the `TokenOutcome` dataclass's `is_terminal` property. The original plan missed these — they were discovered during a 2026-05-05 consumer-surface sweep. Without them in Phase 1, MCP `diagnose()` silently returns zero quarantines (Tier 1 audit-integrity violation per CLAUDE.md), `get_run_summary()` collapses the path axis, the Web run-diagnostics view crashes on the renamed column, and the export TypedDict drifts from the wire payload.
 
 **Files:** see "Files touched in this phase" at the top of this document.
 
@@ -1423,14 +1980,60 @@ exactly the silent-wrong-result class CLAUDE.md Tier 1 forbids.
 
 import pytest
 
+from elspeth.contracts import NodeType, RunStatus
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+from elspeth.contracts.schema import SchemaConfig
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.mcp.analyzers.diagnostics import diagnose
+from tests.fixtures.landscape import make_factory, make_landscape_db
 
 
-def test_diagnose_counts_quarantined_under_new_path(audit_db_with_quarantines):
+_DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+
+def _create_completed_run_with_quarantines(
+    db: LandscapeDB,
+    factory: RecorderFactory,
+    *,
+    run_id: str = "quarantine-run",
+    count: int = 3,
+) -> None:
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
+    factory.data_flow.register_node(
+        run_id=run_id,
+        plugin_name="csv",
+        node_type=NodeType.SOURCE,
+        plugin_version="1.0",
+        config={},
+        node_id=f"source-{run_id}",
+        schema_config=_DYNAMIC_SCHEMA,
+    )
+    for row_index in range(count):
+        row = factory.data_flow.create_row(
+            run_id=run_id,
+            source_node_id=f"source-{run_id}",
+            row_index=row_index,
+            data={"col": f"bad-{row_index}"},
+        )
+        token = factory.data_flow.create_token(row.row_id)
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token.token_id, run_id=run_id),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            error_hash=f"{row_index:064x}",
+        )
+    factory.run_lifecycle.complete_run(run_id, RunStatus.COMPLETED)
+
+
+def test_diagnose_counts_quarantined_under_new_path() -> None:
     """A run with 3 quarantined rows reports 3 quarantines via diagnose()."""
-    # Fixture writes 3 (FAILURE, QUARANTINED_AT_SOURCE) outcomes.
-    result = diagnose(audit_db_with_quarantines.conn)
+    db = make_landscape_db()
+    factory = make_factory(db)
+    _create_completed_run_with_quarantines(db, factory, count=3)
+
+    result = diagnose(db, factory)
     quarantine_problems = [
         p for p in result["problems"] if p["type"] == "quarantined_rows"
     ]
@@ -1442,6 +2045,11 @@ def test_diagnose_counts_quarantined_under_new_path(audit_db_with_quarantines):
         f"RowOutcome.QUARANTINED string 'quarantined'."
     )
 ```
+
+Do not call `diagnose(audit_db_with_quarantines.conn)`: the live analyzer
+signature is `diagnose(db: LandscapeDB, factory: RecorderFactory)`. The RED
+signal must be the silent-wrong `count == 0` result from the legacy
+`outcome == "quarantined"` filter, not a missing fixture or TypeError.
 
 **Step 2: Run RED**
 
@@ -1530,9 +2138,15 @@ non_terminal_count = sum(o["count"] for o in outcomes if not o["completed"])
 
 Add `from elspeth.contracts.enums import TerminalPath` to the imports.
 
-**Step 5: Patch `mcp/types.py:364` — TypedDict wire schema**
+**Step 5: Patch `mcp/types.py:360` — TypedDict wire schema**
 
 ```python
+# OLD (`RunSummaryReport`):
+outcome_distribution: dict[str, int]  # dynamic outcome names
+
+# NEW (`RunSummaryReport`):
+outcome_distribution: list[OutcomeDistributionEntry]
+
 # OLD:
 class OutcomeDistributionEntry(TypedDict):
     outcome: str
@@ -1555,6 +2169,133 @@ class OutcomeDistributionEntry(TypedDict):
 ```
 
 **Wire-format note:** This is a breaking change to the MCP outcome-analysis response shape. Per CLAUDE.md "no legacy code" + "no users yet," breaking is acceptable; the renamed field flows from the recorder schema rename and the added field surfaces a load-bearing dimension that could not be exposed under the single-axis model. Operator MCP clients that destructured `is_terminal` must update to `completed`. Documented in `docs/operator/migrations/adr-019.md` (Phase 5).
+
+**Step 5b: Patch `mcp/analyzers/reports.py::get_run_summary` path distribution**
+
+`get_run_summary()` has a second outcome distribution that groups only by `token_outcomes.outcome` and returns a collapsed `{"outcome": count}` dictionary. Under the two-axis model this silently merges distinct lifecycle paths. Patch it in the same file as `get_outcome_analysis`:
+
+```python
+# OLD (lines 120-127):
+outcome_query = (
+    select(token_outcomes_table.c.outcome, func.count().label("count"))
+    .where(token_outcomes_table.c.run_id == run_id)
+    .group_by(token_outcomes_table.c.outcome)
+)
+outcome_distribution = {row.outcome: row.count for row in outcome_rows}
+
+# NEW:
+outcome_query = (
+    select(
+        token_outcomes_table.c.outcome,
+        token_outcomes_table.c.path,
+        token_outcomes_table.c.completed,
+        func.count().label("count"),
+    )
+    .where(token_outcomes_table.c.run_id == run_id)
+    .group_by(
+        token_outcomes_table.c.outcome,
+        token_outcomes_table.c.path,
+        token_outcomes_table.c.completed,
+    )
+)
+outcome_distribution = [
+    {
+        "outcome": row.outcome,
+        "path": row.path,
+        "completed": bool(row.completed),
+        "count": row.count,
+    }
+    for row in outcome_rows
+]
+```
+
+Update `RunSummaryReport.outcome_distribution` and every test expectation for `get_run_summary()` so the report surface is path-aware. Do not keep a collapsed legacy distribution unless the field is explicitly renamed/deprecated and covered by tests.
+
+**Step 5c: Add DB-backed RED tests for both MCP report surfaces**
+
+Existing analogous tests in `tests/unit/mcp/analyzers/test_reports.py` mock
+SQLAlchemy rows. Keep those tests if useful, but they are not sufficient for
+this migration because they do not prove the production query groups by
+`(outcome, path, completed)` or that `RunSummaryReport`'s TypedDict matches the
+real payload.
+
+Add a concrete DB-backed test module, or extend
+`tests/unit/mcp/analyzers/test_reports.py`, with real `LandscapeDB` +
+`RecorderFactory` setup:
+
+```python
+from elspeth.contracts import NodeType, RunStatus
+from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+from elspeth.contracts.schema import SchemaConfig
+from elspeth.mcp.analyzers.reports import get_outcome_analysis, get_run_summary
+from tests.fixtures.landscape import make_factory, make_landscape_db
+
+
+def _record_token(factory, *, run_id: str, row_index: int, outcome, path, **fields):
+    row = factory.data_flow.create_row(
+        run_id=run_id,
+        source_node_id=f"source-{run_id}",
+        row_index=row_index,
+        data={"row": row_index},
+    )
+    token = factory.data_flow.create_token(row.row_id)
+    factory.data_flow.record_token_outcome(
+        ref=TokenRef(token_id=token.token_id, run_id=run_id),
+        outcome=outcome,
+        path=path,
+        **fields,
+    )
+
+
+def test_outcome_reports_group_by_path_not_lifecycle_only() -> None:
+    db = make_landscape_db()
+    factory = make_factory(db)
+    run_id = "two-axis-report-run"
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
+    factory.data_flow.register_node(
+        run_id=run_id,
+        plugin_name="csv",
+        node_type=NodeType.SOURCE,
+        plugin_version="1.0",
+        config={},
+        node_id=f"source-{run_id}",
+        schema_config=SchemaConfig.from_dict({"mode": "observed"}),
+    )
+    _record_token(
+        factory,
+        run_id=run_id,
+        row_index=0,
+        outcome=TerminalOutcome.SUCCESS,
+        path=TerminalPath.DEFAULT_FLOW,
+        sink_name="primary",
+    )
+    _record_token(
+        factory,
+        run_id=run_id,
+        row_index=1,
+        outcome=TerminalOutcome.SUCCESS,
+        path=TerminalPath.FILTER_DROPPED,
+    )
+    factory.run_lifecycle.complete_run(run_id, RunStatus.COMPLETED)
+
+    outcome_analysis = get_outcome_analysis(db, factory, run_id)
+    run_summary = get_run_summary(db, factory, run_id)
+
+    for report in (outcome_analysis, run_summary):
+        assert "error" not in report
+        distribution = report["outcome_distribution"]
+        buckets = {
+            (entry["outcome"], entry["path"], entry["completed"]): entry["count"]
+            for entry in distribution
+        }
+        assert buckets[("success", "default_flow", True)] == 1
+        assert buckets[("success", "filter_dropped", True)] == 1
+```
+
+Before the SQL rewrite, this test must fail because `get_run_summary()` returns a
+collapsed `dict[str, int]` and `get_outcome_analysis()` has no `path` field. The
+post-fix payload must be an entry list for both surfaces.
 
 **Step 6: Patch `web/execution/diagnostics.py:170`**
 
@@ -1591,6 +2332,37 @@ class OutcomeDistributionEntry(TypedDict):
 ```
 
 The discard-summary widget can ALSO benefit from a path-aware filter under the new model — the widget today counts rows where `sink_name == "__discard__"`, which conflates failsink-mode `(TRANSIENT, SINK_FALLBACK_TO_FAILSINK)` (sink_name = the actual failsink name, NOT `__discard__`) with discard-mode `(FAILURE, SINK_DISCARDED)` (sink_name = `__discard__`). The existing `sink_name == DISCARD_SINK_NAME` filter already isolates the discard-mode case, so no semantic change is needed beyond the column rename. Verify the widget's count under the new model produces the same number as before for discard-mode-only runs.
+
+**Step 7b: Patch `contracts/export_records.py::TokenOutcomeExportRecord`**
+
+The JSONL exporter is typed by `TokenOutcomeExportRecord`; changing only the emitted payload leaves mypy and the wire contract inconsistent. Update the TypedDict before patching the exporter:
+
+```python
+# OLD:
+class TokenOutcomeExportRecord(TypedDict):
+    record_type: Literal["token_outcome"]
+    run_id: str
+    outcome_id: str
+    token_id: str
+    outcome: str
+    is_terminal: bool
+    recorded_at: str
+    ...
+
+# NEW:
+class TokenOutcomeExportRecord(TypedDict):
+    record_type: Literal["token_outcome"]
+    run_id: str
+    outcome_id: str
+    token_id: str
+    outcome: str | None
+    path: str
+    completed: bool
+    recorded_at: str
+    ...
+```
+
+The export tests must assert the TypedDict shape and the JSONL row shape together, so a future payload/contract drift fails in one place.
 
 **Step 8: Patch `core/landscape/exporter.py:430`**
 
@@ -1647,38 +2419,70 @@ lines.append(f"Completed: {result.outcome.completed}")
 After applying Steps 1-10, run a residual-hit grep to confirm zero misses:
 
 ```bash
-echo "=== Residual is_terminal column reads (must be 0) ==="
-grep -rn "token_outcomes_table.c.is_terminal\|outcome.is_terminal" src/elspeth/ \
-    | grep -v "/contracts/\|test_"
-# Expected: empty.
+set -euo pipefail
+
+assert_no_hits() {
+    label="$1"
+    shift
+    tmp_file="$(mktemp)"
+    if "$@" >"$tmp_file"; then
+        if [ -s "$tmp_file" ]; then
+            printf '%s\n' "Unexpected findings for ${label}:"
+            cat "$tmp_file"
+            rm -f "$tmp_file"
+            exit 1
+        fi
+    fi
+    rm -f "$tmp_file"
+}
+
+assert_no_hits "residual token_outcomes_table.c.is_terminal/outcome.is_terminal reads" \
+    grep -rn "token_outcomes_table.c.is_terminal\|outcome.is_terminal" src/elspeth/
 # NOTE: the previous version of this sweep excluded data_flow_repository.py to silence
 # noise from the in-scope sites at lines 573/788/859/868. That file-level exclusion
 # also masked the read-side query sites at lines 899 and 930. Task 1.6 Step 5b now
 # covers those lines, so the exclusion is removed — by end of Phase 1, the file is
 # 100% migrated and any residual hit indicates a missed consumer.
 
-echo "=== Residual hardcoded RowOutcome.value SQL filters (must be 0) ==="
-grep -rn 'outcome\s*==\s*"\(completed\|routed\|routed_on_error\|forked\|failed\|quarantined\|diverted\|consumed_in_batch\|dropped_by_filter\|coalesced\|expanded\|buffered\)"' src/elspeth/
-# Expected: empty.
+assert_no_hits "residual hardcoded RowOutcome.value SQL filters" \
+    grep -rn 'outcome\s*==\s*"\(completed\|routed\|routed_on_error\|forked\|failed\|quarantined\|diverted\|consumed_in_batch\|dropped_by_filter\|coalesced\|expanded\|buffered\)"' src/elspeth/
 
-echo "=== Residual is_terminal references in src/ that aren't event-progress (which is unrelated) ==="
-grep -rn "is_terminal" src/elspeth/ | grep -v "/web/execution/progress.py" | grep -v "/__pycache__/"
-# Expected: only legitimate references in tests, contracts/freeze, or comments.
+residual_is_terminal="$(grep -rn "is_terminal" src/elspeth/ || true)"
+residual_is_terminal="$(printf '%s\n' "$residual_is_terminal" | grep -v "/web/execution/progress.py" | grep -v "/__pycache__/" || true)"
+if [ -n "$residual_is_terminal" ]; then
+    printf '%s\n' "Unexpected residual is_terminal references:"
+    printf '%s\n' "$residual_is_terminal"
+    exit 1
+fi
 ```
 
-If any sweep shows a hit not addressed by Steps 1-10, STOP and surface to user — there's a missed consumer.
+The helper must exit 0 when grep finds no matches (grep's native no-match exit
+code is 1) and exit 1 after printing findings when matches exist. If any sweep
+shows a hit not addressed by Steps 1-10, STOP and surface to user — there's a
+missed consumer.
 
 **Step 12: GREEN — both regression tests + suite**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/mcp/test_diagnose_quarantine_count.py tests/unit/mcp/test_outcome_analysis.py -v
-.venv/bin/python -m pytest tests/unit/mcp/ tests/unit/web/execution/ tests/unit/core/landscape/test_exporter.py tests/unit/core/landscape/test_lineage.py -q
+.venv/bin/python -m pytest \
+    tests/unit/mcp/analyzers/test_reports.py \
+    tests/unit/mcp/test_diagnostics.py \
+    tests/unit/web/execution/test_diagnostics.py \
+    tests/unit/core/landscape/test_exporter.py \
+    tests/unit/core/landscape/test_lineage.py \
+    -q
 ```
 
-Expected: all green. Existing tests with stale assertions (`is_terminal` field reads, hardcoded `"quarantined"` string assertions) need fixture updates in the same commit — this is schema-dependent test fixup per Phase 5 § Test triage Category C, but rolled into Phase 1 because the Web/MCP fixtures co-located with the consumer code make a clean commit boundary.
+Expected: all focused consumer tests green. Existing consumer tests with stale
+assertions in these files (`is_terminal` field reads, hardcoded `"quarantined"`
+string assertions) need fixture updates in the same commit because they are
+co-located with the consumer code. Do not broaden this Phase 1 checkpoint to all
+of `tests/unit/mcp/` unless the executor is also prepared to complete every
+schema-dependent/assertion-only stale fixture that Phase 5 triages.
 
 **Definition of Done:**
-- [ ] Eight downstream consumer sites patched (5 in `mcp/analyzers/reports.py`, 1 in `mcp/types.py`, 1 in `mcp/analyzers/diagnostics.py`, 1 in `web/execution/diagnostics.py`, 1 in `web/execution/discard_summary.py`, 1 in `core/landscape/exporter.py`, 1 in `core/landscape/lineage.py`, 1 in `core/landscape/formatters.py`)
+- [ ] Downstream consumer sites patched (`mcp/analyzers/reports.py` `get_outcome_analysis`, `mcp/analyzers/reports.py` `get_run_summary`, `mcp/types.py`, `mcp/analyzers/diagnostics.py`, `web/execution/diagnostics.py`, `web/execution/discard_summary.py`, `contracts/export_records.py`, `core/landscape/exporter.py`, `core/landscape/lineage.py`, `core/landscape/formatters.py`)
 - [ ] B3 silent-zero-quarantine regression test passes
 - [ ] B2 wire-schema test passes (new MCP outcome-analysis test)
 - [ ] Final consumer-surface sweep shows zero residual hits
@@ -1687,20 +2491,35 @@ Expected: all green. Existing tests with stale assertions (`is_terminal` field r
 
 ---
 
-### Task 1.10: Phase 1 commit
+### Task 1.10: Phase 1 local checkpoint (no git commit)
 
-**Step 1: Run all Phase 1 tests**
+**Step 1: Run the focused Phase 1 tests**
 
 ```bash
 .venv/bin/python -m pytest \
-    tests/unit/contracts/ \
-    tests/unit/core/landscape/ \
-    tests/unit/mcp/ \
-    tests/unit/web/execution/ \
+    tests/unit/scripts/cicd/test_adr019_symbol_inventory.py \
+    tests/unit/core/landscape/test_database_compatibility_guards.py \
+    tests/unit/contracts/test_audit.py::TestTokenOutcomeTwoAxis \
+    tests/unit/contracts/test_results.py::TestRowResultTwoAxis \
+    tests/unit/contracts/test_engine_contracts.py::TestPendingOutcomeTwoAxis \
+    tests/unit/contracts/test_events.py::TestTokenCompletedTwoAxis \
+    tests/unit/core/landscape/test_data_flow_repository.py::TestRecordTokenOutcomeTwoAxis \
+    tests/unit/core/landscape/test_token_outcome_loader.py \
+    tests/unit/mcp/test_diagnose_quarantine_count.py \
+    tests/unit/mcp/test_outcome_analysis.py \
+    tests/unit/mcp/analyzers/test_reports.py \
+    tests/unit/web/execution/test_diagnostics.py \
+    tests/unit/core/landscape/test_exporter.py \
+    tests/unit/core/landscape/test_lineage.py \
     -v
 ```
 
-All tests must pass — including the eight downstream-consumer fixes and the B3 regression test added in Task 1.9.
+All focused tests above must pass — including the downstream-consumer fixes and
+the B3 regression test added in Task 1.9. Do **not** claim all of
+`tests/unit/contracts/` or `tests/unit/core/landscape/` is green at the Phase 1
+local checkpoint: Phase 5 still owns the repo-wide schema-dependent constructor
+triage, assertion-only `RowOutcome` translations, and direct-DB-read test
+updates needed for the final full-suite gate.
 
 **Step 2: Run quality gates**
 
@@ -1717,86 +2536,15 @@ All gates must pass.
 
 **Step 3: Note that the engine module will NOT import yet**
 
-After this commit, importing `elspeth.engine.orchestrator` will fail because every producer site still calls `record_token_outcome(outcome=RowOutcome.X, ...)`. This is expected and only resolved by Phase 2's commit. **Do not push or merge after Phase 1 alone — Phase 2 must follow in the same PR.**
+At this checkpoint, importing `elspeth.engine.orchestrator` will fail because every producer site still calls `record_token_outcome(outcome=RowOutcome.X, ...)`, and broad test directories still include stale schema-dependent fixtures that Phase 5 intentionally triages. This is expected and only resolved by Phase 2's producer flip plus Phase 5's full-suite test translation. **Do not create a git commit here.** Leave the changes in the worktree and continue directly to Phase 2. The first legal commit is the atomic Phases 1-3 commit in Phase 3.
 
-**Step 4: Commit**
+**Step 4: Continue without committing**
 
-```bash
-git add src/elspeth/contracts/ \
-        src/elspeth/core/landscape/ \
-        src/elspeth/testing/ \
-        src/elspeth/mcp/ \
-        src/elspeth/web/execution/ \
-        tests/unit/contracts/ \
-        tests/unit/core/landscape/ \
-        tests/unit/mcp/ \
-        tests/unit/web/execution/
-
-git commit -m "$(cat <<'EOF'
-feat(adr-019): phase 1 — schema + recorder + loader + dataclass two-axis flip + downstream consumer fixes
-
-ADR-019 Stage 2/3 Phase 1 of 5 (see docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-overview.md).
-
-Schema:
-- token_outcomes: rename is_terminal → completed; add path column; outcome
-  column nullability flipped to True (NULL means non-terminal/BUFFERED).
-- Partial unique index references completed instead of is_terminal.
-
-Dataclasses retyped to (outcome: TerminalOutcome | None, path: TerminalPath, completed: bool):
-- TokenOutcome (audit.py) with four __post_init__ Tier 1 invariants:
-  type-checked, completed XOR outcome-NULL, legal pair, BUFFERED-on-non-terminal.
-- RowResult (results.py) with per-pair sink_name/error invariants.
-- PendingOutcome (engine.py) with _REQUIRES_ERROR_HASH_PATHS encoding the
-  five paths that need error_hash.
-- TokenCompleted (events.py) telemetry payload extended with path field.
-
-Recorder + loader:
-- _REQUIRED_FIELDS_BY_PAIR canonical dict in contracts/audit.py encodes
-  ADR-019 Implementation Notes table; consumed by both write and read paths.
-- record_token_outcome signature: (outcome, path) pair instead of RowOutcome.
-- TokenOutcomeLoader.load runs six layered cross-checks (type, value coercion,
-  completed XOR, legal pair, BUFFERED-non-terminal, required-field).
-
-Testing pack:
-- testing/__init__.py re-exports TerminalOutcome and TerminalPath alongside
-  RowOutcome (Stage 5 drops RowOutcome).
-- Default-outcome helper signatures accept the new pair.
-
-Downstream consumer fixes (8 sites — discovered during 2026-05-05
-consumer-surface sweep; without these, MCP diagnose() silently lies about
-zero quarantines and Web run-diagnostics crashes on the renamed column):
-- mcp/types.py: OutcomeDistributionEntry retyped — is_terminal renamed to
-  completed, path field added (wire-schema breaking change documented in
-  docs/operator/migrations/adr-019.md, Phase 5).
-- mcp/analyzers/reports.py: get_outcome_analysis SELECT/GROUP BY/dict-key
-  rename + add path grouping (5 sites).
-- mcp/analyzers/diagnostics.py:181: ``outcome == "quarantined"`` →
-  ``path == "quarantined_at_source"``. The hardcoded RowOutcome.value
-  string would silently match zero rows under the new model — Tier 1
-  audit-integrity violation per CLAUDE.md.
-- web/execution/diagnostics.py:170 + web/execution/discard_summary.py:92:
-  is_terminal → completed in JOIN/WHERE clauses.
-- core/landscape/exporter.py:430: JSONL token_outcome export field rename
-  + path field addition.
-- core/landscape/lineage.py:118: TokenOutcome property read renamed.
-- core/landscape/formatters.py:170: CLI formatter prints both outcome.name
-  AND path.name; Terminal: line renamed to Completed:.
-
-This commit alone breaks engine.orchestrator import — every producer site
-still passes RowOutcome to record_token_outcome. Phase 2 is the producer
-flip that restores end-to-end imports. The merge is atomic per ADR-019
-lines 318-320.
-
-Refs: elspeth-949719575e (Stage 2 ticket)
-ADR: docs/architecture/adr/019-two-axis-terminal-model.md
-
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-EOF
-)"
-```
+Do not run `git commit` from the Phase 1 checkpoint. The Phase 1 files are staged/committed only by the atomic Phases 1-3 commit in Phase 3.
 
 **Definition of Done:**
-- [ ] All Phase 1 tests pass
+- [ ] Focused Phase 1 test list above passes
+- [ ] Broad `tests/unit/contracts/` and `tests/unit/core/landscape/` failures are not hidden or ignored; every known stale fixture class is either fixed in Phase 1 because it is touched here or explicitly covered by Phase 5 triage
 - [ ] mypy / ruff / format clean on the affected paths
-- [ ] Commit landed
+- [ ] No git commit created at the Phase 1 checkpoint
 - [ ] Phase 2 starts in the next session/checkpoint

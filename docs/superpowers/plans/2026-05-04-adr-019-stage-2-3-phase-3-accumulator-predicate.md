@@ -16,17 +16,20 @@ The discard-mode flip from Phase 2 is **already landed** at the producer; the ac
 
 **Files touched in this phase:**
 
-- **Create: `tests/integration/_helpers.py`** (NEW — Task 3.0; canonical pipeline-builder factories + `run_pipeline` runner used by every Phase 3 RED test, mandated by CLAUDE.md test-path integrity to use `instantiate_plugins_from_config + ExecutionGraph.from_plugin_instances`)
+- **Create: `tests/integration/_helpers.py`** (NEW — Task 3.0; canonical pipeline-builder factories + `run_pipeline` runner used by every Phase 3 RED test, wired through `instantiate_plugins_from_config()` and `ExecutionGraph.from_plugin_instances()` per CLAUDE.md test-path integrity)
 - Modify: `src/elspeth/engine/orchestrator/outcomes.py:235-307` (accumulator)
 - Modify: `src/elspeth/engine/orchestrator/core.py:450-533` (resume aggregation)
 - Modify: `src/elspeth/contracts/run_result.py:60-152, 180-216` (L0 predicate + `derive_terminal_run_status`)
 - **Modify: `src/elspeth/web/execution/schemas.py:138-160, 197-285` (L3 Pydantic predicate mirror — `_validate_row_decomposition` and `_check_status_row_count_invariant`).** Discovered 2026-05-05: the Pydantic schema duplicates the L0 predicate logic. Without this update, `/api/runs/{rid}` returns HTTP 500 for any valid run with gate-MOVE or transform-on-error routing because the post-Phase-3 counter doubling makes `rows_succeeded + rows_routed_success` exceed `rows_processed` in `_validate_row_decomposition`'s sum-disjoint formula.
+- **Modify: `src/elspeth/web/execution/routes.py:669, 686` and `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.tsx:19-24` (terminal-status fallout).** The shared session protocol already defines `completed_with_failures` and `empty` as terminal, but WebSocket replay/idle checks and the sidebar active-run predicate still use a hardcoded three-status terminal set.
 - Test (RED-first): `tests/integration/test_adr_019_discard_mode_flip.py` (NEW)
 - Test (RED-first): `tests/integration/test_adr_019_counter_changes.py` (NEW)
-- Test (RED-first): `tests/integration/test_adr_019_api_runs_endpoint.py` (NEW — regression test for the `/api/runs/{rid}` 500)
+- Test (unit, extend): `tests/unit/web/execution/test_schemas.py::TestCompletedDataDecomposition` (existing — extend with post-Phase-3 Pydantic predicate-mirror acceptance cases)
 - Test (unit): `tests/unit/engine/orchestrator/test_outcomes.py` (existing — extend with (outcome, path) match assertions)
-- Test (unit): `tests/unit/contracts/test_run_result.py` (existing — flip predicate assertions)
+- Test (unit): `tests/unit/contracts/test_run_result.py` (existing — flip predicate assertions and add ADR-019 boundary cases)
 - Test (unit): `tests/unit/web/execution/test_schemas.py` (existing — Pydantic predicate-mirror tests)
+- Test (unit): `tests/unit/web/execution/test_websocket.py` or `tests/unit/web/execution/test_routes.py` (extend with reconnect/idle terminal replay for `completed_with_failures` and `empty`)
+- Test (frontend): `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.test.tsx` or existing nearest frontend test (assert terminal `completed_with_failures` / `empty` does not keep the active-run marker visible)
 
 **Background reading:** ADR-019 § Counter derivation contract (lines 271-326). Behavior Change Notice (lines 386-402). The accumulator's existing `RowOutcome` match at `outcomes.py:235-307` is the source-of-truth for what each path must do today — verify against it as you flip.
 
@@ -55,9 +58,9 @@ elif (result.outcome, result.path) == (TerminalOutcome.SUCCESS, TerminalPath.GAT
 
 **Operator visibility:** dashboards reading `rows_succeeded` see higher numbers for runs containing gate MOVE routing. Public field name is preserved.
 
-### Change 2: `(FAILURE, ON_ERROR_ROUTED)` becomes a `rows_failed` increment
+### Change 2: FAILURE paths make `rows_failed` exhaustive
 
-Symmetric to Change 1 — the `rows_failed` counter now reflects transform `on_error` routings. This makes `failure_indicator = rows_failed > 0` exhaustive without needing `OR rows_routed_failure > 0`.
+Symmetric to Change 1 — the `rows_failed` counter now reflects every `TerminalOutcome.FAILURE` lifecycle row that is a predicate input, including transform `on_error` routings and source quarantines. This follows ADR-019's normative mapping for `QUARANTINED` (`rows_quarantined`, `rows_failed`) and makes `failure_indicator = rows_failed > 0` exhaustive without needing `OR rows_routed_failure > 0` or `OR rows_quarantined > 0`.
 
 ### Change 3: discard-mode `DIVERTED` increments `rows_failed`
 
@@ -71,7 +74,7 @@ elif (result.outcome, result.path) == (TerminalOutcome.FAILURE, TerminalPath.SIN
     counters.rows_diverted += 1   # structural counter — unchanged from ADR-018
 ```
 
-(Note: today's accumulator at `outcomes.py:279` raises `OrchestrationInvariantError` for `RowOutcome.DIVERTED` because diversions are recorded at sink-write time inside `SinkExecutor.write()` and counted at the orchestrator's sink-call site (`core.py:2199`: `loop_ctx.counters.rows_diverted += total_diversions`), not in the row-processing loop. The `(FAILURE, SINK_DISCARDED)` and `(TRANSIENT, SINK_FALLBACK_TO_FAILSINK)` pairs similarly should NOT appear in `accumulate_row_outcomes` — they're emitted by the sink executor and counted at the orchestrator's sink-call site. The operator-visible discard-mode counter bump (`rows_failed`) lands at that orchestrator site too — see Step 3 below for the SinkExecutor return-shape change and the orchestrator counter-update site.)
+(Note: today's accumulator at `outcomes.py:279` raises `OrchestrationInvariantError` for `RowOutcome.DIVERTED` because diversions are recorded at sink-write time inside `SinkExecutor.write()` and counted at the orchestrator's sink-call site (`core.py:2199`: `loop_ctx.counters.rows_diverted += total_diversions`), not in the row-processing loop. The `(FAILURE, SINK_DISCARDED)` and `(TRANSIENT, SINK_FALLBACK_TO_FAILSINK)` pairs similarly should NOT appear in `accumulate_row_outcomes` — they're emitted by the sink executor and counted at the orchestrator's sink-call site. The operator-visible discard-mode counter bump (`rows_failed`) lands at that orchestrator site too — see Task 3.3 Step 4 below for the SinkExecutor return-shape change and the orchestrator counter-update site.)
 
 ### Change 4: predicate drops the bifurcated OR
 
@@ -86,12 +89,11 @@ failure_indicator = (
 # NEW:
 success_indicator = self.rows_succeeded > 0
 failure_indicator = (
-    self.rows_failed > 0 or self.rows_quarantined > 0
-    or self.rows_coalesce_failed > 0
+    self.rows_failed > 0 or self.rows_coalesce_failed > 0
 )
 ```
 
-Both OR clauses go away because Changes 1 and 2 above make `rows_succeeded` and `rows_failed` exhaustive. `rows_quarantined` and `rows_coalesce_failed` remain because they're separate failure signals not folded into `rows_failed` (per ADR-018's existing semantics, preserved by ADR-019).
+Both bifurcated OR clauses go away because Changes 1 and 2 above make `rows_succeeded` and `rows_failed` exhaustive for terminal success/failure lifecycle rows. `rows_quarantined` remains as a subset counter for quarantine reporting, but it is no longer a separate predicate input. `rows_coalesce_failed` remains separate because it is a coalesce/run-level failure signal rather than a token `TerminalOutcome.FAILURE` row.
 
 ---
 
@@ -103,130 +105,409 @@ Both OR clauses go away because Changes 1 and 2 above make `rows_succeeded` and 
 
 **Canonical location:** `tests/integration/_helpers.py`. NOT `src/elspeth/testing/` — that pack hosts ChaosEngine fixtures shipped to ELSPETH consumers, not integration-test pipeline builders. NOT `tests/conftest.py` — that's pytest fixture machinery, not pipeline-config factories.
 
-**CLAUDE.md test-path integrity (load-bearing):** the helpers MUST construct pipelines via `instantiate_plugins_from_config()` + `ExecutionGraph.from_plugin_instances()` from `cli_helpers.py:43` and `engine/__init__.py:25`. Per CLAUDE.md "Critical Implementation Patterns": *"Never bypass production code paths in tests — integration tests MUST use `ExecutionGraph.from_plugin_instances()` and `instantiate_plugins_from_config()`"*. Bypassing these would let Phase 3's behaviour-change tests pass against a fake codepath that isn't exercised in production — defeating the whole point of the RED-first verification.
+**CLAUDE.md test-path integrity (load-bearing):** the helpers MUST exercise both production assembly layers: `instantiate_plugins_from_config()` for settings/YAML-to-plugin construction and `ExecutionGraph.from_plugin_instances()` for graph construction. Do not construct plugin instances directly in these integration helpers. Direct construction is acceptable for isolated unit tests, but these Phase 3 tests assert operator-visible runtime behavior and must pass through the same path as CLI/web execution.
 
 **Files:**
 - Create: `tests/integration/_helpers.py`
+- Create: `tests/integration/_adr019_test_plugins.py`
+- Test: `tests/integration/test_adr_019_helpers.py`
 
-**Step 1: Create the helper module**
+**Step 1: Add `DivertingSink` to `tests/fixtures/plugins.py`**
+
+`(FAILURE, SINK_DISCARDED)` is emitted by `SinkExecutor` when a sink write fails
+AND no failsink is configured for that primary sink (the `failsink=None` branch at
+`src/elspeth/engine/executors/sink.py:977`). The trigger is a sink that calls
+`self._divert_row()` — the `BaseSink` hook at
+`src/elspeth/plugins/infrastructure/base.py:894`. No such test fixture currently
+exists; add one alongside the existing test plugins.
+
+```python
+# In tests/fixtures/plugins.py — add after FailingSink (around line 130)
+# Also add to the existing imports block at the top of plugins.py:
+#   from elspeth.contracts.diversion import RowDiversion
+
+class DivertingSink(_TestSinkBase):
+    """Sink that diverts the first ``divert_count`` rows via direct RowDiversion construction.
+
+    When no failsink is wired to this sink, the executor takes the discard
+    branch (``src/elspeth/engine/executors/sink.py:977``) and records each
+    diverted token as (FAILURE, SINK_DISCARDED) with sink_name='__discard__'.
+
+    Use this to exercise ADR-019 § Sub-decision 5: discard-mode ``rows_failed``
+    increment (Phase 3 accumulator change).
+
+    Args:
+        name: Sink name (defaults to 'diverting_sink').
+        divert_count: How many rows (from the start of each write batch) to
+            divert. Remaining rows are written normally. A value of ``None``
+            diverts ALL rows.
+    """
+
+    name = "diverting_sink"
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        super().__init__()
+        options = dict(config or {})
+        self.name = str(options.get("name", self.name))
+        self.results: list[dict[str, Any]] = []
+        self._divert_count = options.get("divert_count")
+        self._artifact_counter = 0
+
+    def on_start(self, ctx: Any) -> None:
+        pass
+
+    def on_complete(self, ctx: Any) -> None:
+        pass
+
+    def write(self, rows: Any, ctx: Any) -> SinkWriteResult:
+        limit = self._divert_count if self._divert_count is not None else len(rows)
+        diversions: tuple[RowDiversion, ...] = tuple(
+            RowDiversion(
+                row_index=idx,
+                reason="diverting_sink: forced divert for ADR-019 test",
+                row_data=dict(row),
+            )
+            for idx, row in enumerate(rows)
+            if idx < limit
+        )
+        primary_rows = [row for idx, row in enumerate(rows) if idx >= limit]
+        self.results.extend(primary_rows)
+        self._artifact_counter += 1
+        return SinkWriteResult(
+            artifact=ArtifactDescriptor.for_file(
+                path=f"memory://{self.name}_{self._artifact_counter}",
+                size_bytes=len(str(rows)),
+                content_hash=f"hash_{self._artifact_counter}",
+            ),
+            diversions=diversions,
+        )
+
+    def close(self) -> None:
+        pass
+```
+
+**Diversion handoff contract (verified):** `_TestSinkBase` (at
+`tests/fixtures/base_classes.py:135`) does NOT provide `_divert_row()` or
+`_get_diversions()` — those are `BaseSink` methods for production plugins only.
+The canonical test-fixture pattern constructs `RowDiversion` records directly
+and passes them as a `tuple[RowDiversion, ...]` via
+`SinkWriteResult(diversions=...)`. The canonical reference is
+`DivertSecondRowSink` at
+`tests/integration/pipeline/orchestrator/test_sink_diversion_counters.py:34`.
+The executor reads `write_result.diversions` from the returned `SinkWriteResult`
+at `src/elspeth/engine/executors/sink.py:548` — it does NOT reach into any
+sink-side accumulator.
+
+**Step 2: Create config-dict-compatible test plugin registration**
+
+`instantiate_plugins_from_config()` uses the shared `PluginManager` and passes a
+single `dict(options)` positional argument into plugin constructors. The existing
+fixture classes (`ListSource(data, ...)`, `CollectSink(name, ...)`,
+`ConditionalErrorTransform(*, ...)`) are not constructor-compatible with that
+path, and `PluginManager` discovers by class-level `name`. Do not register those
+classes directly.
+
+Create `tests/integration/_adr019_test_plugins.py` with thin adapter classes and
+a pytest install helper. The adapter classes keep the existing fixture behavior
+but expose the production constructor shape:
+
+```python
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+import pytest
+
+from elspeth.plugins.infrastructure.discovery import create_dynamic_hookimpl
+from elspeth.plugins.infrastructure.manager import PluginManager
+from tests.fixtures.plugins import (
+    CollectSink,
+    ConditionalErrorTransform,
+    DivertingSink,
+    ListSource,
+)
+
+
+class ADR019ListSource(ListSource):
+    name = "list_source"
+
+    def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+        options = dict(config or {})
+        rows = options.pop("rows")
+        super().__init__(
+            list(rows),
+            name=str(options.pop("name", self.name)),
+            on_success=str(options.pop("on_success", "default")),
+        )
+
+
+class ADR019CollectSink(CollectSink):
+    name = "collect_sink"
+
+    def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+        options = dict(config or {})
+        super().__init__(
+            str(options.pop("name", self.name)),
+            node_id=options.pop("node_id", None),
+        )
+
+
+class ADR019ConditionalErrorTransform(ConditionalErrorTransform):
+    name = "conditional_error"
+
+    def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+        options = dict(config or {})
+        super().__init__(
+            name=options.pop("name", None),
+            input_connection=options.pop("input", None),
+            on_success=options.pop("on_success", None),
+            on_error=options.pop("on_error", None),
+        )
+
+
+class ADR019DivertingSink(DivertingSink):
+    name = "diverting_sink"
+
+
+def make_adr019_plugin_manager() -> PluginManager:
+    manager = PluginManager()
+    manager.register_builtin_plugins()
+    manager.register(create_dynamic_hookimpl([ADR019ListSource], "elspeth_get_source"))
+    manager.register(create_dynamic_hookimpl([ADR019ConditionalErrorTransform], "elspeth_get_transforms"))
+    manager.register(create_dynamic_hookimpl([ADR019CollectSink, ADR019DivertingSink], "elspeth_get_sinks"))
+    return manager
+
+
+def install_adr019_test_plugin_manager(monkeypatch: pytest.MonkeyPatch) -> PluginManager:
+    manager = make_adr019_plugin_manager()
+    monkeypatch.setattr(
+        "elspeth.plugins.infrastructure.manager.get_shared_plugin_manager",
+        lambda: manager,
+    )
+    return manager
+```
+
+Keep the `pytest` import because `install_adr019_test_plugin_manager` exposes the
+runtime `pytest.MonkeyPatch` type in its signature.
+
+**Step 3: Create the helper module**
 
 ```python
 """Integration-test helpers for ADR-019 behaviour-change verification.
 
-Three pipeline factories that produce minimal end-to-end pipeline configs
-plus a single ``run_pipeline()`` runner that goes through the production
-code path: instantiate_plugins_from_config + ExecutionGraph.from_plugin_instances
-+ Orchestrator. Per CLAUDE.md Critical Implementation Patterns: integration
-tests MUST exercise the real code path, never a bypass.
+Three pipeline factories that produce minimal end-to-end settings/config objects
+plus a single ``run_pipeline()`` runner.
 
-The pipelines produced here are deliberately minimal — JSON source, one
-transform, one or two sinks. Just enough surface to exercise the producer
-emit sites for (SUCCESS, GATE_ROUTED), (FAILURE, ON_ERROR_ROUTED), and
-(FAILURE, SINK_DISCARDED) in the accumulator.
+CLAUDE.md test-path integrity: these are integration helpers, so they MUST use
+``instantiate_plugins_from_config()`` to construct plugin instances from the same
+settings shape the CLI/web paths use, and then build the graph through
+``ExecutionGraph.from_plugin_instances()``.
+Do not manually instantiate source/transform/sink classes in these helpers.
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+import pytest
+import yaml
 
 from elspeth.cli_helpers import instantiate_plugins_from_config
-from elspeth.contracts.run_result import RunResult
-from elspeth.core.config import load_settings
+from elspeth.core.config import ElspethSettings, load_settings_from_yaml_string
 from elspeth.core.dag import ExecutionGraph
-from elspeth.engine import Orchestrator, PipelineConfig
+from elspeth.contracts.run_result import RunResult
+from elspeth.core.landscape.database import LandscapeDB  # src/elspeth/core/landscape/database.py
+from elspeth.core.payload_store import FilesystemPayloadStore  # src/elspeth/core/payload_store.py
+from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
+from elspeth.engine.orchestrator import (
+    Orchestrator,       # src/elspeth/engine/orchestrator/core.py:299
+    PipelineConfig,     # src/elspeth/engine/orchestrator/types.py:60
+)
+from tests.integration._adr019_test_plugins import install_adr019_test_plugin_manager
 
 
-@dataclass(frozen=True)
-class TestPipelineSpec:
-    """A self-contained pipeline configuration ready to feed run_pipeline()."""
+def make_settings_yaml_for_test_plugins(
+    *,
+    source_plugin: str,
+    source_config: dict[str, object],
+    sinks: dict[str, dict[str, object]],
+    transforms: list[dict[str, object]] | None = None,
+    gates: list[dict[str, object]] | None = None,
+) -> str:
+    """Serialize the minimal production settings shape used by the helpers."""
+    source_options = dict(source_config)
+    source_on_success = str(source_options.pop("on_success"))
+    sink_payload: dict[str, dict[str, object]] = {}
+    for sink_name, sink_spec in sinks.items():
+        sink_payload[sink_name] = {
+            "plugin": sink_spec["plugin"],
+            "on_write_failure": sink_spec.get("on_write_failure", "discard"),
+            "options": sink_spec.get("options", sink_spec.get("config", {})),
+        }
+    payload: dict[str, object] = {
+        "source": {
+            "plugin": source_plugin,
+            "on_success": source_on_success,
+            "options": source_options,
+        },
+        "sinks": sink_payload,
+    }
+    if transforms:
+        payload["transforms"] = transforms
+    if gates:
+        payload["gates"] = gates
+    return yaml.safe_dump(payload, sort_keys=False)
 
-    config_path: Path
-    audit_db_url: str
+
+def _make_db_and_store(tmp_path: Path) -> tuple[LandscapeDB, FilesystemPayloadStore]:
+    db = LandscapeDB(f"sqlite:///{tmp_path / 'audit.db'}")
+    store = FilesystemPayloadStore(tmp_path / "payloads")
+    return db, store
 
 
-def _write_input(tmp_path: Path, rows: list[dict[str, Any]]) -> Path:
-    input_file = tmp_path / "input.json"
-    input_file.write_text(json.dumps(rows))
-    return input_file
+def _pipeline_from_settings(
+    settings: ElspethSettings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[PipelineConfig, ExecutionGraph, LandscapeDB, FilesystemPayloadStore]:
+    """Build a pipeline through the production configuration path."""
+    db, store = _make_db_and_store(tmp_path)
+    install_adr019_test_plugin_manager(monkeypatch)
+    bundle = instantiate_plugins_from_config(settings)
+    graph = ExecutionGraph.from_plugin_instances(
+        source=bundle.source,
+        source_settings=bundle.source_settings,
+        transforms=bundle.transforms,
+        sinks=bundle.sinks,
+        aggregations=bundle.aggregations,
+        gates=list(settings.gates),
+        coalesce_settings=(list(settings.coalesce) if settings.coalesce else None),
+    )
+    config = assemble_and_validate_pipeline_config(
+        source=bundle.source,
+        transforms=bundle.transforms,
+        sinks=bundle.sinks,
+        aggregations=bundle.aggregations,
+        settings=settings,
+        graph=graph,
+    )
+    return config, graph, db, store
 
 
-def _write_settings(tmp_path: Path, settings_dict: dict[str, Any]) -> Path:
-    """Write a settings.yaml suitable for load_settings() to consume."""
-    import yaml
+def _yaml_for_discard_sink(rows: list[dict[str, object]], discard_row_count: int) -> str:
+    """Return settings YAML for source -> DivertingSink -> CollectSink.
 
-    settings_path = tmp_path / "settings.yaml"
-    settings_path.write_text(yaml.safe_dump(settings_dict))
-    return settings_path
+    The implementation step must register these fixture plugin names with the
+    test plugin registry if current HEAD does not already expose them:
+    ``list_source``, ``collect_sink``, and ``diverting_sink``. The RED test in
+    Task 3.0 must assert that ``instantiate_plugins_from_config(settings)``
+    succeeds for this YAML before any accumulator assertions run.
+    """
+    return make_settings_yaml_for_test_plugins(
+        source_plugin="list_source",
+        source_config={"rows": rows, "on_success": "default"},
+        sinks={
+            "default": {
+                "plugin": "diverting_sink",
+                "config": {"divert_count": discard_row_count},
+            },
+        },
+    )
+
+
+def _yaml_for_gate_route(rows: list[dict[str, object]]) -> str:
+    """Return settings YAML for a MOVE gate route plus default sink path."""
+    return make_settings_yaml_for_test_plugins(
+        source_plugin="list_source",
+        source_config={"rows": rows, "on_success": "default"},
+        gates=[
+            {
+                "name": "gate",
+                "input": "default",
+                "condition": "row['route'] == 'move'",
+                "routes": {"true": "routed", "false": "primary"},
+            }
+        ],
+        sinks={
+            "routed": {"plugin": "collect_sink", "config": {}},
+            "primary": {"plugin": "collect_sink", "config": {}},
+        },
+    )
+
+
+def _yaml_for_on_error_route(rows: list[dict[str, object]]) -> str:
+    """Return settings YAML for ConditionalErrorTransform on_error routing."""
+    return make_settings_yaml_for_test_plugins(
+        source_plugin="list_source",
+        source_config={"rows": rows, "on_success": "default"},
+        transforms=[
+            {
+                "name": "maybe_fail",
+                "plugin": "conditional_error",
+                "input": "default",
+                "on_success": "primary",
+                "on_error": "error_sink",
+            }
+        ],
+        sinks={
+            "primary": {"plugin": "collect_sink", "config": {}},
+            "error_sink": {"plugin": "collect_sink", "config": {}},
+        },
+    )
 
 
 def build_test_pipeline_with_discard_sink(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     success_row_count: int,
     discard_row_count: int,
-) -> TestPipelineSpec:
-    """Pipeline with one transform whose ``on_error: discard`` causes
-    ``discard_row_count`` rows to hit the discard sink path
-    (sink_name='__discard__'). The remaining ``success_row_count`` rows
-    flow through to the primary success sink as (SUCCESS, DEFAULT_FLOW)."""
-    rows = [
-        {"id": i, "should_fail": False} for i in range(success_row_count)
-    ] + [
-        {"id": success_row_count + i, "should_fail": True}
-        for i in range(discard_row_count)
-    ]
-    input_path = _write_input(tmp_path, rows)
-    output_path = tmp_path / "output.json"
-    audit_db_url = f"sqlite:///{tmp_path / 'audit.db'}"
+) -> tuple[PipelineConfig, ExecutionGraph, LandscapeDB, FilesystemPayloadStore]:
+    """Pipeline where ``discard_row_count`` rows land as (FAILURE, SINK_DISCARDED).
 
-    settings = {
-        "source": {
-            "plugin": "json",
-            "on_success": "fail_if_flagged",
-            "options": {
-                "path": str(input_path),
-                "schema": {
-                    "mode": "fixed",
-                    "fields": ["id: int", "should_fail: bool"],
-                },
-            },
-        },
-        "transforms": [
-            {
-                "name": "fail_if_flagged",
-                "plugin": "raise_on_field",  # Stage-1-shipped test plugin or equivalent
-                "input": "fail_if_flagged",
-                "on_success": "output",
-                "on_error": "discard",
-                "options": {"field": "should_fail", "raise_when": True},
-            },
-        ],
-        "sinks": {
-            "output": {
-                "plugin": "json",
-                "on_write_failure": "discard",
-                "options": {"path": str(output_path)},
-            },
-        },
-        "landscape": {"url": audit_db_url},
-    }
-    config_path = _write_settings(tmp_path, settings)
-    return TestPipelineSpec(config_path=config_path, audit_db_url=audit_db_url)
+    Mechanism: ``DivertingSink.write()`` constructs ``RowDiversion`` records
+    directly for the first ``discard_row_count`` rows and returns them via
+    ``SinkWriteResult(diversions=...)``. Because no failsink is wired, the
+    executor takes the discard branch (``src/elspeth/engine/executors/sink.py:977``)
+    and records each as outcome=DIVERTED / sink_name='__discard__'.
+
+    The ``success_row_count`` rows are accepted by ``DivertingSink.write()`` as
+    ordinary successful sink writes, so their provisional
+    (SUCCESS, DEFAULT_FLOW) outcomes remain after sink diversion reconciliation.
+
+    NOTE: (FAILURE, SINK_DISCARDED) is a SINK-SIDE event, not a transform
+    on_error event. The transform here succeeds for all rows; the diversion
+    happens when DivertingSink.write() returns RowDiversion records in the
+    SinkWriteResult.
+    """
+    rows = [
+        {"id": i, "fail": False, "expected": "discard"}
+        for i in range(discard_row_count)
+    ] + [
+        {"id": discard_row_count + i, "fail": False, "expected": "success"}
+        for i in range(success_row_count)
+    ]
+    settings = load_settings_from_yaml_string(_yaml_for_discard_sink(rows, discard_row_count))
+    return _pipeline_from_settings(settings, tmp_path, monkeypatch)
 
 
 def build_test_pipeline_with_gate_route(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     routed_row_count: int,
     default_flow_row_count: int,
-) -> TestPipelineSpec:
-    """Pipeline with a gate that MOVE-routes ``routed_row_count`` rows to
-    a secondary sink, and lets ``default_flow_row_count`` rows pass through
-    to the primary sink as (SUCCESS, DEFAULT_FLOW). The MOVE-routed rows
-    land as (SUCCESS, GATE_ROUTED) and exercise the Phase 3 counter doubling.
+) -> tuple[PipelineConfig, ExecutionGraph, LandscapeDB, FilesystemPayloadStore]:
+    """Pipeline with a ``GateSettings`` MOVE-route exercising (SUCCESS, GATE_ROUTED).
+
+    Gate condition ``row['route'] == 'move'`` routes ``routed_row_count`` rows to
+    the 'routed' sink (MOVE semantics → (SUCCESS, GATE_ROUTED)).
+    ``default_flow_row_count`` rows fall through to the 'primary' sink as
+    (SUCCESS, DEFAULT_FLOW).
+
+    ``GateSettings``: src/elspeth/core/config.py:476
+    Routing semantics: condition=True → routes["true"] destination (MOVE to named sink).
     """
     rows = [
         {"id": i, "route": "move"} for i in range(routed_row_count)
@@ -234,138 +515,67 @@ def build_test_pipeline_with_gate_route(
         {"id": routed_row_count + i, "route": "default"}
         for i in range(default_flow_row_count)
     ]
-    input_path = _write_input(tmp_path, rows)
-    primary_output = tmp_path / "primary.json"
-    routed_output = tmp_path / "routed.json"
-    audit_db_url = f"sqlite:///{tmp_path / 'audit.db'}"
-
-    settings = {
-        "source": {
-            "plugin": "json",
-            "on_success": "route_gate",
-            "options": {"path": str(input_path), "schema": {"mode": "observed"}},
-        },
-        "gates": [
-            {
-                "name": "route_gate",
-                "plugin": "expression_gate",  # canonical gate; replace if pack differs
-                "input": "route_gate",
-                "on_success": "primary",
-                "options": {
-                    "rules": [
-                        {
-                            "when": "row.route == 'move'",
-                            "action": "route_to_sink",
-                            "destination": "routed",
-                        },
-                    ],
-                },
-            },
-        ],
-        "sinks": {
-            "primary": {
-                "plugin": "json",
-                "on_write_failure": "discard",
-                "options": {"path": str(primary_output)},
-            },
-            "routed": {
-                "plugin": "json",
-                "on_write_failure": "discard",
-                "options": {"path": str(routed_output)},
-            },
-        },
-        "landscape": {"url": audit_db_url},
-    }
-    config_path = _write_settings(tmp_path, settings)
-    return TestPipelineSpec(config_path=config_path, audit_db_url=audit_db_url)
+    settings = load_settings_from_yaml_string(_yaml_for_gate_route(rows))
+    return _pipeline_from_settings(settings, tmp_path, monkeypatch)
 
 
 def build_test_pipeline_with_on_error_route(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     on_error_routed_count: int,
     success_count: int,
-) -> TestPipelineSpec:
-    """Pipeline with a transform whose ``on_error: error_sink`` routes
-    failing rows to a named error sink. ``on_error_routed_count`` rows
-    raise inside the transform and land as (FAILURE, ON_ERROR_ROUTED);
-    ``success_count`` rows succeed as (SUCCESS, DEFAULT_FLOW)."""
+) -> tuple[PipelineConfig, ExecutionGraph, LandscapeDB, FilesystemPayloadStore]:
+    """Pipeline where ``on_error_routed_count`` rows land as (FAILURE, ON_ERROR_ROUTED).
+
+    ``ConditionalErrorTransform`` (tests/fixtures/plugins.py:213) returns
+    ``TransformResult.error(...)`` when ``row['fail']`` is truthy.  The transform's
+    ``on_error`` routes to the 'error_sink'; ``on_success`` routes to 'primary'.
+
+    ``success_count`` rows have ``fail=False`` → (SUCCESS, DEFAULT_FLOW).
+    ``on_error_routed_count`` rows have ``fail=True`` → (FAILURE, ON_ERROR_ROUTED).
+    """
     rows = [
-        {"id": i, "should_fail": True} for i in range(on_error_routed_count)
+        {"id": i, "fail": True} for i in range(on_error_routed_count)
     ] + [
-        {"id": on_error_routed_count + i, "should_fail": False}
+        {"id": on_error_routed_count + i, "fail": False}
         for i in range(success_count)
     ]
-    input_path = _write_input(tmp_path, rows)
-    primary_output = tmp_path / "primary.json"
-    error_output = tmp_path / "errors.json"
-    audit_db_url = f"sqlite:///{tmp_path / 'audit.db'}"
-
-    settings = {
-        "source": {
-            "plugin": "json",
-            "on_success": "fail_if_flagged",
-            "options": {"path": str(input_path), "schema": {"mode": "observed"}},
-        },
-        "transforms": [
-            {
-                "name": "fail_if_flagged",
-                "plugin": "raise_on_field",
-                "input": "fail_if_flagged",
-                "on_success": "primary",
-                "on_error": "error_sink",
-                "options": {"field": "should_fail", "raise_when": True},
-            },
-        ],
-        "sinks": {
-            "primary": {
-                "plugin": "json",
-                "on_write_failure": "discard",
-                "options": {"path": str(primary_output)},
-            },
-            "error_sink": {
-                "plugin": "json",
-                "on_write_failure": "discard",
-                "options": {"path": str(error_output)},
-            },
-        },
-        "landscape": {"url": audit_db_url},
-    }
-    config_path = _write_settings(tmp_path, settings)
-    return TestPipelineSpec(config_path=config_path, audit_db_url=audit_db_url)
+    settings = load_settings_from_yaml_string(_yaml_for_on_error_route(rows))
+    return _pipeline_from_settings(settings, tmp_path, monkeypatch)
 
 
-def run_pipeline(spec: TestPipelineSpec) -> RunResult:
+def run_pipeline(
+    config: PipelineConfig,
+    graph: ExecutionGraph,
+    db: LandscapeDB,
+    store: FilesystemPayloadStore,
+) -> RunResult:
     """Run the pipeline through the production code path.
 
-    Mandated by CLAUDE.md "Critical Implementation Patterns": integration
-    tests must use ``instantiate_plugins_from_config()`` +
-    ``ExecutionGraph.from_plugin_instances()`` so the test exercises the
-    same wiring the CLI does. Bypassing these (e.g., constructing
-    PipelineConfig manually with mocked plugins) would let behaviour-change
-    tests pass against a fake codepath.
+    Canonical pattern from tests/integration/audit/test_recorder_routing_events.py:413
+    and tests/fixtures/pipeline.py:98-99:
+        Orchestrator(db).run(config, graph=graph, payload_store=store)
+
+    ``Orchestrator.__init__``: src/elspeth/engine/orchestrator/core.py:315
+    ``Orchestrator.run``: src/elspeth/engine/orchestrator/core.py:1478
+    The graph is already built by ``_pipeline_from_settings`` through
+    ExecutionGraph.from_plugin_instances() after instantiate_plugins_from_config().
     """
-    settings = load_settings(spec.config_path)
-    config = PipelineConfig.from_settings(settings)
-    plugins = instantiate_plugins_from_config(config)
-    graph = ExecutionGraph.from_plugin_instances(config=config, plugins=plugins)
-    orchestrator = Orchestrator(config=config, graph=graph)
-    return orchestrator.execute()
+    return Orchestrator(db).run(
+        config,
+        graph=graph,
+        payload_store=store,
+    )
 ```
 
-**Plugin-name caveats (verify before relying on the helper):**
+Every test that calls one of these helpers must pass the pytest `monkeypatch`
+fixture through. This is intentional: `instantiate_plugins_from_config()` has no
+manager parameter, so the production lookup path must be patched before the
+helper constructs plugins. Do not hide this as global module state in
+`tests/integration/_helpers.py`; it makes helper ordering load-bearing.
 
-The pipeline configs above name three plugins (`json` source/sink, `raise_on_field` transform, `expression_gate`). Verify each is registered in the codebase before writing the tests:
-
-```bash
-.venv/bin/python -c "from elspeth.plugins import list_plugins; print('\\n'.join(sorted(list_plugins())))" | grep -E "^(json|raise_on_field|expression_gate)$"
-```
-
-If a name differs (e.g., `json_source` / `json_sink` are separate, or `raise_on_field` doesn't exist as a test plugin), substitute the registered name. The Phase 3 RED tests assume the helper produces VALID pipeline configs that pass `instantiate_plugins_from_config()` — bad plugin names would fail there, masking the actual behaviour-change assertion.
-
-If `raise_on_field` doesn't exist as a registered plugin, add it under `src/elspeth/testing/` as a small test-only transform that raises on a configured field-equals condition. This is one-off scaffolding for the ADR-019 RED tests; document the addition in the Phase 5 test-strategy doc.
-
-**Step 2: Verify the helper module imports cleanly**
+**Step 4: Verify the helper module imports and production instantiation works**
 
 ```bash
 .venv/bin/python -c "
@@ -379,14 +589,56 @@ print('OK')
 "
 ```
 
-Expected: `OK`. (Note: `tests/integration/_helpers.py` must be importable from the test runner's working directory; `pytest` does this by default if `tests/` is on `sys.path` per `pyproject.toml` configuration.)
+Expected: `OK`. (`tests/` must be on `sys.path`; `pytest` ensures this via `pyproject.toml`.)
+
+Add a RED-first helper test that loads each generated settings object and asserts
+`instantiate_plugins_from_config(settings)` and `ExecutionGraph.from_plugin_instances(...)`
+succeed after `install_adr019_test_plugin_manager(monkeypatch)` runs:
+
+```python
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+
+from tests.integration._helpers import (
+    build_test_pipeline_with_discard_sink,
+    build_test_pipeline_with_gate_route,
+    build_test_pipeline_with_on_error_route,
+)
+
+@pytest.mark.parametrize(
+    "builder,args",
+    [
+        (build_test_pipeline_with_discard_sink, {"success_row_count": 2, "discard_row_count": 1}),
+        (build_test_pipeline_with_gate_route, {"routed_row_count": 2, "default_flow_row_count": 1}),
+        (build_test_pipeline_with_on_error_route, {"on_error_routed_count": 2, "success_count": 1}),
+    ],
+)
+def test_adr019_helpers_build_through_production_instantiation(
+    builder: Callable[..., object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    args: dict[str, int],
+) -> None:
+    builder(tmp_path, monkeypatch, **args)
+```
+
+If this test fails because a fixture plugin name is absent from the test
+registry, fix `_adr019_test_plugins.py`. If it fails with a graph validation
+error, fix the generated YAML connection names. Do not fall back to direct
+construction in `tests/integration/_helpers.py`.
 
 **Definition of Done:**
-- [ ] `tests/integration/_helpers.py` created with all four helper functions
-- [ ] All three pipeline builders use `instantiate_plugins_from_config + ExecutionGraph.from_plugin_instances` per CLAUDE.md test-path integrity (no bypassed code paths)
-- [ ] Plugin names verified against the project's registered plugin set
+- [ ] `DivertingSink` added to `tests/fixtures/plugins.py` using direct `RowDiversion` construction and `SinkWriteResult(diversions=...)` return — canonical pattern from `tests/integration/pipeline/orchestrator/test_sink_diversion_counters.py:34`; constructor accepts `dict(options)` and uses `divert_count`
+- [ ] `tests/integration/_adr019_test_plugins.py` registers config-dict-compatible `list_source`, `collect_sink`, `conditional_error`, and `diverting_sink` adapters through `PluginManager.register(...)`
+- [ ] `tests/integration/_helpers.py` created with all four helper functions; pipeline builders accept and use pytest `monkeypatch`
+- [ ] All three pipeline builders call `instantiate_plugins_from_config(settings)`, then `ExecutionGraph.from_plugin_instances(...)`, then `assemble_and_validate_pipeline_config(...)` per CLAUDE.md test-path integrity
+- [ ] Fixture plugins needed by the helpers are registered with the test plugin registry; helper tests prove `instantiate_plugins_from_config(settings)` and graph construction succeed for all three settings shapes
+- [ ] Generated helper YAML has coherent connection names (`source.on_success` matches the downstream `input` for gate/transform cases)
+- [ ] `run_pipeline` calls `Orchestrator(db).run(config, graph=..., payload_store=...)` — matching the canonical integration-test pattern
 - [ ] `from tests.integration._helpers import ...` works for all four names
-- [ ] mypy clean on the helper module
+- [ ] mypy clean on the helper module and the `DivertingSink` addition
 
 ---
 
@@ -400,10 +652,15 @@ Expected: `OK`. (Note: `tests/integration/_helpers.py` must be importable from t
 ```python
 """ADR-019 § Behavior Change Notice: discard-mode DIVERTED flips RunStatus.
 
-A pipeline with a discard sink ("__discard__") and otherwise clean rows
-should report RunStatus.COMPLETED_WITH_FAILURES (not COMPLETED) because
-discard-mode is reclassified as (FAILURE, SINK_DISCARDED) and increments
-rows_failed.
+A pipeline with a DivertingSink and no failsink wired should report
+RunStatus.COMPLETED_WITH_FAILURES (not COMPLETED) because discard-mode is
+reclassified as (FAILURE, SINK_DISCARDED) and increments rows_failed.
+
+Mechanism: DivertingSink.write() constructs RowDiversion records directly and
+returns them via SinkWriteResult(diversions=...). SinkExecutor takes the
+discard branch (failsink=None) and records each as outcome=DIVERTED /
+sink_name='__discard__'. Phase 3 accumulator change maps this to
+rows_failed += 1 (ADR-019 § Sub-decision 5 / orchestrator site).
 
 This test is RED before Phase 3's accumulator/predicate change lands and
 GREEN after. It is the operator-visible assertion that pins the change.
@@ -416,14 +673,15 @@ from tests.integration._helpers import build_test_pipeline_with_discard_sink, ru
 
 
 @pytest.fixture
-def pipeline_with_discard_and_success_sink(tmp_path):
+def pipeline_with_discard_and_success_sink(tmp_path, monkeypatch):
     """A pipeline where:
-    - 3 rows succeed via the primary sink (DEFAULT_FLOW)
-    - 2 rows divert to "__discard__" via a transform's on_error config
-    - No quarantines, no upstream failures
+    - 3 rows succeed (not diverted by DivertingSink)
+    - 2 rows divert to '__discard__' via DivertingSink returning RowDiversion records
+    - No quarantines, no upstream transform failures
     """
     return build_test_pipeline_with_discard_sink(
         tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
         success_row_count=3,
         discard_row_count=2,
     )
@@ -434,7 +692,8 @@ class TestDiscardModeRunStatusFlip:
         self, pipeline_with_discard_and_success_sink
     ) -> None:
         """ADR-019 § Sub-decision 5: discard-mode is FAILURE, predicate-input."""
-        result = run_pipeline(pipeline_with_discard_and_success_sink)
+        config, graph, db, store = pipeline_with_discard_and_success_sink
+        result = run_pipeline(config, graph, db, store)
 
         assert result.status == RunStatus.COMPLETED_WITH_FAILURES, (
             f"Expected COMPLETED_WITH_FAILURES (3 success + 2 discard), "
@@ -445,20 +704,21 @@ class TestDiscardModeRunStatusFlip:
         assert result.rows_failed == 2  # NEW: discards now count as failures
         assert result.rows_diverted == 2  # structural counter unchanged
 
-    def test_all_discards_yields_failed(self, tmp_path) -> None:
+    def test_all_discards_yields_failed(self, tmp_path, monkeypatch) -> None:
         """ADR-019 § Behavior Change Notice: pipelines that ONLY discard yield FAILED."""
-        pipeline = build_test_pipeline_with_discard_sink(
+        config, graph, db, store = build_test_pipeline_with_discard_sink(
             tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
             success_row_count=0,
             discard_row_count=3,
         )
-        result = run_pipeline(pipeline)
+        result = run_pipeline(config, graph, db, store)
         assert result.status == RunStatus.FAILED
         assert result.rows_succeeded == 0
         assert result.rows_failed == 3
 ```
 
-`build_test_pipeline_with_discard_sink` is the helper created in Task 3.0 at the canonical location `tests/integration/_helpers.py`. It builds a minimal pipeline (JSON source, a transform that raises on a configured field, primary success sink + discard sink) using `instantiate_plugins_from_config` + `ExecutionGraph.from_plugin_instances` per CLAUDE.md test-path integrity.
+`build_test_pipeline_with_discard_sink` is the helper created in Task 3.0 at the canonical location `tests/integration/_helpers.py`. It builds a minimal pipeline (``ListSource``, ``DivertingSink``) using the project's fixture plugins — the same path as every other integration test. The ``(config, graph, db, store)`` tuple is unpacked before calling ``run_pipeline``.
 
 **Step 2: Run RED**
 
@@ -470,19 +730,13 @@ Expected: BOTH tests fail. The first fails because `result.status == RunStatus.C
 
 **Step 3: Confirm the test fixture builds correctly even before the predicate change**
 
-```python
-# Quick sanity check: the test pipeline runs without errors and produces a RunResult.
-.venv/bin/python -c "
-from tests.integration._helpers import build_test_pipeline_with_discard_sink, run_pipeline
-import tempfile, pathlib
-with tempfile.TemporaryDirectory() as t:
-    pipeline = build_test_pipeline_with_discard_sink(pathlib.Path(t), 3, 2)
-    result = run_pipeline(pipeline)
-    print(result.status, result.rows_succeeded, result.rows_failed)
-"
+```bash
+.venv/bin/python -m pytest tests/integration/test_adr_019_helpers.py::test_adr019_helpers_build_through_production_instantiation -v
 ```
 
-Expected pre-Phase-3: `RunStatus.COMPLETED 3 0`. Post-Phase-3: `RunStatus.COMPLETED_WITH_FAILURES 3 2`.
+Expected: green before and after the predicate change. Helper-build failures are
+setup defects and must be fixed in Task 3.0 before using this discard-mode test
+as behavioral evidence.
 
 **Definition of Done:**
 - [ ] Test file exists and asserts the post-Phase-3 behaviour
@@ -523,14 +777,15 @@ from tests.integration._helpers import (
 
 class TestGateRoutedCounterDoubling:
     def test_gate_routed_bumps_both_succeeded_and_routed_success(
-        self, tmp_path
+        self, tmp_path, monkeypatch
     ) -> None:
-        pipeline = build_test_pipeline_with_gate_route(
+        config, graph, db, store = build_test_pipeline_with_gate_route(
             tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
             routed_row_count=4,
             default_flow_row_count=0,  # ALL rows get gate-routed
         )
-        result = run_pipeline(pipeline)
+        result = run_pipeline(config, graph, db, store)
 
         assert result.status == RunStatus.COMPLETED, (
             f"With 4 gate-routed rows and 0 failures, expected COMPLETED, got {result.status}"
@@ -540,14 +795,15 @@ class TestGateRoutedCounterDoubling:
         assert result.rows_routed_success == 4
 
     def test_on_error_routed_bumps_both_failed_and_routed_failure(
-        self, tmp_path
+        self, tmp_path, monkeypatch
     ) -> None:
-        pipeline = build_test_pipeline_with_on_error_route(
+        config, graph, db, store = build_test_pipeline_with_on_error_route(
             tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
             on_error_routed_count=3,
             success_count=2,
         )
-        result = run_pipeline(pipeline)
+        result = run_pipeline(config, graph, db, store)
 
         assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_failed == 3       # NEW: on-error routes count as failures
@@ -563,6 +819,188 @@ Expected: both tests fail because under current code, `rows_succeeded == 0` (all
 - [ ] Test file exists with both counter-doubling assertions
 - [ ] Tests fail before Phase 3 lands
 - [ ] Fixture helpers exist
+
+---
+
+### Task 3.2a: Add predicate boundary RED tests
+
+**Why this task exists:** Task 3.4 deletes the old bifurcated predicate clauses
+(`OR rows_routed_success`, `OR rows_routed_failure`, `OR rows_quarantined`).
+The behaviour-change tests cover the main happy paths, but the predicate also
+needs explicit boundary coverage for zero-row, all-failure, all-quarantine, and
+mixed success/failure shapes. These tests prevent the old subset counters from
+quietly remaining predicate inputs after the accumulator starts double-bumping
+the base counters, and they reject impossible subset shapes mechanically.
+
+**Files:**
+- Modify: `tests/unit/contracts/test_run_result.py`
+
+**Step 1: Add the boundary tests FIRST**
+
+Append this class near the existing `derive_terminal_run_status` tests. Ensure
+the file imports `pytest` before adding the `pytest.raises(...)` cases:
+
+```python
+class TestADR019PredicateBoundaryCases:
+    """ADR-019 predicate boundaries after base counters become exhaustive."""
+
+    def test_zero_row_source_derives_empty(self) -> None:
+        """A source that emits no rows remains EMPTY."""
+        assert (
+            derive_terminal_run_status(
+                rows_processed=0,
+                rows_succeeded=0,
+                rows_failed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+                rows_quarantined=0,
+                rows_coalesce_failed=0,
+            )
+            == RunStatus.EMPTY
+        )
+        RunResult(
+            run_id="run-empty-boundary",
+            status=RunStatus.EMPTY,
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+        )
+
+    def test_all_sink_discarded_rows_derive_failed(self) -> None:
+        """All rows in (FAILURE, SINK_DISCARDED) have no success path."""
+        assert (
+            derive_terminal_run_status(
+                rows_processed=3,
+                rows_succeeded=0,
+                rows_failed=3,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+                rows_quarantined=0,
+                rows_coalesce_failed=0,
+            )
+            == RunStatus.FAILED
+        )
+        RunResult(
+            run_id="run-all-discarded",
+            status=RunStatus.FAILED,
+            rows_processed=3,
+            rows_succeeded=0,
+            rows_failed=3,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_diverted=3,
+        )
+
+    def test_all_quarantined_at_source_derive_failed_from_rows_failed(self) -> None:
+        """All source quarantines must be represented by the base failure counter."""
+        assert (
+            derive_terminal_run_status(
+                rows_processed=4,
+                rows_succeeded=0,
+                rows_failed=4,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+                rows_quarantined=4,
+                rows_coalesce_failed=0,
+            )
+            == RunStatus.FAILED
+        )
+
+    def test_quarantine_subset_without_rows_failed_is_rejected(self) -> None:
+        """rows_quarantined is impossible unless rows_failed covers it."""
+        with pytest.raises(ValueError, match="rows_quarantined"):
+            derive_terminal_run_status(
+                rows_processed=4,
+                rows_succeeded=4,
+                rows_failed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+                rows_quarantined=4,
+                rows_coalesce_failed=0,
+            )
+
+        with pytest.raises(ValueError, match="rows_quarantined"):
+            RunResult(
+                run_id="run-invalid-quarantine-subset",
+                status=RunStatus.COMPLETED,
+                rows_processed=4,
+                rows_succeeded=4,
+                rows_failed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+                rows_quarantined=4,
+            )
+        )
+
+    def test_on_error_routed_plus_default_flow_uses_rows_failed_not_routed_subset(
+        self,
+    ) -> None:
+        """A mixed DEFAULT_FLOW/ON_ERROR_ROUTED run is mixed only when rows_failed is bumped."""
+        assert (
+            derive_terminal_run_status(
+                rows_processed=5,
+                rows_succeeded=2,
+                rows_failed=3,
+                rows_routed_success=0,
+                rows_routed_failure=3,
+                rows_quarantined=0,
+                rows_coalesce_failed=0,
+            )
+            == RunStatus.COMPLETED_WITH_FAILURES
+        )
+
+        with pytest.raises(ValueError, match="rows_routed_failure"):
+            derive_terminal_run_status(
+                rows_processed=5,
+                rows_succeeded=2,
+                rows_failed=0,
+                rows_routed_success=0,
+                rows_routed_failure=3,
+                rows_quarantined=0,
+                rows_coalesce_failed=0,
+            )
+
+        with pytest.raises(ValueError, match="rows_routed_failure"):
+            RunResult(
+                run_id="run-invalid-routed-failure-subset",
+                status=RunStatus.COMPLETED,
+                rows_processed=5,
+                rows_succeeded=2,
+                rows_failed=0,
+                rows_routed_success=0,
+                rows_routed_failure=3,
+                rows_quarantined=0,
+            )
+        )
+```
+
+**Step 2: Run RED before changing the predicate**
+
+```bash
+.venv/bin/python -m pytest tests/unit/contracts/test_run_result.py::TestADR019PredicateBoundaryCases -v
+```
+
+Expected before Task 3.4: the simplified-predicate assertions fail because the
+old predicate still treats `rows_quarantined` and `rows_routed_failure` as direct
+failure indicators, and the impossible-subset `pytest.raises(...)` cases fail
+because current L0 code does not yet reject them mechanically. The zero-row,
+all-discarded, and correct all-quarantined shapes may already pass; they are
+boundary pins that must stay green after the simplification.
+
+**Step 3: GREEN after Task 3.4**
+
+Run the same class after the predicate rewrite. Expected: all boundary tests
+pass, proving the base counters (`rows_succeeded`, `rows_failed`) are the only
+row-terminal predicate inputs, impossible subset shapes are rejected at L0, and
+`rows_coalesce_failed` remains the separate run-level failure signal.
+
+**Definition of Done:**
+- [ ] `TestADR019PredicateBoundaryCases` exists in `tests/unit/contracts/test_run_result.py`
+- [ ] Invalid `rows_quarantined > rows_failed` and `rows_routed_failure > rows_failed` shapes fail before Task 3.4 because no L0 subset invariant exists yet
+- [ ] Zero-row, all-discarded, all-quarantined, mixed default/on-error, and impossible-subset rejection shapes pass after Task 3.4
+- [ ] Boundary tests are included in the Phase 3 GREEN command
 
 ---
 
@@ -645,6 +1083,7 @@ for result in results:
         counters.rows_failed += 1
     elif pair == (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE):
         counters.rows_quarantined += 1
+        counters.rows_failed += 1
     elif pair == (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED):
         counters.rows_succeeded += 1
     elif pair == (TerminalOutcome.SUCCESS, TerminalPath.COALESCED):
@@ -709,11 +1148,101 @@ def _route_to_sink(
     )
 ```
 
-**Step 3: Update diversion-counter accumulation at the orchestrator (NOT inside SinkExecutor)**
+Also update every direct `PendingOutcome(...)` construction that bypasses `_route_to_sink`. The live quarantine path in `src/elspeth/engine/orchestrator/core.py` constructs `PendingOutcome(RowOutcome.QUARANTINED, quarantine_error_hash)` directly; after Phase 1's keyword-only retype, this must become:
+
+```python
+PendingOutcome(
+    outcome=TerminalOutcome.FAILURE,
+    path=TerminalPath.QUARANTINED_AT_SOURCE,
+    error_hash=quarantine_error_hash,
+)
+```
+
+Update `reconcile_sink_write_diversions` in `outcomes.py` at the same time: comparisons against `pending_outcome.outcome == RowOutcome.X` must become explicit `(pending_outcome.outcome, pending_outcome.path)` checks so discard-mode and failsink-mode diversions do not collapse into one branch.
+
+**Load-bearing reconciliation matrix:** after Phase 3, routed/quarantined counters are non-disjoint subsets of the base counters. A diverted pending token must remove every provisional counter the accumulator already bumped before the sink write failed:
+
+| Pending pair before sink write | Provisional counters to subtract on diversion |
+| --- | --- |
+| `(SUCCESS, DEFAULT_FLOW)` | `rows_succeeded` |
+| `(SUCCESS, COALESCED)` | `rows_succeeded`, `rows_coalesced` if this pair is routed to a sink in the live path |
+| `(SUCCESS, GATE_ROUTED)` | `rows_succeeded`, `rows_routed_success`, `routed_destinations[sink_name]` |
+| `(FAILURE, ON_ERROR_ROUTED)` | `rows_failed`, `rows_routed_failure`, `routed_destinations[sink_name]` |
+| `(FAILURE, QUARANTINED_AT_SOURCE)` | `rows_failed`, `rows_quarantined` |
+
+Only after those provisional counters are reconciled does the orchestrator add sink-diversion counters from `DiversionCounts`: `rows_diverted += total`, and `rows_failed += discard_mode` only for `(FAILURE, SINK_DISCARDED)` discard diversions. Failsink-mode diversions add `rows_diverted` only because `(TRANSIENT, SINK_FALLBACK_TO_FAILSINK)` is not a predicate input.
+
+Add unit tests in `tests/unit/engine/orchestrator/test_outcomes.py` that
+exercise default-flow, gate-routed, on-error-routed, quarantined, and coalesced
+pending rows. The coalesced case is mandatory: current HEAD already has
+coalesced sink-routing coverage in
+`tests/unit/engine/orchestrator/test_outcomes.py::TestCoalescedOutcome::test_coalesced_routes_to_sink`
+and terminal coalesce tests that return `RowOutcome.COALESCED` with
+`sink_name="output"`, so coalesced pending outcomes can reach
+`SinkExecutor.write()`.
+
+Required test names:
+
+```python
+def test_reconcile_sink_write_diversion_subtracts_default_flow_success() -> None: ...
+def test_reconcile_sink_write_diversion_subtracts_gate_routed_success_subset() -> None: ...
+def test_reconcile_sink_write_diversion_subtracts_on_error_failure_subset() -> None: ...
+def test_reconcile_sink_write_diversion_subtracts_quarantined_failure_subset() -> None: ...
+def test_reconcile_sink_write_diversion_subtracts_coalesced_success_and_coalesced() -> None: ...
+```
+
+The coalesced regression starts with counters
+`rows_succeeded=1, rows_coalesced=1`, a pending pair
+`(TerminalOutcome.SUCCESS, TerminalPath.COALESCED)`, and a discard-mode sink
+diversion. After reconciliation, `rows_succeeded == 0`,
+`rows_coalesced == 0`, `rows_diverted == 1`, and `rows_failed == 1` only after
+the orchestrator applies `DiversionCounts.discard_mode`.
+
+**Step 3: Preserve `path` in sink-write grouping**
+
+`_write_pending_to_sinks` currently groups pending writes by sink-local outcome
+shape before calling `SinkExecutor.write()`. After Phase 1, `PendingOutcome`
+contains both `outcome` and `path`; Phase 3 must make `path` part of the
+sort/group key. Otherwise `(SUCCESS, DEFAULT_FLOW)` and
+`(SUCCESS, GATE_ROUTED)` rows with the same sink and error hash collapse into
+one sink write, losing the path witness that the recorder and cross-table
+invariants need.
+
+```python
+def pending_group_key(
+    pair: tuple[TokenInfo, PendingOutcome | None],
+) -> tuple[bool, str, str, str]:
+    pending = pair[1]
+    if pending is None:
+        return (True, "", "", "")
+    outcome_value = pending.outcome.value if pending.outcome is not None else ""
+    return (
+        False,
+        outcome_value,
+        pending.path.value,
+        pending.error_hash or "",
+    )
+
+
+sorted_pairs = sorted(token_outcome_pairs, key=pending_group_key)
+for _group_key, group in groupby(sorted_pairs, key=pending_group_key):
+    group_pairs = list(group)
+    pending_outcome = group_pairs[0][1]
+    group_tokens = [token for token, _pending in group_pairs]
+    ...
+```
+
+Add a focused unit test that sends mixed pending rows for the same sink:
+`(SUCCESS, DEFAULT_FLOW)` and `(SUCCESS, GATE_ROUTED)` with the same
+`error_hash`. The test must prove `SinkExecutor.write()` is invoked once per
+distinct `(outcome, path, error_hash)` group and that the recorder receives the
+original path for every row.
+
+**Step 4: Update diversion-counter accumulation at the orchestrator (NOT inside SinkExecutor)**
 
 **Reality check:** `SinkExecutor` has no `_counters` attribute — counter accumulation happens at the orchestrator level. `SinkExecutor.write()` (`sink.py:341`) returns `tuple[Artifact | None, int]`; the int is `diversion_count`. `Orchestrator._run_main_processing_loop` at `core.py:2199` accumulates it via `loop_ctx.counters.rows_diverted += total_diversions`. The discard-mode `rows_failed` bump must live at that orchestrator site, AND `SinkExecutor.write()` must return enough information for the orchestrator to know how many of the diversions were discard-mode versus failsink-mode (the orchestrator can no longer treat `total_diversions` as opaque).
 
-**Sub-step 3a: Change the SinkExecutor.write() return shape to distinguish diversion flavors**
+**Sub-step 4a: Change the SinkExecutor.write() return shape to distinguish diversion flavors**
 
 Add a small frozen dataclass alongside the existing return contract:
 
@@ -753,7 +1282,7 @@ return artifact, diversion_count
 return artifact, DiversionCounts(failsink_mode=failsink_count, discard_mode=discard_count)
 ```
 
-**Sub-step 3b: Update orchestrator to accumulate the split counts**
+**Sub-step 4b: Update orchestrator to accumulate the split counts**
 
 ```python
 # In core.py around line 2199 — OLD:
@@ -767,9 +1296,9 @@ loop_ctx.counters.rows_diverted += diversion_counts.total
 loop_ctx.counters.rows_failed += diversion_counts.discard_mode
 ```
 
-The local variable that today holds `total_diversions` (returned from the sink-write call site) becomes `diversion_counts: DiversionCounts`. Both call sites in `core.py` that consume the return value need updating — find them via `grep -n "rows_diverted\\|sink_executor.*write\\|\\.write(" src/elspeth/engine/orchestrator/core.py` and update each.
+The local variable that today holds `total_diversions` (returned from the sink-write call site) becomes `diversion_counts: DiversionCounts`. Update the direct `SinkExecutor.write()` destructuring site and the later orchestrator counter-update site that consumes the value — find them via `grep -n "rows_diverted\\|sink_executor.*write\\|\\.write(" src/elspeth/engine/orchestrator/core.py` and update each.
 
-**Sub-step 3c: Update any other callers of `SinkExecutor.write()`**
+**Sub-step 4c: Update any other callers of `SinkExecutor.write()`**
 
 ```bash
 grep -rn "sink_executor\.write\|SinkExecutor.*write\|self\._sink_executor\.write" src/elspeth/
@@ -777,11 +1306,11 @@ grep -rn "sink_executor\.write\|SinkExecutor.*write\|self\._sink_executor\.write
 
 Each caller that destructured `(artifact, diversion_count)` becomes `(artifact, diversion_counts)` and uses the dataclass fields. Test fixtures that assert on the return shape need fixture updates in this commit (schema-dependent per Phase 5 triage).
 
-**Step 4: Update imports in `outcomes.py`**
+**Step 5: Update imports in `outcomes.py`**
 
 Replace `from elspeth.contracts.enums import RowOutcome` with `from elspeth.contracts.enums import TerminalOutcome, TerminalPath`.
 
-**Step 5: Verify**
+**Step 6: Verify**
 
 Run: `.venv/bin/python -m pytest tests/unit/engine/orchestrator/test_outcomes.py -v`
 
@@ -791,6 +1320,11 @@ Expected: existing accumulator unit tests pass. The integration tests from Tasks
 - [ ] Accumulator pattern-matches on `(outcome, path)`
 - [ ] GATE_ROUTED and ON_ERROR_ROUTED branches bump both counters
 - [ ] `_route_to_sink` signature updated
+- [ ] `_write_pending_to_sinks` sort/group key includes `pending.path` and uses the same key function for both `sorted(...)` and `groupby(...)`
+- [ ] Mixed default-flow/gate-routed pending rows for the same sink do not collapse into one write group
+- [ ] Direct quarantine `PendingOutcome(...)` construction updated with keyword-only `(outcome, path, error_hash)`
+- [ ] `reconcile_sink_write_diversions` compares explicit `(outcome, path)` pairs instead of `RowOutcome`
+- [ ] `reconcile_sink_write_diversions` subtracts every provisional base and subset counter in the matrix above; routed destinations are decremented for both routed paths
 - [ ] `DiversionCounts` dataclass added in `sink.py`; `SinkExecutor.write()` return shape changed from `tuple[Artifact | None, int]` to `tuple[Artifact | None, DiversionCounts]`
 - [ ] All `SinkExecutor.write()` call sites updated to destructure the dataclass (verified by `grep -rn "sink_executor\.write\|SinkExecutor.*write" src/elspeth/`)
 - [ ] Orchestrator counter-update site at `core.py:~2199` increments BOTH `rows_diverted` (total) AND `rows_failed` (discard_mode subset)
@@ -834,6 +1368,48 @@ def test_completed_status_with_only_routed_success(self) -> None:
 
 Run RED test against the existing run_result.py.
 
+**Step 1a: Add the L0 subset invariant helper**
+
+Before editing the predicate, add a named helper in
+`src/elspeth/contracts/run_result.py` and call it from both
+`RunResult.__post_init__` and `derive_terminal_run_status(...)`. This is a
+Tier-1 mechanical guard, not a documentation-only expectation:
+
+```python
+def _validate_counter_subsets(
+    *,
+    rows_succeeded: int,
+    rows_failed: int,
+    rows_routed_success: int,
+    rows_routed_failure: int,
+    rows_quarantined: int,
+) -> None:
+    """ADR-019: structural counters are subsets of base terminal counters."""
+    if rows_routed_success > rows_succeeded:
+        raise ValueError(
+            "rows_routed_success must be <= rows_succeeded under ADR-019; "
+            f"got rows_routed_success={rows_routed_success}, "
+            f"rows_succeeded={rows_succeeded}"
+        )
+    if rows_routed_failure > rows_failed:
+        raise ValueError(
+            "rows_routed_failure must be <= rows_failed under ADR-019; "
+            f"got rows_routed_failure={rows_routed_failure}, "
+            f"rows_failed={rows_failed}"
+        )
+    if rows_quarantined > rows_failed:
+        raise ValueError(
+            "rows_quarantined must be <= rows_failed under ADR-019; "
+            f"got rows_quarantined={rows_quarantined}, "
+            f"rows_failed={rows_failed}"
+        )
+```
+
+Call this helper before status classification in `derive_terminal_run_status(...)`
+so callers cannot derive a clean terminal status from corrupt counter shapes. Call
+it in `RunResult.__post_init__` after integer validation and before
+`_check_status_invariant()`.
+
 **Step 2: Apply the predicate edits**
 
 ```python
@@ -851,7 +1427,7 @@ failure_indicator = (
 # rows_routed_failure). The bifurcated OR clauses are vestigial.
 success_indicator = self.rows_succeeded > 0
 failure_indicator = (
-    self.rows_failed > 0 or self.rows_quarantined > 0 or self.rows_coalesce_failed > 0
+    self.rows_failed > 0 or self.rows_coalesce_failed > 0
 )
 ```
 
@@ -860,7 +1436,7 @@ Update the error-message strings in the `case` arms below to match the simplifie
 ```python
 # Same edit for derive_terminal_run_status (lines 208-216):
 success_indicator = rows_succeeded > 0
-failure_indicator = rows_failed > 0 or rows_quarantined > 0 or rows_coalesce_failed > 0
+failure_indicator = rows_failed > 0 or rows_coalesce_failed > 0
 ```
 
 **Step 3: Drop unused parameters**
@@ -876,6 +1452,8 @@ Run: `.venv/bin/python -m pytest tests/unit/contracts/test_run_result.py tests/i
 Expected: all tests pass.
 
 **Definition of Done:**
+- [ ] `_validate_counter_subsets` added in `run_result.py` and called from both `RunResult.__post_init__` and `derive_terminal_run_status(...)`
+- [ ] L0 rejects `rows_routed_success > rows_succeeded`, `rows_routed_failure > rows_failed`, and `rows_quarantined > rows_failed`
 - [ ] `__post_init__` predicate simplified
 - [ ] `derive_terminal_run_status` predicate simplified
 - [ ] Error-message strings updated to match new predicate
@@ -899,82 +1477,171 @@ Expected: all tests pass.
 **Files:**
 - Modify: `src/elspeth/web/execution/schemas.py:138-160` (`_validate_row_decomposition`)
 - Modify: `src/elspeth/web/execution/schemas.py:197-285` (`_check_status_row_count_invariant`)
-- Test: `tests/integration/test_adr_019_api_runs_endpoint.py` (NEW)
+- Test: `tests/unit/web/execution/test_schemas.py` — extend `TestCompletedDataDecomposition` (EXISTING); no new test file needed
 
-**Step 1: Write the RED-first regression test for the 500**
+**Test shape rationale (shape c — schema-layer unit tests):**
 
-Create: `tests/integration/test_adr_019_api_runs_endpoint.py`
+The bug is a Pydantic validator invariant (`_validate_row_decomposition`). Testing it at the `CompletedData` / `RunStatusResponse` constructor level is both sufficient and the established pattern — `TestCompletedDataDecomposition` already lives in `tests/unit/web/execution/test_schemas.py` and exercises exactly this predicate.
+
+A web-layer integration test using `TestClient(app)` and `/api/runs/{run_id}` would additionally require: `create_app()` with a test-scoped `WebSettings`
+(no module-level `app` object is exported — `src/elspeth/web/app.py:293` exports only
+`def create_app(settings: WebSettings | None = None) -> FastAPI`), an auth token
+(the route enforces ownership via `_verify_run_ownership`), a run seeded through the
+full web `ExecutionService`, and `asgi_lifespan.LifespanManager`. That is end-to-end
+coverage of the wrong layer: the exercise is already provided by
+`tests/integration/web/test_execute_pipeline.py::TestGateRoutedPipelineExecution`
+(gate-routed pipeline, `/api/runs/{run_id}`, `rows_routed_success > 0` assertions).
+Duplicating it here is CYA, not regression value.
+
+**Step 1: Write the RED-first regression tests — extend `TestCompletedDataDecomposition`**
+
+Add the following methods to `tests/unit/web/execution/test_schemas.py::TestCompletedDataDecomposition`:
 
 ```python
-"""ADR-019 B4 regression: /api/runs/{rid} returns 200 (not 500) for runs
-that exercise gate-MOVE routing or transform on_error routing.
+# Imports already at the top of test_schemas.py:
+#   from elspeth.web.execution.schemas import (CompletedData, RunStatusResponse, ...)
+# Source symbols:
+#   _validate_row_decomposition  src/elspeth/web/execution/schemas.py:138
+#   CompletedData                src/elspeth/web/execution/schemas.py:288
 
-Pre-fix bug: web/execution/schemas.py::_validate_row_decomposition asserts a
-sum-disjoint inequality that breaks after Phase 3's accumulator counter
-doubling. A run with N gate-routed rows has rows_succeeded=N AND
-rows_routed_success=N; the formula's right-hand sum exceeds rows_processed
-and fires ValueError, surfacing as HTTP 500.
-"""
+def test_gate_routed_shape_accepted_post_phase3(self) -> None:
+    """ADR-019 B4 regression: gate-MOVE rows bump BOTH rows_succeeded and
+    rows_routed_success after Phase 3's accumulator change. Pre-fix,
+    _validate_row_decomposition added rows_routed_success to the RHS sum,
+    producing sum=8 against rows_processed=4, raising ValueError (HTTP 500).
+    Post-fix the RHS is rows_succeeded + rows_failed only. Quarantines are
+    included in rows_failed and also reported separately via rows_quarantined.
 
-from fastapi.testclient import TestClient
+    # _validate_row_decomposition: src/elspeth/web/execution/schemas.py:138
+    """
+    data = CompletedData(
+        status="completed",
+        rows_processed=4,
+        rows_succeeded=4,
+        rows_failed=0,
+        rows_routed_success=4,   # non-disjoint SUBSET of rows_succeeded post-Phase-3
+        rows_routed_failure=0,
+        rows_quarantined=0,
+        landscape_run_id="lscape-gate-phase3",
+    )
+    assert data.rows_succeeded == 4
+    assert data.rows_routed_success == 4
 
-from elspeth.contracts.enums import RunStatus
-from tests.integration._helpers import (
-    build_test_pipeline_with_gate_route,
-    build_test_pipeline_with_on_error_route,
-    run_pipeline,
-)
-from elspeth.web.app import app  # the FastAPI app
+def test_on_error_routed_shape_accepted_post_phase3(self) -> None:
+    """Symmetric B4 regression for transform on_error routing. Pre-fix,
+    rows_failed=3 AND rows_routed_failure=3 produced sum=8 against
+    rows_processed=5, raising ValueError (HTTP 500).
 
+    # _validate_row_decomposition: src/elspeth/web/execution/schemas.py:138
+    """
+    data = CompletedData(
+        status="completed_with_failures",
+        rows_processed=5,
+        rows_succeeded=2,
+        rows_failed=3,
+        rows_routed_success=0,
+        rows_routed_failure=3,   # non-disjoint SUBSET of rows_failed post-Phase-3
+        rows_quarantined=0,
+        landscape_run_id="lscape-on-error-phase3",
+    )
+    assert data.rows_failed == 3
+    assert data.rows_routed_failure == 3
 
-class TestAdr019ApiRunsEndpoint:
-    def test_gate_routed_run_returns_200_not_500(self, tmp_path) -> None:
-        """A run with 4 gate-routed rows produces a valid CompletedData payload."""
-        pipeline = build_test_pipeline_with_gate_route(
-            tmp_path=tmp_path,
-            routed_row_count=4,
-            default_flow_row_count=0,
+def test_routed_success_cannot_exceed_rows_succeeded_post_phase3(self) -> None:
+    """rows_routed_success is a subset of rows_succeeded, not a sibling bucket.
+
+    This RED test constructs an impossible schema payload directly. A future
+    accumulator regression that bumps rows_routed_success without the paired
+    rows_succeeded bump must be caught at the Pydantic boundary instead of
+    relying on construction discipline alone.
+    """
+    with pytest.raises(pydantic.ValidationError, match="rows_routed_success"):
+        CompletedData(
+            status="completed",
+            rows_processed=5,
+            rows_succeeded=1,
+            rows_failed=0,
+            rows_routed_success=2,   # impossible subset relationship
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            landscape_run_id="lscape-routed-subset",
         )
-        run_id = run_pipeline(pipeline).run_id
 
-        client = TestClient(app)
-        response = client.get(f"/api/runs/{run_id}")
-        assert response.status_code == 200, (
-            f"Expected 200 OK, got {response.status_code}. "
-            f"Body: {response.json()}. The Pydantic CompletedData validator "
-            f"must accept Phase-3 counter shapes where rows_succeeded and "
-            f"rows_routed_success both reflect gate-routed rows."
+def test_routed_failure_cannot_exceed_rows_failed_post_phase3(self) -> None:
+    """rows_routed_failure is a subset of rows_failed."""
+    with pytest.raises(pydantic.ValidationError, match="rows_routed_failure"):
+        CompletedData(
+            status="completed_with_failures",
+            rows_processed=5,
+            rows_succeeded=2,
+            rows_failed=1,
+            rows_routed_success=0,
+            rows_routed_failure=2,   # impossible subset relationship
+            rows_quarantined=0,
+            landscape_run_id="lscape-routed-failure-subset",
         )
-        body = response.json()
-        assert body["status"] == "completed"
-        assert body["rows_succeeded"] == 4
-        assert body["rows_routed_success"] == 4
 
-    def test_on_error_routed_run_returns_200_not_500(self, tmp_path) -> None:
-        """Symmetric: transform on_error routing produces valid response."""
-        pipeline = build_test_pipeline_with_on_error_route(
-            tmp_path=tmp_path,
-            on_error_routed_count=3,
-            success_count=2,
+def test_quarantined_cannot_exceed_rows_failed_post_phase3(self) -> None:
+    """rows_quarantined is a reporting subset of rows_failed."""
+    with pytest.raises(pydantic.ValidationError, match="rows_quarantined"):
+        CompletedData(
+            status="completed_with_failures",
+            rows_processed=5,
+            rows_succeeded=2,
+            rows_failed=1,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=2,   # impossible subset relationship
+            landscape_run_id="lscape-quarantine-subset",
         )
-        run_id = run_pipeline(pipeline).run_id
+```
 
-        client = TestClient(app)
-        response = client.get(f"/api/runs/{run_id}")
-        assert response.status_code == 200
-        body = response.json()
-        assert body["status"] == "completed_with_failures"
-        assert body["rows_failed"] == 3
-        assert body["rows_routed_failure"] == 3
+**Also update `test_double_counted_routed_success_rejected` (line 455) in the same class.** That test currently asserts that `rows_processed=1, rows_succeeded=1, rows_routed_success=1` raises a `ValidationError` with "decomposition mismatch". Post-Phase-3, this is the VALID counter shape for a single gate-routed row — the test is pinned to the pre-Phase-3 invariant and will need to be updated (or converted to a positive-case assertion) in the same commit as the predicate change.
+
+```python
+# OLD (locked to pre-Phase-3 invariant — DELETE this test):
+def test_double_counted_routed_success_rejected(self) -> None:
+    with pytest.raises(pydantic.ValidationError, match="decomposition mismatch"):
+        CompletedData(
+            status="completed",
+            rows_processed=1,
+            rows_succeeded=1,
+            rows_failed=0,
+            rows_routed_success=1,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            landscape_run_id="lscape-routed",
+        )
+
+# NEW (post-Phase-3 valid shape — replace with positive assertion):
+def test_gate_routed_single_row_accepted(self) -> None:
+    """Post-Phase-3: a single gate-routed row legitimately increments both
+    rows_succeeded and rows_routed_success. The old test asserted this shape
+    raises ValidationError; after the predicate fix it must be accepted.
+
+    # _validate_row_decomposition: src/elspeth/web/execution/schemas.py:138
+    """
+    data = CompletedData(
+        status="completed",
+        rows_processed=1,
+        rows_succeeded=1,
+        rows_failed=0,
+        rows_routed_success=1,
+        rows_routed_failure=0,
+        rows_quarantined=0,
+        landscape_run_id="lscape-routed",
+    )
+    assert data.rows_routed_success == 1
+    assert data.rows_succeeded == 1
 ```
 
 **Step 2: Run RED**
 
 ```bash
-.venv/bin/python -m pytest tests/integration/test_adr_019_api_runs_endpoint.py -v
+.venv/bin/python -m pytest tests/unit/web/execution/test_schemas.py::TestCompletedDataDecomposition -v
 ```
 
-Expected: BOTH tests fail with HTTP 500 because `_validate_row_decomposition` rejects the post-Phase-3 counter shape.
+Expected: `test_gate_routed_shape_accepted_post_phase3` and `test_on_error_routed_shape_accepted_post_phase3` FAIL with `pydantic.ValidationError` ("decomposition mismatch") because `_validate_row_decomposition` still includes `rows_routed_*` in the RHS sum. `test_double_counted_routed_success_rejected` passes (it's pinned to the old invariant), and `test_gate_routed_single_row_accepted` fails (same formula rejection). The subset-bound tests also fail in the RED sense because the current schema accepts impossible `rows_routed_success > rows_succeeded`, `rows_routed_failure > rows_failed`, and `rows_quarantined > rows_failed` payloads. Together these failures confirm the predicate mirror is still in its pre-Phase-3 shape and lacks the named subset invariant.
 
 **Step 3: Patch `_validate_row_decomposition` (line 138-160)**
 
@@ -1001,26 +1668,26 @@ def _validate_row_decomposition(
     if rows_processed < sum_terminal:
         raise ValueError(...)
 
-# NEW:
+# NEW (Blocker B1 fix — ONLY succeeded + failed participate in decomposition):
 def _validate_row_decomposition(
     rows_processed: int,
     rows_succeeded: int,
     rows_failed: int,
-    rows_routed_success: int,
-    rows_routed_failure: int,
-    rows_quarantined: int,
 ) -> None:
-    """Enforce rows_processed >= rows_succeeded + rows_failed + rows_quarantined.
+    """Enforce rows_processed >= rows_succeeded + rows_failed.
 
     ADR-019 § Counter derivation contract: under the two-axis terminal model,
     ``rows_succeeded`` is exhaustive for SUCCESS lifecycles (DEFAULT_FLOW,
     GATE_ROUTED, FILTER_DROPPED, COALESCED) and ``rows_failed`` is exhaustive
-    for FAILURE lifecycles other than QUARANTINED_AT_SOURCE (UNROUTED,
-    ON_ERROR_ROUTED, SINK_DISCARDED). ``rows_quarantined`` covers the third
-    failure bucket (QUARANTINED_AT_SOURCE). The structural counters
-    ``rows_routed_success`` and ``rows_routed_failure`` are non-disjoint
-    SUBSETS of ``rows_succeeded`` / ``rows_failed`` — counting them in a
-    decomposition sum double-counts gate-routed and on-error-routed rows.
+    for FAILURE lifecycles (UNROUTED, ON_ERROR_ROUTED, QUARANTINED_AT_SOURCE,
+    SINK_DISCARDED). ``rows_quarantined`` is a non-disjoint SUBSET of
+    ``rows_failed`` — counting it in a decomposition sum double-counts source
+    quarantines. The structural counters ``rows_routed_success`` and
+    ``rows_routed_failure`` are non-disjoint SUBSETS of ``rows_succeeded`` /
+    ``rows_failed`` — counting them in a decomposition sum double-counts
+    gate-routed and on-error-routed rows. These subset counters are display-only
+    breakdown fields at the web/API layer and must be checked by the named
+    subset invariant, not by this terminal-decomposition sum.
 
     The pre-ADR-019 formula included rows_routed_* in the sum because
     ADR-018 made gate-routed rows bump ONLY rows_routed_success (disjoint
@@ -1033,12 +1700,12 @@ def _validate_row_decomposition(
     rows_processed without contributing to any of the three predicate
     buckets. The full DAG-aware balance is tracked in elspeth-cf84eb1b52.
     """
-    sum_terminal = rows_succeeded + rows_failed + rows_quarantined
+    sum_terminal = rows_succeeded + rows_failed
     if rows_processed < sum_terminal:
         raise ValueError(
             f"Row count decomposition mismatch (over-counting): rows_processed="
             f"{rows_processed} < rows_succeeded({rows_succeeded}) + "
-            f"rows_failed({rows_failed}) + rows_quarantined({rows_quarantined}) "
+            f"rows_failed({rows_failed}) "
             f"= {sum_terminal}. Tier 1 anomaly: orchestrator emitted more "
             f"predicate-bucket counts than input rows. ADR-019 § Counter "
             f"derivation contract: rows_routed_success and rows_routed_failure "
@@ -1046,15 +1713,63 @@ def _validate_row_decomposition(
         )
 ```
 
-**Note:** The function signature still accepts `rows_routed_success` and `rows_routed_failure` because callers pass them positionally. Inside the function they're now unused. Either:
-- **(a)** Drop the parameters from the signature and update all four call sites (lines 308, 621, 665, plus the one I haven't seen yet).
-- **(b)** Keep the parameters as accepted-but-ignored; mark with `_` prefix or a docstring note.
+**Required shape:** drop `rows_routed_success`, `rows_routed_failure`, and
+`rows_quarantined` from `_validate_row_decomposition`. They are no longer
+terminal decomposition inputs after Phase 3; they are display-only breakdown
+fields and named subset-invariant inputs. Keeping them as accepted-but-ignored
+parameters is not allowed because it invites a future patch to reintroduce the
+double-counting formula.
 
-Prefer (a) — clean signature change matches the project's "no legacy code" policy. The grep `grep -rn "_validate_row_decomposition(" src/elspeth/` will surface all callers; update each.
+Run `grep -rn "_validate_row_decomposition(" src/elspeth/` and update every
+caller so it passes only `(rows_processed, rows_succeeded, rows_failed)`.
+Pass the routed/quarantine counters to `_validate_response_counter_subsets`
+instead.
 
-**Step 4: Patch `_check_status_row_count_invariant` (line ~218)**
+**Step 4: Add a named response-counter subset invariant**
 
-The functional check is fine (the bifurcated OR clauses remain logically satisfied post-Phase-3) but the error messages reference dropped concepts. Update to match the L0 predicate's simplified shape:
+After `rows_routed_*` drops out of the decomposition sum, the schema layer still
+must enforce the Tier 1 subset relationships by name. Mirror the L0 helper from
+Task 3.4, including quarantine:
+
+```python
+def _validate_response_counter_subsets(
+    *,
+    rows_succeeded: int,
+    rows_failed: int,
+    rows_routed_success: int,
+    rows_routed_failure: int,
+    rows_quarantined: int,
+) -> None:
+    """ADR-019: response structural counters are subsets of base counters."""
+    if rows_routed_success > rows_succeeded:
+        raise ValueError(
+            "rows_routed_success must be <= rows_succeeded under ADR-019; "
+            f"got rows_routed_success={rows_routed_success}, "
+            f"rows_succeeded={rows_succeeded}"
+        )
+    if rows_routed_failure > rows_failed:
+        raise ValueError(
+            "rows_routed_failure must be <= rows_failed under ADR-019; "
+            f"got rows_routed_failure={rows_routed_failure}, "
+            f"rows_failed={rows_failed}"
+        )
+    if rows_quarantined > rows_failed:
+        raise ValueError(
+            "rows_quarantined must be <= rows_failed under ADR-019; "
+            f"got rows_quarantined={rows_quarantined}, "
+            f"rows_failed={rows_failed}"
+        )
+```
+
+Call this helper from every Pydantic response model that carries both base
+counters and structural subset counters (`ProgressData`, `CompletedData`,
+`CancelledData`, `RunStatusResponse`, and `RunResultsResponse` if all are present
+in current HEAD). This is a schema-boundary invariant, not just an accumulator
+construction property.
+
+**Step 5: Patch `_check_status_row_count_invariant` (line ~218)**
+
+The functional check must match the L0 predicate's simplified shape:
 
 ```python
 # OLD line 218:
@@ -1063,43 +1778,141 @@ failure_indicator = rows_failed > 0 or rows_quarantined > 0 or rows_routed_failu
 
 # NEW:
 # ADR-019 § Counter derivation contract: rows_succeeded is exhaustive for
-# SUCCESS lifecycles; rows_failed for non-quarantine FAILURE lifecycles.
-# The bifurcated OR clauses become vestigial.
+# SUCCESS lifecycles; rows_failed is exhaustive for FAILURE lifecycles.
+# rows_quarantined is a reporting subset of rows_failed, not a separate
+# predicate input. The bifurcated OR clauses become vestigial.
 success_indicator = rows_succeeded > 0
-failure_indicator = rows_failed > 0 or rows_quarantined > 0
+failure_indicator = rows_failed > 0
 ```
 
 Update the four error-message strings (lines ~248, ~258, ~273, ~282) to drop the `or rows_routed_success` / `or rows_routed_failure` references. The function signature still receives those parameters because callers pass them, but they're no longer used in the predicate.
 
-**Step 5: Update callers of `_validate_row_decomposition`**
+**Step 6: Update callers of `_validate_row_decomposition`**
 
 ```bash
 grep -n "_validate_row_decomposition(" src/elspeth/web/execution/schemas.py
 ```
 
-Each call site (CompletedData, CancelledData, RunStatusResponse, ProgressData if applicable) drops the two `rows_routed_*` arguments. The `_check_status_row_count_invariant` function does the same parameter cleanup OR keeps the params as accepted-but-ignored — same choice as Step 3.
+Each call site (CompletedData, CancelledData, RunStatusResponse, ProgressData if applicable) drops the two `rows_routed_*` arguments and `rows_quarantined` from `_validate_row_decomposition`. Those counters still feed `_validate_response_counter_subsets`; they are display-only breakdown/subset fields, not decomposition inputs. The `_check_status_row_count_invariant` function may still accept routed/quarantine parameters if its callers expose them, but it must treat them as non-predicate display/subset fields and must not OR them into terminal status.
 
-**Step 6: GREEN**
+**Step 7: GREEN**
 
 ```bash
 .venv/bin/python -m pytest \
-  tests/integration/test_adr_019_api_runs_endpoint.py \
+  tests/unit/web/execution/test_schemas.py \
   tests/integration/test_adr_019_counter_changes.py \
   tests/integration/test_adr_019_discard_mode_flip.py \
-  tests/unit/web/execution/test_schemas.py \
+  tests/integration/web/test_execute_pipeline.py::TestGateRoutedPipelineExecution \
   -v
 ```
 
-Expected: all green. Any pre-existing tests in `test_schemas.py` that asserted the old decomposition-sum shape need fixture updates in this commit — they're schema-dependent.
+Expected: all green. `test_double_counted_routed_success_rejected` must have been replaced by `test_gate_routed_single_row_accepted` in this commit — if the old test still exists, it will spuriously fail (it was pinned to the pre-Phase-3 invariant). `TestGateRoutedPipelineExecution` in `tests/integration/web/test_execute_pipeline.py` provides the end-to-end `/api/runs/{run_id}` coverage that pins this regression at the HTTP layer; no additional API-layer test file is needed.
 
 **Definition of Done:**
-- [ ] `_validate_row_decomposition` formula simplified — drops `rows_routed_*` from the sum
-- [ ] `_check_status_row_count_invariant` predicate aligned with L0 (drops bifurcated OR)
+- [ ] `_validate_row_decomposition` formula simplified — drops `rows_routed_*` and `rows_quarantined` from the RHS sum (new formula: `rows_succeeded + rows_failed`)
+- [ ] `_validate_response_counter_subsets` added and wired into every response model that exposes base counters plus routed/quarantined subset counters
+- [ ] `_check_status_row_count_invariant` predicate aligned with L0 (drops bifurcated OR; `success_indicator = rows_succeeded > 0`, `failure_indicator = rows_failed > 0`)
 - [ ] Error messages updated to match the new predicate shape
-- [ ] All `_validate_row_decomposition` callers updated (or parameters preserved-and-ignored consistently)
-- [ ] B4 regression test (`/api/runs/{rid}` returns 200 for gate-routed and on_error-routed runs) passes
-- [ ] Pre-existing schemas tests pass after fixture updates
+- [ ] All `_validate_row_decomposition` callers updated to pass only `rows_processed`, `rows_succeeded`, and `rows_failed`; routed/quarantine counters are routed to `_validate_response_counter_subsets`
+- [ ] `test_gate_routed_shape_accepted_post_phase3` and `test_on_error_routed_shape_accepted_post_phase3` pass in `TestCompletedDataDecomposition`
+- [ ] Subset-boundary tests reject `rows_routed_success > rows_succeeded`, `rows_routed_failure > rows_failed`, and `rows_quarantined > rows_failed`
+- [ ] `test_double_counted_routed_success_rejected` removed; replaced with `test_gate_routed_single_row_accepted` (positive assertion for the post-Phase-3 valid shape)
+- [ ] `TestGateRoutedPipelineExecution` (already in `tests/integration/web/test_execute_pipeline.py`) passes — provides end-to-end `/api/runs/{run_id}` coverage
+- [ ] All pre-existing `test_schemas.py` tests pass after any fixture updates
 - [ ] mypy clean across `src/elspeth/web/execution/`
+
+---
+
+### Task 3.5a: Update web terminal-status replay, session persistence, cancellation, and frontend active-run predicates
+
+**Why this task exists:** `src/elspeth/web/sessions/protocol.py` already defines `SESSION_TERMINAL_RUN_STATUS_VALUES = {"completed", "completed_with_failures", "failed", "empty", "cancelled"}` and `RunRecord.__post_init__` requires `finished_at` for every terminal status. However, several web/backend/frontend surfaces still hard-code the old terminal subset `("completed", "failed", "cancelled")`: `web/execution/routes.py` WebSocket seed/idle checks, `web/sessions/service.py::update_run_status` finished-at stamping, `web/execution/service.py::cancel` idempotency, and `SessionSidebar.tsx` active-run visibility. These stale terminal subsets become more visible once ADR-019 makes `completed_with_failures` and `empty` common operator-facing results.
+
+**Files:**
+- Modify: `src/elspeth/web/execution/routes.py:669, 686`
+- Modify: `src/elspeth/web/sessions/service.py:677-679`
+- Modify: `src/elspeth/web/execution/service.py:614-633`
+- Modify: `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.tsx:19-24`
+- Test: `tests/unit/web/execution/test_websocket.py` or `tests/unit/web/execution/test_routes.py`
+- Test: `tests/unit/web/sessions/test_service.py` or nearest existing SessionService test file
+- Test: `tests/unit/web/execution/test_service.py` or nearest existing ExecutionService cancel test file
+- Test: create `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.test.tsx` if no closer existing colocated test file exists
+
+**Step 1: Backend RED tests**
+
+Add tests for all backend terminal-set consumers:
+
+1. A client connects after the run is already `completed_with_failures`; the route sends `_build_terminal_run_event(...)` and closes.
+2. A client idles, status is rechecked as `empty`; the route sends `_build_terminal_run_event(...)` and closes.
+3. `SessionService.update_run_status(..., status="completed_with_failures")` stores `finished_at` and the returned `RunRecord` does not raise the terminal-null `AuditIntegrityError`.
+4. `SessionService.update_run_status(..., status="empty")` stores `finished_at` and the returned `RunRecord` does not raise the terminal-null `AuditIntegrityError`.
+5. `ExecutionService.cancel(run_id)` is idempotent for existing runs with `status="completed_with_failures"` and `status="empty"`; it must not attempt a transition to `cancelled`.
+
+Use `SESSION_TERMINAL_RUN_STATUS_VALUES` in assertions so the test catches future local hardcoded subsets.
+
+**Step 2: Backend fixes**
+
+Replace every hardcoded backend terminal subset with the shared protocol constant:
+
+```python
+from elspeth.web.sessions.protocol import SESSION_TERMINAL_RUN_STATUS_VALUES
+
+# routes.py seed/idle checks:
+if current.status in SESSION_TERMINAL_RUN_STATUS_VALUES:
+    event = _build_terminal_run_event(current)
+    await websocket.send_json(event.model_dump(mode="json"))
+    await websocket.close(code=1000)
+    return
+
+# web/sessions/service.py::update_run_status:
+if status in SESSION_TERMINAL_RUN_STATUS_VALUES:
+    values["finished_at"] = now
+
+# web/execution/service.py::cancel:
+if run.status not in SESSION_TERMINAL_RUN_STATUS_VALUES:
+    await self._session_service.update_run_status(run_id, status="cancelled")
+```
+
+The import must come from `web.sessions.protocol`; do not invent second local terminal sets in `routes.py`, `web/sessions/service.py`, or `web/execution/service.py`.
+
+**Step 3: Frontend RED test + fix**
+
+Add or extend `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.test.tsx` so `hasActiveRun` is false for every terminal status, including `completed_with_failures` and `empty`. If a closer colocated test exists in current HEAD, extend that file instead and update this task before implementation; do not leave the frontend assertion implicit. Then replace the local three-comparison predicate with the existing frontend terminal taxonomy from `src/elspeth/web/frontend/src/types/index.ts`:
+
+```ts
+import { TERMINAL_RUN_STATUS_VALUES, type Session } from "@/types/index";
+
+const hasActiveRun =
+  !!activeRunId &&
+  !!progress &&
+  !TERMINAL_RUN_STATUS_VALUES.includes(progress.status);
+```
+
+Do not add a second terminal-status set inside `SessionSidebar.tsx`; future status additions must flow through the central `TERMINAL_RUN_STATUS_VALUES` export.
+Replace the existing type-only `Session` import with the combined import shown
+above so the component keeps the repo's `@/types/index` alias convention.
+
+**Step 4: GREEN**
+
+Run:
+
+```bash
+.venv/bin/python -m pytest tests/unit/web/execution/test_websocket.py tests/unit/web/execution/test_routes.py -v
+.venv/bin/python -m pytest tests/unit/web/sessions tests/unit/web/execution/test_service.py -v
+cd src/elspeth/web/frontend
+npm run test -- SessionSidebar
+npm run build
+```
+
+**Definition of Done:**
+- [ ] `routes.py` uses `SESSION_TERMINAL_RUN_STATUS_VALUES` for both seed and idle terminal checks
+- [ ] `web/sessions/service.py::update_run_status` stamps `finished_at` for every status in `SESSION_TERMINAL_RUN_STATUS_VALUES`
+- [ ] `web/execution/service.py::cancel` treats every status in `SESSION_TERMINAL_RUN_STATUS_VALUES` as idempotently terminal
+- [ ] WebSocket tests cover `completed_with_failures` and `empty`
+- [ ] SessionService tests prove `completed_with_failures` and `empty` persist with non-null `finished_at`
+- [ ] ExecutionService cancel tests prove `completed_with_failures` and `empty` are no-ops
+- [ ] `SessionSidebar` imports `TERMINAL_RUN_STATUS_VALUES` and treats `completed_with_failures` and `empty` as terminal
+- [ ] `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.test.tsx` (or the updated colocated replacement named in this task) covers all terminal statuses
+- [ ] Frontend `npm run test -- SessionSidebar` and `npm run build` pass
 
 ---
 
@@ -1110,7 +1923,7 @@ Expected: all green. Any pre-existing tests in `test_schemas.py` that asserted t
 
 **Step 1: Apply the edit**
 
-The resume aggregator pattern-matches on `RowOutcome` and tallies per-counter. Flip to `(outcome, path)` matching with the same two BEHAVIOUR CHANGES applied (so resume produces the same counter shape as a live run).
+The resume aggregator pattern-matches on `RowOutcome` and tallies per-counter. Flip to `(outcome, path)` matching with the same two BEHAVIOUR CHANGES applied to the **predicate-input counters** so resume status agrees with a live run. Per ADR-019 § Resume nuance, do **not** re-derive structural counters from token outcomes in this helper: `rows_diverted`, `rows_coalesced`, `rows_forked`, `rows_expanded`, and `rows_buffered` remain owned by the live run summary / existing audit surfaces until a later ADR explicitly makes them replayable from first principles.
 
 ```python
 # OLD (lines 456-501):
@@ -1152,15 +1965,26 @@ for outcome_record in outcomes:
             rows_processed += 1
         case (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE):
             rows_quarantined += 1
-            rows_processed += 1
-        case (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED):
-            # ADR-019 § Sub-decision 5: discard-mode is FAILURE.
             rows_failed += 1
             rows_processed += 1
-        case (TerminalOutcome.TRANSIENT, _):
-            # Parent-token / batch-absorption / failsink-fallback bookkeeping —
-            # children/batch-result tokens carry the lifecycle answer.
+        case (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED):
+            # ADR-019 § Sub-decision 5: discard-mode is FAILURE and therefore
+            # a predicate input. Do not re-derive rows_diverted here; it is a
+            # structural counter owned by the live sink-write path.
+            rows_failed += 1
             rows_processed += 1
+        case (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK):
+            # Sink-write diversion reached a failsink. This is structural
+            # diversion evidence, not a predicate input. Count it as processed
+            # for resume completion/status, but do not re-derive rows_diverted.
+            rows_processed += 1
+        case (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT) \
+             | (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT) \
+             | (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED):
+            # Parent-token / batch bookkeeping is neutral in resume, matching
+            # live-run accumulation: children / batch-result tokens carry the
+            # row-level lifecycle answer.
+            pass
         case _:
             raise AssertionError(
                 f"Unhandled (outcome, path) pair in resume aggregation: {pair!r}. "
@@ -1169,28 +1993,106 @@ for outcome_record in outcomes:
             )
 ```
 
-**Step 2: Update imports**
+**Step 2: Preserve the existing return shape**
+
+`_derive_resume_terminal_status_from_audit` currently feeds the resume completion branch around `core.py:3250-3304`. Keep the return tuple scoped to replayable predicate/status counters:
+
+```python
+return (
+    terminal_status,
+    rows_processed,
+    rows_succeeded,
+    rows_failed,
+    rows_routed_success,
+    rows_routed_failure,
+    rows_quarantined,
+)
+```
+
+Do not add `rows_diverted` to the tuple in this ADR. A sink-fallback token outcome is `(TRANSIENT, SINK_FALLBACK_TO_FAILSINK)`: it proves a processed lifecycle checkpoint for resume status, but not enough by itself to reconstruct every structural sink-diversion count with the same authority as the live sink-write path.
+
+**Step 3: Update imports**
 
 Replace `RowOutcome` with `TerminalOutcome, TerminalPath` in the imports.
 
-**Step 3: GREEN**
+**Step 4: GREEN**
 
 Run: `.venv/bin/python -m pytest tests/unit/engine/orchestrator/test_resume.py -v` (or whichever resume test file exists).
+
+Add explicit live-vs-resume parity tests for gate-routed, on-error-routed, quarantine, failsink-mode, and discard-mode runs. The parity assertions are for terminal status and predicate-input counters (`rows_processed`, `rows_succeeded`, `rows_failed`, `rows_routed_success`, `rows_routed_failure`, `rows_quarantined`). For sink-diversion cases, assert that structural `rows_diverted` is **not** re-derived by `_derive_resume_terminal_status_from_audit`; leave any existing live-run structural counter source untouched.
+
+Create `tests/integration/test_adr_019_resume_counter_parity.py` with explicit
+RED-first cases:
+
+```python
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "gate_routed_success",
+        "on_error_routed_failure",
+        "quarantine_failure",
+        "failsink_mode_diversion",
+        "discard_mode_diversion",
+    ],
+)
+def test_resume_counter_shape_matches_live_predicate_counters(
+    scenario: str,
+    tmp_path: Path,
+) -> None:
+    """ADR-019 resume parity: replayed predicate counters match live counters."""
+    live = run_live_scenario(tmp_path / "live", scenario)
+    resumed = run_interrupt_then_resume_scenario(tmp_path / "resume", scenario)
+
+    assert resumed.status == live.status
+    assert resumed.rows_processed == live.rows_processed
+    assert resumed.rows_succeeded == live.rows_succeeded
+    assert resumed.rows_failed == live.rows_failed
+    assert resumed.rows_routed_success == live.rows_routed_success
+    assert resumed.rows_routed_failure == live.rows_routed_failure
+    assert resumed.rows_quarantined == live.rows_quarantined
+```
+
+For `failsink_mode_diversion` and `discard_mode_diversion`, add a second
+assertion block that documents the structural-counter boundary:
+
+```python
+derived = Orchestrator._derive_resume_terminal_status_from_audit(factory, run_id)
+assert len(derived) == 7  # tuple stays scoped to predicate/status counters
+```
+
+Use the existing interrupt/resume construction patterns from
+`tests/integration/pipeline/test_resume_comprehensive.py` and
+`tests/integration/pipeline/orchestrator/test_graceful_shutdown.py`; do not
+construct synthetic `RunResult` objects for this parity test.
 
 **Definition of Done:**
 - [ ] Resume match block flipped to `(outcome, path)`
 - [ ] Both BEHAVIOUR CHANGES applied symmetrically with the live accumulator
+- [ ] Transient resume paths are explicit: `SINK_FALLBACK_TO_FAILSINK` increments
+      `rows_processed` only, while `FORK_PARENT`, `EXPAND_PARENT`, and
+      `BATCH_CONSUMED` remain neutral bookkeeping paths
+- [ ] `(FAILURE, SINK_DISCARDED)` increments `rows_failed` and `rows_processed` only
+- [ ] Resume completion branch return tuple is not extended with `rows_diverted`
+- [ ] Live-vs-resume parity tests cover gate-routed, on-error-routed, quarantine, failsink-mode, and discard-mode predicate/status counters; structural `rows_diverted` is explicitly documented as not replayed here
+- [ ] `tests/integration/test_adr_019_resume_counter_parity.py` runs through real interrupt/resume construction, not synthetic `RunResult` instances
 - [ ] Resume tests pass
 - [ ] mypy clean
 
 ---
 
-### Task 3.7: Phase 3 commit
+### Task 3.7: Atomic Stage 2/3 commit (Phases 1-3)
 
 **Step 1: Run all tests**
 
 ```bash
 .venv/bin/python -m pytest tests/ -q --timeout=120
+.venv/bin/python scripts/cicd/adr019_symbol_inventory.py check \
+    --root src/elspeth \
+    --allowlist config/cicd/adr019_symbol_inventory
+cd src/elspeth/web/frontend
+npm run test
+npm run build
+cd /home/john/elspeth
 ```
 
 Most tests pass. Some unit tests for the accumulator and predicate may have stale RowOutcome assertions that survived Phase 1's contract-test updates — those are now fully retyped in this phase. Update each in the same commit.
@@ -1206,63 +2108,67 @@ Both Task 3.1 and Task 3.2 integration tests are GREEN. Re-run them to confirm:
     -v
 ```
 
-**Step 3: Commit**
+**Step 3: Commit Phases 1-3 together**
 
 ```bash
-git add src/elspeth/engine/orchestrator/outcomes.py \
-        src/elspeth/engine/orchestrator/core.py \
-        src/elspeth/engine/executors/sink.py \
-        src/elspeth/contracts/run_result.py \
-        src/elspeth/web/execution/schemas.py \
+git add src/elspeth/contracts/ \
+        src/elspeth/core/landscape/ \
+        src/elspeth/testing/ \
+	    src/elspeth/mcp/ \
+	    src/elspeth/web/execution/ \
+	    src/elspeth/web/frontend/ \
+	    src/elspeth/engine/ \
+	    src/elspeth/core/checkpoint/recovery.py \
+	    config/cicd/forbid_new_row_outcome/migration_files.yaml \
+	    config/cicd/adr019_symbol_inventory \
+	    scripts/cicd/adr019_symbol_inventory.py \
+	    tests/fixtures/plugins.py \
+	    tests/unit/scripts/cicd/test_adr019_symbol_inventory.py \
+	    tests/unit/contracts/ \
+        tests/unit/core/landscape/ \
+        tests/unit/mcp/ \
+        tests/unit/web/execution/ \
+        tests/unit/engine/orchestrator/ \
         tests/integration/test_adr_019_discard_mode_flip.py \
         tests/integration/test_adr_019_counter_changes.py \
-        tests/integration/test_adr_019_api_runs_endpoint.py \
-        tests/integration/_helpers.py \
-        tests/unit/contracts/test_run_result.py \
-        tests/unit/web/execution/test_schemas.py \
-        tests/unit/engine/orchestrator/
+        tests/integration/_helpers.py
 
 git commit -m "$(cat <<'EOF'
-feat(adr-019): phase 3 — accumulator + L0 predicate + L3 Pydantic mirror + resume + behaviour changes
+feat(adr-019): atomic stage 2-3 two-axis outcome migration
 
-ADR-019 Stage 2/3 Phase 3 of 5 (see docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-overview.md).
+ADR-019 Stage 2/3 Phases 1-3 of 5 (see docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-overview.md).
+This is the first legal commit boundary for the migration: Phase 1 and Phase 2
+are local checkpoints only and are intentionally not buildable in isolation.
 
-Four coupled changes ship together per ADR-019 § Counter derivation contract:
+Schema + recorder + loader + consumer surface:
+- token_outcomes: rename is_terminal → completed; add path column; outcome
+  column nullability flipped to True (NULL means non-terminal/BUFFERED).
+- TokenOutcome, RowResult, PendingOutcome, and TokenCompleted carry
+  (outcome, path) instead of RowOutcome.
+- record_token_outcome signature and TokenOutcomeLoader cross-checks use the
+  new two-axis model.
+- MCP, Web execution diagnostics, and core landscape exporters/formatters read
+  completed/path instead of is_terminal-only schema.
 
-1. Accumulator (engine/orchestrator/outcomes.py::accumulate_row_outcomes):
-   pattern-matches on (outcome, path); ships the two BEHAVIOUR CHANGES:
-   - (SUCCESS, GATE_ROUTED) bumps BOTH rows_succeeded AND rows_routed_success
-   - (FAILURE, ON_ERROR_ROUTED) bumps BOTH rows_failed AND rows_routed_failure
+Producer flip:
+- processor.py, transform.py, sink.py, coalesce_executor.py, and recovery.py
+  emit/read canonical (TerminalOutcome, TerminalPath) pairs.
 
-2. L0 predicate (contracts/run_result.py::__post_init__ + derive_terminal_run_status):
-   bifurcated OR clauses removed. success_indicator = rows_succeeded > 0;
-   failure_indicator = rows_failed > 0 or rows_quarantined > 0 or
-   rows_coalesce_failed > 0 (drops the rows_routed_failure clause).
+Accumulator + predicate + resume:
+- engine/orchestrator/outcomes.py::accumulate_row_outcomes pattern-matches on
+  (outcome, path) and ships the two behaviour changes:
+  (SUCCESS, GATE_ROUTED) bumps rows_succeeded and rows_routed_success;
+  (FAILURE, ON_ERROR_ROUTED) bumps rows_failed and rows_routed_failure.
+- contracts/run_result.py drops the bifurcated OR clauses from the terminal
+  predicate.
+- web/execution/schemas.py mirrors the L0 predicate and decomposition formula.
+- _derive_resume_terminal_status_from_audit reads the new columns and produces
+  the same counter shape as live runs.
+- Sink discard-mode rows now contribute to rows_failed, so discard-only
+  pipelines no longer report plain COMPLETED.
 
-3. L3 Pydantic mirror (web/execution/schemas.py::_validate_row_decomposition +
-   _check_status_row_count_invariant): the decomposition formula drops the
-   rows_routed_* terms (now non-disjoint subsets of rows_succeeded /
-   rows_failed); the predicate mirror aligns with L0. Without this update,
-   /api/runs/{rid} returns HTTP 500 for any run with gate-MOVE or
-   transform-on-error routing because the post-Phase-3 counter doubling
-   makes rows_succeeded + rows_routed_success exceed rows_processed in the
-   Pydantic decomposition check.
-
-4. Resume aggregation (engine/orchestrator/core.py::_derive_resume_terminal_status_from_audit):
-   pattern-matches on (outcome, path) with the same two behaviour changes
-   applied; resume produces the same counter shape as a live run.
-
-Plus the SinkExecutor counter increment for the discard-mode flip:
-sink.py adds rows_failed += 1 alongside the existing rows_diverted += 1
-for (FAILURE, SINK_DISCARDED). Operator-visible: a pipeline with discards
-and otherwise clean rows now reports COMPLETED_WITH_FAILURES instead of
-COMPLETED.
-
-New integration tests pin each behaviour change as RED-first → GREEN-after:
-- tests/integration/test_adr_019_discard_mode_flip.py
-- tests/integration/test_adr_019_counter_changes.py
-- tests/integration/test_adr_019_api_runs_endpoint.py (B4 regression — confirms
-  /api/runs/{rid} returns 200 for gate-routed and on_error-routed runs)
+New RED-first tests cover discard-mode RunStatus flip, routed counter changes,
+schema acceptance, and accumulator/predicate behaviour.
 
 Refs: elspeth-edb60744f0 (Stage 3 ticket — producer + accumulator)
 ADR: docs/architecture/adr/019-two-axis-terminal-model.md § Counter derivation contract
@@ -1278,5 +2184,5 @@ EOF
 - [ ] Two RED-first integration tests now GREEN
 - [ ] All unit tests pass after fixture updates
 - [ ] mypy clean
-- [ ] Phase 3 commit landed
+- [ ] Atomic Phases 1-3 commit landed
 - [ ] Phase 4 starts in the next session/checkpoint

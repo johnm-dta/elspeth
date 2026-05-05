@@ -1,0 +1,231 @@
+{
+  "verdict": "CHANGES_APPLIED_PENDING_REVIEW",
+  "summary": "The 8 blocking issues and 6 warnings from the 2026-05-05 plan review have been patched into the plan artifacts. Rerun plan-review before execution to confirm no fresh drift was introduced.",
+  "patched_at": "2026-05-05T00:00:00Z",
+  "patched_files": [
+    "docs/architecture/adr/019-two-axis-terminal-model.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-overview.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-2-producers.md",
+    "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-5-test-strategy.md"
+  ],
+  "plan_file": "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md",
+  "reviewed_at": "2026-05-05T00:00:00Z",
+  "review_mode": "full plan-review: reality, architecture, quality, systems, plus local synthesis",
+  "standards_loaded": [
+    "engine-patterns-reference",
+    "tier-model-deep-dive",
+    "logging-telemetry-policy",
+    "config-contracts-guide"
+  ],
+  "blocking_issues": [
+    {
+      "id": "B1",
+      "source": "systems",
+      "issue": "The stale-schema guard only checks missing columns, but ADR-019 also changes token_outcomes.outcome nullability and the terminal unique-index predicate from is_terminal == 1 to completed == 1.",
+      "priority_score": 18,
+      "evidence": [
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:56",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:357",
+        "src/elspeth/core/landscape/schema.py:190",
+        "src/elspeth/core/landscape/schema.py:210",
+        "src/elspeth/core/landscape/database.py:441",
+        "src/elspeth/core/landscape/database.py:500"
+      ],
+      "resolution": "Extend the plan to validate the full ADR-019 token_outcomes shape for existing schemas: required columns, forbidden stale is_terminal column or explicit stale-shape detection, outcome nullable=true, and partial unique-index predicate on completed for SQLite/Postgres where inspectable. Add stale-schema tests for each guard."
+    },
+    {
+      "id": "B2",
+      "source": "systems",
+      "issue": "PendingOutcome does not enforce legal (outcome, path) pairs before sink side effects. The proposed __post_init__ only checks error_hash by path, while SinkExecutor.write consumes PendingOutcome before the recorder write path can reject an illegal pair.",
+      "priority_score": 18,
+      "evidence": [
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:46",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:1006",
+        "src/elspeth/engine/executors/sink.py:341",
+        "src/elspeth/engine/executors/sink.py:480"
+      ],
+      "resolution": "Make PendingOutcome.__post_init__ enforce completed/outcome consistency and membership in _LEGAL_TERMINAL_PAIRS, with path=BUFFERED requiring outcome=None. Add RED tests for illegal pairs such as SUCCESS+UNROUTED and outcome=None with non-BUFFERED path."
+    },
+    {
+      "id": "B3",
+      "source": "reality",
+      "issue": "The B3 diagnose() regression test calls a non-existent API shape and assumes a fixture that is not present. It would fail on test wiring rather than the quarantine-count bug.",
+      "priority_score": 16,
+      "evidence": [
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:1768",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:1771",
+        "src/elspeth/mcp/analyzers/diagnostics.py:25",
+        "tests/unit/mcp/test_diagnostics.py:84",
+        "tests/unit/mcp/test_diagnostics.py:161"
+      ],
+      "resolution": "Rewrite the test plan to use the live diagnose(db, factory) signature and existing MCP diagnostics test setup, or define a concrete fixture that returns both LandscapeDB and RecorderFactory. The RED signal must be count==0, not TypeError or missing fixture."
+    },
+    {
+      "id": "B4",
+      "source": "reality",
+      "issue": "The fork_token direct-insert snippet accidentally changes expected_branches_json from the live raw branch-list shape to an object with a branches key.",
+      "priority_score": 15,
+      "evidence": [
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:1412",
+        "src/elspeth/core/landscape/data_flow_repository.py:576",
+        "tests/integration/audit/test_recorder_tokens.py:612"
+      ],
+      "resolution": "Keep expected_branches_json=json.dumps(branches, allow_nan=False) for fork parents, or explicitly add a migration of every reader and test that consumes the existing list shape."
+    },
+    {
+      "id": "B5",
+      "source": "quality",
+      "issue": "Phase 1 says all tests/unit/contracts and tests/unit/core/landscape tests must pass, but Phase 5 defers many schema-dependent constructor and direct DB-read test rewrites. The current Phase 1 checkpoint is therefore internally inconsistent.",
+      "priority_score": 16,
+      "evidence": [
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:2105",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:2113",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-5-test-strategy.md:269",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-5-test-strategy.md:311",
+        "tests/unit/core/landscape/test_model_loaders.py:1318",
+        "tests/unit/core/landscape/test_model_loaders.py:1348"
+      ],
+      "resolution": "Either move every schema-dependent test touched by the Phase 1 checkpoint into Phase 1, or narrow the Phase 1 checkpoint to the focused tests it actually updates and state which suite failures remain expected until Phase 5."
+    },
+    {
+      "id": "B6",
+      "source": "quality",
+      "issue": "TokenCompleted is a cross-package contract change, but Phase 1 checkpoint gates omit telemetry and engine surfaces where TokenCompleted is constructed or serialized.",
+      "priority_score": 14,
+      "evidence": [
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:1060",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:1103",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:2105",
+        "src/elspeth/engine/processor.py:559",
+        "src/elspeth/engine/orchestrator/outcomes.py:195",
+        "src/elspeth/telemetry/filtering.py:63"
+      ],
+      "resolution": "Add explicit TokenCompleted producer/exporter/test coverage to the appropriate phase gates. At minimum, include tests/unit/telemetry and the engine producer helper tests wherever the event shape changes are claimed green."
+    },
+    {
+      "id": "B7",
+      "source": "quality",
+      "issue": "The MCP outcome-analysis and run-report SQL rewrites do not specify a RED production-path test body. Existing analogous tests use mocked rows and would not catch query/TypedDict drift.",
+      "priority_score": 14,
+      "evidence": [
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:1792",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:1841",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:2084",
+        "tests/unit/mcp/analyzers/test_reports.py:156",
+        "tests/unit/mcp/analyzers/test_reports.py:195"
+      ],
+      "resolution": "Define a concrete DB-backed RED test for get_outcome_analysis and the live get_run_summary report surface using actual token_outcomes rows with distinct paths sharing the same lifecycle outcome. The test must fail before the SQL grouping and TypedDict updates."
+    },
+    {
+      "id": "B8",
+      "source": "architecture",
+      "issue": "The stale-schema error points operators to docs/operator/migrations/adr-019.md, but that document is created in Phase 5 while the first legal commit is Phases 1-3. The fail-fast path can point at a missing remediation doc in an intermediate valid commit.",
+      "priority_score": 12,
+      "evidence": [
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:386",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-overview.md:34",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-5-test-strategy.md:15"
+      ],
+      "resolution": "Create the operator migration doc no later than the atomic Phases 1-3 commit, or change the Phase 1 error text to point only at an existing ADR/plan until the durable operator doc lands."
+    }
+  ],
+  "warnings": [
+    {
+      "id": "W1",
+      "source": "architecture",
+      "issue": "RunSummaryReport.outcome_distribution remains typed as dict[str, int] while the live get_run_summary report surface is planned to return path-aware entries.",
+      "evidence": [
+        "src/elspeth/mcp/types.py:204",
+        "src/elspeth/mcp/types.py:214",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:1902"
+      ],
+      "recommendation": "Add RunSummaryReport.outcome_distribution to the explicit Phase 1 file map and DoD, not only a generic 'update any TypedDict' note."
+    },
+    {
+      "id": "W2",
+      "source": "architecture",
+      "issue": "The plan deliberately avoids contracts/__init__.py, but TerminalOutcome and TerminalPath become cross-boundary contract types while RowOutcome is still package-exported.",
+      "evidence": [
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:1649",
+        "src/elspeth/contracts/__init__.py:150",
+        "src/elspeth/contracts/__init__.py:388"
+      ],
+      "recommendation": "Make the export decision explicit: either add TerminalOutcome/TerminalPath to contracts/__init__.py in Phase 1, or document that direct enums imports are mandatory through this migration window."
+    },
+    {
+      "id": "W3",
+      "source": "reality",
+      "issue": "The ADR implementation-notes table cited as canonical still says EXPANDED requires fork_group_id, while live code and the plan use expand_group_id.",
+      "evidence": [
+        "docs/architecture/adr/019-two-axis-terminal-model.md:654",
+        "src/elspeth/core/landscape/model_loaders.py:567",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:1234"
+      ],
+      "recommendation": "Patch or annotate the ADR before relying on those line anchors as the canonical implementation table."
+    },
+    {
+      "id": "W4",
+      "source": "reality",
+      "issue": "The Phase 1 file list calls tests/unit/web/execution/test_discard_summary.py an existing test, but no such file exists in the live tree.",
+      "evidence": [
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:43",
+        "tests/unit/web/execution/test_diagnostics.py"
+      ],
+      "recommendation": "Name this as a new test file, or attach the discard-summary regression to an existing web execution test module."
+    },
+    {
+      "id": "W5",
+      "source": "quality",
+      "issue": "Task 1.6 sample tests use audit_repo, run_id, and token_ref fixtures that do not match live landscape test conventions.",
+      "evidence": [
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:1160",
+        "tests/unit/core/landscape/test_data_flow_repository.py:58",
+        "tests/unit/core/landscape/test_data_flow_repository.py:111"
+      ],
+      "recommendation": "Rewrite the sample tests against _make_repo/_make_repo_with_token or define the fixtures concretely in the plan."
+    },
+    {
+      "id": "W6",
+      "source": "quality",
+      "issue": "Residual grep sweeps expect empty output but do not make grep's non-zero empty-result status mechanically clear.",
+      "evidence": [
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:2026",
+        "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md:2040"
+      ],
+      "recommendation": "Wrap residual sweeps in a tiny script or command pattern that exits 0 only when there are no findings and exits 1 with printed findings otherwise."
+    }
+  ],
+  "recommendations": [
+    "Patch the Phase 1 plan before execution and rerun plan-review.",
+    "Do not start implementation while B1-B8 remain open; several failures would produce false RED tests or late runtime failures.",
+    "Keep the existing atomic Phases 1-3 boundary; the no-commit rule for Phase 1 itself is sound."
+  ],
+  "reviewer_summaries": {
+    "reality": {
+      "status": "ISSUES_FOUND",
+      "blocking": 2,
+      "warnings": 3
+    },
+    "architecture": {
+      "status": "WARNINGS_FOUND",
+      "blocking": 0,
+      "warnings": 3
+    },
+    "quality": {
+      "status": "ISSUES_FOUND",
+      "blocking": 4,
+      "warnings": 2
+    },
+    "systems": {
+      "status": "ISSUES_FOUND",
+      "blocking": 2,
+      "warnings": 2
+    },
+    "synthesis": {
+      "status": "CHANGES_APPLIED_PENDING_REVIEW",
+      "blocking": 8,
+      "warnings": 6
+    }
+  }
+}

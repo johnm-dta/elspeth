@@ -652,7 +652,7 @@ The implementation surface, in order of dependency:
    | `ROUTED requires sink_name` | `(SUCCESS, GATE_ROUTED)` requires `sink_name` |
    | `ROUTED_ON_ERROR requires sink_name AND error_hash` | `(FAILURE, ON_ERROR_ROUTED)` requires `sink_name` AND `error_hash` |
    | `FORKED requires fork_group_id` | `(TRANSIENT, FORK_PARENT)` requires `fork_group_id` |
-   | `EXPANDED requires fork_group_id` | `(TRANSIENT, EXPAND_PARENT)` requires `fork_group_id` |
+   | `EXPANDED requires expand_group_id` | `(TRANSIENT, EXPAND_PARENT)` requires `expand_group_id` |
    | `COALESCED requires join_group_id AND sink_name` | `(SUCCESS, COALESCED)` requires `join_group_id` AND `sink_name` |
    | `QUARANTINED requires quarantine_reason` | `(FAILURE, QUARANTINED_AT_SOURCE)` requires `quarantine_reason` |
    | `DIVERTED requires sink_name AND error_hash` (failsink) | `(TRANSIENT, SINK_FALLBACK_TO_FAILSINK)` requires `sink_name` AND `error_hash` |

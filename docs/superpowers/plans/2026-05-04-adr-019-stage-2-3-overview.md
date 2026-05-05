@@ -2,13 +2,13 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task.
 >
-> **CRITICAL — atomic merge:** This plan is split into FIVE phase documents for review and execution organization. **The merge into `main` is atomic per ADR-019 lines 318-320: "the migration plan's Stage 2/3 (merged) PR ships the accumulator change in lockstep with the `RunResult.__post_init__` predicate rewrite — neither edit is safe in isolation."** Phases are sequenced commits within ONE PR; intermediate phases left on `main` would break the engine. Do NOT propose to land Phase 1 alone, or Phases 1-2 alone, etc. The PR opens with all five phases complete and tests green end-to-end.
+> **CRITICAL — atomic merge:** This plan is split into FIVE phase documents for review and execution organization. **The merge into `main` is atomic per ADR-019 lines 318-320: "the migration plan's Stage 2/3 (merged) PR ships the accumulator change in lockstep with the `RunResult.__post_init__` predicate rewrite — neither edit is safe in isolation."** Phases 1 and 2 are local checkpoints only, not git commit boundaries: each leaves known engine breakage that Phase 3 resolves. The first legal git commit combines Phases 1-3 and must leave the tree compiling with the Stage 2/3 accumulator and predicate flip in place. Phases 4 and 5 may then land as follow-up commits in the same PR. Do NOT push, commit, or propose landing Phase 1 alone, or Phases 1-2 alone. The PR opens with all five phases complete and tests green end-to-end.
 
 **Goal:** Replace the single-axis `RowOutcome` audit recording with the two-axis `(TerminalOutcome, TerminalPath, completed)` triple across the recorder, every producer emit site, the accumulator, the resume aggregator, the four contract dataclasses, the telemetry event payload, and the `RunResult.__post_init__` predicate. Ships the discard-mode behaviour change (operator-visible `RunStatus` flip from `COMPLETED` to `COMPLETED_WITH_FAILURES`) and the two accumulator counter-increment changes (`(SUCCESS, GATE_ROUTED)` and `(FAILURE, ON_ERROR_ROUTED)`) per ADR-019 § Counter derivation contract.
 
 **Architecture:** Producers emit `(outcome, path)` pairs at every recording site; the recorder writes the triple to `token_outcomes`; the loader reconstructs the dataclass and runs the new (outcome, path) cross-checks plus four NEW cross-table invariants (I1a/I1b/I1c/I3); the accumulator matches on `(outcome, path)` and increments per the canonical mapping; the predicate becomes `success_indicator = rows_succeeded > 0` and `failure_indicator = rows_failed > 0` — the bifurcated OR clauses go away. Stage 1 introduced `TerminalOutcome`/`TerminalPath`/`_LEGAL_TERMINAL_PAIRS` alongside the unchanged `RowOutcome` (commit `60d30551` on `RC5-UX-RoutingVocabFix`); Stages 4 (test mechanical translation) and 5 (delete `RowOutcome`) follow this PR.
 
-**Tech Stack:** Python 3.13, SQLAlchemy Core, pytest, mypy, ruff, pluggy. Audit DB is SQLite or Postgres (no Alembic — operator deletes `audit.db` + `sessions.db` between this PR and any pre-Stage-2 state per `MEMORY.md::project_db_migration_policy`).
+**Tech Stack:** Python 3.13, SQLAlchemy Core, pytest, mypy, ruff, pluggy. Audit DB is SQLite or Postgres (no Alembic — operator deletes `audit.db` + `sessions.db` between this PR and any pre-Stage-2 state per ELSPETH's project DB migration policy recorded for this plan).
 
 **Prerequisites:**
 - Stage 1 commit `60d30551` is on the branch (introduces `TerminalOutcome`, `TerminalPath`, `_LEGAL_TERMINAL_PAIRS`, `_NON_TERMINAL_PATHS`, the closed-set partition assertion, the property test, and the `forbid_new_row_outcome.py` lint guard with allowlist).
@@ -21,36 +21,48 @@
 
 | Phase | Document | Scope |
 | --- | --- | --- |
-| 1 | [Phase 1 — Schema + recorder + loader + contract dataclasses + downstream consumers](2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md) | DB schema rename + new column; `TokenOutcome`, `RowResult`, `PendingOutcome`, `TokenCompleted` retype; recorder `record_token_outcome` signature flip; loader `TokenOutcomeLoader.load` cross-check rewrite; `testing/__init__.py` re-exports. **Plus 8 downstream-consumer fixes** in `mcp/analyzers/{reports,diagnostics}.py`, `mcp/types.py`, `web/execution/{diagnostics,discard_summary}.py`, `core/landscape/{exporter,lineage,formatters}.py` — schema rename + B3 silent-zero-quarantine fix. Without these, MCP diagnose() lies about quarantine count (Tier 1 violation) and Web run-diagnostics crashes. |
+| 1 | [Phase 1 — Schema + recorder + loader + contract dataclasses + downstream consumers](2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md) | **First task creates the AST inventory tool/config/tests** so every later phase boundary can use it. DB schema rename + new column; `TokenOutcome`, `RowResult`, `PendingOutcome`, `TokenCompleted` retype; recorder `record_token_outcome` signature flip; loader `TokenOutcomeLoader.load` cross-check rewrite; `contracts/__init__.py` and `testing/__init__.py` re-exports; operator migration doc stub so stale-schema errors point at an existing file. **Plus 9 downstream-consumer fixes** in `mcp/analyzers/{reports,diagnostics}.py`, `mcp/types.py`, `web/execution/{diagnostics,discard_summary}.py`, `contracts/export_records.py`, `core/landscape/{exporter,lineage,formatters}.py` — schema rename + B3 silent-zero-quarantine fix. Without these, MCP diagnose() lies about quarantine count (Tier 1 violation) and Web run-diagnostics crashes. |
 | 2 | [Phase 2 — Producer site flip](2026-05-04-adr-019-stage-2-3-phase-2-producers.md) | Every `RowOutcome.X` reference in `processor.py`, `transform.py`, `coalesce_executor.py`, `sink.py`, `recovery.py` flips to `(outcome, path)` pair construction at the emit site. ~120 src/ references with the canonical mapping table embedded for mechanical translation. |
 | 3 | [Phase 3 — Accumulator + L0 predicate + L3 Pydantic mirror + resume aggregation + behaviour changes](2026-05-04-adr-019-stage-2-3-phase-3-accumulator-predicate.md) | `accumulate_row_outcomes` matches on `(outcome, path)` and ships the `(SUCCESS, GATE_ROUTED)` and `(FAILURE, ON_ERROR_ROUTED)` counter changes; `RunResult.__post_init__` and `derive_terminal_run_status` drop their bifurcated OR clauses; **`web/execution/schemas.py::_validate_row_decomposition` formula drops `rows_routed_*` from the sum (post-Phase-3 they're non-disjoint subsets) and `_check_status_row_count_invariant` mirrors the L0 simplification — without these, `/api/runs/{rid}` returns 500 for every gate-MOVE / on_error-routed run because Pydantic rejects the new counter shape**; `_derive_resume_terminal_status_from_audit` reads new columns. The discard-mode operator-visible `RunStatus` flip and the B4 `/api/runs/{rid}` 500-regression are each exercised by RED-first integration tests before the predicate change lands. |
-| 4 | [Phase 4 — Cross-table invariants (I1a/I1b/I1c/I3)](2026-05-04-adr-019-stage-2-3-phase-4-cross-check-invariants.md) | Four NEW deferred / real-time invariants per ADR-019 § "Cross-check invariants." I1c (failsink-pair) and I3 (discard-no-failsink) are real-time at recording. I1a/I1b are deferred (children land later) — verified via end-of-run sweep wired into `Orchestrator._finalize_source_iteration` at `core.py:2511`, gated on `not interrupted_by_shutdown`. |
-| 5 | [Phase 5 — Test strategy + triage](2026-05-04-adr-019-stage-2-3-phase-5-test-strategy.md) | Triage `tests/` into schema-dependent (must move with Stage 2/3, won't compile otherwise) vs assertion-only (deferred to Stage 4). Grep recipe + per-file expected categories. New behavioural tests for: cross-table invariants, discard-mode `RunStatus` flip, accumulator counter changes, predicate drop-OR-clause. |
+| 4 | [Phase 4 — Cross-table invariants (I1a/I1b/I1c/I3)](2026-05-04-adr-019-stage-2-3-phase-4-cross-check-invariants.md) | Four NEW deferred / real-time invariants per ADR-019 § "Cross-check invariants." I1c (failsink-pair) and I3 (discard-no-failsink) are real-time at recording. I1a/I1b are deferred (children land later) — verified via end-of-run sweep wired into `Orchestrator._execute_run` immediately after `_flush_and_write_sinks(...)` returns and before final progress / terminal finalization. This is intentionally after sink writes; `_finalize_source_iteration` is too early because child sink `token_outcomes` rows are written during the sink phase. |
+| 5 | [Phase 5 — Test strategy + triage](2026-05-04-adr-019-stage-2-3-phase-5-test-strategy.md) | Triage `tests/` into schema-dependent, assertion-only, and direct-DB-read categories. Schema-dependent and assertion-only sites both move in this PR so `pytest tests/ -q` can be green; the assertion-only work is mechanical but not deferrable. Expand the Phase 1 operator migration stub into the full deployment/rollback runbook. Run the AST-backed source inventory created in Phase 1 as the authoritative closeout gate. New behavioural tests for: cross-table invariants, discard-mode `RunStatus` flip, accumulator counter changes, predicate drop-OR-clause. |
 
 ---
 
 ## Sequencing within the PR
 
-The five phases sequence as five commits in order; every commit boundary leaves the tree compiling and `pytest tests/unit/contracts/` + `pytest tests/unit/core/landscape/` green. Phase 5's behavioural tests are written FIRST per TDD discipline — they fail until the corresponding phase commit lands.
+The five phase documents are execution checkpoints, not five buildable commits. The only allowed git commit boundaries are:
+
+1. **Atomic Stage 2/3 commit:** Phases 1-3 together. This is the first point at which the engine must compile and the accumulator / predicate contract is coherent.
+2. **Phase 4 commit:** Cross-table invariants, additive on top of the buildable Stage 2/3 state.
+3. **Phase 5 commit:** Schema-dependent test fixes, behavioural tests, and full operator migration documentation expansion.
+
+Phase 5's behavioural tests are written FIRST per TDD discipline — they fail until the corresponding phase commit lands.
 
 ```
 Stage 1 (already shipped, commit 60d30551)
    │
-   ├── Phase 1 commit: schema + dataclasses + recorder + loader (engine compiles, producers broken)
+   ├── Phase 1 local checkpoint: AST inventory + schema + dataclasses + recorder + loader + downstream consumers
    │       ├── ❌ producer sites still pass RowOutcome to record_token_outcome — engine module won't import
-   │       └── this is why Phase 1 alone cannot land — Phase 2 must follow in the same PR
+   │       └── no git commit; continue directly to Phase 2
    │
-   ├── Phase 2 commit: producer flip (engine module imports; runtime tests fail because accumulator still on RowOutcome)
+   ├── Phase 2 local checkpoint: producer flip
+   │       ├── ❌ runtime tests fail because accumulator still matches RowOutcome
+   │       └── no git commit; continue directly to Phase 3
    │
-   ├── Phase 3 commit: accumulator + predicate + resume + behaviour changes (engine green end-to-end at unit level)
+  ├── Atomic Stage 2/3 commit: Phases 1-3 together
+  │       ├── ✅ engine compiles; accumulator, resume aggregation, L0 predicate, and L3 predicate mirror are coherent
+  │       └── ✅ AST inventory gate has run from the Phase 1 tool
    │
-   ├── Phase 4 commit: cross-table invariants (NEW behaviour, additive)
+  ├── Phase 4 commit: cross-table invariants (NEW behaviour, additive)
+  │       └── ✅ AST inventory gate rerun before commit
    │
-   └── Phase 5 commit: schema-dependent test fixes + new behavioural tests
-                        (Stage 4 leaves the ~143 ``outcome == RowOutcome.X`` assertion sites alone)
+ └── Phase 5 commit: schema-dependent + assertion-only test fixes + new behavioural tests
+                      ✅ AST inventory + frontend/Python/full project gates rerun
+                      ✅ no remaining broken ``outcome == RowOutcome.X`` assertions in tests/
 ```
 
-The PR is opened only after Phase 5 lands. Reviewers see five clean commits; the squash-or-keep choice is the reviewer's at merge time.
+The PR is opened only after Phase 5 lands. Reviewers see three clean commits: the atomic Phases 1-3 migration, Phase 4 invariants, and Phase 5 tests/docs. The squash-or-keep choice is the reviewer's at merge time.
 
 ---
 
@@ -81,7 +93,7 @@ The `token_outcomes` table changes:
 - `outcome` (String 32) changes value space from `RowOutcome.value` (non-NULL) to `TerminalOutcome.value | NULL` — NULL means non-terminal (`BUFFERED`).
 - `path` (String 64) added — always populated, never NULL.
 
-Per `MEMORY.md::project_db_migration_policy`, ELSPETH does not run Alembic on schema changes. **Operator action required at deploy time:** delete `audit.db` and `sessions.db` from any production / staging environment before deploying this PR. The PR description and `docs/operator/migrations/adr-019.md` (added in Phase 5) document the required deletion command.
+Per ELSPETH's project DB migration policy recorded for this plan, ELSPETH does not run Alembic on schema changes. **Operator action required at deploy time:** replace the old-schema `audit.db` / `sessions.db` stores before deploying this PR, with service stop, immutable snapshot/backup, destructive delete/drop, restart, health check, and rollback steps documented in `docs/operator/migrations/adr-019.md` (stub added in Phase 1; full runbook expanded in Phase 5). Agents must not run the destructive database commands without explicit operator approval for the target environment.
 
 ---
 
@@ -107,7 +119,9 @@ The "delete the DB" policy means we do not write a migration; operators delete a
 
 ### D3: Deferred invariants (I1a/I1b) verified via end-of-run sweep, not periodic probe
 
-Per ADR-019 § "Cross-check invariants" (lines 237-269), I1a (FORK_PARENT requires ≥1 child) and I1b (BATCH_CONSUMED requires batch-result token at flush) are *deferred* obligations. The mechanism: extend `Orchestrator._finalize_source_iteration` (`src/elspeth/engine/orchestrator/core.py:2511`) — gated on `not interrupted_by_shutdown`, mirroring the existing aggregation-flush and coalesce-flush gates — to query for orphaned `TRANSIENT` parent tokens (no children, no batch-result) via two new helper methods on `DataFlowRepository` (`find_orphaned_transient_parents`, `find_orphaned_batch_consumptions`). Crash with `AuditIntegrityError` if any are found. Run-end is the first moment the invariant CAN be verified — earlier verification would race with child completion. The shutdown gate is essential: graceful shutdown legitimately leaves fork-parents without children because resume completes them. See Phase 4 for the concrete sweep code and exact insertion point.
+Per ADR-019 § "Cross-check invariants" (lines 237-269), I1a (FORK_PARENT requires ≥1 child) and I1b (BATCH_CONSUMED requires the consuming batch row to reach `BatchStatus.COMPLETED` by end of run) are *deferred* obligations. The mechanism: extend both `Orchestrator._execute_run` (`src/elspeth/engine/orchestrator/core.py:2972-3084`) and the sibling resume path `_process_resumed_rows` (`core.py:3420-3515`) to call `factory.data_flow.sweep_deferred_invariants_or_crash(run_id)` immediately after `_flush_and_write_sinks(...)` returns. In the fresh-run path this is before final progress / `PhaseCompleted`; in the resume path it is before returning to the public `resume()` wrapper for terminal finalization. Do **not** place the sweep in `_finalize_source_iteration`: current source calls `_finalize_source_iteration` before `_flush_and_write_sinks`, while child sink outcomes are recorded during `SinkExecutor.write()`. A pre-sink sweep would reject valid fork/expand runs as orphaned.
+
+The sweep is naturally skipped whenever `_flush_and_write_sinks` raises before returning. Graceful shutdown is the benign expected case: buffered/forked work is resumable and must not be declared orphaned before resume has a chance to complete it. If resume later flushes sinks successfully, the resume-path sweep runs then. Other unhandled sink-flush exceptions also skip the sweep intentionally because the postconditions for I1a/I1b are not stable after a failed flush; the outer failure ceremony owns that run failure. The repository sweep queries for orphaned `TRANSIENT` parent tokens (FORK_PARENT with no children) and orphaned BATCH_CONSUMED tokens (whose consuming batch is not yet `BatchStatus.COMPLETED`) via `DataFlowRepository` helpers (`find_orphaned_transient_parents`, `find_orphaned_batch_consumptions`). Crash with `AuditIntegrityError` if any are found. Run-end after sink writes is the first moment the invariant CAN be verified. See Phase 4 for the concrete sweep code and exact insertion point. Note on I1b semantics: the result token created at flush time does NOT carry `batch_id` in its own `token_outcomes` row (only CONSUMED_IN_BATCH and BUFFERED outcomes set `batch_id`), so the reachability path for the batch's lifecycle answer goes through `batches.status`, not a paired `token_outcomes` row. ADR-019 lines 229-232 ("reachable via `batch_id`") will receive a clarifying amendment in a follow-up.
 
 ### D4: I1c (sink-fallback-paired) and I3 (discard-FAILURE) verified at recording time
 
@@ -117,23 +131,36 @@ Both are real-time verifiable per the ADR. I1c checks the failsink node_state + 
 
 The Behavior Change Notice is documented in three places:
 1. **PR description** — top-level summary for reviewers.
-2. **`docs/operator/migrations/adr-019.md`** (NEW file added in Phase 5) — durable operator reference: what changed, what action to take, how to identify affected pipelines, the DB-delete command.
-3. **No CHANGELOG entry** — ELSPETH has no CHANGELOG today (`MEMORY.md::feedback_no_calendar_shipping_commitments` codifies that release ceremony is not the project's idiom; commits + ADRs ARE the release record).
+2. **`docs/operator/migrations/adr-019.md`** (stub added in Phase 1; full runbook expanded in Phase 5) — durable operator reference: what changed, what action to take, how to identify affected pipelines, the DB-delete command.
+3. **No CHANGELOG entry** — ELSPETH has no CHANGELOG today; commits + ADRs are the release record for this project.
 
 ### D7: Downstream-consumer sweep is mandatory at every phase boundary
 
 **Discovered 2026-05-05 across two patch rounds:** The original Phase 1 + Phase 3 file lists missed 9 downstream consumers across THREE distinct bug classes. Each class is invisible to the Stage 1 lint guard because none of the offending sites import `RowOutcome`.
 
-- **Bug class A: schema-column reads** (e.g. `token_outcomes_table.c.is_terminal` in raw SQL, `OutcomeDistributionEntry.is_terminal: bool` in Pydantic TypedDict) — would crash at deploy with `AttributeError` on the renamed column. Sites: `mcp/analyzers/reports.py`, `mcp/types.py`, `web/execution/diagnostics.py`, `web/execution/discard_summary.py`, `core/landscape/exporter.py`, `core/landscape/lineage.py`, `core/landscape/formatters.py`. Patched in Phase 1 Task 1.9.
+- **Bug class A: schema-column reads / wire-contract fields** (e.g. `token_outcomes_table.c.is_terminal` in raw SQL, `OutcomeDistributionEntry.is_terminal: bool`, `TokenOutcomeExportRecord.is_terminal: bool`) — would crash at deploy with `AttributeError` on the renamed column or fail mypy/wire-contract checks after the emitted payload switches to `completed` + `path`. Sites: `mcp/analyzers/reports.py`, `mcp/types.py`, `web/execution/diagnostics.py`, `web/execution/discard_summary.py`, `contracts/export_records.py`, `core/landscape/exporter.py`, `core/landscape/lineage.py`, `core/landscape/formatters.py`. Patched in Phase 1 Task 1.9.
 - **Bug class B: hardcoded `RowOutcome.value` strings as SQL filters** (e.g. `outcome == "quarantined"` in `diagnostics.py:181`) — would silently match zero rows after the value-space change, returning confidently-wrong results to operators. Per CLAUDE.md "I don't know what happened" + Tier 1 audit-integrity, silent-wrong is the worst-class failure. Patched in Phase 1 Task 1.9.
 - **Bug class C: Pydantic / L3 wire-schema mirrors of L0 predicates** (e.g. `web/execution/schemas.py::_validate_row_decomposition` copies the bifurcated sum-disjoint formula; `_check_status_row_count_invariant` copies the bifurcated OR predicate). When Phase 3's accumulator changes the *semantic* of which counters get bumped (without changing field names), the L3 mirror's formula breaks → HTTP 500 on the API. Distinct from class A because the column names ARE the same; the bug is at the predicate-formula layer. Patched in Phase 3 Task 3.5.
 - **Bug class D: prose-driven hallucination — wrong import paths and wrong attribute references in plan-snippet code** (e.g. `from elspeth.contracts.audit import AuditIntegrityError` when the exception lives in `contracts.errors`; `self._counters.rows_failed += 1` when `SinkExecutor` has no `_counters` attribute and counter accumulation lives at the orchestrator level). These are NOT codebase bugs — they're plan-snippet bugs that would crash AT EXECUTION TIME if the plan is followed literally. The pattern: ADR / planning prose names a concept ("the SinkExecutor counter site") that doesn't map to a Python attribute, or imports a class from the file it's "about" rather than from the file that exports it. Patched in Phase 3 Task 3.3 Step 3 (counter relocation) and Phase 4 test-template imports. The mandatory check is: every code snippet in a plan that names a Python symbol must have that symbol grep-verified against current HEAD before the plan ships.
 
 - **Bug class E: undefined / non-existent test-helper functions cited as if they exist** (e.g. Phase 3 referenced `build_test_pipeline_with_discard_sink`, `build_test_pipeline_with_gate_route`, `build_test_pipeline_with_on_error_route`, `run_pipeline` across three different import paths — none of which existed in the codebase). The plan-snippet cited the helpers from inconsistent locations (`elspeth.testing` vs `tests.integration._helpers` vs `tests.conftest`) and never specified which was canonical. **Plus:** the plan failed to mandate `ExecutionGraph.from_plugin_instances` + `instantiate_plugins_from_config` per CLAUDE.md "Never bypass production code paths in tests." Patched in Phase 3 Task 3.0 (a new prerequisite task that creates the canonical helpers ONCE at `tests/integration/_helpers.py`, mandates the production code path, and verifies plugin names against the registered set). The mandatory check is: any helper function cited by a plan code-block must either (a) exist in the codebase already (verify with `grep -rn "def <name>" src/ tests/`), or (b) have an explicit creation task in the plan with a single canonical location.
 
-- **Bug class F: missing audit-trail durability contract on Tier 1 invariants** (e.g. Phase 4 introduced an `AuditIntegrityError`-raising sweep but didn't specify run-finalization ordering, evidence preservation, or a durability regression test). Per CLAUDE.md Auditability Standard, every Tier 1 crash must (1) durably finalize the run as `RunStatus.FAILED` with a queryable error message, (2) preserve the evidence rows that triggered the crash, and (3) be exercisable by a regression test. Without these, an operator querying a sweep-crashed run gets an exception traceback but no audit trail explaining why. Patched in Phase 4 Task 4.4 (durability contract + regression test for I1a-orphan, I1b-orphan, and shutdown-skip cases). The mandatory check is: every new exception-raising Tier 1 invariant must specify the run-finalization ordering, evidence-preservation policy, and have a regression test before the plan ships.
+- **Bug class F: missing audit-trail durability contract on Tier 1 invariants** (e.g. Phase 4 introduced an `AuditIntegrityError`-raising sweep but didn't specify run-finalization ordering, evidence preservation, or a durability regression test). Per CLAUDE.md Auditability Standard, every Tier 1 crash must (1) durably finalize the run as `RunStatus.FAILED`, (2) preserve queryable evidence rows that triggered the crash, and (3) be exercisable by a regression test. ADR-019 does not add a persisted run-error-message field; the queryable evidence is the preserved offending `token_outcomes`/batch/node rows plus the FAILED run status, while the exception message is re-raised to the caller. Patched in Phase 4 Task 4.4 (durability contract + regression test for I1a-orphan, I1b-orphan, and shutdown-skip cases). The mandatory check is: every new exception-raising Tier 1 invariant must specify the run-finalization ordering, evidence-preservation policy, and have a regression test before the plan ships.
 
 **Mandatory check before EVERY phase commit, not just Phase 1:**
+
+Use the AST inventory added in Phase 1 Task 1.0 as the authoritative closeout gate:
+
+```bash
+.venv/bin/python scripts/cicd/adr019_symbol_inventory.py check \
+  --root src/elspeth \
+  --allowlist config/cicd/adr019_symbol_inventory
+```
+
+The older grep snippets below are local triage aids only. They are not
+sufficient approval gates because they cannot see every syntactic form
+(`TypedDict` declarations, keyword arguments, dict literal keys, and some
+function-call shapes).
 
 ```bash
 # Class A — schema-column residual reads:
@@ -168,24 +195,47 @@ grep -rnE 'rows_processed\s*[<>=]+\s*' src/elspeth/ | grep -v test_ | grep -v "/
 #   - OrchestrationInvariantError is in contracts.errors (NOT in
 #     contracts/results.py despite being raised from RowResult.__post_init__).
 #   - SinkExecutor has no _counters attribute — orchestrator owns counters.
-#   - Hook names in core.py are _finalize_source_iteration, NOT
+#   - End-of-source hook is _finalize_source_iteration, NOT
 #     _post_source_iteration_work (the latter exists only in ADR prose).
+#     Deferred I1a/I1b sweep is later still: post-sink in _execute_run.
 #
 # Adopt the discipline: for every named symbol in a plan snippet, run
 # ``grep -rn "^class <Symbol>\|def <Symbol>" src/elspeth/`` to confirm
 # the symbol exists at the path the plan claims, BEFORE the plan ships.
 ```
 
-A non-zero result from any of these greps after Phases 2-4 lands means a downstream consumer was missed (classes A-C) or a plan-snippet bug was missed (class D). STOP and patch the missing consumer in the same commit; do not let the gap leak across the phase boundary. The pattern is recurring — string literals, column names, and predicate-formula copies hide in places that don't import `RowOutcome`, so the Stage 1 lint guard does not catch them.
+A non-zero result from the AST inventory after Phases 2-4 lands means a
+downstream consumer was missed (classes A-C) or a plan-snippet bug was missed
+(class D). STOP and patch the missing consumer in the same commit; do not let
+the gap leak across the phase boundary. The pattern is recurring — string
+literals, column names, and predicate-formula copies hide in places that don't
+import `RowOutcome`, so the Stage 1 lint guard and grep triage do not catch them.
 
-### D6: Test deferral split (Stage 2/3 vs Stage 4)
+### D8: Closed-set contracts require property and boundary tests
+
+ADR-019 introduces closed sets (`TerminalOutcome`, `TerminalPath`,
+`_LEGAL_TERMINAL_PAIRS`, terminal run statuses, and the counter/predicate
+truth table). Any new closed-set contract in this plan must include:
+
+- A Hypothesis property sweep over the closed-set Cartesian product, asserting
+  every illegal pair/shape is rejected or every legal pair/shape is accepted.
+- Boundary examples for zero-cardinality, all-one-side, and mixed-success /
+  mixed-failure cases when a predicate is simplified.
+- A RED-first note naming which examples fail before the production change.
+
+The concrete ADR-019 anchors are Phase 1 Task 1.2
+(`test_all_illegal_completed_pairs_rejected`) and Phase 3 Task 3.2a
+(`TestADR019PredicateBoundaryCases`). Treat those as the minimum pattern for
+future closed-set additions; one hand-picked illegal example is not enough.
+
+### D6: Test migration split (all pytest-blocking assertions move in this PR)
 
 Phase 5 establishes the triage. Short summary:
 - **Tests that construct dataclass instances (`TokenOutcome(outcome=RowOutcome.X, ...)`)** — schema-dependent. Won't compile after Phase 1. Move with Stage 2/3.
-- **Tests that assert on `result.outcome == RowOutcome.X` from a real engine execution** — assertion-only. Defer to Stage 4. Stage 4's mechanical translation flips them.
-- **Integration tests that exercise end-to-end engine execution and observe outputs** — schema-dependent if they read `token_outcomes` directly; assertion-only if they only check `RunResult` counters.
+- **Tests that assert on `result.outcome == RowOutcome.X` from a real engine execution** — assertion-only but pytest-blocking after Phase 1. These MUST move in this PR, translated mechanically against `tests/unit/contracts/test_enums.py::_ROW_OUTCOME_TO_TWO_AXIS_MAPPING`. Cross-enum equality returns `False`, not `TypeError`, so leaving these assertions for Stage 4 would make the full-suite gate impossible.
+- **Integration tests that exercise end-to-end engine execution and observe outputs** — schema-dependent if they read `token_outcomes` directly; assertion-only if they only check `RunResult` counters. Both pytest-blocking forms move in this PR.
 
-The Phase 5 grep recipe distinguishes the two categories deterministically so executing engineers don't have to invent it.
+The Phase 5 grep recipe distinguishes the categories deterministically so executing engineers don't have to invent it. Stage 4 remains useful only for non-blocking cleanup and eventual `RowOutcome` deletion prep; it is not allowed to carry failing `outcome == RowOutcome.X` assertions from this PR.
 
 ---
 
@@ -211,19 +261,28 @@ After Phase 5 commit lands, all of these must pass before the PR opens:
 .venv/bin/python scripts/cicd/enforce_contract_manifest.py check --allowlist config/cicd/enforce_contract_manifest
 .venv/bin/python scripts/cicd/enforce_freeze_guards.py check --root src/elspeth --allowlist config/cicd/enforce_freeze_guards
 .venv/bin/python scripts/cicd/enforce_frozen_annotations.py check --root src/elspeth --allowlist config/cicd/enforce_frozen_annotations
+.venv/bin/python scripts/cicd/adr019_symbol_inventory.py check --root src/elspeth --allowlist config/cicd/adr019_symbol_inventory
 
-# Stage 1's lint guard MUST still pass — the migration files are still allowlisted, but
-# the producer flip in Phase 2 may add new RowOutcome.X references in tests/ that
-# Stage 4 will handle. The src/ side should drop FROM 134 references to 0 by end of
-# Phase 4 (TerminalOutcome / TerminalPath fully replaces RowOutcome in src/).
+# Stage 1's lint guard MUST still pass. The src/ side should drop FROM 134
+# references to 0 by end of Phase 4 (TerminalOutcome / TerminalPath fully
+# replaces RowOutcome in src/). Phase 5 also fixes assertion-only tests that
+# would otherwise fail under cross-enum equality.
+# FNR1 (RowOutcome.X attribute access) + FNR2 (hardcoded RowOutcome value-string
+# comparisons, e.g. outcome == "quarantined") — Phase 5 Task 5.7 extends the script.
 .venv/bin/python scripts/cicd/forbid_new_row_outcome.py check --root . --allowlist config/cicd/forbid_new_row_outcome
+
+# Frontend gates for the Phase 3 terminal-status UI fix
+cd src/elspeth/web/frontend
+npm run test
+npm run build
+cd /home/john/elspeth
 ```
 
-After this PR merges, the migration files allowlist for `src/elspeth/` paths is now empty — every src/ migration site has flipped. Stage 4 flips `tests/`; Stage 5 deletes the script entirely. Until Stage 5, the script + allowlist remain to guard against new `RowOutcome.X` introductions during the test-migration window.
+After this PR merges, the migration files allowlist for `src/elspeth/` paths is now empty — every src/ migration site has flipped. Phase 5 also removes every pytest-blocking `outcome == RowOutcome.X` assertion. Stage 5 deletes the script entirely after `RowOutcome` itself is removed. Until Stage 5, the script + allowlist remain to guard against new `RowOutcome.X` introductions.
 
 ### Behavioural verification (NEW for this PR)
 
-Per Phase 5, three new integration-test fixtures must exist and be green:
+Per Phase 5, the new ADR-019 integration-test fixtures must exist and be green:
 
 ```bash
 # Discard-mode RunStatus flip (the operator-visible change)
@@ -234,6 +293,9 @@ Per Phase 5, three new integration-test fixtures must exist and be green:
 
 # Counter changes for (SUCCESS, GATE_ROUTED) and (FAILURE, ON_ERROR_ROUTED)
 .venv/bin/python -m pytest tests/integration/test_adr_019_counter_changes.py -v
+
+# Sweep-crash durability and graceful-shutdown gate
+.venv/bin/python -m pytest tests/integration/test_adr_019_sweep_durability.py -v
 ```
 
 These tests are described in Phase 5; their existence is gated by a Phase 3 Definition of Done ("Behavioural test for discard-mode flip is RED before the predicate rewrite, GREEN after").
@@ -242,15 +304,13 @@ These tests are described in Phase 5; their existence is gated by a Phase 3 Defi
 
 ## Out of scope for this PR
 
-- **The ~143 `outcome == RowOutcome.X` assertion sites in `tests/`** — Stage 4 ticket `elspeth-27ce7613fa`. These are mechanical translations against the canonical mapping table in `tests/unit/contracts/test_enums.py::_ROW_OUTCOME_TO_TWO_AXIS_MAPPING`. The Phase 5 triage explicitly leaves them.
-
 - **`RowOutcome` enum deletion** — Stage 5 ticket `elspeth-774b1d3c2e`. RowOutcome continues to exist alongside `TerminalOutcome` until every assertion site has flipped. Deleting it is the final sweep.
 
 - **The Stage 1 lint guard `forbid_new_row_outcome.py` and its allowlist** — Stage 5. The guard prevents drift during Stages 4 and earlier; once Stage 5 deletes `RowOutcome` itself, the guard becomes vacuous and is removed.
 
 - **Counter rename** — separate ADR-020 conversation. Public API field names (`rows_succeeded`, `rows_routed_success`, etc.) are preserved in this PR per ADR-019 § Counter derivation contract.
 
-- **Frontend TypeScript types** — `web/frontend/src/types/index.ts` does not require changes (counter names preserved per ADR-019 § Counter derivation contract). **NOTE:** the Python web module `src/elspeth/web/execution/` IS in scope and DOES change — Pydantic schemas at `web/execution/schemas.py` are updated in Phase 3 Task 3.5; SQL queries at `web/execution/{diagnostics,discard_summary}.py` are updated in Phase 1 Task 1.9. The "frontend" caveat applies only to the React/TypeScript layer at `web/frontend/`.
+- **Frontend counter-type redesign** — `web/frontend/src/types/index.ts` keeps the existing counter field names per ADR-019 § Counter derivation contract. The React layer is still in scope for the Phase 3 terminal-status fix: `SessionSidebar.tsx` must import the existing `TERMINAL_RUN_STATUS_VALUES` taxonomy and the frontend test/build gates must pass.
 
 ---
 

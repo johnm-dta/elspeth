@@ -220,7 +220,7 @@ allow_hits:
     at loop end; no silent drops. AggregateDeclarationContractViolation is a Tier-1 class, preserving
     the propagation guarantee.
   expires: null
-- key: engine/_best_effort.py:R4:best_effort:fp=73f1c2a6f5351479
+- key: engine/_best_effort.py:R4:best_effort:fp=b3699c289a4ed172
   owner: architecture
   reason: "best_effort() is the canonical post-audit ceremony helper for the engine
     layer. Its single broad-except is the entire reason this helper exists \u2014 it
@@ -231,9 +231,10 @@ allow_hits:
     in-flight event. CLAUDE.md logging-telemetry-policy: logger is the recovery
     path of last resort when telemetry/ceremony itself is the failing system."
   safety: "Failures are logged with structured context (operation label + caller-
-    supplied kwargs) at warning level; the in-flight exception (if any) continues
-    to propagate unchanged. The helper performs no work itself \u2014 only the body
-    can fail. Burndown: filigree elspeth-550362f760 (closed)."
+    supplied kwargs) and exception class at warning level; raw exception strings
+    are deliberately not logged. The in-flight exception (if any) continues to
+    propagate unchanged. The helper performs no work itself \u2014 only the body can
+    fail. Burndown: filigree elspeth-550362f760 (closed)."
   expires: null
 - key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:run_hook:fp=64aa6bffa9e759d1
   owner: architecture

@@ -13,7 +13,9 @@ Per CLAUDE.md logging-telemetry-policy primacy (audit > telemetry > logger):
 this helper logs at the **logger** layer because the work it wraps is
 post-audit ceremony or telemetry, and any failure here means the ceremony
 itself (the secondary channel) is the failing system. Logger is the
-recovery path of last resort.
+recovery path of last resort. It logs exception classes only; raw ceremony
+exception strings can carry SQL parameters, exporter internals, paths, or
+provider details that do not belong in structured logs.
 """
 
 from __future__ import annotations
@@ -61,7 +63,6 @@ def best_effort(operation: str, /, **context: Any) -> Iterator[None]:
         _slog.warning(
             "best-effort ceremony failed during error propagation; original event preserved",
             operation=operation,
-            error=str(ceremony_failure),
             error_type=type(ceremony_failure).__name__,
             **context,
         )

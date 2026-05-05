@@ -228,11 +228,12 @@ reconstruction.
 **Classification rationale (descriptive, not derivational):** a `TRANSIENT`
 token has its row's lifecycle answer durably recorded *elsewhere* — either
 (a) on a paired `token_outcomes` record reachable via the same `row_id`
-lineage (`FORK_PARENT`, `EXPAND_PARENT`) or via `batch_id`
-(`BATCH_CONSUMED`), or (b) on a paired `NodeStateStatus.COMPLETED`
-`node_state` for the same `token_id` at a different node, with a registered
-row in the `artifacts` table (`SINK_FALLBACK_TO_FAILSINK`). A `SUCCESS` or
-`FAILURE` token IS its row's lifecycle answer.
+lineage (`FORK_PARENT`, `EXPAND_PARENT`), (b) through the consuming batch row's
+`batches.status == COMPLETED` witness reached by `batch_id` (`BATCH_CONSUMED`),
+or (c) on a paired `NodeStateStatus.COMPLETED` `node_state` for the same
+`token_id` at a different node, with a registered row in the `artifacts` table
+(`SINK_FALLBACK_TO_FAILSINK`). A `SUCCESS` or `FAILURE` token IS its row's
+lifecycle answer.
 
 ### Cross-check invariants (verify producer declaration; do not derive)
 
@@ -247,8 +248,10 @@ invariant is a *deferred* obligation rather than a write-time assertion.
   `parent_token_id == this.token_id`. *Deferred* — children complete after
   the parent.
 - **I1b (aggregate-paired):** `(TRANSIENT, BATCH_CONSUMED)` requires the
-  consuming batch's batch-result token to be recorded at flush time.
-  *Deferred*.
+  consuming batch row to reach `BatchStatus.COMPLETED` by end of run. The
+  batch-result token created at flush time does not carry `batch_id` in its own
+  `token_outcomes` row; the invariant witness is the `batches.status` row linked
+  from the `BATCH_CONSUMED` token's `batch_id`. *Deferred*.
 - **I1c (sink-fallback-paired):** `(TRANSIENT, SINK_FALLBACK_TO_FAILSINK)`
   requires a paired `NodeStateStatus.COMPLETED` `node_state` for the same
   `token_id` at the failsink node, AND that node_state has a registered
@@ -348,10 +351,14 @@ all-rows-already-processed branch (preserving ADR-018 line 70-82 nuance).
 ### Migration policy
 
 ELSPETH's "delete the DB on schema change" policy
-(`MEMORY.md::project_db_migration_policy`) applies. There is no in-place
-migration: operators discard old `audit.db` and `sessions.db` files when ADR-019
-ships. The recorder, wire schemas, frontend counter readers, and integration
-tests flip together. Migration surface is approximately 700–800 `RowOutcome.X`
+(`MEMORY.md::project_db_migration_policy`) applies to the Landscape audit store.
+There is no in-place audit-store migration: operators replace old pre-ADR-019
+`audit.db` / Landscape audit-store schemas when ADR-019 ships. ADR-019 does not
+change the web session schema; operators preserve `sessions.db` unless a
+separate web-session compatibility check proves that database stale and the
+operator runbook is amended with explicit session backup/restore steps. The
+recorder, wire schemas, frontend counter readers, and integration tests flip
+together. Migration surface is approximately 700–800 `RowOutcome.X`
 references across ~80 files (precise count depends on commit; both
 pre-composer-audit and post-composer-audit grep totals are in this band). Of
 these, on the order of 90–150 are `outcome == RowOutcome` test assertion sites
@@ -379,9 +386,9 @@ closed-set partition assertion gating each stage:
    assertion is now the only enforcement of the partition.
 
 The "delete the DB" policy (`MEMORY.md::project_db_migration_policy`)
-contains the data-side migration: operators discard old `audit.db` and
-`sessions.db` between stages 1 and 5. No in-place migration; no schema
-versioning.
+contains the data-side migration for the Landscape audit store only: operators
+replace old `audit.db` / audit-store schemas between stages 1 and 5. No
+in-place audit-store migration; no Alembic path for this ADR.
 
 ## Behavior Change Notice (operator-visible)
 
@@ -654,7 +661,7 @@ The implementation surface, in order of dependency:
    | `FORKED requires fork_group_id` | `(TRANSIENT, FORK_PARENT)` requires `fork_group_id` |
    | `EXPANDED requires expand_group_id` | `(TRANSIENT, EXPAND_PARENT)` requires `expand_group_id` |
    | `COALESCED requires join_group_id AND sink_name` | `(SUCCESS, COALESCED)` requires `join_group_id` AND `sink_name` |
-   | `QUARANTINED requires quarantine_reason` | `(FAILURE, QUARANTINED_AT_SOURCE)` requires `quarantine_reason` |
+   | `QUARANTINED requires error_hash` | `(FAILURE, QUARANTINED_AT_SOURCE)` requires `error_hash` |
    | `DIVERTED requires sink_name AND error_hash` (failsink) | `(TRANSIENT, SINK_FALLBACK_TO_FAILSINK)` requires `sink_name` AND `error_hash` |
    | (DIVERTED / discard mode, currently same guard as failsink) | `(FAILURE, SINK_DISCARDED)` requires `sink_name="__discard__"` AND `error_hash` |
    | `is_terminal` cross-check (`model_loaders.py:539`) | `completed XOR (outcome IS NULL)` cross-check |

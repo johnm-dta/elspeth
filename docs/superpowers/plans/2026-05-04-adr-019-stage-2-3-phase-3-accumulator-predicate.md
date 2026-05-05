@@ -17,18 +17,25 @@ The discard-mode flip from Phase 2 is **already landed** at the producer; the ac
 **Files touched in this phase:**
 
 - **Create: `tests/integration/_helpers.py`** (NEW — Task 3.0; canonical pipeline-builder factories + `run_pipeline` runner used by every Phase 3 RED test, wired through `instantiate_plugins_from_config()` and `ExecutionGraph.from_plugin_instances()` per CLAUDE.md test-path integrity)
+- **Create: `tests/integration/_adr019_test_plugins.py`** (NEW — Task 3.0; config-dict-compatible adapter plugins for the canonical helpers)
 - Modify: `src/elspeth/engine/orchestrator/outcomes.py:235-307` (accumulator)
-- Modify: `src/elspeth/engine/orchestrator/core.py:450-533` (resume aggregation)
+- Modify: `src/elspeth/engine/orchestrator/core.py:450-533, 2277-2371` (resume aggregation + live source-quarantine counter/pending-outcome path)
+- Modify: `src/elspeth/engine/executors/sink.py:341, 949-1019` (`SinkExecutor.write()` return shape becomes `DiversionCounts`)
 - Modify: `src/elspeth/contracts/run_result.py:60-152, 180-216` (L0 predicate + `derive_terminal_run_status`)
 - **Modify: `src/elspeth/web/execution/schemas.py:138-160, 197-285` (L3 Pydantic predicate mirror — `_validate_row_decomposition` and `_check_status_row_count_invariant`).** Discovered 2026-05-05: the Pydantic schema duplicates the L0 predicate logic. Without this update, `/api/runs/{rid}` returns HTTP 500 for any valid run with gate-MOVE or transform-on-error routing because the post-Phase-3 counter doubling makes `rows_succeeded + rows_routed_success` exceed `rows_processed` in `_validate_row_decomposition`'s sum-disjoint formula.
-- **Modify: `src/elspeth/web/execution/routes.py:669, 686` and `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.tsx:19-24` (terminal-status fallout).** The shared session protocol already defines `completed_with_failures` and `empty` as terminal, but WebSocket replay/idle checks and the sidebar active-run predicate still use a hardcoded three-status terminal set.
+- **Modify: `src/elspeth/web/sessions/protocol.py`, `src/elspeth/web/sessions/service.py:672-679`, `src/elspeth/web/execution/routes.py:669, 686`, `src/elspeth/web/execution/service.py:614-633`, and `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.tsx:19-24` (terminal-status fallout).** The shared session protocol already defines `completed_with_failures` and `empty` as terminal, but WebSocket replay/idle checks, the session write guard, cancellation idempotency, and the sidebar active-run predicate still have old hardcoded status subsets.
 - Test (RED-first): `tests/integration/test_adr_019_discard_mode_flip.py` (NEW)
 - Test (RED-first): `tests/integration/test_adr_019_counter_changes.py` (NEW)
+- Test: `tests/integration/test_adr_019_helpers.py` (NEW — Task 3.0 helper integrity)
+- Test (RED-first): `tests/integration/test_adr_019_resume_counter_parity.py` (NEW — Task 3.6 live-vs-resume predicate counter parity)
+- Test (unit/integration, direct `SinkExecutor.write()` return-shape fallout): `tests/unit/engine/test_sink_executor_diversion.py`, `tests/unit/engine/test_executors.py`, `tests/integration/plugins/sinks/test_durability.py`
 - Test (unit, extend): `tests/unit/web/execution/test_schemas.py::TestCompletedDataDecomposition` (existing — extend with post-Phase-3 Pydantic predicate-mirror acceptance cases)
 - Test (unit): `tests/unit/engine/orchestrator/test_outcomes.py` (existing — extend with (outcome, path) match assertions)
 - Test (unit): `tests/unit/contracts/test_run_result.py` (existing — flip predicate assertions and add ADR-019 boundary cases)
 - Test (unit): `tests/unit/web/execution/test_schemas.py` (existing — Pydantic predicate-mirror tests)
 - Test (unit): `tests/unit/web/execution/test_websocket.py` or `tests/unit/web/execution/test_routes.py` (extend with reconnect/idle terminal replay for `completed_with_failures` and `empty`)
+- Test (unit): `tests/unit/web/sessions/test_service.py` (extend terminal write/read invariants for `completed_with_failures` and `empty`)
+- Test (unit): `tests/unit/web/execution/test_service.py` (extend cancel idempotency for widened terminal set)
 - Test (frontend): `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.test.tsx` or existing nearest frontend test (assert terminal `completed_with_failures` / `empty` does not keep the active-run marker visible)
 
 **Background reading:** ADR-019 § Counter derivation contract (lines 271-326). Behavior Change Notice (lines 386-402). The accumulator's existing `RowOutcome` match at `outcomes.py:235-307` is the source-of-truth for what each path must do today — verify against it as you flip.
@@ -61,6 +68,15 @@ elif (result.outcome, result.path) == (TerminalOutcome.SUCCESS, TerminalPath.GAT
 ### Change 2: FAILURE paths make `rows_failed` exhaustive
 
 Symmetric to Change 1 — the `rows_failed` counter now reflects every `TerminalOutcome.FAILURE` lifecycle row that is a predicate input, including transform `on_error` routings and source quarantines. This follows ADR-019's normative mapping for `QUARANTINED` (`rows_quarantined`, `rows_failed`) and makes `failure_indicator = rows_failed > 0` exhaustive without needing `OR rows_routed_failure > 0` or `OR rows_quarantined > 0`.
+
+**Load-bearing live-source nuance:** source quarantine rows do NOT flow through
+`accumulate_row_outcomes`; the live path is
+`Orchestrator._handle_quarantine_row` in
+`src/elspeth/engine/orchestrator/core.py:2277-2371`. Phase 3 must update that
+site directly so it increments both `rows_quarantined` and `rows_failed` before
+appending the `(FAILURE, QUARANTINED_AT_SOURCE)` `PendingOutcome`. Otherwise the
+new L0/L3 subset guard (`rows_quarantined <= rows_failed`) rejects real
+source-quarantine runs.
 
 ### Change 3: discard-mode `DIVERTED` increments `rows_failed`
 
@@ -470,7 +486,8 @@ def build_test_pipeline_with_discard_sink(
     directly for the first ``discard_row_count`` rows and returns them via
     ``SinkWriteResult(diversions=...)``. Because no failsink is wired, the
     executor takes the discard branch (``src/elspeth/engine/executors/sink.py:977``)
-    and records each as outcome=DIVERTED / sink_name='__discard__'.
+    and records each as (FAILURE, SINK_DISCARDED) with
+    sink_name='__discard__'.
 
     The ``success_row_count`` rows are accepted by ``DivertingSink.write()`` as
     ordinary successful sink writes, so their provisional
@@ -658,8 +675,9 @@ reclassified as (FAILURE, SINK_DISCARDED) and increments rows_failed.
 
 Mechanism: DivertingSink.write() constructs RowDiversion records directly and
 returns them via SinkWriteResult(diversions=...). SinkExecutor takes the
-discard branch (failsink=None) and records each as outcome=DIVERTED /
-sink_name='__discard__'. Phase 3 accumulator change maps this to
+discard branch (failsink=None) and records each as
+(FAILURE, SINK_DISCARDED) with sink_name='__discard__'. Phase 3 sink diversion
+accounting maps this to
 rows_failed += 1 (ADR-019 § Sub-decision 5 / orchestrator site).
 
 This test is RED before Phase 3's accumulator/predicate change lands and
@@ -717,6 +735,20 @@ class TestDiscardModeRunStatusFlip:
         assert result.rows_succeeded == 0
         assert result.rows_failed == 3
 ```
+
+Add DB-backed audit assertions to the same file; counter/status-only assertions
+are not enough because resume and diagnostics read the persisted token outcomes.
+Use `RecorderFactory(db).query.get_all_token_outcomes_for_run(result.run_id)`.
+Import `DISCARD_SINK_NAME` from `elspeth.contracts.audit` for sentinel checks;
+do not compare against a local `"__discard__"` literal. Assert the durable rows
+include:
+
+- success rows as `(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, completed=True)`
+- discard rows as `(TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED, completed=True, sink_name=DISCARD_SINK_NAME)`
+- non-empty `error_hash` on every discard row
+
+The test must fail if discard rows are still persisted as legacy `DIVERTED` or
+if the producer path is missing from the audit row.
 
 `build_test_pipeline_with_discard_sink` is the helper created in Task 3.0 at the canonical location `tests/integration/_helpers.py`. It builds a minimal pipeline (``ListSource``, ``DivertingSink``) using the project's fixture plugins — the same path as every other integration test. The ``(config, graph, db, store)`` tuple is unpacked before calling ``run_pipeline``.
 
@@ -811,13 +843,31 @@ class TestGateRoutedCounterDoubling:
         assert result.rows_succeeded == 2
 ```
 
+Add DB-backed audit assertions with
+`RecorderFactory(db).query.get_all_token_outcomes_for_run(result.run_id)`:
+
+- gate-routed rows persist as `(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, completed=True)` with the routed sink name
+- on-error rows persist as `(TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED, completed=True)` with the error sink name and non-empty `error_hash`
+- default-flow rows persist as `(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, completed=True)`
+
+These assertions are part of the RED/GREEN contract. A run that has correct
+counters but wrong durable `(outcome, path)` rows is still broken because resume,
+diagnostics, and operator explanations consume the audit rows.
+
 **Step 2: Run RED**
 
-Expected: both tests fail because under current code, `rows_succeeded == 0` (all rows are gate-routed) and `result.status == RunStatus.COMPLETED` only via the `OR rows_routed_success > 0` predicate clause.
+Expected: both tests fail. The gate-routed case fails because under current
+code `rows_succeeded == 0` for an all-gate-routed run, even though
+`result.status == RunStatus.COMPLETED` via the legacy
+`OR rows_routed_success > 0` predicate clause. The on-error case fails because
+`rows_failed == 0` while `rows_routed_failure == 3`; status may already be
+`COMPLETED_WITH_FAILURES` under the old OR predicate, so the counter assertion is
+the load-bearing RED signal.
 
 **Definition of Done:**
 - [ ] Test file exists with both counter-doubling assertions
 - [ ] Tests fail before Phase 3 lands
+- [ ] Tests assert the durable token-outcome `(outcome, path, completed, sink_name, error_hash)` rows, not only `RunResult` counters
 - [ ] Fixture helpers exist
 
 ---
@@ -924,7 +974,7 @@ class TestADR019PredicateBoundaryCases:
         with pytest.raises(ValueError, match="rows_quarantined"):
             RunResult(
                 run_id="run-invalid-quarantine-subset",
-                status=RunStatus.COMPLETED,
+                status=RunStatus.COMPLETED_WITH_FAILURES,
                 rows_processed=4,
                 rows_succeeded=4,
                 rows_failed=0,
@@ -932,7 +982,6 @@ class TestADR019PredicateBoundaryCases:
                 rows_routed_failure=0,
                 rows_quarantined=4,
             )
-        )
 
     def test_on_error_routed_plus_default_flow_uses_rows_failed_not_routed_subset(
         self,
@@ -965,7 +1014,7 @@ class TestADR019PredicateBoundaryCases:
         with pytest.raises(ValueError, match="rows_routed_failure"):
             RunResult(
                 run_id="run-invalid-routed-failure-subset",
-                status=RunStatus.COMPLETED,
+                status=RunStatus.COMPLETED_WITH_FAILURES,
                 rows_processed=5,
                 rows_succeeded=2,
                 rows_failed=0,
@@ -973,7 +1022,6 @@ class TestADR019PredicateBoundaryCases:
                 rows_routed_failure=3,
                 rows_quarantined=0,
             )
-        )
 ```
 
 **Step 2: Run RED before changing the predicate**
@@ -1087,6 +1135,15 @@ for result in results:
     elif pair == (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED):
         counters.rows_succeeded += 1
     elif pair == (TerminalOutcome.SUCCESS, TerminalPath.COALESCED):
+        # Terminal coalesce merged rows still reach a sink, but the coalesce
+        # identity is not topology-derived here: TokenInfo.join_group_id is the
+        # producer-carried witness created by CoalesceExecutor. Sink recording
+        # must pass that join_group_id through to record_token_outcome().
+        if result.token.join_group_id is None:
+            raise OrchestrationInvariantError(
+                f"(SUCCESS, COALESCED) result missing token.join_group_id. "
+                f"Token: {result.token}"
+            )
         sink_name = _require_sink_name(result)
         counters.rows_coalesced += 1
         counters.rows_succeeded += 1
@@ -1148,7 +1205,17 @@ def _route_to_sink(
     )
 ```
 
-Also update every direct `PendingOutcome(...)` construction that bypasses `_route_to_sink`. The live quarantine path in `src/elspeth/engine/orchestrator/core.py` constructs `PendingOutcome(RowOutcome.QUARANTINED, quarantine_error_hash)` directly; after Phase 1's keyword-only retype, this must become:
+Also update every direct `PendingOutcome(...)` construction that bypasses `_route_to_sink`. The live quarantine path in `src/elspeth/engine/orchestrator/core.py` constructs `PendingOutcome(RowOutcome.QUARANTINED, quarantine_error_hash)` directly and increments only `rows_quarantined`. After Phase 1's keyword-only retype and Phase 3's exhaustive-failure counter contract, this source-quarantine branch must become:
+
+```python
+# Destination validated - increment counters and proceed with routing.
+# ADR-019: (FAILURE, QUARANTINED_AT_SOURCE) contributes to both the
+# reporting subset counter and the exhaustive failure predicate counter.
+counters.rows_quarantined += 1
+counters.rows_failed += 1
+```
+
+And the pending outcome append must become:
 
 ```python
 PendingOutcome(
@@ -1165,7 +1232,7 @@ Update `reconcile_sink_write_diversions` in `outcomes.py` at the same time: comp
 | Pending pair before sink write | Provisional counters to subtract on diversion |
 | --- | --- |
 | `(SUCCESS, DEFAULT_FLOW)` | `rows_succeeded` |
-| `(SUCCESS, COALESCED)` | `rows_succeeded`, `rows_coalesced` if this pair is routed to a sink in the live path |
+| `(SUCCESS, COALESCED)` | `rows_succeeded`, `rows_coalesced`; also require `token.join_group_id` and pass it through the sink recorder |
 | `(SUCCESS, GATE_ROUTED)` | `rows_succeeded`, `rows_routed_success`, `routed_destinations[sink_name]` |
 | `(FAILURE, ON_ERROR_ROUTED)` | `rows_failed`, `rows_routed_failure`, `routed_destinations[sink_name]` |
 | `(FAILURE, QUARANTINED_AT_SOURCE)` | `rows_failed`, `rows_quarantined` |
@@ -1174,7 +1241,10 @@ Only after those provisional counters are reconciled does the orchestrator add s
 
 Add unit tests in `tests/unit/engine/orchestrator/test_outcomes.py` that
 exercise default-flow, gate-routed, on-error-routed, quarantined, and coalesced
-pending rows. The coalesced case is mandatory: current HEAD already has
+pending rows. The coalesced case is mandatory and must assert that a missing
+`token.join_group_id` crashes before recording, while a populated
+`token.join_group_id` is preserved into the sink-side `record_token_outcome()`
+call. Current HEAD already has
 coalesced sink-routing coverage in
 `tests/unit/engine/orchestrator/test_outcomes.py::TestCoalescedOutcome::test_coalesced_routes_to_sink`
 and terminal coalesce tests that return `RowOutcome.COALESCED` with
@@ -1188,13 +1258,14 @@ def test_reconcile_sink_write_diversion_subtracts_default_flow_success() -> None
 def test_reconcile_sink_write_diversion_subtracts_gate_routed_success_subset() -> None: ...
 def test_reconcile_sink_write_diversion_subtracts_on_error_failure_subset() -> None: ...
 def test_reconcile_sink_write_diversion_subtracts_quarantined_failure_subset() -> None: ...
-def test_reconcile_sink_write_diversion_subtracts_coalesced_success_and_coalesced() -> None: ...
+def test_reconcile_sink_write_diversion_subtracts_coalesced_success_and_preserves_join_group() -> None: ...
 ```
 
 The coalesced regression starts with counters
 `rows_succeeded=1, rows_coalesced=1`, a pending pair
-`(TerminalOutcome.SUCCESS, TerminalPath.COALESCED)`, and a discard-mode sink
-diversion. After reconciliation, `rows_succeeded == 0`,
+`(TerminalOutcome.SUCCESS, TerminalPath.COALESCED)`, a token with
+`join_group_id="join-1"`, and a discard-mode sink diversion. After
+reconciliation, `rows_succeeded == 0`,
 `rows_coalesced == 0`, `rows_diverted == 1`, and `rows_failed == 1` only after
 the orchestrator applies `DiversionCounts.discard_mode`.
 
@@ -1207,6 +1278,13 @@ sort/group key. Otherwise `(SUCCESS, DEFAULT_FLOW)` and
 `(SUCCESS, GATE_ROUTED)` rows with the same sink and error hash collapse into
 one sink write, losing the path witness that the recorder and cross-table
 invariants need.
+
+At the sink recording call, preserve coalesce identity mechanically: when
+`pending.path == TerminalPath.COALESCED`, pass `join_group_id=token.join_group_id`
+to `record_token_outcome()` and crash if that token field is missing. This is how
+Phase 3 keeps the Phase 1 recorder contract (`COALESCED` requires
+`join_group_id`) without reclassifying terminal coalesce output as default flow
+or inventing a topology-derived join ID at the sink.
 
 ```python
 def pending_group_key(
@@ -1296,15 +1374,36 @@ loop_ctx.counters.rows_diverted += diversion_counts.total
 loop_ctx.counters.rows_failed += diversion_counts.discard_mode
 ```
 
-The local variable that today holds `total_diversions` (returned from the sink-write call site) becomes `diversion_counts: DiversionCounts`. Update the direct `SinkExecutor.write()` destructuring site and the later orchestrator counter-update site that consumes the value — find them via `grep -n "rows_diverted\\|sink_executor.*write\\|\\.write(" src/elspeth/engine/orchestrator/core.py` and update each.
+The local variable that today holds `total_diversions` (returned from the sink-write call site) becomes `diversion_counts: DiversionCounts`. Update the direct `SinkExecutor.write()` destructuring site and the later orchestrator counter-update site that consumes the value — find them via `rg -n "rows_diverted|sink_executor.*write|\\.write\\(" src/elspeth/engine/orchestrator/core.py` and update each.
 
 **Sub-step 4c: Update any other callers of `SinkExecutor.write()`**
 
 ```bash
-grep -rn "sink_executor\.write\|SinkExecutor.*write\|self\._sink_executor\.write" src/elspeth/
+rg -n "SinkExecutor\\(|sink_executor\\.write\\(|executor\\.write\\(|artifact, diversion_count|diversion_count" src/elspeth tests
 ```
 
-Each caller that destructured `(artifact, diversion_count)` becomes `(artifact, diversion_counts)` and uses the dataclass fields. Test fixtures that assert on the return shape need fixture updates in this commit (schema-dependent per Phase 5 triage).
+Each caller that destructured `(artifact, diversion_count)` becomes
+`(artifact, diversion_counts)` and uses the dataclass fields. Test fixtures that
+assert on the return shape need fixture updates in this commit
+(schema-dependent per Phase 5 triage). As of the review that produced this
+fixup, direct call sites existed in at least:
+
+- `tests/unit/engine/test_sink_executor_diversion.py`
+- `tests/unit/engine/test_executors.py`
+- `tests/integration/plugins/sinks/test_durability.py`
+- source call sites under `src/elspeth/engine/orchestrator/core.py`
+
+Do not stop at a `src/elspeth/`-only grep. The full test gate in Task 3.7 is a
+commit blocker, so return-shape fallout in tests is part of this phase.
+
+**Partial-failure timing note:** `_write_pending_to_sinks` may durably record
+some sink diversions before a later sink group raises. If the phase keeps the
+current "return aggregate counts after all writes" shape, exception-bounded
+failures rely on the audit rows as the authoritative partial-write evidence and
+the final counter update may not run. Document that explicitly in the code
+comment beside the aggregation, or refactor the counter update to apply after
+each successful sink group before moving to the next group. Do not leave the
+timing assumption implicit.
 
 **Step 5: Update imports in `outcomes.py`**
 
@@ -1322,11 +1421,13 @@ Expected: existing accumulator unit tests pass. The integration tests from Tasks
 - [ ] `_route_to_sink` signature updated
 - [ ] `_write_pending_to_sinks` sort/group key includes `pending.path` and uses the same key function for both `sorted(...)` and `groupby(...)`
 - [ ] Mixed default-flow/gate-routed pending rows for the same sink do not collapse into one write group
+- [ ] Direct quarantine branch in `Orchestrator._handle_quarantine_row` increments BOTH `rows_quarantined` and `rows_failed`
 - [ ] Direct quarantine `PendingOutcome(...)` construction updated with keyword-only `(outcome, path, error_hash)`
 - [ ] `reconcile_sink_write_diversions` compares explicit `(outcome, path)` pairs instead of `RowOutcome`
 - [ ] `reconcile_sink_write_diversions` subtracts every provisional base and subset counter in the matrix above; routed destinations are decremented for both routed paths
 - [ ] `DiversionCounts` dataclass added in `sink.py`; `SinkExecutor.write()` return shape changed from `tuple[Artifact | None, int]` to `tuple[Artifact | None, DiversionCounts]`
-- [ ] All `SinkExecutor.write()` call sites updated to destructure the dataclass (verified by `grep -rn "sink_executor\.write\|SinkExecutor.*write" src/elspeth/`)
+- [ ] All `SinkExecutor.write()` call sites updated to destructure the dataclass where needed (verified by the all-tree `rg` command in Sub-step 4c, not by a source-only grep)
+- [ ] Direct sink-executor tests and plugin sink durability tests are updated or explicitly verified to ignore the return shape safely
 - [ ] Orchestrator counter-update site at `core.py:~2199` increments BOTH `rows_diverted` (total) AND `rows_failed` (discard_mode subset)
 - [ ] Discard-mode integration test (Task 3.1) passes
 - [ ] Counter-doubling integration test (Task 3.2) passes
@@ -1439,11 +1540,25 @@ success_indicator = rows_succeeded > 0
 failure_indicator = rows_failed > 0 or rows_coalesce_failed > 0
 ```
 
-**Step 3: Drop unused parameters**
+**Step 3: Keep subset counters as guard-only inputs**
 
-`derive_terminal_run_status` takes `rows_routed_success` and `rows_routed_failure` parameters that are no longer read by the predicate. They remain in the function signature because the resume aggregator + caller still pass them as positional args, but mark them with comments that they are no longer load-bearing for the predicate (they remain useful for the structural-counter view in `RunResult`'s output).
+`derive_terminal_run_status` takes `rows_routed_success`, `rows_routed_failure`,
+and `rows_quarantined` parameters. After ADR-019 they are no longer predicate
+inputs, but they MUST remain in the function signature because
+`_validate_counter_subsets(...)` uses them to reject corrupt counter shapes before
+status classification. Treat them as guard-only inputs:
 
-Actually — clean approach: drop them from the predicate function signature entirely. Audit the callers and confirm none rely on the parameter for predicate purposes. Update each caller to omit the unused arguments.
+- Keep the named parameters in `derive_terminal_run_status(...)`.
+- Call `_validate_counter_subsets(...)` before computing `success_indicator` and
+  `failure_indicator`.
+- Do not OR any routed/quarantine subset counter into the simplified predicate.
+- Keep all callers passing the routed/quarantine counters by keyword so the guard
+  remains mechanically enforced at every terminal-status derivation site.
+
+This is intentionally not an API-cleanup task. Dropping the parameters would make
+`derive_terminal_run_status(...)` capable of deriving a clean status from an
+impossible shape such as `rows_quarantined > rows_failed`, which is the exact
+Tier-1 corruption guard Phase 3 is adding.
 
 **Step 4: GREEN**
 
@@ -1457,7 +1572,7 @@ Expected: all tests pass.
 - [ ] `__post_init__` predicate simplified
 - [ ] `derive_terminal_run_status` predicate simplified
 - [ ] Error-message strings updated to match new predicate
-- [ ] Unused parameters dropped (or callers updated)
+- [ ] `derive_terminal_run_status` keeps `rows_routed_success`, `rows_routed_failure`, and `rows_quarantined` as guard-only parameters; callers keep passing them by keyword
 - [ ] All existing tests pass after fixture updates
 - [ ] Both ADR-019 integration tests pass
 - [ ] mypy clean
@@ -1828,9 +1943,11 @@ Expected: all green. `test_double_counted_routed_success_rejected` must have bee
 **Why this task exists:** `src/elspeth/web/sessions/protocol.py` already defines `SESSION_TERMINAL_RUN_STATUS_VALUES = {"completed", "completed_with_failures", "failed", "empty", "cancelled"}` and `RunRecord.__post_init__` requires `finished_at` for every terminal status. However, several web/backend/frontend surfaces still hard-code the old terminal subset `("completed", "failed", "cancelled")`: `web/execution/routes.py` WebSocket seed/idle checks, `web/sessions/service.py::update_run_status` finished-at stamping, `web/execution/service.py::cancel` idempotency, and `SessionSidebar.tsx` active-run visibility. These stale terminal subsets become more visible once ADR-019 makes `completed_with_failures` and `empty` common operator-facing results.
 
 **Files:**
+- Modify: `src/elspeth/web/sessions/protocol.py` (add shared operator-completion status constant)
 - Modify: `src/elspeth/web/execution/routes.py:669, 686`
-- Modify: `src/elspeth/web/sessions/service.py:677-679`
+- Modify: `src/elspeth/web/sessions/service.py:672-679`
 - Modify: `src/elspeth/web/execution/service.py:614-633`
+- Modify: `src/elspeth/web/frontend/src/types/index.ts` (add terminal-status type guard)
 - Modify: `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.tsx:19-24`
 - Test: `tests/unit/web/execution/test_websocket.py` or `tests/unit/web/execution/test_routes.py`
 - Test: `tests/unit/web/sessions/test_service.py` or nearest existing SessionService test file
@@ -1845,16 +1962,27 @@ Add tests for all backend terminal-set consumers:
 2. A client idles, status is rechecked as `empty`; the route sends `_build_terminal_run_event(...)` and closes.
 3. `SessionService.update_run_status(..., status="completed_with_failures")` stores `finished_at` and the returned `RunRecord` does not raise the terminal-null `AuditIntegrityError`.
 4. `SessionService.update_run_status(..., status="empty")` stores `finished_at` and the returned `RunRecord` does not raise the terminal-null `AuditIntegrityError`.
-5. `ExecutionService.cancel(run_id)` is idempotent for existing runs with `status="completed_with_failures"` and `status="empty"`; it must not attempt a transition to `cancelled`.
+5. `SessionService.update_run_status(..., status="completed")`, `status="completed_with_failures"`, and `status="empty"` each raise `ValueError` when neither the new call nor the existing row has a `landscape_run_id`.
+6. `ExecutionService.cancel(run_id)` is idempotent for existing runs with `status="completed_with_failures"` and `status="empty"`; it must not attempt a transition to `cancelled`.
 
 Use `SESSION_TERMINAL_RUN_STATUS_VALUES` in assertions so the test catches future local hardcoded subsets.
 
 **Step 2: Backend fixes**
 
-Replace every hardcoded backend terminal subset with the shared protocol constant:
+Add a shared operator-completion subset next to the existing terminal set in
+`web/sessions/protocol.py`, then replace every hardcoded backend terminal subset
+with shared protocol constants:
 
 ```python
-from elspeth.web.sessions.protocol import SESSION_TERMINAL_RUN_STATUS_VALUES
+OperatorCompletionSessionRunStatus = Literal["completed", "completed_with_failures", "empty"]
+OPERATOR_COMPLETION_RUN_STATUS_VALUES: frozenset[str] = frozenset(
+    get_args(OperatorCompletionSessionRunStatus)
+)
+
+from elspeth.web.sessions.protocol import (
+    OPERATOR_COMPLETION_RUN_STATUS_VALUES,
+    SESSION_TERMINAL_RUN_STATUS_VALUES,
+)
 
 # routes.py seed/idle checks:
 if current.status in SESSION_TERMINAL_RUN_STATUS_VALUES:
@@ -1864,6 +1992,11 @@ if current.status in SESSION_TERMINAL_RUN_STATUS_VALUES:
     return
 
 # web/sessions/service.py::update_run_status:
+if status in OPERATOR_COMPLETION_RUN_STATUS_VALUES and not (
+    landscape_run_id or current.landscape_run_id
+):
+    raise ValueError(f"{status} status requires landscape_run_id")
+
 if status in SESSION_TERMINAL_RUN_STATUS_VALUES:
     values["finished_at"] = now
 
@@ -1872,22 +2005,35 @@ if run.status not in SESSION_TERMINAL_RUN_STATUS_VALUES:
     await self._session_service.update_run_status(run_id, status="cancelled")
 ```
 
-The import must come from `web.sessions.protocol`; do not invent second local terminal sets in `routes.py`, `web/sessions/service.py`, or `web/execution/service.py`.
+The imports must come from `web.sessions.protocol`; do not invent second local
+terminal or operator-completion sets in `routes.py`, `web/sessions/service.py`,
+or `web/execution/service.py`. The write guard must mirror
+`RunRecord.__post_init__`: all operator-completion statuses
+(`completed`, `completed_with_failures`, `empty`) require `landscape_run_id`;
+every terminal status requires `finished_at`.
 
 **Step 3: Frontend RED test + fix**
 
-Add or extend `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.test.tsx` so `hasActiveRun` is false for every terminal status, including `completed_with_failures` and `empty`. If a closer colocated test exists in current HEAD, extend that file instead and update this task before implementation; do not leave the frontend assertion implicit. Then replace the local three-comparison predicate with the existing frontend terminal taxonomy from `src/elspeth/web/frontend/src/types/index.ts`:
+Add or extend `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.test.tsx` so `hasActiveRun` is false for every terminal status, including `completed_with_failures` and `empty`. If a closer colocated test exists in current HEAD, extend that file instead and update this task before implementation; do not leave the frontend assertion implicit. Then add an exported type guard beside the existing frontend terminal taxonomy in `src/elspeth/web/frontend/src/types/index.ts`:
 
 ```ts
-import { TERMINAL_RUN_STATUS_VALUES, type Session } from "@/types/index";
+export function isTerminalRunStatus(status: RunStatus): status is TerminalRunStatus {
+  return (TERMINAL_RUN_STATUS_VALUES as readonly RunStatus[]).includes(status);
+}
+```
+
+Replace the local three-comparison predicate with that guard:
+
+```ts
+import { isTerminalRunStatus, type Session } from "@/types/index";
 
 const hasActiveRun =
   !!activeRunId &&
   !!progress &&
-  !TERMINAL_RUN_STATUS_VALUES.includes(progress.status);
+  !isTerminalRunStatus(progress.status);
 ```
 
-Do not add a second terminal-status set inside `SessionSidebar.tsx`; future status additions must flow through the central `TERMINAL_RUN_STATUS_VALUES` export.
+Do not add a second terminal-status set inside `SessionSidebar.tsx`; future status additions must flow through the central `TERMINAL_RUN_STATUS_VALUES` export. Use the type guard instead of calling `.includes(progress.status)` directly because `TERMINAL_RUN_STATUS_VALUES` is a terminal-only `as const` tuple while `progress.status` is the wider `RunStatus` type under strict TypeScript.
 Replace the existing type-only `Session` import with the combined import shown
 above so the component keeps the repo's `@/types/index` alias convention.
 
@@ -1906,11 +2052,13 @@ npm run build
 **Definition of Done:**
 - [ ] `routes.py` uses `SESSION_TERMINAL_RUN_STATUS_VALUES` for both seed and idle terminal checks
 - [ ] `web/sessions/service.py::update_run_status` stamps `finished_at` for every status in `SESSION_TERMINAL_RUN_STATUS_VALUES`
+- [ ] `web/sessions/service.py::update_run_status` rejects `completed`, `completed_with_failures`, and `empty` when `landscape_run_id` would remain absent
 - [ ] `web/execution/service.py::cancel` treats every status in `SESSION_TERMINAL_RUN_STATUS_VALUES` as idempotently terminal
 - [ ] WebSocket tests cover `completed_with_failures` and `empty`
-- [ ] SessionService tests prove `completed_with_failures` and `empty` persist with non-null `finished_at`
+- [ ] SessionService tests prove `completed_with_failures` and `empty` persist with non-null `finished_at` and require `landscape_run_id`
 - [ ] ExecutionService cancel tests prove `completed_with_failures` and `empty` are no-ops
-- [ ] `SessionSidebar` imports `TERMINAL_RUN_STATUS_VALUES` and treats `completed_with_failures` and `empty` as terminal
+- [ ] `src/elspeth/web/frontend/src/types/index.ts` exports `isTerminalRunStatus(status: RunStatus): status is TerminalRunStatus`
+- [ ] `SessionSidebar` imports `isTerminalRunStatus` and treats `completed_with_failures` and `empty` as terminal
 - [ ] `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.test.tsx` (or the updated colocated replacement named in this task) covers all terminal statuses
 - [ ] Frontend `npm run test -- SessionSidebar` and `npm run build` pass
 
@@ -2021,8 +2169,63 @@ Run: `.venv/bin/python -m pytest tests/unit/engine/orchestrator/test_resume.py -
 
 Add explicit live-vs-resume parity tests for gate-routed, on-error-routed, quarantine, failsink-mode, and discard-mode runs. The parity assertions are for terminal status and predicate-input counters (`rows_processed`, `rows_succeeded`, `rows_failed`, `rows_routed_success`, `rows_routed_failure`, `rows_quarantined`). For sink-diversion cases, assert that structural `rows_diverted` is **not** re-derived by `_derive_resume_terminal_status_from_audit`; leave any existing live-run structural counter source untouched.
 
-Create `tests/integration/test_adr_019_resume_counter_parity.py` with explicit
-RED-first cases:
+Create `tests/integration/test_adr_019_resume_counter_parity.py` with concrete
+same-file helpers before the parameterized tests. Do not leave
+`run_live_scenario(...)` or `run_interrupt_then_resume_scenario(...)` as
+undefined placeholders.
+
+Required helper contract:
+
+```python
+@dataclass(frozen=True, slots=True)
+class ScenarioResult:
+    result: RunResult
+    db: LandscapeDB
+    run_id: str
+
+
+def _predicate_counter_tuple(result: RunResult) -> tuple[RunStatus, int, int, int, int, int, int]:
+    return (
+        result.status,
+        result.rows_processed,
+        result.rows_succeeded,
+        result.rows_failed,
+        result.rows_routed_success,
+        result.rows_routed_failure,
+        result.rows_quarantined,
+    )
+
+
+def _resume_counter_tuple_from_audit(db: LandscapeDB, run_id: str) -> tuple[RunStatus, int, int, int, int, int, int]:
+    factory = RecorderFactory(db)
+    status, processed, succeeded, failed, routed_success, routed_failure, quarantined = (
+        Orchestrator._derive_resume_terminal_status_from_audit(factory, run_id)
+    )
+    return (status, processed, succeeded, failed, routed_success, routed_failure, quarantined)
+```
+
+`run_live_scenario(tmp_path, monkeypatch, scenario)` must build and run the
+named scenario through `run_pipeline(...)`, returning `ScenarioResult`. It may
+reuse Task 3.0 builders for `gate_routed_success`, `on_error_routed_failure`,
+and `discard_mode_diversion`, but it must define local builders in this test
+file for `quarantine_failure` and `failsink_mode_diversion` if Task 3.0 does not
+create those helpers. The local builders still go through production
+`instantiate_plugins_from_config()` and `ExecutionGraph.from_plugin_instances()`;
+do not synthesize `RunResult` objects.
+
+`run_interrupt_then_resume_scenario(tmp_path, monkeypatch, scenario)` must use
+the real checkpoint/resume path: `CheckpointManager`, `RecoveryManager`,
+`RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True,
+frequency="every_row"))`, `Orchestrator.run(..., shutdown_event=...)`, and
+`Orchestrator.resume(...)`. Reuse the `InterruptAfterN` / shutdown-event
+construction pattern from
+`tests/integration/pipeline/orchestrator/test_graceful_shutdown.py`; do not
+invent a separate fake resume harness. If a scenario cannot be interrupted
+deterministically through the existing helper plugins, define the smallest
+test-only transform/source adapter in `_adr019_test_plugins.py` and register it
+through the same plugin-manager patching path as the other ADR-019 helpers.
+
+Then add the explicit RED-first cases:
 
 ```python
 @pytest.mark.parametrize(
@@ -2038,18 +2241,14 @@ RED-first cases:
 def test_resume_counter_shape_matches_live_predicate_counters(
     scenario: str,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ADR-019 resume parity: replayed predicate counters match live counters."""
-    live = run_live_scenario(tmp_path / "live", scenario)
-    resumed = run_interrupt_then_resume_scenario(tmp_path / "resume", scenario)
+    live = run_live_scenario(tmp_path / "live", monkeypatch, scenario)
+    resumed = run_interrupt_then_resume_scenario(tmp_path / "resume", monkeypatch, scenario)
 
-    assert resumed.status == live.status
-    assert resumed.rows_processed == live.rows_processed
-    assert resumed.rows_succeeded == live.rows_succeeded
-    assert resumed.rows_failed == live.rows_failed
-    assert resumed.rows_routed_success == live.rows_routed_success
-    assert resumed.rows_routed_failure == live.rows_routed_failure
-    assert resumed.rows_quarantined == live.rows_quarantined
+    assert _predicate_counter_tuple(resumed.result) == _predicate_counter_tuple(live.result)
+    assert _resume_counter_tuple_from_audit(live.db, live.run_id) == _predicate_counter_tuple(live.result)
 ```
 
 For `failsink_mode_diversion` and `discard_mode_diversion`, add a second
@@ -2059,11 +2258,6 @@ assertion block that documents the structural-counter boundary:
 derived = Orchestrator._derive_resume_terminal_status_from_audit(factory, run_id)
 assert len(derived) == 7  # tuple stays scoped to predicate/status counters
 ```
-
-Use the existing interrupt/resume construction patterns from
-`tests/integration/pipeline/test_resume_comprehensive.py` and
-`tests/integration/pipeline/orchestrator/test_graceful_shutdown.py`; do not
-construct synthetic `RunResult` objects for this parity test.
 
 **Definition of Done:**
 - [ ] Resume match block flipped to `(outcome, path)`
@@ -2082,20 +2276,67 @@ construct synthetic `RunResult` objects for this parity test.
 
 ### Task 3.7: Atomic Stage 2/3 commit (Phases 1-3)
 
-**Step 1: Run all tests**
+**Step 1: Run the hard atomic Stage 2/3 gate**
 
 ```bash
-.venv/bin/python -m pytest tests/ -q --timeout=120
+.venv/bin/python -m pytest \
+    tests/unit/scripts/cicd/test_adr019_symbol_inventory.py \
+    tests/unit/core/landscape/test_database_compatibility_guards.py \
+    tests/unit/contracts/ \
+    tests/unit/core/landscape/test_data_flow_repository.py::TestRecordTokenOutcomeTwoAxis \
+    tests/unit/core/landscape/test_model_loaders.py::TestTokenOutcomeLoaderTwoAxis \
+    tests/unit/mcp/test_diagnose_quarantine_count.py \
+    tests/unit/mcp/test_outcome_analysis.py \
+    tests/unit/mcp/analyzers/test_reports.py \
+    tests/unit/web/execution/test_diagnostics.py \
+    tests/unit/web/execution/test_discard_summary.py \
+    tests/unit/core/landscape/test_exporter.py \
+    tests/unit/core/landscape/test_lineage.py \
+    tests/unit/core/landscape/test_formatters.py \
+    tests/unit/telemetry/ \
+    tests/unit/engine/orchestrator/ \
+    tests/unit/engine/test_sink_executor_diversion.py \
+    tests/unit/engine/test_executors.py \
+    tests/integration/plugins/sinks/test_durability.py \
+    tests/integration/test_adr_019_discard_mode_flip.py \
+    tests/integration/test_adr_019_counter_changes.py \
+    tests/integration/test_adr_019_helpers.py \
+    tests/integration/test_adr_019_resume_counter_parity.py \
+    -q
+
+.venv/bin/python - <<'PY'
+from elspeth.engine.orchestrator import Orchestrator
+from elspeth.engine.processor import RowProcessor
+
+print("adr019-stage23-import-smoke: OK", Orchestrator.__name__, RowProcessor.__name__)
+PY
+
+.venv/bin/python -m mypy src/elspeth
+.venv/bin/python -m ruff check src/ tests/ scripts/
+.venv/bin/python -m ruff format --check src/ tests/ scripts/
+.venv/bin/python -m scripts.check_contracts
+.venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model --exclude "**/__pycache__/*"
+.venv/bin/python -m scripts.cicd.enforce_plugin_hashes check --root src/elspeth
+.venv/bin/python scripts/cicd/enforce_contract_manifest.py check --allowlist config/cicd/enforce_contract_manifest
+.venv/bin/python scripts/cicd/enforce_freeze_guards.py check --root src/elspeth --allowlist config/cicd/enforce_freeze_guards
+.venv/bin/python scripts/cicd/enforce_frozen_annotations.py check --root src/elspeth --allowlist config/cicd/enforce_frozen_annotations
 .venv/bin/python scripts/cicd/adr019_symbol_inventory.py check \
     --root src/elspeth \
     --allowlist config/cicd/adr019_symbol_inventory
+.venv/bin/python scripts/cicd/forbid_new_row_outcome.py check --root . --allowlist config/cicd/forbid_new_row_outcome
 cd src/elspeth/web/frontend
 npm run test
 npm run build
 cd /home/john/elspeth
 ```
 
-Most tests pass. Some unit tests for the accumulator and predicate may have stale RowOutcome assertions that survived Phase 1's contract-test updates — those are now fully retyped in this phase. Update each in the same commit.
+This focused gate is the mechanical enforcement that makes Phases 1-3 one
+atomic execution unit. It proves every source/test surface intentionally touched
+by Phases 1-3, the import/runtime smoke, frontend build, and policy checks. It
+does **not** run `pytest tests/ -q`; Phase 5 owns the remaining repo-wide
+schema-dependent/assertion-only/direct-DB-read test triage and is the first
+full-suite gate. If any command here fails, do not commit; return to the phase
+task that owns the failure and patch it before rerunning this whole gate.
 
 **Step 2: Operator-visible RunStatus flip is now visible**
 
@@ -2113,25 +2354,38 @@ Both Task 3.1 and Task 3.2 integration tests are GREEN. Re-run them to confirm:
 ```bash
 git add src/elspeth/contracts/ \
         src/elspeth/core/landscape/ \
-        src/elspeth/testing/ \
-	    src/elspeth/mcp/ \
-	    src/elspeth/web/execution/ \
-	    src/elspeth/web/frontend/ \
-	    src/elspeth/engine/ \
-	    src/elspeth/core/checkpoint/recovery.py \
-	    config/cicd/forbid_new_row_outcome/migration_files.yaml \
-	    config/cicd/adr019_symbol_inventory \
-	    scripts/cicd/adr019_symbol_inventory.py \
-	    tests/fixtures/plugins.py \
-	    tests/unit/scripts/cicd/test_adr019_symbol_inventory.py \
-	    tests/unit/contracts/ \
-        tests/unit/core/landscape/ \
-        tests/unit/mcp/ \
-        tests/unit/web/execution/ \
-        tests/unit/engine/orchestrator/ \
-        tests/integration/test_adr_019_discard_mode_flip.py \
-        tests/integration/test_adr_019_counter_changes.py \
-        tests/integration/_helpers.py
+		        src/elspeth/testing/ \
+			    src/elspeth/mcp/ \
+			    src/elspeth/telemetry/ \
+			    src/elspeth/web/execution/ \
+			    src/elspeth/web/sessions/ \
+			    src/elspeth/web/frontend/ \
+			    src/elspeth/engine/ \
+			    src/elspeth/core/checkpoint/recovery.py \
+			    docs/architecture/adr/019-two-axis-terminal-model.md \
+			    docs/operator/migrations/adr-019.md \
+			    config/cicd/forbid_new_row_outcome/migration_files.yaml \
+			    config/cicd/adr019_symbol_inventory \
+			    scripts/cicd/adr019_symbol_inventory.py \
+			    tests/fixtures/cicd/adr019_symbol_inventory/ \
+			    tests/fixtures/plugins.py \
+			    tests/unit/scripts/cicd/test_adr019_symbol_inventory.py \
+			    tests/unit/contracts/ \
+		        tests/unit/core/landscape/ \
+		        tests/unit/mcp/ \
+		        tests/unit/telemetry/ \
+		        tests/unit/web/execution/ \
+	        tests/unit/web/sessions/ \
+	        tests/unit/engine/orchestrator/ \
+	        tests/unit/engine/test_sink_executor_diversion.py \
+	        tests/unit/engine/test_executors.py \
+	        tests/integration/plugins/sinks/test_durability.py \
+	        tests/integration/test_adr_019_discard_mode_flip.py \
+	        tests/integration/test_adr_019_counter_changes.py \
+	        tests/integration/test_adr_019_helpers.py \
+	        tests/integration/test_adr_019_resume_counter_parity.py \
+	        tests/integration/_helpers.py \
+	        tests/integration/_adr019_test_plugins.py
 
 git commit -m "$(cat <<'EOF'
 feat(adr-019): atomic stage 2-3 two-axis outcome migration
@@ -2160,10 +2414,13 @@ Accumulator + predicate + resume:
   (SUCCESS, GATE_ROUTED) bumps rows_succeeded and rows_routed_success;
   (FAILURE, ON_ERROR_ROUTED) bumps rows_failed and rows_routed_failure.
 - contracts/run_result.py drops the bifurcated OR clauses from the terminal
-  predicate.
+  predicate while retaining routed/quarantine counters as guard-only subset
+  inputs to derive_terminal_run_status.
 - web/execution/schemas.py mirrors the L0 predicate and decomposition formula.
 - _derive_resume_terminal_status_from_audit reads the new columns and produces
   the same counter shape as live runs.
+- Source-quarantine routing in Orchestrator._handle_quarantine_row now bumps
+  both rows_quarantined and rows_failed before routing to the quarantine sink.
 - Sink discard-mode rows now contribute to rows_failed, so discard-only
   pipelines no longer report plain COMPLETED.
 
@@ -2180,9 +2437,11 @@ EOF
 
 **Definition of Done:**
 - [ ] Accumulator + predicate + resume aggregation flipped
+- [ ] Live source-quarantine branch increments both rows_quarantined and rows_failed
 - [ ] SinkExecutor counter increments updated for discard-mode
 - [ ] Two RED-first integration tests now GREEN
-- [ ] All unit tests pass after fixture updates
-- [ ] mypy clean
+- [ ] Focused Phases 1-3 pytest gate passes; full `pytest tests/ -q --timeout=120` remains owned by Phase 5
+- [ ] Engine import/runtime smoke passes
+- [ ] mypy, ruff check, ruff format, contracts, tier-model, plugin-hash, contract-manifest, freeze-guard, ADR-019 inventory, RowOutcome guard, and frontend gates pass
 - [ ] Atomic Phases 1-3 commit landed
 - [ ] Phase 4 starts in the next session/checkpoint

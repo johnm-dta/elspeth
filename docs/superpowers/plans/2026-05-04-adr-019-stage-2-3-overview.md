@@ -8,11 +8,11 @@
 
 **Architecture:** Producers emit `(outcome, path)` pairs at every recording site; the recorder writes the triple to `token_outcomes`; the loader reconstructs the dataclass and runs the new (outcome, path) cross-checks plus four NEW cross-table invariants (I1a/I1b/I1c/I3); the accumulator matches on `(outcome, path)` and increments per the canonical mapping; the predicate becomes `success_indicator = rows_succeeded > 0` and `failure_indicator = rows_failed > 0` — the bifurcated OR clauses go away. Stage 1 introduced `TerminalOutcome`/`TerminalPath`/`_LEGAL_TERMINAL_PAIRS` alongside the unchanged `RowOutcome` (commit `60d30551` on `RC5-UX-RoutingVocabFix`); Stages 4 (test mechanical translation) and 5 (delete `RowOutcome`) follow this PR.
 
-**Tech Stack:** Python 3.13, SQLAlchemy Core, pytest, mypy, ruff, pluggy. Audit DB is SQLite or Postgres (no Alembic — operator deletes `audit.db` + `sessions.db` between this PR and any pre-Stage-2 state per ELSPETH's project DB migration policy recorded for this plan).
+**Tech Stack:** Python 3.13, SQLAlchemy Core, pytest, mypy, ruff, pluggy. Audit DB is SQLite or Postgres (no Alembic — operator replaces the Landscape audit store, for example `audit.db`, between this PR and any pre-Stage-2 audit schema per ELSPETH's project DB migration policy recorded for this plan; ADR-019 does not require deleting `sessions.db`).
 
 **Prerequisites:**
 - Stage 1 commit `60d30551` is on the branch (introduces `TerminalOutcome`, `TerminalPath`, `_LEGAL_TERMINAL_PAIRS`, `_NON_TERMINAL_PATHS`, the closed-set partition assertion, the property test, and the `forbid_new_row_outcome.py` lint guard with allowlist).
-- Allowlist at `config/cicd/forbid_new_row_outcome/migration_files.yaml` already covers every file this plan touches.
+- Allowlist at `config/cicd/forbid_new_row_outcome/migration_files.yaml` covers the existing RowOutcome migration-window files. It is not expected to cover every downstream schema consumer touched by Phase 1, because many of those files read `token_outcomes.is_terminal`/wire fields without importing `RowOutcome`; the new ADR-019 AST inventory created in Phase 1 is the broader closeout gate for those surfaces.
 - ADR-019 at `docs/architecture/adr/019-two-axis-terminal-model.md` (HEAD `a5144c01` post-round-4 amendment) is the canonical spec; line references in the phase docs are against that revision.
 
 ---
@@ -23,9 +23,9 @@
 | --- | --- | --- |
 | 1 | [Phase 1 — Schema + recorder + loader + contract dataclasses + downstream consumers](2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md) | **First task creates the AST inventory tool/config/tests** so every later phase boundary can use it. DB schema rename + new column; `TokenOutcome`, `RowResult`, `PendingOutcome`, `TokenCompleted` retype; recorder `record_token_outcome` signature flip; loader `TokenOutcomeLoader.load` cross-check rewrite; `contracts/__init__.py` and `testing/__init__.py` re-exports; operator migration doc stub so stale-schema errors point at an existing file. **Plus 9 downstream-consumer fixes** in `mcp/analyzers/{reports,diagnostics}.py`, `mcp/types.py`, `web/execution/{diagnostics,discard_summary}.py`, `contracts/export_records.py`, `core/landscape/{exporter,lineage,formatters}.py` — schema rename + B3 silent-zero-quarantine fix. Without these, MCP diagnose() lies about quarantine count (Tier 1 violation) and Web run-diagnostics crashes. |
 | 2 | [Phase 2 — Producer site flip](2026-05-04-adr-019-stage-2-3-phase-2-producers.md) | Every `RowOutcome.X` reference in `processor.py`, `transform.py`, `coalesce_executor.py`, `sink.py`, `recovery.py` flips to `(outcome, path)` pair construction at the emit site. ~120 src/ references with the canonical mapping table embedded for mechanical translation. |
-| 3 | [Phase 3 — Accumulator + L0 predicate + L3 Pydantic mirror + resume aggregation + behaviour changes](2026-05-04-adr-019-stage-2-3-phase-3-accumulator-predicate.md) | `accumulate_row_outcomes` matches on `(outcome, path)` and ships the `(SUCCESS, GATE_ROUTED)` and `(FAILURE, ON_ERROR_ROUTED)` counter changes; `RunResult.__post_init__` and `derive_terminal_run_status` drop their bifurcated OR clauses; **`web/execution/schemas.py::_validate_row_decomposition` formula drops `rows_routed_*` from the sum (post-Phase-3 they're non-disjoint subsets) and `_check_status_row_count_invariant` mirrors the L0 simplification — without these, `/api/runs/{rid}` returns 500 for every gate-MOVE / on_error-routed run because Pydantic rejects the new counter shape**; `_derive_resume_terminal_status_from_audit` reads new columns. The discard-mode operator-visible `RunStatus` flip and the B4 `/api/runs/{rid}` 500-regression are each exercised by RED-first integration tests before the predicate change lands. |
+| 3 | [Phase 3 — Accumulator + L0 predicate + L3 Pydantic mirror + resume aggregation + behaviour changes](2026-05-04-adr-019-stage-2-3-phase-3-accumulator-predicate.md) | `accumulate_row_outcomes` matches on `(outcome, path)` and ships the `(SUCCESS, GATE_ROUTED)` and `(FAILURE, ON_ERROR_ROUTED)` counter changes; the live source-quarantine path in `Orchestrator._handle_quarantine_row` also bumps `rows_failed` so `rows_quarantined` remains a subset of the exhaustive failure counter; `RunResult.__post_init__` and `derive_terminal_run_status` drop their bifurcated OR clauses while retaining routed/quarantine counters as guard-only subset inputs; **`web/execution/schemas.py::_validate_row_decomposition` formula drops `rows_routed_*` from the sum (post-Phase-3 they're non-disjoint subsets) and `_check_status_row_count_invariant` mirrors the L0 simplification — without these, `/api/runs/{rid}` returns 500 for every gate-MOVE / on_error-routed run because Pydantic rejects the new counter shape**; `_derive_resume_terminal_status_from_audit` reads new columns. The discard-mode operator-visible `RunStatus` flip and the B4 `/api/runs/{rid}` 500-regression are each exercised by RED-first integration tests before the predicate change lands. |
 | 4 | [Phase 4 — Cross-table invariants (I1a/I1b/I1c/I3)](2026-05-04-adr-019-stage-2-3-phase-4-cross-check-invariants.md) | Four NEW deferred / real-time invariants per ADR-019 § "Cross-check invariants." I1c (failsink-pair) and I3 (discard-no-failsink) are real-time at recording. I1a/I1b are deferred (children land later) — verified via end-of-run sweep wired into `Orchestrator._execute_run` immediately after `_flush_and_write_sinks(...)` returns and before final progress / terminal finalization. This is intentionally after sink writes; `_finalize_source_iteration` is too early because child sink `token_outcomes` rows are written during the sink phase. |
-| 5 | [Phase 5 — Test strategy + triage](2026-05-04-adr-019-stage-2-3-phase-5-test-strategy.md) | Triage `tests/` into schema-dependent, assertion-only, and direct-DB-read categories. Schema-dependent and assertion-only sites both move in this PR so `pytest tests/ -q` can be green; the assertion-only work is mechanical but not deferrable. Expand the Phase 1 operator migration stub into the full deployment/rollback runbook. Run the AST-backed source inventory created in Phase 1 as the authoritative closeout gate. New behavioural tests for: cross-table invariants, discard-mode `RunStatus` flip, accumulator counter changes, predicate drop-OR-clause. |
+| 5 | [Phase 5 — Test strategy + triage](2026-05-04-adr-019-stage-2-3-phase-5-test-strategy.md) | Audit `tests/` into schema-dependent, assertion-only, and direct-DB-read categories after the focused Phase 3 gate. Phase 3 does not run the full `pytest tests/` suite because Phase 5 owns the remaining repo-wide schema-dependent test migration. Phase 5 is the first full-suite gate; it must not carry known-red tests forward to PR open. Phase 5 expands the Phase 1 operator migration stub into the full deployment/rollback runbook, reruns the AST-backed source inventory as the authoritative closeout gate, and adds remaining non-blocking behavioural/property coverage for cross-table invariants and migration closeout. |
 
 ---
 
@@ -33,9 +33,9 @@
 
 The five phase documents are execution checkpoints, not five buildable commits. The only allowed git commit boundaries are:
 
-1. **Atomic Stage 2/3 commit:** Phases 1-3 together. This is the first point at which the engine must compile and the accumulator / predicate contract is coherent.
+1. **Atomic Stage 2/3 commit:** Phases 1-3 together. This is the first point at which the engine must compile and the accumulator / predicate contract is coherent. It runs the focused Phase 1-3 contract, integration, import-smoke, AST-inventory, frontend, and policy gates; the full `pytest tests/` gate is deliberately deferred to Phase 5.
 2. **Phase 4 commit:** Cross-table invariants, additive on top of the buildable Stage 2/3 state.
-3. **Phase 5 commit:** Schema-dependent test fixes, behavioural tests, and full operator migration documentation expansion.
+3. **Phase 5 commit:** Post-green test-strategy closeout, additional non-blocking behavioural tests, and full operator migration documentation expansion.
 
 Phase 5's behavioural tests are written FIRST per TDD discipline — they fail until the corresponding phase commit lands.
 
@@ -43,7 +43,7 @@ Phase 5's behavioural tests are written FIRST per TDD discipline — they fail u
 Stage 1 (already shipped, commit 60d30551)
    │
    ├── Phase 1 local checkpoint: AST inventory + schema + dataclasses + recorder + loader + downstream consumers
-   │       ├── ❌ producer sites still pass RowOutcome to record_token_outcome — engine module won't import
+   │       ├── ❌ producer sites still pass RowOutcome-shaped values to record_token_outcome — type-check/runtime call sites remain broken
    │       └── no git commit; continue directly to Phase 2
    │
    ├── Phase 2 local checkpoint: producer flip
@@ -52,12 +52,14 @@ Stage 1 (already shipped, commit 60d30551)
    │
   ├── Atomic Stage 2/3 commit: Phases 1-3 together
   │       ├── ✅ engine compiles; accumulator, resume aggregation, L0 predicate, and L3 predicate mirror are coherent
-  │       └── ✅ AST inventory gate has run from the Phase 1 tool
+  │       ├── ✅ engine import/runtime smoke passes from the Phase 3 hard gate
+  │       ├── ✅ AST inventory gate has run from the Phase 1 tool
+  │       └── ⚠️ full `pytest tests/` deferred to Phase 5 test triage
    │
   ├── Phase 4 commit: cross-table invariants (NEW behaviour, additive)
   │       └── ✅ AST inventory gate rerun before commit
    │
- └── Phase 5 commit: schema-dependent + assertion-only test fixes + new behavioural tests
+ └── Phase 5 commit: post-green test closeout + new behavioural tests + runbook expansion
                       ✅ AST inventory + frontend/Python/full project gates rerun
                       ✅ no remaining broken ``outcome == RowOutcome.X`` assertions in tests/
 ```
@@ -80,7 +82,7 @@ The PR is opened only after Phase 5 lands. Reviewers see three clean commits: th
 
 **Before:** `RowOutcome.ROUTED` increments only `rows_routed_success`. `RowOutcome.ROUTED_ON_ERROR` increments only `rows_routed_failure`.
 
-**After:** `(SUCCESS, GATE_ROUTED)` increments BOTH `rows_succeeded` AND `rows_routed_success`. `(FAILURE, ON_ERROR_ROUTED)` increments BOTH `rows_failed` AND `rows_routed_failure`.
+**After:** `(SUCCESS, GATE_ROUTED)` increments BOTH `rows_succeeded` AND `rows_routed_success`. `(FAILURE, ON_ERROR_ROUTED)` increments BOTH `rows_failed` AND `rows_routed_failure`. Source quarantine rows increment BOTH `rows_failed` and `rows_quarantined` at the live quarantine-routing site rather than relying on the row-processing accumulator.
 
 **Why:** Without this, the `RunResult.__post_init__` predicate has to retain the bifurcated OR clauses (`rows_succeeded > 0 OR rows_routed_success > 0`). The accumulator change makes `success_indicator = rows_succeeded > 0` exhaustive by construction, which makes the predicate change safe.
 
@@ -93,7 +95,7 @@ The `token_outcomes` table changes:
 - `outcome` (String 32) changes value space from `RowOutcome.value` (non-NULL) to `TerminalOutcome.value | NULL` — NULL means non-terminal (`BUFFERED`).
 - `path` (String 64) added — always populated, never NULL.
 
-Per ELSPETH's project DB migration policy recorded for this plan, ELSPETH does not run Alembic on schema changes. **Operator action required at deploy time:** replace the old-schema `audit.db` / `sessions.db` stores before deploying this PR, with service stop, immutable snapshot/backup, destructive delete/drop, restart, health check, and rollback steps documented in `docs/operator/migrations/adr-019.md` (stub added in Phase 1; full runbook expanded in Phase 5). Agents must not run the destructive database commands without explicit operator approval for the target environment.
+Per ELSPETH's project DB migration policy recorded for this plan, ELSPETH does not run Alembic on schema changes. **Operator action required at deploy time:** replace the old-schema Landscape audit store before deploying this PR, with service stop, immutable snapshot/backup, destructive delete/drop, restart, health check, and rollback steps documented in `docs/operator/migrations/adr-019.md` (stub added in Phase 1; full runbook expanded in Phase 5). ADR-019 does not change the web session schema, so do not delete `sessions.db` unless a separate compatibility check proves it stale and the operator runbook is explicitly amended with session backup/restore steps. Agents must not run destructive database commands without explicit operator approval for the target environment.
 
 ---
 
@@ -121,7 +123,7 @@ The "delete the DB" policy means we do not write a migration; operators delete a
 
 Per ADR-019 § "Cross-check invariants" (lines 237-269), I1a (FORK_PARENT requires ≥1 child) and I1b (BATCH_CONSUMED requires the consuming batch row to reach `BatchStatus.COMPLETED` by end of run) are *deferred* obligations. The mechanism: extend both `Orchestrator._execute_run` (`src/elspeth/engine/orchestrator/core.py:2972-3084`) and the sibling resume path `_process_resumed_rows` (`core.py:3420-3515`) to call `factory.data_flow.sweep_deferred_invariants_or_crash(run_id)` immediately after `_flush_and_write_sinks(...)` returns. In the fresh-run path this is before final progress / `PhaseCompleted`; in the resume path it is before returning to the public `resume()` wrapper for terminal finalization. Do **not** place the sweep in `_finalize_source_iteration`: current source calls `_finalize_source_iteration` before `_flush_and_write_sinks`, while child sink outcomes are recorded during `SinkExecutor.write()`. A pre-sink sweep would reject valid fork/expand runs as orphaned.
 
-The sweep is naturally skipped whenever `_flush_and_write_sinks` raises before returning. Graceful shutdown is the benign expected case: buffered/forked work is resumable and must not be declared orphaned before resume has a chance to complete it. If resume later flushes sinks successfully, the resume-path sweep runs then. Other unhandled sink-flush exceptions also skip the sweep intentionally because the postconditions for I1a/I1b are not stable after a failed flush; the outer failure ceremony owns that run failure. The repository sweep queries for orphaned `TRANSIENT` parent tokens (FORK_PARENT with no children) and orphaned BATCH_CONSUMED tokens (whose consuming batch is not yet `BatchStatus.COMPLETED`) via `DataFlowRepository` helpers (`find_orphaned_transient_parents`, `find_orphaned_batch_consumptions`). Crash with `AuditIntegrityError` if any are found. Run-end after sink writes is the first moment the invariant CAN be verified. See Phase 4 for the concrete sweep code and exact insertion point. Note on I1b semantics: the result token created at flush time does NOT carry `batch_id` in its own `token_outcomes` row (only CONSUMED_IN_BATCH and BUFFERED outcomes set `batch_id`), so the reachability path for the batch's lifecycle answer goes through `batches.status`, not a paired `token_outcomes` row. ADR-019 lines 229-232 ("reachable via `batch_id`") will receive a clarifying amendment in a follow-up.
+The sweep is naturally skipped whenever `_flush_and_write_sinks` raises before returning. Graceful shutdown is the benign expected case: buffered/forked work is resumable and must not be declared orphaned before resume has a chance to complete it. If resume later flushes sinks successfully, the resume-path sweep runs then. Other unhandled sink-flush exceptions also skip the sweep intentionally because the postconditions for I1a/I1b are not stable after a failed flush; the outer failure ceremony owns that run failure. The repository sweep queries for orphaned `TRANSIENT` parent tokens (FORK_PARENT with no children) and orphaned BATCH_CONSUMED tokens (whose consuming batch is not yet `BatchStatus.COMPLETED`) via `DataFlowRepository` helpers (`find_orphaned_transient_parents`, `find_orphaned_batch_consumptions`). Crash with `AuditIntegrityError` if any are found. Run-end after sink writes is the first moment the invariant CAN be verified. See Phase 4 for the concrete sweep code and exact insertion point. Note on I1b semantics: the result token created at flush time does NOT carry `batch_id` in its own `token_outcomes` row (only CONSUMED_IN_BATCH and BUFFERED outcomes set `batch_id`), so the reachability path for the batch's lifecycle answer goes through `batches.status`, not a paired `token_outcomes` row. ADR-019 has been amended to make this batch-status witness canonical.
 
 ### D4: I1c (sink-fallback-paired) and I3 (discard-FAILURE) verified at recording time
 
@@ -228,9 +230,12 @@ The concrete ADR-019 anchors are Phase 1 Task 1.2
 (`TestADR019PredicateBoundaryCases`). Treat those as the minimum pattern for
 future closed-set additions; one hand-picked illegal example is not enough.
 
-### D6: Test migration split (all pytest-blocking assertions move in this PR)
+### D6: Test migration split (all pytest-blocking assertions move before the first commit)
 
-Phase 5 establishes the triage. Short summary:
+Phase 5 owns the repo-wide `pytest tests/ -q` triage and is the first full-suite
+gate. Phases 1-3 still must update every schema-dependent test that is in their
+focused gate or in a touched module, but the atomic Stage 2/3 commit is not
+required to make unrelated stale tests green. Short summary:
 - **Tests that construct dataclass instances (`TokenOutcome(outcome=RowOutcome.X, ...)`)** — schema-dependent. Won't compile after Phase 1. Move with Stage 2/3.
 - **Tests that assert on `result.outcome == RowOutcome.X` from a real engine execution** — assertion-only but pytest-blocking after Phase 1. These MUST move in this PR, translated mechanically against `tests/unit/contracts/test_enums.py::_ROW_OUTCOME_TO_TWO_AXIS_MAPPING`. Cross-enum equality returns `False`, not `TypeError`, so leaving these assertions for Stage 4 would make the full-suite gate impossible.
 - **Integration tests that exercise end-to-end engine execution and observe outputs** — schema-dependent if they read `token_outcomes` directly; assertion-only if they only check `RunResult` counters. Both pytest-blocking forms move in this PR.

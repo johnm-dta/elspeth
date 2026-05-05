@@ -479,11 +479,13 @@ attempt must surface that same guidance; it must not degrade into a late
 
 ## Deploy
 
-### 1. Replace the audit and sessions databases
+### 1. Replace the Landscape audit database
 
 ELSPETH does not run Alembic migrations for this project. The
 `token_outcomes` table schema changes — column rename + new column + value
-space change.
+space change. ADR-019 does not change the web session schema; preserve
+`sessions.db` unless a separate web-session compatibility check fails and this
+runbook is amended with explicit session backup/restore steps.
 
 **Permission boundary:** these commands are destructive. Agents must not run
 them unless the human operator gives explicit approval for the target
@@ -496,26 +498,37 @@ before execution.
 # Fail closed: every backup verification below must succeed before any delete.
 set -euo pipefail
 
-# 0. Stop the service that writes audit/session data.
+# 0. Stop the service that writes audit data.
 sudo systemctl stop elspeth-web.service
 
-# 1. Set deployment-specific paths.
+# 1. Set deployment-specific paths and capture the app revision for rollback.
 export ELSPETH_DATA_DIR=/var/lib/elspeth
+export ELSPETH_CHECKOUT=/home/john/elspeth
 export ADR019_BACKUP_DIR=/var/backups/elspeth/adr-019-$(date -u +%Y%m%dT%H%M%SZ)
 
 # 2. Snapshot before deleting. Keep permissions and timestamps.
 sudo mkdir -p "$ADR019_BACKUP_DIR"
-sudo cp -a "$ELSPETH_DATA_DIR/audit.db" "$ADR019_BACKUP_DIR/audit.db"
-sudo cp -a "$ELSPETH_DATA_DIR/sessions.db" "$ADR019_BACKUP_DIR/sessions.db"
+git -C "$ELSPETH_CHECKOUT" rev-parse HEAD > "$ADR019_BACKUP_DIR/app-ref.txt"
+
+# SQLite is configured with journal_mode=WAL. Stop writers first, then checkpoint
+# and snapshot the main DB plus sidecars when present.
+sudo sqlite3 "$ELSPETH_DATA_DIR/audit.db" "PRAGMA wal_checkpoint(TRUNCATE);"
+for suffix in "" "-wal" "-shm"; do
+  if sudo test -e "$ELSPETH_DATA_DIR/audit.db${suffix}"; then
+    sudo cp -a "$ELSPETH_DATA_DIR/audit.db${suffix}" "$ADR019_BACKUP_DIR/audit.db${suffix}"
+  fi
+done
 
 # 3. Verify the backup files exist before deleting anything. These `test -s`
 # commands are the hard stop before the destructive rm step.
 sudo test -s "$ADR019_BACKUP_DIR/audit.db"
-sudo test -s "$ADR019_BACKUP_DIR/sessions.db"
+test -s "$ADR019_BACKUP_DIR/app-ref.txt"
 
-# 4. Delete the old-schema databases. Startup recreates the new schema.
-sudo rm -f "$ELSPETH_DATA_DIR/audit.db"
-sudo rm -f "$ELSPETH_DATA_DIR/sessions.db"
+# 4. Delete the old-schema audit database. Startup recreates the new schema.
+sudo rm -f \
+  "$ELSPETH_DATA_DIR/audit.db" \
+  "$ELSPETH_DATA_DIR/audit.db-wal" \
+  "$ELSPETH_DATA_DIR/audit.db-shm"
 
 # 5. Deploy/start the ADR-019 commit and smoke-check health.
 sudo systemctl start elspeth-web.service
@@ -531,20 +544,19 @@ set -euo pipefail
 # 0. Stop writers first.
 sudo systemctl stop elspeth-web.service
 
-# 1. Snapshot both databases. Use deployment-specific DB names/roles.
+# 1. Snapshot the audit database. Use deployment-specific DB names/roles.
 export ADR019_BACKUP_DIR=/var/backups/elspeth/adr-019-$(date -u +%Y%m%dT%H%M%SZ)
+export ELSPETH_CHECKOUT=/home/john/elspeth
 sudo mkdir -p "$ADR019_BACKUP_DIR"
+git -C "$ELSPETH_CHECKOUT" rev-parse HEAD > "$ADR019_BACKUP_DIR/app-ref.txt"
 pg_dump --format=custom --file="$ADR019_BACKUP_DIR/elspeth_audit.dump" elspeth_audit
-pg_dump --format=custom --file="$ADR019_BACKUP_DIR/elspeth_sessions.dump" elspeth_sessions
 # These `test -s` commands are the hard stop before the destructive dropdb step.
 test -s "$ADR019_BACKUP_DIR/elspeth_audit.dump"
-test -s "$ADR019_BACKUP_DIR/elspeth_sessions.dump"
+test -s "$ADR019_BACKUP_DIR/app-ref.txt"
 
-# 2. Drop/recreate the old-schema stores. Adjust ownership/permissions to match deployment.
+# 2. Drop/recreate the old-schema audit store. Adjust ownership/permissions to match deployment.
 dropdb elspeth_audit
-dropdb elspeth_sessions
 createdb elspeth_audit
-createdb elspeth_sessions
 
 # 3. Deploy/start the ADR-019 commit and smoke-check health.
 sudo systemctl start elspeth-web.service
@@ -642,8 +654,13 @@ counters.
 ## Rollback
 
 Rollback requires restoring the previous application commit **and** restoring
-the pre-ADR-019 database snapshots. Do not run old code against the new schema
+the pre-ADR-019 audit database snapshot. Do not run old code against the new schema
 or new code against the old schema.
+
+For source-checkout deployments, set `ADR019_PREVIOUS_REF` from the backup's
+`app-ref.txt` or an equivalent release tag. Before switching the checkout,
+verify the checkout is clean; if it is not clean, stop and use the deployment
+system's normal artifact rollback instead of discarding local work.
 
 ### SQLite rollback
 
@@ -652,11 +669,28 @@ set -euo pipefail
 
 # Stop writers, restore the previous application commit, restore DB snapshots,
 # then restart and health-check.
+export ELSPETH_DATA_DIR=/var/lib/elspeth
+export ELSPETH_CHECKOUT=/home/john/elspeth
+export ADR019_PREVIOUS_REF="$(cat "$ADR019_BACKUP_DIR/app-ref.txt")"
+
 sudo systemctl stop elspeth-web.service
+test -n "$ADR019_PREVIOUS_REF"
+test -z "$(git -C "$ELSPETH_CHECKOUT" status --porcelain)"
+git -C "$ELSPETH_CHECKOUT" switch --detach "$ADR019_PREVIOUS_REF"
+test "$(git -C "$ELSPETH_CHECKOUT" rev-parse HEAD)" = \
+  "$(git -C "$ELSPETH_CHECKOUT" rev-parse "$ADR019_PREVIOUS_REF")"
+
 sudo test -s "$ADR019_BACKUP_DIR/audit.db"
-sudo test -s "$ADR019_BACKUP_DIR/sessions.db"
-sudo cp -a "$ADR019_BACKUP_DIR/audit.db" "$ELSPETH_DATA_DIR/audit.db"
-sudo cp -a "$ADR019_BACKUP_DIR/sessions.db" "$ELSPETH_DATA_DIR/sessions.db"
+sudo rm -f \
+  "$ELSPETH_DATA_DIR/audit.db" \
+  "$ELSPETH_DATA_DIR/audit.db-wal" \
+  "$ELSPETH_DATA_DIR/audit.db-shm"
+for suffix in "" "-wal" "-shm"; do
+  if sudo test -e "$ADR019_BACKUP_DIR/audit.db${suffix}"; then
+    sudo cp -a "$ADR019_BACKUP_DIR/audit.db${suffix}" "$ELSPETH_DATA_DIR/audit.db${suffix}"
+  fi
+done
+sudo test -s "$ELSPETH_DATA_DIR/audit.db"
 sudo systemctl start elspeth-web.service
 curl -fsS https://elspeth.foundryside.dev/api/health
 ```
@@ -667,15 +701,20 @@ curl -fsS https://elspeth.foundryside.dev/api/health
 set -euo pipefail
 
 sudo systemctl stop elspeth-web.service
+export ELSPETH_CHECKOUT=/home/john/elspeth
+export ADR019_PREVIOUS_REF="$(cat "$ADR019_BACKUP_DIR/app-ref.txt")"
+
 # Restore the previous application commit before restoring pre-ADR-019 data.
+test -n "$ADR019_PREVIOUS_REF"
+test -z "$(git -C "$ELSPETH_CHECKOUT" status --porcelain)"
+git -C "$ELSPETH_CHECKOUT" switch --detach "$ADR019_PREVIOUS_REF"
+test "$(git -C "$ELSPETH_CHECKOUT" rev-parse HEAD)" = \
+  "$(git -C "$ELSPETH_CHECKOUT" rev-parse "$ADR019_PREVIOUS_REF")"
+
 test -s "$ADR019_BACKUP_DIR/elspeth_audit.dump"
-test -s "$ADR019_BACKUP_DIR/elspeth_sessions.dump"
 dropdb elspeth_audit
-dropdb elspeth_sessions
 createdb elspeth_audit
-createdb elspeth_sessions
 pg_restore --dbname=elspeth_audit "$ADR019_BACKUP_DIR/elspeth_audit.dump"
-pg_restore --dbname=elspeth_sessions "$ADR019_BACKUP_DIR/elspeth_sessions.dump"
 sudo systemctl start elspeth-web.service
 curl -fsS https://elspeth.foundryside.dev/api/health
 ```
@@ -719,6 +758,7 @@ This project does not currently depend on the Python `markdown` package; do not 
 - [ ] Migration doc warns that routed/quarantined counters are non-disjoint subsets and must not be summed with base counters
 - [ ] Migration doc states that stale DB and resume-across-migration failures raise `SchemaCompatibilityError` pointing at `docs/operator/migrations/adr-019.md`
 - [ ] Migration doc includes SQLite and Postgres rollback steps with application-version + DB-snapshot coupling
+- [ ] SQLite backup/rollback commands handle `audit.db`, `audit.db-wal`, and `audit.db-shm` consistently after writers are stopped
 - [ ] Renders without errors
 
 ---
@@ -767,7 +807,9 @@ These should already be removed across Phase 1-4 commits. Phase 5 verifies the a
   --root . --allowlist config/cicd/forbid_new_row_outcome
 ```
 
-Expected: `exit 0`. If any src/ file outside the final 2-entry allowlist contains `RowOutcome.X`, fix it (it was missed in Phases 1-4) or surface to user if root cause is unclear.
+Expected: `exit 0`. If any src/ file outside the final 3-entry allowlist shape
+(two src entries plus `tests/`) contains `RowOutcome.X`, fix it (it was missed
+in Phases 1-4) or surface to user if root cause is unclear.
 
 **Definition of Done:**
 - [ ] Allowlist trimmed to its final 3-entry shape
@@ -889,7 +931,7 @@ Ships three operator-visible behaviour changes (see [docs/operator/migrations/ad
 
 Plus four NEW Tier 1 cross-table invariants (I1a, I1b, I1c, I3) per ADR-019 § Cross-check invariants.
 
-**Operator action required at deploy time:** delete `audit.db` and `sessions.db` per `docs/operator/migrations/adr-019.md`. ELSPETH does not run Alembic migrations for this project.
+**Operator action required at deploy time:** replace the Landscape audit store per `docs/operator/migrations/adr-019.md`. ELSPETH does not run Alembic migrations for this project. ADR-019 does not require deleting `sessions.db`.
 
 ## Phase structure (3 commits)
 

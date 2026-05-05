@@ -4,9 +4,9 @@
 >
 > **CRITICAL — atomic merge:** This phase is part of a five-phase plan ([overview](2026-05-04-adr-019-stage-2-3-overview.md)). Phase 4 adds NEW Tier 1 invariants that did not exist under ADR-018. They are additive and don't break the build, but they may surface latent bugs in the engine that the old invariant set was not catching. Phase 5 follows in the same PR.
 
-**Goal:** Implement the four cross-table invariants from ADR-019 § "Cross-check invariants" (lines 237-269). Two are real-time at recording (I1c, I3); two are deferred — verified after sink writes (I1a, I1b). The mechanism choice for deferred invariants is **post-sink sweep in both fresh-run `Orchestrator._execute_run` and resume-path `_process_resumed_rows`, immediately after `_flush_and_write_sinks(...)` returns** per overview decision D3.
+**Goal:** Implement the four cross-table invariants from ADR-019 § "Cross-check invariants" (lines 237-269). Two are real-time at recording (I1c, I3); two are deferred — verified after sink writes (I1a, I1b). The mechanism choice for deferred invariants is **post-sink sweep in fresh-run `Orchestrator._execute_run`, resume-path `_process_resumed_rows`, and the public `resume()` no-work terminalization branch** per overview decision D3. The first two hooks run immediately after `_flush_and_write_sinks(...)` returns; the no-work resume branch has no sink flush, so it runs the same sweep immediately before deriving/finalizing the terminal resume status.
 
-**Hook location verified against current HEAD (post-Stage-1 commit `60d30551`).** `_finalize_source_iteration` at `src/elspeth/engine/orchestrator/core.py:2511` is **not** the correct hook: current source calls it before `_flush_and_write_sinks(...)`, and sink child outcomes are recorded by `SinkExecutor.write()` during that later sink phase. The deferred-invariant sweep slots in `src/elspeth/engine/orchestrator/core.py::_execute_run` immediately after `_flush_and_write_sinks(...)` returns (currently around lines 3029-3040) and before final progress / `PhaseCompleted` emission. The sibling resume path `_process_resumed_rows` also calls `_flush_and_write_sinks(...)` (currently around lines 3492-3502) and must run the same sweep immediately after that call returns. This makes both fresh and resumed completions post-flush and post-sink, so I1a can see child token outcomes and I1b can see completed batches.
+**Hook location verified against current HEAD (post-Stage-3 worktree).** `_finalize_source_iteration` at `src/elspeth/engine/orchestrator/core.py:2511` is **not** the correct hook: current source calls it before `_flush_and_write_sinks(...)`, and sink child outcomes are recorded by `SinkExecutor.write()` during that later sink phase. The deferred-invariant sweep slots in `src/elspeth/engine/orchestrator/core.py::_execute_run` immediately after `_flush_and_write_sinks(...)` returns (currently around lines 3029-3040) and before final progress / `PhaseCompleted` emission. The sibling resume path `_process_resumed_rows` also calls `_flush_and_write_sinks(...)` (currently around lines 3492-3502) and must run the same sweep immediately after that call returns. Current `resume()` also has an early no-work branch (`not unprocessed_rows and not restored_state and restored_coalesce_state is None`, currently around lines 3247-3264) that derives/finalizes a terminal status without calling `_process_resumed_rows`; Phase 4 must sweep that branch before terminal finalization. This makes fresh completions, resumed completions, and no-op resume completions all pass through the same deferred invariant gate.
 
 **Shutdown semantic.** On graceful shutdown `_flush_and_write_sinks(...)` raises `GracefulShutdownError` before the fresh-run post-sink sweep call site. That natural control-flow skip is the required gate: a shutdown can legitimately leave fork-parents without children and BATCH_CONSUMED tokens without flush-results, because resume will produce them. When resume later reaches `_process_resumed_rows` and its sink flush returns normally, the resume-path sweep runs. Do not add a separate call in `_finalize_source_iteration`; running the sweep there would crash valid resumable stops and valid pre-sink runs.
 
@@ -14,14 +14,16 @@
 
 - Modify: `src/elspeth/core/landscape/data_flow_repository.py` (add `_validate_cross_table_invariants`, `find_orphaned_transient_parents`, `find_orphaned_batch_consumptions`, and `sweep_deferred_invariants_or_crash`; wire I1c and I3 checks into `record_token_outcome`)
 - Modify: `src/elspeth/engine/orchestrator/core.py:2972-3084` (add deferred-invariant sweep to `_execute_run` immediately after `_flush_and_write_sinks(...)` returns)
+- Modify: `src/elspeth/engine/orchestrator/core.py:3247-3264` (add deferred-invariant sweep to the no-op `resume()` terminalization branch before `_derive_resume_terminal_status_from_audit(...)` / `finalize_run(...)`)
 - Modify: `src/elspeth/engine/orchestrator/core.py:3420-3515` (add the same sweep to `_process_resumed_rows` after resume sink writes)
 - Test (RED-first): `tests/integration/test_adr_019_cross_table_invariants.py` (NEW) — exercises each invariant
+- Test (RED-first): `tests/integration/test_adr_019_sweep_durability.py` (NEW) — verifies sweep crash propagation, FAILED finalization, evidence preservation, and no-op resume coverage
 - Test (unit): `tests/unit/core/landscape/test_data_flow_repository.py` — extend with I1c and I3 unit tests
 
 **Background reading:** ADR-019 lines 237-269 (the four invariants and their semantics). The existing single-row guards in `_validate_outcome_fields` (Phase 1's `_TERMINAL_PAIR_FIELD_CONSTRAINTS`) are necessary but not sufficient; the cross-table invariants verify *structural consistency between `token_outcomes`, `node_states`, and `artifacts`*.
 
 **Prerequisites for Phase 4 RED tests:**
-- **Phase 2 must ship first.** Phase 4's integration tests call `record_token_outcome` with the new `outcome: TerminalOutcome | None` and `path: TerminalPath` parameters. The current (pre-Phase-2) signature takes `RowOutcome` only. Tests will fail with `TypeError` until Phase 2 updates the signature and adds the `path` column to `token_outcomes_table`. This is the expected RED state — do not patch the tests to accept `RowOutcome`.
+- **Phases 1-3 are complete before this phase starts.** Phase 4's integration tests call `record_token_outcome` with the new `outcome: TerminalOutcome | None` and `path: TerminalPath` parameters and expect the Phase 1-3 schema/producer/accumulator changes to be present. Do not patch Phase 4 tests to accept the old ADR-018 `RowOutcome`-only signature.
 - **Phase 3 Task 3.0 helpers** (`tests/integration/_helpers.py`) are NOT used in Phase 4. Invariant violations require direct factory API construction — no well-formed pipeline produces an orphan FORK_PARENT or an unflushed BATCH_CONSUMED. Phase 3 helpers exist for behaviour-change (counter/predicate) tests only.
 - Batch creation lives on `ExecutionRepository`, not `DataFlowRepository`. Use `landscape_factory.execution.create_batch(run_id, aggregation_node_id, batch_id=batch_id)` to open a batch, and `landscape_factory.execution.complete_batch(batch_id, status=BatchStatus.COMPLETED)` to complete it. `open_batch` does not exist; `complete_batch` on `DataFlowRepository` does not exist. The tests below use the verified API.
 
@@ -77,7 +79,7 @@ Per ADR-019 line 261: "Real-time verifiable — `sink.py:977-1003` does not call
 **Files:**
 - Create: `tests/integration/test_adr_019_cross_table_invariants.py`
 
-**Step 1: Write the six failing cross-table invariant tests**
+**Step 1: Write the cross-table invariant RED suite**
 
 ```python
 """ADR-019 § Cross-check invariants: structural consistency between
@@ -89,11 +91,11 @@ audit-DB state (the kind of state a faulty plugin could produce) and
 verifies the recorder/orchestrator crashes with AuditIntegrityError.
 
 PREREQUISITES:
-- Phase 2 must have shipped the updated ``record_token_outcome`` signature
+- Phases 1-3 have shipped the updated ``record_token_outcome`` signature
   that accepts ``outcome: TerminalOutcome | None`` and ``path: TerminalPath``
   as separate parameters, plus the ``path`` column in ``token_outcomes_table``.
-  Phase 4 tests are intentionally RED against the current (pre-Phase-2)
-  ``RowOutcome``-only signature — they fail with TypeError until Phase 2 lands.
+  Phase 4 tests must use this two-axis signature directly; do not reintroduce
+  ADR-018 ``RowOutcome`` compatibility into new test helpers.
 - Phase 3 Task 3.0 helpers (``tests/integration/_helpers.py``) are NOT used
   here. Invariant violations cannot be produced by any well-formed pipeline;
   they require direct factory API surgery to construct the illegal DB state.
@@ -111,7 +113,8 @@ import pytest
 from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenRef
 # TokenRef / DISCARD_SINK_NAME: from elspeth.contracts.audit
 # (used in test_tier1_integrity.py:29 — confirmed import path)
-from elspeth.contracts.enums import BatchStatus, NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
+from elspeth.contracts import NodeType
+from elspeth.contracts.enums import BatchStatus, NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.factory import RecorderFactory
@@ -316,6 +319,69 @@ class TestI1cFailsinkPaired:
                 error_hash="abcd1234abcd1234abcd1234abcd1234",
             )
 
+    def test_failsink_wrong_sink_node_crashes(self, landscape_factory: RecorderFactory) -> None:
+        """I1c violation: witness exists for one sink, producer passes another.
+
+        This protects the exact-node witness. The recorder must not accept
+        "any completed sink node_state for this token" or infer the sink from
+        ``sink_name``. The producer-declared ``sink_node_id`` must be the exact
+        failsink node that completed the node_state.
+        """
+        run_id, _source_node_id, token_id = _build_base_run(landscape_factory)
+        failsink_node_id = _register_sink_node(landscape_factory, run_id, name="failsink")
+        sibling_sink_node_id = _register_sink_node(landscape_factory, run_id, name="other_failsink")
+        _state_id, artifact_id = _record_completed_sink_state_with_artifact(
+            landscape_factory,
+            run_id=run_id,
+            token_id=token_id,
+            sink_node_id=failsink_node_id,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="node|failsink"):
+            landscape_factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
+                sink_name="failsink",
+                sink_node_id=sibling_sink_node_id,
+                artifact_id=artifact_id,
+                error_hash="abcd1234abcd1234abcd1234abcd1234",
+            )
+
+    def test_failsink_wrong_artifact_crashes(self, landscape_factory: RecorderFactory) -> None:
+        """I1c violation: artifact exists, but for a different sink write.
+
+        The artifact witness must be the exact producer-declared artifact for
+        the same run and exact failsink node. A query that accepts any artifact
+        in the run, or any artifact for a sibling sink, is too weak.
+        """
+        run_id, _source_node_id, token_id = _build_base_run(landscape_factory)
+        failsink_node_id = _register_sink_node(landscape_factory, run_id, name="failsink")
+        sibling_sink_node_id = _register_sink_node(landscape_factory, run_id, name="other_failsink")
+        _state_id, _correct_artifact_id = _record_completed_sink_state_with_artifact(
+            landscape_factory,
+            run_id=run_id,
+            token_id=token_id,
+            sink_node_id=failsink_node_id,
+        )
+        _other_state_id, wrong_artifact_id = _record_completed_sink_state_with_artifact(
+            landscape_factory,
+            run_id=run_id,
+            token_id=token_id,
+            sink_node_id=sibling_sink_node_id,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="artifact"):
+            landscape_factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
+                sink_name="failsink",
+                sink_node_id=failsink_node_id,
+                artifact_id=wrong_artifact_id,
+                error_hash="abcd1234abcd1234abcd1234abcd1234",
+            )
+
 
 # ---------------------------------------------------------------------------
 # I3: discard-no-failsink (real-time)
@@ -329,13 +395,29 @@ class TestI3DiscardNoFailsink:
     Fixture: ``landscape_factory`` from tests/integration/conftest.py:67.
     """
 
-    def test_discard_clean_passes(self, landscape_factory: RecorderFactory) -> None:
+    def test_discard_with_failed_sink_state_passes(self, landscape_factory: RecorderFactory) -> None:
         """Happy path: discard with sink_name='__discard__' and no COMPLETED sink
         node_state for the token — I3-valid state, no crash.
+
+        Production discard completes the primary sink node_state as FAILED before
+        recording SINK_DISCARDED. I3 forbids a paired COMPLETED sink state, not
+        the FAILED primary sink state that witnesses the discard attempt.
         """
         run_id, _source_node_id, token_id = _build_base_run(landscape_factory)
-        # Deliberately do NOT create any sink node_state for this token.
-        # I3 requires that absence — discard means the row found no durable home.
+        primary_sink_node_id = _register_sink_node(landscape_factory, run_id, name="primary_sink")
+        failed_state = landscape_factory.execution.begin_node_state(
+            token_id=token_id,
+            node_id=primary_sink_node_id,
+            run_id=run_id,
+            step_index=0,
+            input_data={},
+        )
+        landscape_factory.execution.complete_node_state(
+            state_id=failed_state.state_id,
+            status=NodeStateStatus.FAILED,
+            output_data={"discarded": True},
+            duration_ms=1.0,
+        )
 
         outcome_id = landscape_factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token_id, run_id=run_id),
@@ -375,17 +457,19 @@ class TestI3DiscardNoFailsink:
                 error_hash="abcd1234abcd1234abcd1234abcd1234",
             )
 
-    def test_discard_wrong_sink_name_crashes(self, landscape_factory: RecorderFactory) -> None:
-        """I3 sub-invariant: SINK_DISCARDED requires sink_name='__discard__'.
+    def test_discard_wrong_sink_name_rejected_by_scalar_guard(self, landscape_factory: RecorderFactory) -> None:
+        """Scalar guard: SINK_DISCARDED requires sink_name='__discard__'.
 
         The sentinel name '__discard__' is the ONLY valid sink_name for the
         SINK_DISCARDED path. Any other name violates the semantic: discard is
-        a specific system-managed outcome, not a sink-specific write.
+        a specific system-managed outcome, not a sink-specific write. Phase 1's
+        _TERMINAL_PAIR_FIELD_CONSTRAINTS already reject this before the Phase 4
+        cross-table I3 query runs.
         """
         run_id, _source_node_id, token_id = _build_base_run(landscape_factory)
         # No COMPLETED sink node_state needed — the sink_name check fires first.
 
-        with pytest.raises(AuditIntegrityError, match="discard"):
+        with pytest.raises(ValueError, match="sink_name|__discard__"):
             landscape_factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token_id, run_id=run_id),
                 outcome=TerminalOutcome.FAILURE,
@@ -476,18 +560,14 @@ class TestI1aForkParentDeferred:
             row_index=1,
             data={"x": 2},
         )
-        # fork_token creates children AND populates token_parents.
-        children, fork_group_id = landscape_factory.data_flow.fork_token(
+        # fork_token creates children, populates token_parents, and records the
+        # parent (TRANSIENT, FORK_PARENT) outcome. Do not record the parent a
+        # second time; token_outcomes has a one-terminal-row-per-token unique
+        # index.
+        children, _fork_group_id = landscape_factory.data_flow.fork_token(
             parent_ref=TokenRef(token_id=parent_token_id, run_id=run_id),
             row_id=row.row_id,
             branches=["branch_a", "branch_b"],
-        )
-        # Record the parent outcome — this is the (TRANSIENT, FORK_PARENT) row.
-        landscape_factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=parent_token_id, run_id=run_id),
-            outcome=TerminalOutcome.TRANSIENT,
-            path=TerminalPath.FORK_PARENT,
-            fork_group_id=fork_group_id,
         )
         # The ADR requires a child token_outcomes row, not merely a token_parents
         # link. Record one child lifecycle answer before asserting happy path.
@@ -664,11 +744,14 @@ class TestI1bBatchConsumedDeferred:
 
 **Step 2: Run RED**
 
-Expected: all six tests fail. Phase 1's `_validate_outcome_fields` catches single-row missing-field violations but not cross-table; Phase 4 adds the cross-table layer.
+Expected RED shape:
+- Cross-table violation tests fail because Phase 4 has not added `_validate_cross_table_invariants`, `find_orphaned_transient_parents`, `find_orphaned_batch_consumptions`, and `sweep_deferred_invariants_or_crash` yet.
+- Scalar producer-contract tests, such as the wrong `SINK_DISCARDED` sink name, are already owned by Phase 1's `_validate_outcome_fields` / `_TERMINAL_PAIR_FIELD_CONSTRAINTS`; they should raise `ValueError`, not `AuditIntegrityError`.
+- Happy-path tests document the legal state shape and may pass once Phases 1-3 are present. Do not count them as required failures.
 
 **Definition of Done:**
-- [ ] Six tests written
-- [ ] All six fail before Phase 4's edits land
+- [ ] I1c, I3, I1a, and I1b test cases written, including positive legal-state cases and negative cross-table violation cases
+- [ ] Cross-table violation tests fail before Phase 4's edits land; scalar guard tests raise the existing scalar exception class
 - [ ] Test fixtures construct the required cross-table state (node_states, artifacts) for the happy and violation paths
 
 ---
@@ -824,8 +907,10 @@ def _validate_cross_table_invariants(
 
 ```python
 from sqlalchemy import and_, select  # `and_` for the multi-key join condition
+from sqlalchemy.engine import Row as SQLAlchemyRow
 
-from elspeth.contracts.enums import NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
+from elspeth.contracts import NodeType
+from elspeth.contracts.enums import BatchStatus, NodeStateStatus, TerminalOutcome, TerminalPath
 # These imports are NEW for Phase 4 — not currently in data_flow_repository.py
 # (current imports verified at data_flow_repository.py:47-56):
 from elspeth.core.landscape.schema import artifacts_table, batches_table, node_states_table
@@ -833,7 +918,7 @@ from elspeth.core.landscape.schema import artifacts_table, batches_table, node_s
 # token_parents_table (data_flow_repository.py:48-55).
 ```
 
-Verify with: `.venv/bin/python -c "from elspeth.contracts.enums import NodeType; print(NodeType.SINK.value)"` — expect `sink`.
+Verify with: `.venv/bin/python -c "from elspeth.contracts import NodeType; print(NodeType.SINK.value)"` — expect `sink`.
 
 **Step 2: Wire into `record_token_outcome`**
 
@@ -912,6 +997,8 @@ grep -n "_flush_and_write_sinks" src/elspeth/engine/orchestrator/core.py
 
 Expected: `_execute_run` calls `_run_main_processing_loop(...)` first, then `_flush_and_write_sinks(...)` around lines 3029-3040, then emits final progress and `PhaseCompleted`. `_process_resumed_rows` calls `_run_resume_processing_loop(...)`, then `_flush_and_write_sinks(...)` around lines 3492-3502, then exits to the public resume wrapper. The deferred-invariant sweep slots immediately after `_flush_and_write_sinks(...)` returns in **both** paths.
 
+Also inspect the public `resume()` no-work terminalization branch around the `if not unprocessed_rows and not restored_state and restored_coalesce_state is None:` guard. That branch does not call `_process_resumed_rows`; it derives/finalizes from existing audit rows directly. Phase 4 must run the same sweep in that branch immediately before `_derive_resume_terminal_status_from_audit(...)` / `finalize_run(...)`, otherwise a fully processed resumed run can finalize successfully with pre-existing orphaned deferred invariant rows.
+
 Do not insert this sweep in `_finalize_source_iteration`. Current source calls `_finalize_source_iteration` before `_flush_and_write_sinks(...)`; sink child outcomes are recorded during `SinkExecutor.write()`, so a pre-sink sweep can reject valid fork/expand runs as orphaned.
 
 The sweep is naturally skipped when `_flush_and_write_sinks(...)` raises before returning. Graceful shutdown is the expected benign case: it can legitimately leave fork-parents without children, and the resume path completes them before running its own post-sink sweep. Any other unhandled sink-flush exception also skips the sweep intentionally because the postconditions for I1a/I1b are not stable when sink flushing did not finish; the outer failure ceremony handles the run failure.
@@ -968,7 +1055,51 @@ can be left behind:
             factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
 ```
 
-**Step 2c: Add the positive fork/coalesce false-positive regression**
+**Step 2c: Add the sweep in the public `resume()` no-work terminalization branch**
+
+Move or create `resume_start_time = time.perf_counter()` before the no-work
+branch so the failure ceremony has a valid duration anchor, then insert the
+sweep before `_derive_resume_terminal_status_from_audit(...)`:
+
+```python
+        resume_start_time = time.perf_counter()
+
+        if not unprocessed_rows and not restored_state and restored_coalesce_state is None:
+            # ADR-019 Phase 4: no-op resume still reaches a terminal audit state.
+            # It bypasses _process_resumed_rows, so it must run the deferred
+            # invariant sweep here before deriving/finalizing the terminal
+            # status from audit rows. If the sweep raises, use the same failed
+            # ceremony contract as the row-processing resume path; otherwise the
+            # run could be finalized as COMPLETED/PARTIAL_SUCCESS with orphaned
+            # deferred invariant evidence still present.
+            try:
+                factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
+            except Exception:
+                try:
+                    self._emit_failed_ceremony(run_id, factory, resume_start_time)
+                except Exception:
+                    slog.debug("Failure ceremony failed — original exception preserved", run_id=run_id)
+                self._safe_flush_telemetry()
+                raise
+
+            (
+                terminal_status,
+                audit_rows_processed,
+                audit_rows_succeeded,
+                audit_rows_failed,
+                audit_rows_routed_success,
+                audit_rows_routed_failure,
+                audit_rows_quarantined,
+            ) = self._derive_resume_terminal_status_from_audit(factory, run_id)
+            factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
+            # Existing RunFinished, RunSummary, checkpoint deletion, and
+            # RunResult return block follows unchanged.
+```
+
+Do not leave a second `resume_start_time = time.perf_counter()` assignment below
+the no-work branch; the row-processing path should reuse the earlier timestamp.
+
+**Step 2d: Add the positive fork/coalesce false-positive regression**
 
 Add this concrete test body to `tests/integration/test_adr_019_sweep_durability.py`
 or to `tests/integration/test_adr_019_cross_table_invariants.py` if that file
@@ -992,9 +1123,8 @@ def test_valid_fork_coalesce_run_does_not_false_positive_after_sink_writes(
     from elspeth.core.landscape.database import LandscapeDB
     from elspeth.core.payload_store import FilesystemPayloadStore
     from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-    from tests.fixtures.base_classes import as_sink, as_source, as_transform
+    from tests.fixtures.base_classes import as_sink, as_source
     from tests.fixtures.pipeline import build_fork_pipeline
-    from tests.fixtures.plugins import PassTransform
 
     db = LandscapeDB(f"sqlite:///{tmp_path / 'audit.db'}")
     payload_store = FilesystemPayloadStore(tmp_path / "payloads")
@@ -1024,19 +1154,20 @@ def test_valid_fork_coalesce_run_does_not_false_positive_after_sink_writes(
         branches=["path_a", "path_b"],
         policy="require_all",
         merge="union",
+        on_success="default",
     )
-    source, transforms, sinks, graph = build_fork_pipeline(
+    source, _transforms, sinks, graph = build_fork_pipeline(
         [{"id": 1, "value": 7}],
         gate=gate,
         branch_transforms={
-            "path_a": [PassTransform(name="a_pass", input_connection="path_a", on_success="merge_results")],
-            "path_b": [PassTransform(name="b_pass", input_connection="path_b", on_success="merge_results")],
+            "path_a": [],
+            "path_b": [],
         },
         coalesce_settings=[coalesce],
     )
     config = PipelineConfig(
         source=as_source(source),
-        transforms=[as_transform(t) for t in transforms],
+        transforms=[],
         sinks={name: as_sink(sink) for name, sink in sinks.items()},
         coalesce_settings=[coalesce],
         gates=[gate],
@@ -1187,6 +1318,7 @@ Expected: tests pass.
 - [ ] `sweep_deferred_invariants_or_crash` method added
 - [ ] Wired into `_execute_run` immediately after `_flush_and_write_sinks(...)` returns and before final progress / `PhaseCompleted`
 - [ ] Wired into `_process_resumed_rows` immediately after resume `_flush_and_write_sinks(...)` returns
+- [ ] Wired into the public `resume()` no-work terminalization branch before `_derive_resume_terminal_status_from_audit(...)` and `finalize_run(...)`, with sweep failures finalized through the failed ceremony rather than successful terminalization
 - [ ] Concrete Orchestrator regression `test_valid_fork_coalesce_run_does_not_false_positive_after_sink_writes` proves a valid fork/coalesce-to-sink run does not false-positive because the sweep runs after sink outcomes are recorded
 - [ ] Resume regression test proves a resumed run also invokes `sweep_deferred_invariants_or_crash(run_id)` after resume sink writes
 - [ ] I1a and I1b integration tests pass
@@ -1273,8 +1405,8 @@ factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
 
 Create: `tests/integration/test_adr_019_sweep_durability.py`
 
-Minimum regression matrix (four named tests, each asserting all three required
-properties: propagation, `FAILED` finalization, and row preservation):
+Required regression matrix (each row asserts propagation, `FAILED`
+finalization, and evidence preservation):
 
 | Test | Path | Required assertions |
 | --- | --- | --- |
@@ -1282,9 +1414,23 @@ properties: propagation, `FAILED` finalization, and row preservation):
 | `test_execute_i1b_sweep_crash_propagates_fails_and_preserves_orphan` | fresh run, I1b uncompleted batch | public `Orchestrator.run()` raises `AuditIntegrityError`; run row is `RunStatus.FAILED`; planted `BATCH_CONSUMED` row and referenced non-completed batch remain queryable |
 | `test_resume_i1a_sweep_crash_propagates_fails_and_preserves_orphan` | resume path, I1a orphan parent | public resume entrypoint raises `AuditIntegrityError`; run row is `RunStatus.FAILED`; planted parent row remains queryable |
 | `test_resume_i1b_sweep_crash_propagates_fails_and_preserves_orphan` | resume path, I1b uncompleted batch | public resume entrypoint raises `AuditIntegrityError`; run row is `RunStatus.FAILED`; planted batch-consumed row remains queryable |
+| `test_resume_noop_i1a_sweep_crash_propagates_fails_and_preserves_orphan` | no-work resume branch, I1a orphan parent | public resume entrypoint raises `AuditIntegrityError`; run row is `RunStatus.FAILED`; planted parent row remains queryable; `_process_resumed_rows` is not called |
+| `test_resume_noop_i1b_sweep_crash_propagates_fails_and_preserves_orphan` | no-work resume branch, I1b uncompleted batch | public resume entrypoint raises `AuditIntegrityError`; run row is `RunStatus.FAILED`; planted batch-consumed row and referenced non-completed batch remain queryable; `_process_resumed_rows` is not called |
+| `test_execute_i1c_realtime_crash_propagates_fails_and_preserves_witnesses` | fresh run, failsink producer passes wrong exact sink/artifact witness | public `Orchestrator.run()` raises `AuditIntegrityError`; run row is `RunStatus.FAILED`; the completed failsink node_state and artifact rows written before `record_token_outcome` remain queryable |
+| `test_execute_i3_realtime_crash_propagates_fails_and_preserves_failed_sink_state` | fresh run, discard producer violates I3 after primary sink state is written | public `Orchestrator.run()` raises `AuditIntegrityError`; run row is `RunStatus.FAILED`; the primary FAILED sink node_state remains queryable and no cleanup deletes discard evidence |
 
 `test_sweep_skipped_on_graceful_shutdown` remains an additional shutdown-gate
 test; it is not a substitute for any row-preservation matrix case.
+
+The I1c/I3 durability rows must corrupt the producer boundary, not the invariant
+method itself. For I1c, monkeypatch the failsink recording producer so the
+failsink node_state/artifact are durably written but `record_token_outcome`
+receives a sibling `sink_node_id` or sibling artifact id. For I3, monkeypatch
+the discard producer so it reaches `record_token_outcome` with a contradictory
+completed sink state or otherwise violates the real-time I3 condition after the
+primary sink state has been durably completed as FAILED. Do not monkeypatch
+`_validate_cross_table_invariants` to raise directly for these two rows; that
+would skip the producer/evidence path the test is supposed to prove.
 
 ```python
 """ADR-019 Phase 4: sweep-crash audit-trail durability regression test.
@@ -1312,13 +1458,14 @@ only way to produce these in a test is via direct factory API surgery
 already cover. This file tests the propagation path, not the detection logic.
 
 PREREQUISITES:
-- Phase 2's ``record_token_outcome`` signature with ``outcome/path`` params.
-- Phase 3's ``tests/integration/_helpers.py`` (config, db, store) factory —
-  does NOT exist yet when Phase 4 is written. If _helpers.py is absent,
-  use the raw ``RecorderFactory`` + ``Orchestrator.run(config, ...)`` pattern
-  from ``tests/integration/pipeline/test_basic_pipeline.py`` instead.
-  The monkeypatch approach works with either; the Orchestrator instance is
-  the same object whether constructed via _helpers.py or directly.
+- Phases 1-3's ``record_token_outcome`` signature with ``outcome/path`` params.
+- Use raw ``RecorderFactory`` + ``Orchestrator.run(config, ...)`` construction
+  or a new ADR-019-compatible helper in this file. Do not reuse
+  ``TestResumeLifecycle._setup_failed_run`` from
+  ``tests/integration/pipeline/orchestrator/test_graceful_shutdown.py`` unless
+  it has first been updated to record two-axis ``TerminalOutcome`` /
+  ``TerminalPath`` rows; the current helper is an ADR-018 fixture and records
+  ``RowOutcome.COMPLETED`` without ``path``.
 - Phase 4's ``sweep_deferred_invariants_or_crash`` on DataFlowRepository
   (Task 4.3 Step 3a). RED until this method exists.
 
@@ -1332,8 +1479,9 @@ from __future__ import annotations
 
 import pytest
 
+from elspeth.contracts import NodeType, RunStatus
 from elspeth.contracts.audit import TokenRef
-from elspeth.contracts.enums import NodeType, RunStatus, TerminalOutcome, TerminalPath
+from elspeth.contracts.enums import BatchStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.factory import RecorderFactory
@@ -1341,7 +1489,7 @@ from elspeth.core.landscape.factory import RecorderFactory
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
 
-def _plant_orphan_fork_parent(factory: RecorderFactory, run_id: str) -> str:
+def _plant_orphan_fork_parent(factory: RecorderFactory, run_id: str, *, row_index: int = 999) -> str:
     """Plant a (TRANSIENT, FORK_PARENT) token with no children into an existing run.
     Returns the token_id. Called from the monkeypatched database-phase wrapper
     after the run row exists but before Orchestrator enters _execute_run, so the
@@ -1362,7 +1510,7 @@ def _plant_orphan_fork_parent(factory: RecorderFactory, run_id: str) -> str:
     row = factory.data_flow.create_row(
         run_id=run_id,
         source_node_id=source.node_id,
-        row_index=999,
+        row_index=row_index,
         data={"planted": True},
     )
     token = factory.data_flow.create_token(row_id=row.row_id)
@@ -1375,7 +1523,7 @@ def _plant_orphan_fork_parent(factory: RecorderFactory, run_id: str) -> str:
     return token.token_id
 
 
-def _plant_orphan_batch_consumed(factory: RecorderFactory, run_id: str) -> str:
+def _plant_orphan_batch_consumed(factory: RecorderFactory, run_id: str, *, row_index: int = 998) -> str:
     """Plant a (TRANSIENT, BATCH_CONSUMED) token whose batch never completes.
     Called from the monkeypatched database-phase wrapper before _execute_run for
     the same durability reason as _plant_orphan_fork_parent.
@@ -1391,7 +1539,7 @@ def _plant_orphan_batch_consumed(factory: RecorderFactory, run_id: str) -> str:
     row = factory.data_flow.create_row(
         run_id=run_id,
         source_node_id=source_node.node_id,
-        row_index=998,
+        row_index=row_index,
         data={"planted_i1b": True},
     )
     token = factory.data_flow.create_token(row_id=row.row_id)
@@ -1414,6 +1562,183 @@ def _plant_orphan_batch_consumed(factory: RecorderFactory, run_id: str) -> str:
     return token.token_id
 
 
+def _setup_adr019_failed_resume_run(
+    db,
+    payload_store,
+    run_id: str,
+    *,
+    num_rows: int,
+    processed_count: int,
+):
+    """ADR-019-compatible failed-run fixture for resume durability tests.
+
+    Implement this as a local clone of
+    ``TestResumeLifecycle._setup_failed_run`` from
+    ``tests/integration/pipeline/orchestrator/test_graceful_shutdown.py``:
+    keep its production ``build_linear_pipeline`` graph construction, manual
+    runs/nodes/edges/rows/tokens SQL bootstrap, and checkpoint creation, but
+    replace the stale ADR-018 terminal recording loop with:
+
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=f"t{i}", run_id=run_id),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="default",
+        )
+
+    The helper must not import the old one-axis enum or call the stale resume
+    fixture. Verify with:
+    ``rg -n "outcome=RowOutcome|TestResumeLifecycle\\(\\)\\._setup_failed_run" tests/integration/test_adr_019_sweep_durability.py``.
+    """
+    import json as json_mod
+    from datetime import UTC, datetime
+
+    from sqlalchemy import insert
+
+    from elspeth.contracts.contract_records import ContractAuditRecord
+    from elspeth.contracts.enums import Determinism, RoutingMode
+    from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
+    from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+    from elspeth.core.canonical import canonical_json
+    from elspeth.core.checkpoint import CheckpointManager
+    from elspeth.core.landscape.schema import (
+        edges_table,
+        nodes_table,
+        rows_table,
+        runs_table,
+        tokens_table,
+    )
+    from elspeth.engine.orchestrator import prepare_for_run
+    from tests.fixtures.base_classes import as_transform
+    from tests.fixtures.pipeline import build_linear_pipeline
+    from tests.fixtures.plugins import PassTransform
+
+    now = datetime.now(UTC)
+    prepare_for_run()
+    runtime_val_manifest_json = canonical_json(build_runtime_val_manifest())
+
+    source_data = [{"value": i} for i in range(num_rows)]
+    transform = PassTransform()
+    _, _, _, graph = build_linear_pipeline(source_data, transforms=[as_transform(transform)])
+
+    source_nid = graph.get_source()
+    assert source_nid is not None
+    transform_id_map = graph.get_transform_id_map()
+    sink_id_map = graph.get_sink_id_map()
+    xform_nid = str(transform_id_map[0])
+    sink_nid = str(next(iter(sink_id_map.values())))
+
+    source_schema_json = json_mod.dumps({"properties": {"value": {"type": "integer"}}, "required": ["value"]})
+    contract = SchemaContract(
+        mode="FIXED",
+        fields=(
+            FieldContract(
+                normalized_name="value",
+                original_name="value",
+                python_type=int,
+                required=True,
+                source="declared",
+            ),
+        ),
+        locked=True,
+    )
+    audit_record = ContractAuditRecord.from_contract(contract)
+
+    with db.engine.begin() as conn:
+        conn.execute(
+            insert(runs_table).values(
+                run_id=run_id,
+                started_at=now,
+                config_hash="test",
+                settings_json="{}",
+                canonical_version="v1",
+                status=RunStatus.FAILED,
+                source_schema_json=source_schema_json,
+                schema_contract_json=audit_record.to_json(),
+                schema_contract_hash=contract.version_hash(),
+                runtime_val_manifest_json=runtime_val_manifest_json,
+            )
+        )
+
+        for node_id, plugin_name, node_type in [
+            (source_nid, "list_source", NodeType.SOURCE),
+            (xform_nid, "passthrough", NodeType.TRANSFORM),
+            (sink_nid, "collect_sink", NodeType.SINK),
+        ]:
+            conn.execute(
+                insert(nodes_table).values(
+                    node_id=node_id,
+                    run_id=run_id,
+                    plugin_name=plugin_name,
+                    node_type=node_type,
+                    plugin_version="1.0.0",
+                    determinism=Determinism.DETERMINISTIC if node_type != NodeType.SINK else Determinism.IO_WRITE,
+                    config_hash="test",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+
+        for edge_id, from_node, to_node in [
+            ("e1", source_nid, xform_nid),
+            ("e2", xform_nid, sink_nid),
+        ]:
+            conn.execute(
+                insert(edges_table).values(
+                    edge_id=edge_id,
+                    run_id=run_id,
+                    from_node_id=from_node,
+                    to_node_id=to_node,
+                    label="continue",
+                    default_mode=RoutingMode.MOVE,
+                    created_at=now,
+                )
+            )
+
+        for i in range(num_rows):
+            row_data = {"value": i}
+            ref = payload_store.store(json_mod.dumps(row_data).encode())
+            conn.execute(
+                insert(rows_table).values(
+                    row_id=f"r{i}",
+                    run_id=run_id,
+                    source_node_id=source_nid,
+                    row_index=i,
+                    source_data_hash=f"h{i}",
+                    source_data_ref=ref,
+                    created_at=now,
+                )
+            )
+            conn.execute(
+                insert(tokens_table).values(
+                    token_id=f"t{i}",
+                    row_id=f"r{i}",
+                    run_id=run_id,
+                    created_at=now,
+                )
+            )
+
+    factory = RecorderFactory(db)
+    for i in range(processed_count):
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=f"t{i}", run_id=run_id),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="default",
+        )
+
+    if processed_count > 0:
+        CheckpointManager(db).create_checkpoint(
+            run_id=run_id,
+            token_id=f"t{processed_count - 1}",
+            node_id=xform_nid,
+            sequence_number=processed_count - 1,
+            graph=graph,
+        )
+
+    return graph
+
+
 class TestSweepCrashAuditTrailDurability:
     def test_orphaned_fork_parent_crashes_run_with_durable_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1434,10 +1759,8 @@ class TestSweepCrashAuditTrailDurability:
         RED until Task 4.3 adds sweep_deferred_invariants_or_crash to DataFlowRepository.
         Fails with AttributeError on monkeypatch.setattr until Phase 4 lands.
 
-        PREREQUISITE: Phase 3's tests/integration/_helpers.py does not exist yet.
-        If it is available when implementing this test, use its (config, db, store)
-        pattern. Otherwise, use the direct pipeline construction pattern from
-        tests/integration/pipeline/test_basic_pipeline.py.
+        PREREQUISITE: use an ADR-019-compatible direct pipeline construction
+        pattern. Do not reuse stale RowOutcome-based resume helpers.
         """
         from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 
@@ -1546,12 +1869,9 @@ class TestSweepCrashAuditTrailDurability:
             "The orphan token_outcomes row must persist after the sweep crash. "
             "Tier 1 evidence is never deleted — CLAUDE.md Auditability Standard."
         )
-        # TokenOutcome.outcome holds RowOutcome in pre-Phase-2 code; post-Phase-2
-        # the field will hold TerminalOutcome. The assertion uses the string value
-        # to remain compatible across both phases.
-        assert orphan_outcome.outcome is not None, (
-            "Orphan row must have an outcome field — Tier 1 crash on bad DB state."
-        )
+        assert orphan_outcome.outcome == TerminalOutcome.TRANSIENT
+        assert orphan_outcome.path == TerminalPath.FORK_PARENT
+        assert orphan_outcome.fork_group_id == "fg_durability_planted"
 
     def test_orphaned_batch_consumed_crashes_run_with_durable_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1665,9 +1985,12 @@ class TestSweepCrashAuditTrailDurability:
             "The BATCH_CONSUMED orphan token_outcomes row must persist after the "
             "sweep crash — Tier 1 evidence is never deleted."
         )
-        assert orphan_outcome.outcome is not None, (
-            "Orphan row must have an outcome field — Tier 1 crash on bad DB state."
-        )
+        assert orphan_outcome.outcome == TerminalOutcome.TRANSIENT
+        assert orphan_outcome.path == TerminalPath.BATCH_CONSUMED
+        assert orphan_outcome.batch_id == "batch_durability_evidence_i1b"
+        orphan_batch = factory.execution.get_batch("batch_durability_evidence_i1b")
+        assert orphan_batch is not None
+        assert orphan_batch.status != BatchStatus.COMPLETED
 
     @pytest.mark.parametrize(
         ("label", "plant_orphan"),
@@ -1708,9 +2031,6 @@ class TestSweepCrashAuditTrailDurability:
         from tests.fixtures.base_classes import as_sink, as_source, as_transform
         from tests.fixtures.plugins import CollectSink
         from tests.fixtures.stores import MockPayloadStore
-        from tests.integration.pipeline.orchestrator.test_graceful_shutdown import (
-            TestResumeLifecycle,
-        )
 
         run_id = f"adr019-resume-sweep-{label.lower()}"
         db = LandscapeDB.in_memory()
@@ -1720,10 +2040,11 @@ class TestSweepCrashAuditTrailDurability:
             CheckpointSettings(enabled=True, frequency="every_row")
         )
 
-        # Reuse the existing resume fixture builder until it is extracted into a
-        # shared helper. It creates a failed run with unprocessed rows and builds
-        # the graph through ExecutionGraph.from_plugin_instances().
-        graph = TestResumeLifecycle()._setup_failed_run(
+        # Local ADR-019-compatible helper. It creates a failed run with
+        # unprocessed rows and builds the graph through
+        # ExecutionGraph.from_plugin_instances(), but records processed rows with
+        # TerminalOutcome/TerminalPath, not stale RowOutcome.
+        graph = _setup_adr019_failed_resume_run(
             db,
             payload_store,
             run_id,
@@ -1790,7 +2111,137 @@ class TestSweepCrashAuditTrailDurability:
 
         orphan_outcome = factory.data_flow.get_token_outcome(planted_token_id)
         assert orphan_outcome is not None
-        assert orphan_outcome.outcome is not None
+        assert orphan_outcome.outcome == TerminalOutcome.TRANSIENT
+        if label == "I1a":
+            assert orphan_outcome.path == TerminalPath.FORK_PARENT
+            assert orphan_outcome.fork_group_id == "fg_durability_planted"
+        else:
+            assert orphan_outcome.path == TerminalPath.BATCH_CONSUMED
+            assert orphan_outcome.batch_id == "batch_durability_evidence_i1b"
+            orphan_batch = factory.execution.get_batch("batch_durability_evidence_i1b")
+            assert orphan_batch is not None
+            assert orphan_batch.status != BatchStatus.COMPLETED
+
+    @pytest.mark.parametrize(
+        ("label", "plant_orphan"),
+        [
+            ("I1a", _plant_orphan_fork_parent),
+            ("I1b", _plant_orphan_batch_consumed),
+        ],
+        ids=[
+            "resume-noop-i1a-orphan-parent",
+            "resume-noop-i1b-uncompleted-batch",
+        ],
+    )
+    def test_resume_noop_sweep_crash_propagates_fails_and_preserves_orphan(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        label: str,
+        plant_orphan,
+    ) -> None:
+        """No-work resume branch: sweep runs even when _process_resumed_rows is skipped.
+
+        This covers the public resume shortcut where all rows were already
+        processed and no restored aggregation/coalesce state exists. Without the
+        explicit Phase 4 sweep in that branch, the run can derive/finalize a
+        successful terminal status from stale audit rows while orphaned I1a/I1b
+        evidence remains in the database.
+        """
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.config import CheckpointSettings
+        from elspeth.core.landscape.database import LandscapeDB
+        from elspeth.core.landscape.data_flow_repository import DataFlowRepository
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.plugins.sources.null_source import NullSource
+        from elspeth.plugins.transforms.passthrough import PassThrough
+        from tests.fixtures.base_classes import as_sink, as_source, as_transform
+        from tests.fixtures.plugins import CollectSink
+        from tests.fixtures.stores import MockPayloadStore
+
+        run_id = f"adr019-resume-noop-sweep-{label.lower()}"
+        db = LandscapeDB.in_memory()
+        payload_store = MockPayloadStore()
+        checkpoint_mgr = CheckpointManager(db)
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(
+            CheckpointSettings(enabled=True, frequency="every_row")
+        )
+
+        graph = _setup_adr019_failed_resume_run(
+            db,
+            payload_store,
+            run_id,
+            num_rows=2,
+            processed_count=2,
+        )
+        factory = RecorderFactory(db)
+        # Keep evidence outside the resume query's "after last checkpoint"
+        # range so this test stays on the no-work terminalization branch.
+        planted_token_id = plant_orphan(factory, run_id, row_index=-1)
+
+        resume_point = RecoveryManager(db, checkpoint_mgr).get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        pass_through = PassThrough({"schema": {"mode": "observed"}})
+        pass_through.on_success = "default"
+        pass_through.on_error = "discard"
+        null_source = NullSource({})
+        null_source.on_success = "default"
+        resume_sink = CollectSink()
+        resume_config = PipelineConfig(
+            source=as_source(null_source),
+            transforms=[as_transform(pass_through)],
+            sinks={"default": as_sink(resume_sink)},
+        )
+
+        process_calls: list[str] = []
+        sweep_calls: list[str] = []
+
+        def _fail_if_processed(self: Orchestrator, *args, **kwargs):
+            process_calls.append("process")
+            raise AssertionError("no-work resume branch must not call _process_resumed_rows")
+
+        def _sweep_raises(self: DataFlowRepository, run_id_arg: str) -> None:
+            sweep_calls.append(run_id_arg)
+            raise AuditIntegrityError(
+                f"ADR-019 {label} violation: monkeypatched no-op resume durability test"
+            )
+
+        monkeypatch.setattr(Orchestrator, "_process_resumed_rows", _fail_if_processed)
+        monkeypatch.setattr(DataFlowRepository, "sweep_deferred_invariants_or_crash", _sweep_raises)
+
+        orchestrator = Orchestrator(
+            db=db,
+            checkpoint_manager=checkpoint_mgr,
+            checkpoint_config=checkpoint_config,
+        )
+        with pytest.raises(AuditIntegrityError, match=label):
+            orchestrator.resume(
+                resume_point=resume_point,
+                config=resume_config,
+                graph=graph,
+                payload_store=payload_store,
+            )
+
+        assert process_calls == []
+        assert sweep_calls == [run_id]
+
+        run_row = factory.run_lifecycle.get_run(run_id)
+        assert run_row is not None
+        assert run_row.status == RunStatus.FAILED
+
+        orphan_outcome = factory.data_flow.get_token_outcome(planted_token_id)
+        assert orphan_outcome is not None
+        assert orphan_outcome.outcome == TerminalOutcome.TRANSIENT
+        if label == "I1a":
+            assert orphan_outcome.path == TerminalPath.FORK_PARENT
+            assert orphan_outcome.fork_group_id == "fg_durability_planted"
+        else:
+            assert orphan_outcome.path == TerminalPath.BATCH_CONSUMED
+            assert orphan_outcome.batch_id == "batch_durability_evidence_i1b"
+            orphan_batch = factory.execution.get_batch("batch_durability_evidence_i1b")
+            assert orphan_batch is not None
+            assert orphan_batch.status != BatchStatus.COMPLETED
 
     def test_sweep_skipped_on_graceful_shutdown(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1864,7 +2315,8 @@ class TestSweepCrashAuditTrailDurability:
 Expected RED states:
 - Before Task 4.3: `monkeypatch.setattr(DataFlowRepository, "sweep_deferred_invariants_or_crash", ...)` fails with `AttributeError` — the method does not exist yet. This is the correct RED signal: the test cannot be faked green because `monkeypatch.setattr` asserts the attribute exists before overwriting it.
 - After Task 4.3 (method exists but only the fresh-run hook is wired): the parametrized resume cases fail because `sweep_calls == []` or the flush/sweep ordering assertion fails.
-- GREEN: the five durability cases pass after the full propagation path is wired: fresh I1a, fresh I1b, resume I1a, resume I1b, and graceful-shutdown skip.
+- After Task 4.3 (fresh/resume row-processing hooks wired but no-op resume omitted): the no-op resume cases fail because `_process_resumed_rows` is not called and `sweep_calls == []`.
+- GREEN: the durability matrix passes after the full propagation path is wired: fresh I1a, fresh I1b, resume I1a, resume I1b, no-op resume I1a, no-op resume I1b, I1c real-time producer crash, I3 real-time producer crash, and graceful-shutdown skip.
 
 **Step 5: Final propagation audit**
 
@@ -1885,7 +2337,7 @@ grep -B 2 "class AuditIntegrityError" src/elspeth/contracts/errors.py
 - [ ] Verified the exception propagation path from `DataFlowRepository.sweep_deferred_invariants_or_crash` to `factory.run_lifecycle.finalize_run(run_id, status=RunStatus.FAILED)` — no intermediate handler swallows `AuditIntegrityError`
 - [ ] `_RunFailedWithPartialResultError.__cause__` semantics documented and verified for any internal-path assertion
 - [ ] Audit-trail durability comment block added at the sweep call site
-- [ ] Four durability matrix tests pass: fresh I1a, fresh I1b, resume I1a, resume I1b; each asserts propagation, `FAILED` finalization, and row preservation
+- [ ] Durability matrix tests pass: fresh I1a, fresh I1b, resume I1a, resume I1b, no-op resume I1a, no-op resume I1b, I1c real-time producer crash, and I3 real-time producer crash; each asserts propagation, `FAILED` finalization, and evidence preservation
 - [ ] Graceful-shutdown skip regression passes and documents that the sweep is intentionally not run when `_flush_and_write_sinks(...)` raises `GracefulShutdownError`
 - [ ] Orphaned `token_outcomes` rows verified to PERSIST after sweep crash (Tier 1 evidence preservation)
 - [ ] No regression in graceful-shutdown handling
@@ -1917,6 +2369,9 @@ grep -B 2 "class AuditIntegrityError" src/elspeth/contracts/errors.py
     tests/integration/test_adr_019_cross_table_invariants.py \
     tests/integration/test_adr_019_sweep_durability.py \
     tests/unit/core/landscape/test_data_flow_repository.py
+.venv/bin/python scripts/cicd/adr019_symbol_inventory.py check \
+    --root src/elspeth \
+    --allowlist config/cicd/adr019_symbol_inventory
 ```
 
 Expected: all focused Phase 4 invariant and durability tests pass. The full
@@ -1950,9 +2405,11 @@ Real-time at recording (data_flow_repository.py::_validate_cross_table_invariant
   sink_name='__discard__' and no paired sink-completion node_state. Verified
   at write time per ADR-019 line 261.
 
-Deferred / end-of-run sweep (orchestrator/core.py::_execute_run calls
-`factory.data_flow.sweep_deferred_invariants_or_crash(run_id)` immediately after
-`_flush_and_write_sinks(...)` returns):
+Deferred / end-of-run sweep (orchestrator/core.py::_execute_run and
+_process_resumed_rows call `factory.data_flow.sweep_deferred_invariants_or_crash(run_id)`
+immediately after `_flush_and_write_sinks(...)` returns; the public resume
+no-work terminalization branch calls it before deriving/finalizing terminal
+status):
 - I1a (lineage-paired): every fork/expand parent must have ≥1 child token by
   end of run. Children land later than parents, so write-time check is impossible.
 - I1b (aggregate-paired): every BATCH_CONSUMED token's consuming batch must have
@@ -1980,10 +2437,10 @@ Plus a sweep-crash audit-trail durability contract (Task 4.4):
 - Shutdown-gated: graceful shutdown skips the sweep because
   `_flush_and_write_sinks(...)` raises before the post-sink sweep site,
   preserving the resume contract.
-- Four durability matrix tests in tests/integration/test_adr_019_sweep_durability.py
-  pin fresh/resume I1a and I1b crash paths, evidence preservation, and FAILED
-  finalization. A separate shutdown-skip test records the graceful-shutdown
-  behaviour.
+- Durability matrix tests in tests/integration/test_adr_019_sweep_durability.py
+  pin fresh/resume/no-op-resume I1a and I1b crash paths, I1c/I3 real-time
+  producer crash paths, evidence preservation, and FAILED finalization. A
+  separate shutdown-skip test records the graceful-shutdown behaviour.
 
 Refs: elspeth-edb60744f0 (Stage 3 ticket — producer + accumulator)
 ADR: docs/architecture/adr/019-two-axis-terminal-model.md § Cross-check invariants
@@ -1995,6 +2452,7 @@ EOF
 
 **Definition of Done:**
 - [ ] All four invariants implemented (two real-time, two deferred)
-- [ ] Six integration tests pass
+- [ ] Cross-table invariant suite and durability matrix pass, including no-op resume, I1c, and I3 durability rows
+- [ ] ADR-019 AST symbol inventory gate passes with `--allowlist config/cicd/adr019_symbol_inventory`
 - [ ] No regression in other tests, OR latent bugs surfaced and fixed (not relaxed)
 - [ ] Phase 4 commit landed

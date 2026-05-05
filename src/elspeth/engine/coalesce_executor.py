@@ -1010,10 +1010,17 @@ class CoalesceExecutor:
                     raise OrchestrationInvariantError(
                         "CoalesceExecutor.data_flow is None but token outcome recording requires DataFlowRepository"
                     )
+                if settings.on_success is None:
+                    raise OrchestrationInvariantError(
+                        f"Coalesce '{settings.name}' recorded consumed COALESCED tokens "
+                        "without an on_success sink witness. ADR-019 requires "
+                        "sink_name on (SUCCESS, COALESCED) token outcomes."
+                    )
                 self._data_flow.record_token_outcome(
                     ref=TokenRef(token_id=entry.token.token_id, run_id=self._run_id),
                     outcome=TerminalOutcome.SUCCESS,
                     path=TerminalPath.COALESCED,
+                    sink_name=settings.on_success,
                     join_group_id=merged_token.join_group_id,
                 )
 

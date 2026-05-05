@@ -332,18 +332,19 @@ allow_hits:
   reason: "Tier-3 boundary \u2014 quarantined row data may contain NaN/Infinity that stable_hash rejects"
   safety: Falls back to repr_hash with debug logging; audit trail uses separate hashing path
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=14489290ea1bf14b
+- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=a97bc640dca2b843
   owner: architecture
   reason: "Best-effort interrupted ceremony on resume \u2014 must not mask original shutdown exception"
   safety: Catches and logs; original exception always re-raised
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=6626c501c1ba9413
+- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=4f63bd35ea46f972
   owner: architecture
-  reason: "Best-effort interrupted ceremony on resume \u2014 must not mask original shutdown exception"
-  safety: Catches and logs; original exception always re-raised
+  reason: "Best-effort failed ceremony on resume partial-result failure \u2014 must not mask the original\
+    \ pipeline exception"
+  safety: Catches and logs; original pipeline exception is re-raised with its original traceback
   expires: '2026-07-10'
-- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=f41c66873c4d7bca
+- key: engine/orchestrator/core.py:R4:Orchestrator:resume:fp=2648fcbeba680386
   owner: architecture
-  reason: "Best-effort interrupted ceremony on resume \u2014 must not mask original shutdown exception"
+  reason: "Best-effort failed ceremony on resume generic failure \u2014 must not mask the original exception"
   safety: Catches and logs; original exception always re-raised
   expires: '2026-07-10'

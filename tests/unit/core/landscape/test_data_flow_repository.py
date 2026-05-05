@@ -33,7 +33,7 @@ from elspeth.contracts.audit import (
     DISCARD_SINK_NAME,
     TokenRef,
 )
-from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import repr_hash
 from elspeth.contracts.schema import SchemaConfig
@@ -127,6 +127,39 @@ def _make_repo_with_token(
     token = repo.create_token("row-1", token_id="tok-1")
     factory.execution.create_batch(run_id=run_id, aggregation_node_id="transform-1", batch_id="batch-1")
     return db, repo, factory, row.row_id, token.token_id
+
+
+def _record_completed_sink_state_with_artifact(
+    factory: RecorderFactory,
+    *,
+    run_id: str,
+    token_id: str,
+    sink_node_id: str = "sink-0",
+) -> str:
+    """Create the I1c node-state and artifact witnesses for direct repo tests."""
+    state = factory.execution.begin_node_state(
+        token_id=token_id,
+        node_id=sink_node_id,
+        run_id=run_id,
+        step_index=0,
+        input_data={},
+    )
+    factory.execution.complete_node_state(
+        state_id=state.state_id,
+        status=NodeStateStatus.COMPLETED,
+        output_data={"written": True},
+        duration_ms=1.0,
+    )
+    artifact = factory.execution.register_artifact(
+        run_id=run_id,
+        state_id=state.state_id,
+        sink_node_id=sink_node_id,
+        artifact_type="test",
+        path=f"memory://unit/{token_id}",
+        content_hash="deadbeef" * 8,
+        size_bytes=0,
+    )
+    return artifact.artifact_id
 
 
 def _valid_constraint_fields(pair: tuple[TerminalOutcome | None, TerminalPath]) -> dict[str, str]:
@@ -332,17 +365,77 @@ class TestRecordTokenOutcomeTwoAxis:
         self,
         pair: tuple[TerminalOutcome | None, TerminalPath],
     ) -> None:
-        _db, repo, _fac, _row, tok = _make_repo_with_token()
+        _db, repo, fac, _row, tok = _make_repo_with_token()
         outcome, path = pair
+        fields = _valid_constraint_fields(pair)
+        if pair == (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK):
+            fields["sink_node_id"] = "sink-0"
+            fields["artifact_id"] = _record_completed_sink_state_with_artifact(
+                fac,
+                run_id="run-1",
+                token_id=tok,
+            )
 
         outcome_id = repo.record_token_outcome(
             ref=TokenRef(token_id=tok, run_id="run-1"),
             outcome=outcome,
             path=path,
-            **_valid_constraint_fields(pair),
+            **fields,
         )
 
         assert outcome_id.startswith("out_")
+
+    def test_record_failsink_fallback_requires_node_witness(self) -> None:
+        _db, repo, _fac, _row, tok = _make_repo_with_token()
+
+        with pytest.raises(AuditIntegrityError, match=r"I1c.*node_id"):
+            repo.record_token_outcome(
+                ref=TokenRef(token_id=tok, run_id="run-1"),
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
+                sink_name="sink-0",
+                error_hash=_ERROR_HASH,
+            )
+
+    def test_record_failsink_fallback_rejects_missing_artifact_witness(self) -> None:
+        _db, repo, fac, _row, tok = _make_repo_with_token()
+        state = fac.execution.begin_node_state(
+            token_id=tok,
+            node_id="sink-0",
+            run_id="run-1",
+            step_index=0,
+            input_data={},
+        )
+        fac.execution.complete_node_state(
+            state_id=state.state_id,
+            status=NodeStateStatus.COMPLETED,
+            output_data={"written": True},
+            duration_ms=1.0,
+        )
+
+        with pytest.raises(AuditIntegrityError, match=r"I1c.*artifact"):
+            repo.record_token_outcome(
+                ref=TokenRef(token_id=tok, run_id="run-1"),
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
+                sink_name="sink-0",
+                sink_node_id="sink-0",
+                artifact_id="missing-artifact",
+                error_hash=_ERROR_HASH,
+            )
+
+    def test_record_discard_rejects_completed_sink_state(self) -> None:
+        _db, repo, fac, _row, tok = _make_repo_with_token()
+        _record_completed_sink_state_with_artifact(fac, run_id="run-1", token_id=tok)
+
+        with pytest.raises(AuditIntegrityError, match=r"I3.*discard"):
+            repo.record_token_outcome(
+                ref=TokenRef(token_id=tok, run_id="run-1"),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.SINK_DISCARDED,
+                sink_name=DISCARD_SINK_NAME,
+                error_hash=_ERROR_HASH,
+            )
 
     @pytest.mark.parametrize("pair", tuple(_TERMINAL_PAIR_FIELD_CONSTRAINTS))
     def test_record_rejects_each_constraint_row_violation(

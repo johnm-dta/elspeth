@@ -184,25 +184,25 @@ allow_hits:
 - key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=2c0214fa9a261b33
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=864b521d994e2469
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=60affc486e53170e
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
   safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
   expires: '2026-05-12'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=1675f19df514e450
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=7d0809b197d9ab44
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
   safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
   expires: '2026-05-12'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=66e345c2f88be022
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=5d39923434a1b710
   owner: architecture
   reason: Tier-3 boundary - row_data may contain NaN/Infinity which are not canonically serializable
   safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=e910713f29edd9d0
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=ec4658370df974ec
   owner: bugfix
   reason: Tier-3 boundary — error_details from transform results may contain NaN/Infinity that canonical_json rejects
   safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=2fd79ad08cbcb82b
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=f234b4284f04a49d
   owner: bugfix
   reason: Tier-2 boundary — row_data entering audit trail may contain NaN/Infinity that canonical_json rejects
   safety: Falls back to repr_hash + NonCanonicalMetadata — audit trail preserved

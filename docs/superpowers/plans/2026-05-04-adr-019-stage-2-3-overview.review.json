@@ -1,11 +1,11 @@
 {
   "verdict": "CHANGES_APPLIED_PENDING_REVIEW",
-  "go_no_go": "ROUND_5_REVIEW_REQUIRED",
-  "reviewed_at": "2026-05-05T01:40:21Z",
-  "patched_at": "2026-05-05T01:40:21Z",
-  "review_pass": "round-4 plan-review report supplied by operator: 2 blockers, 6 strong warnings, 7 minor warnings",
-  "patch_pass": "round-4 blocker and strong-warning remediation applied to the plan documents",
-  "summary": "Round 4 returned CHANGES_REQUESTED for two blockers and six strong warnings. This patch pass updates the plan documents for B1/B2 and W1-W6: the Phase 3 Pydantic decomposition formula now uses rows_succeeded + rows_failed ONLY and treats routed/quarantine counters as display-only subset fields; Phase 5 explicitly chooses to translate all assertion-only RowOutcome tests in this PR with no xfail/Stage-4 deferral; Phase 4 Task 4.4 now requires the four-by-three durability matrix and documents _RunFailedWithPartialResultError cause semantics; the closed-set test discipline now includes an AST fixture corpus, import-presence checks, and a positive legal-pair Hypothesis sweep; the hidden core.py:2199 diversion counter site remains cited in Phase 3 Task 3.3; all ADR-019 symbol inventory allowlist invocations use the directory-form config path; and the operator migration doc requirements now cover SchemaCompatibilityError guidance for stale DBs and resume-across-migration attempts. The plan is patched, not approved: run plan-review round 5 before execution.",
+  "go_no_go": "PHASE_4_REVIEW_REQUIRED",
+  "reviewed_at": "2026-05-05T08:10:06Z",
+  "patched_at": "2026-05-05T08:10:06Z",
+  "review_pass": "phase-4 focused plan-review after Phases 1-3 were reported complete",
+  "patch_pass": "phase-4 blocker and warning remediation applied to the Phase 4 plan document and synchronized overview text",
+  "summary": "Phase 4 review returned CHANGES_REQUESTED for the deferred sweep hook coverage, stale resume fixture reuse, non-executable test snippets, narrow durability coverage, underpowered exact-witness negatives, missing AST inventory gate, and stale RED/import wording. This patch updates Phase 4 and the overview to add the public resume no-work terminalization sweep, replace stale RowOutcome-based resume fixture reuse with an ADR-019-compatible helper, fix the I1a/I3/coalesce snippets, add exact sink-node and artifact witness negatives, expand the durability matrix to fresh/resume/no-op I1a/I1b plus I1c/I3 real-time producer crash rows, require exact evidence assertions, and include the ADR-019 AST symbol inventory gate. The plan is patched, not approved: run another plan-review pass before executing Phase 4.",
   "plan_files": [
     "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-overview.md",
     "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-1-schema-recorder.md",
@@ -23,106 +23,86 @@
   "issue_counts": {
     "blocking_open_after_patch": 0,
     "strong_warnings_open_after_patch": 0,
-    "minor_warnings_remaining": 2,
+    "minor_warnings_remaining": 0,
     "requires_review": true
   },
   "patched_blockers": [
     {
-      "id": "B1",
-      "title": "Decomposition formula double-counts post-Phase-3",
+      "id": "P4-B1",
+      "title": "No-op resume branch bypasses deferred invariant sweep",
       "status": "patched_pending_review",
       "changes": [
-        "Phase 3 Task 3.5 now marks the new formula as the B1 fix and defines sum_terminal = rows_succeeded + rows_failed ONLY.",
-        "rows_routed_success, rows_routed_failure, and rows_quarantined are described as display-only subset fields and removed from _validate_row_decomposition inputs.",
-        "Callers are instructed to pass routed/quarantine counters to _validate_response_counter_subsets instead."
+        "Phase 4 goal, file list, Task 4.3 hook instructions, DoD, and commit message now require a sweep in the public resume no-work terminalization branch before terminal status derivation/finalization.",
+        "The no-work branch instructions require sweep failures to route through the failed ceremony instead of successful terminalization.",
+        "Durability tests now include parametrized no-op resume I1a and I1b cases that assert _process_resumed_rows is not called, the sweep is called, the run finalizes FAILED, and planted evidence remains queryable."
       ]
     },
     {
-      "id": "B2",
-      "title": "Deferred RowOutcome assertions conflict with the green-suite gate",
+      "id": "P4-B2",
+      "title": "Resume durability fixture reused stale RowOutcome-only helper",
       "status": "patched_pending_review",
       "changes": [
-        "Overview D6 now explicitly chooses to translate assertion-only RowOutcome tests in this PR.",
-        "Phase 5 Category B is now MUST move with this PR; no xfail or Stage 4 manifest path remains.",
-        "Commit and PR templates now state Category B assertions are translated in this PR and no ADR-019 Stage 4 xfails remain."
+        "Phase 4 now forbids reusing TestResumeLifecycle._setup_failed_run unless it is first updated for ADR-019 two-axis outcomes.",
+        "The durability snippet defines _setup_adr019_failed_resume_run, preserving production graph/manual resume setup while recording processed rows with TerminalOutcome.SUCCESS and TerminalPath.DEFAULT_FLOW.",
+        "Resume tests now call the local ADR-019-compatible helper instead of importing TestResumeLifecycle."
+      ]
+    },
+    {
+      "id": "P4-B3",
+      "title": "Concrete test snippets were not executable against current contracts",
+      "status": "patched_pending_review",
+      "changes": [
+        "I1a happy path no longer records a duplicate parent outcome after fork_token, which already writes the parent FORK_PARENT row.",
+        "I3 wrong sink name is now a scalar-guard ValueError test instead of expecting AuditIntegrityError from the cross-table layer.",
+        "The fork/coalesce false-positive regression now uses identity branches and coalesce on_success='default' instead of branch transforms wired to the default sink before coalesce."
       ]
     }
   ],
   "patched_strong_warnings": [
     {
-      "id": "W1",
-      "title": "Task 4.4 needs four named regression tests times three asserted properties",
+      "id": "P4-W1",
+      "title": "Durability coverage did not cover every new Tier 1 invariant crash",
       "status": "patched_pending_review",
       "changes": [
-        "Phase 4 Task 4.4 now names fresh/resume I1a and I1b durability tests.",
-        "Each matrix row requires propagation, FAILED finalization, and row preservation assertions.",
-        "Graceful-shutdown skip is documented as an additional test, not a substitute for the matrix."
+        "Task 4.4 matrix now covers fresh I1a, fresh I1b, resume I1a, resume I1b, no-op resume I1a, no-op resume I1b, I1c real-time producer crash, and I3 real-time producer crash.",
+        "Every matrix row requires propagation, FAILED finalization, and evidence preservation.",
+        "The RED/GREEN expectations and DoD now name no-op resume and real-time I1c/I3 durability rows explicitly."
       ]
     },
     {
-      "id": "W2",
-      "title": "Closed-set test discipline needs fixture corpus, positive sweep, and import-presence check",
+      "id": "P4-W2",
+      "title": "I1c exact witness negatives were too weak",
       "status": "patched_pending_review",
       "changes": [
-        "Phase 1 Task 1.0 now requires a committed AST inventory fixture corpus with positive, negative, and import-presence cases.",
-        "Phase 1 Task 1.2 now adds a positive Hypothesis sweep over _LEGAL_TERMINAL_PAIRS.",
-        "Phase 5 Task 5.0 reuses the corpus and checks the directory-form allowlist in CLI tests."
+        "Added failsink wrong-sink-node negative test to prove the recorder does not accept any completed sink state or infer from sink_name.",
+        "Added failsink wrong-artifact negative test to prove artifact_id must be the exact artifact for the declared run and failsink node.",
+        "I1c durability guidance now says to corrupt producer witness arguments rather than monkeypatching the invariant method directly."
       ]
     },
     {
-      "id": "W3",
-      "title": "Hidden DIVERTED counter site at orchestrator/core.py:2199 must be co-located with accumulator instructions",
+      "id": "P4-W3",
+      "title": "Phase 4 final gate omitted ADR-019 AST symbol inventory",
       "status": "patched_pending_review",
       "changes": [
-        "Phase 3 Task 3.3 already cites core.py:2199 in the sink diversion counter update step and DoD; this patch preserved that explicit anchor."
+        "Task 4.5 now runs scripts/cicd/adr019_symbol_inventory.py check with --root src/elspeth and --allowlist config/cicd/adr019_symbol_inventory.",
+        "The final DoD now requires the AST symbol inventory gate."
       ]
     },
     {
-      "id": "W4",
-      "title": "AuditIntegrityError wrapper path needs grep verification and cause documentation",
+      "id": "P4-W4",
+      "title": "RED/import wording was stale after Phases 1-3",
       "status": "patched_pending_review",
       "changes": [
-        "Phase 4 Task 4.4 now includes rg verification for _RunFailedWithPartialResultError, original_error, from exc, and from None.",
-        "Test guidance now distinguishes internal wrapper __cause__ assertions from public Orchestrator.run() re-raise assertions."
-      ]
-    },
-    {
-      "id": "W5",
-      "title": "CI config path must use subdirectory form",
-      "status": "patched_pending_review",
-      "changes": [
-        "All ADR-019 symbol inventory invocations now use --allowlist config/cicd/adr019_symbol_inventory.",
-        "Phase 1 and Phase 5 file lists now describe config/cicd/adr019_symbol_inventory/ as a directory."
-      ]
-    },
-    {
-      "id": "W6",
-      "title": "Resume-across-migration error message must point at migration doc",
-      "status": "patched_pending_review",
-      "changes": [
-        "Phase 5 migration guide now requires stale DB and resume-across-migration failures to raise SchemaCompatibilityError.",
-        "The message must name token_outcomes.completed, token_outcomes.path, and docs/operator/migrations/adr-019.md.",
-        "Migration-doc grep verification includes SchemaCompatibilityError and the migration-doc path."
+        "Prerequisites now state Phases 1-3 are complete and Phase 4 must use the two-axis record_token_outcome signature.",
+        "The import sketch now imports NodeType from elspeth.contracts and keeps BatchStatus/TerminalOutcome/TerminalPath in elspeth.contracts.enums.",
+        "RED expectations now distinguish cross-table failures from scalar guard behaviour and happy-path documentation tests."
       ]
     }
   ],
-  "remaining_minor_warnings": [
-    {
-      "id": "M1",
-      "title": "Dataclass decorator line-number drift remains informational",
-      "status": "accepted_minor_risk",
-      "note": "The plan still requires implementers to grep current symbols before edits; exact decorator line drift is not execution-blocking."
-    },
-    {
-      "id": "M2",
-      "title": "AST gate PR-time-only nuance remains reviewer-sensitive",
-      "status": "partially_patched_pending_review",
-      "note": "The plan keeps the AST inventory as a phase-boundary and PR closeout gate; reviewers should confirm this is acceptable."
-    }
-  ],
+  "remaining_minor_warnings": [],
   "next_actions": [
-    "Run plan-review round 5 against the current plan documents before executing the ADR-019 implementation.",
-    "If round 5 passes, implement with the atomic Stage 2/3 merge boundary preserved.",
-    "If round 5 still objects to the residual minor warnings, patch those exact lines before implementation."
+    "Run a fresh plan-review pass focused on Phase 4 before implementing it.",
+    "If the next review passes, execute Phase 4 with Phases 1-3 already present and preserve the atomic Stage 2/3 merge boundary.",
+    "If the next review finds any executable-snippet drift, patch the exact snippets before implementation."
   ]
 }

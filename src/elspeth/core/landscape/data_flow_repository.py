@@ -10,7 +10,8 @@ import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
+from sqlalchemy.engine import Row as SQLAlchemyRow
 
 from elspeth.contracts import (
     ContractAuditRecord,
@@ -28,8 +29,8 @@ from elspeth.contracts import (
     ValidationErrorRecord,
     ValidationErrorWithContract,
 )
-from elspeth.contracts.audit import _TERMINAL_PAIR_FIELD_CONSTRAINTS, TokenRef
-from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+from elspeth.contracts.audit import _TERMINAL_PAIR_FIELD_CONSTRAINTS, DISCARD_SINK_NAME, TokenRef
+from elspeth.contracts.enums import BatchStatus, NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import repr_hash
@@ -45,7 +46,10 @@ from elspeth.core.landscape.model_loaders import (
     ValidationErrorLoader,
 )
 from elspeth.core.landscape.schema import (
+    artifacts_table,
+    batches_table,
     edges_table,
+    node_states_table,
     nodes_table,
     rows_table,
     token_outcomes_table,
@@ -251,6 +255,106 @@ class DataFlowRepository:
                 raise ValueError(
                     f"{pair_label} outcome forbids {field_name}, got {field_values[field_name]!r}. "
                     "Contract violation — see ADR-019 Implementation Notes."
+                )
+
+    def _validate_cross_table_invariants(
+        self,
+        ref: TokenRef,
+        outcome: TerminalOutcome | None,
+        path: TerminalPath,
+        *,
+        sink_name: str | None,
+        sink_node_id: str | None,
+        artifact_id: str | None,
+    ) -> None:
+        """Validate ADR-019 real-time cross-table invariants.
+
+        I1c validates exact failsink node-state and artifact witnesses for
+        failsink fallback. I3 validates that discard records do not coexist
+        with a completed sink node-state for the same token.
+        """
+        pair = (outcome, path)
+
+        if pair == (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK):
+            if sink_node_id is None:
+                raise AuditIntegrityError(
+                    f"ADR-019 I1c violation for token {ref.token_id}: "
+                    "(TRANSIENT, SINK_FALLBACK_TO_FAILSINK) requires an exact "
+                    "failsink node_id witness."
+                )
+            if artifact_id is None:
+                raise AuditIntegrityError(
+                    f"ADR-019 I1c violation for token {ref.token_id}: "
+                    "(TRANSIENT, SINK_FALLBACK_TO_FAILSINK) requires an exact "
+                    "failsink artifact_id witness."
+                )
+
+            completed_sink_state = self._ops.execute_fetchone(
+                select(node_states_table.c.state_id, node_states_table.c.node_id)
+                .select_from(
+                    node_states_table.join(
+                        nodes_table,
+                        and_(
+                            node_states_table.c.node_id == nodes_table.c.node_id,
+                            node_states_table.c.run_id == nodes_table.c.run_id,
+                        ),
+                    )
+                )
+                .where(node_states_table.c.token_id == ref.token_id)
+                .where(node_states_table.c.run_id == ref.run_id)
+                .where(node_states_table.c.node_id == sink_node_id)
+                .where(node_states_table.c.status == NodeStateStatus.COMPLETED.value)
+                .where(nodes_table.c.node_type == NodeType.SINK.value)
+            )
+            if completed_sink_state is None:
+                raise AuditIntegrityError(
+                    f"ADR-019 I1c violation for token {ref.token_id}: "
+                    "failsink fallback requires a paired COMPLETED sink "
+                    f"node_state at sink_node_id={sink_node_id!r}."
+                )
+
+            artifact_row = self._ops.execute_fetchone(
+                select(artifacts_table.c.artifact_id)
+                .where(artifacts_table.c.artifact_id == artifact_id)
+                .where(artifacts_table.c.run_id == ref.run_id)
+                .where(artifacts_table.c.sink_node_id == completed_sink_state.node_id)
+            )
+            if artifact_row is None:
+                raise AuditIntegrityError(
+                    f"ADR-019 I1c violation for token {ref.token_id}: "
+                    f"failsink node {completed_sink_state.node_id!r} has no "
+                    f"artifact_id={artifact_id!r} witness for this run."
+                )
+
+        if pair == (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED):
+            if sink_name != DISCARD_SINK_NAME:
+                raise AuditIntegrityError(
+                    f"ADR-019 I3 violation for token {ref.token_id}: "
+                    f"SINK_DISCARDED requires sink_name={DISCARD_SINK_NAME!r}, "
+                    f"got {sink_name!r}."
+                )
+
+            completed_sink_state = self._ops.execute_fetchone(
+                select(node_states_table.c.state_id)
+                .select_from(
+                    node_states_table.join(
+                        nodes_table,
+                        and_(
+                            node_states_table.c.node_id == nodes_table.c.node_id,
+                            node_states_table.c.run_id == nodes_table.c.run_id,
+                        ),
+                    )
+                )
+                .where(node_states_table.c.token_id == ref.token_id)
+                .where(node_states_table.c.run_id == ref.run_id)
+                .where(node_states_table.c.status == NodeStateStatus.COMPLETED.value)
+                .where(nodes_table.c.node_type == NodeType.SINK.value)
+            )
+            if completed_sink_state is not None:
+                raise AuditIntegrityError(
+                    f"ADR-019 I3 violation for token {ref.token_id}: discard "
+                    "recording contradicts an existing COMPLETED sink "
+                    f"node_state ({completed_sink_state.state_id})."
                 )
 
     # ── Token recording: public methods ──────────────────────────────────
@@ -797,7 +901,6 @@ class DataFlowRepository:
             AuditIntegrityError: If token does not belong to the specified run
             IntegrityError: If terminal outcome already exists for token
         """
-        _ = sink_node_id, artifact_id
         self._validate_outcome_fields(
             outcome,
             path,
@@ -811,6 +914,14 @@ class DataFlowRepository:
 
         # Validate token belongs to the specified run (Tier 1 invariant)
         self._validate_token_run_ownership(ref)
+        self._validate_cross_table_invariants(
+            ref,
+            outcome,
+            path,
+            sink_name=sink_name,
+            sink_node_id=sink_node_id,
+            artifact_id=artifact_id,
+        )
 
         outcome_id = f"out_{generate_id()[:12]}"
         completed = outcome is not None
@@ -836,6 +947,73 @@ class DataFlowRepository:
         )
 
         return outcome_id
+
+    def find_orphaned_transient_parents(self, run_id: str) -> list[SQLAlchemyRow[Any]]:
+        """Find I1a parent tokens with no child token outcome witnesses."""
+        parent_paths = (
+            TerminalPath.FORK_PARENT.value,
+            TerminalPath.EXPAND_PARENT.value,
+        )
+        child_outcomes = token_outcomes_table.alias("child_outcomes")
+        child_witness = (
+            select(child_outcomes.c.outcome_id)
+            .select_from(
+                token_parents_table.join(
+                    child_outcomes,
+                    and_(
+                        child_outcomes.c.token_id == token_parents_table.c.token_id,
+                        child_outcomes.c.run_id == run_id,
+                    ),
+                )
+            )
+            .where(token_parents_table.c.parent_token_id == token_outcomes_table.c.token_id)
+        )
+        query = (
+            select(token_outcomes_table.c.token_id, token_outcomes_table.c.path)
+            .where(token_outcomes_table.c.run_id == run_id)
+            .where(token_outcomes_table.c.path.in_(parent_paths))
+            .where(token_outcomes_table.c.outcome == TerminalOutcome.TRANSIENT.value)
+            .where(~child_witness.exists())
+        )
+        return list(self._ops.execute_fetchall(query))
+
+    def find_orphaned_batch_consumptions(self, run_id: str) -> list[str]:
+        """Find I1b batch IDs consumed by tokens whose batch did not complete."""
+        completed_batch_witness = (
+            select(batches_table.c.batch_id)
+            .where(batches_table.c.batch_id == token_outcomes_table.c.batch_id)
+            .where(batches_table.c.run_id == run_id)
+            .where(batches_table.c.status == BatchStatus.COMPLETED.value)
+        )
+        query = (
+            select(token_outcomes_table.c.batch_id)
+            .distinct()
+            .where(token_outcomes_table.c.run_id == run_id)
+            .where(token_outcomes_table.c.path == TerminalPath.BATCH_CONSUMED.value)
+            .where(token_outcomes_table.c.outcome == TerminalOutcome.TRANSIENT.value)
+            .where(~completed_batch_witness.exists())
+        )
+        return [row.batch_id for row in self._ops.execute_fetchall(query)]
+
+    def sweep_deferred_invariants_or_crash(self, run_id: str) -> None:
+        """Sweep ADR-019 deferred I1a/I1b invariants at a stable run boundary."""
+        orphan_parents = self.find_orphaned_transient_parents(run_id)
+        if orphan_parents:
+            examples = ", ".join(f"{row.token_id} (path={row.path})" for row in orphan_parents[:10])
+            raise AuditIntegrityError(
+                f"ADR-019 I1a violation: {len(orphan_parents)} fork/expand "
+                "parent token(s) have no child token_outcomes rows at run-end. "
+                f"Examples: {examples}."
+            )
+
+        orphan_batches = self.find_orphaned_batch_consumptions(run_id)
+        if orphan_batches:
+            examples = ", ".join(orphan_batches[:10])
+            raise AuditIntegrityError(
+                f"ADR-019 I1b violation: {len(orphan_batches)} batch_id(s) had "
+                "BATCH_CONSUMED tokens but the batch never reached "
+                f"BatchStatus.COMPLETED. Examples: {examples}."
+            )
 
     def get_token_outcome(self, token_id: str) -> TokenOutcome | None:
         """Get the terminal outcome for a token.

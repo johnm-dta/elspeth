@@ -3045,6 +3045,20 @@ class Orchestrator:
                 shutdown_checkpoint_source_id=artifacts.source_id,
             )
 
+            # ADR-019 Phase 4: deferred cross-table invariant sweep.
+            #
+            # AUDIT-TRAIL DURABILITY CONTRACT:
+            # 1. The run is still RUNNING here; successful terminal finalization
+            #    has not executed.
+            # 2. If this raises AuditIntegrityError, the exception propagates to
+            #    the public run() failure ceremony, which finalizes the run as
+            #    FAILED and re-raises the original exception.
+            # 3. The offending token_outcomes/batch rows are evidence and are
+            #    not deleted by the sweep.
+            # 4. GracefulShutdownError skips this naturally because sink flush
+            #    raises before this post-sink call site.
+            factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
+
             # 5. Final progress + PROCESS phase completion — AFTER sink writes
             # so these events reflect concrete, durable results. On shutdown,
             # _flush_and_write_sinks raises GracefulShutdownError before we
@@ -3243,82 +3257,81 @@ class Orchestrator:
         restored_coalesce_state = state.restored_coalesce_state
         schema_contract = state.schema_contract
         unprocessed_rows = state.unprocessed_rows
-
-        if not unprocessed_rows and not restored_state and restored_coalesce_state is None:
-            # All rows were processed - complete the run.
-            #
-            # Phase 2.2 (elspeth-0de989c56d): the resume's local counters
-            # are 0 here because nothing was reprocessed, but the audit DB
-            # carries the truth.  Aggregate token_outcomes to derive the
-            # correct four-value terminal status and feed it to both the
-            # Landscape finalize and the local RunResult.
-            (
-                terminal_status,
-                audit_rows_processed,
-                audit_rows_succeeded,
-                audit_rows_failed,
-                audit_rows_routed_success,
-                audit_rows_routed_failure,
-                audit_rows_quarantined,
-            ) = self._derive_resume_terminal_status_from_audit(factory, run_id)
-            factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
-
-            # Emit RunFinished telemetry (matching the normal completion path)
-            from elspeth.telemetry import RunFinished
-
-            self._emit_telemetry(
-                RunFinished(
-                    timestamp=datetime.now(UTC),
-                    run_id=run_id,
-                    status=terminal_status,
-                    row_count=audit_rows_processed,
-                    duration_ms=0.0,
-                )
-            )
-
-            # Emit RunSummary event
-            cli_status, exit_code = self._cli_completion_for(terminal_status)
-            self._events.emit(
-                RunSummary(
-                    run_id=run_id,
-                    status=cli_status,
-                    total_rows=audit_rows_processed,
-                    succeeded=audit_rows_succeeded,
-                    failed=audit_rows_failed,
-                    quarantined=audit_rows_quarantined,
-                    duration_seconds=0.0,
-                    exit_code=exit_code,
-                    routed_success=audit_rows_routed_success,
-                    routed_failure=audit_rows_routed_failure,
-                    routed_destinations=(),
-                )
-            )
-
-            # Delete checkpoints on successful completion
-            self._delete_checkpoints(run_id)
-
-            return RunResult(
-                run_id=run_id,
-                status=terminal_status,
-                rows_processed=audit_rows_processed,
-                rows_succeeded=audit_rows_succeeded,
-                rows_failed=audit_rows_failed,
-                rows_routed_success=audit_rows_routed_success,
-                rows_routed_failure=audit_rows_routed_failure,
-                rows_quarantined=audit_rows_quarantined,
-                routed_destinations={},
-            )
+        resume_start_time = time.perf_counter()
 
         # 5. Process unprocessed rows (with graceful shutdown support)
         from elspeth.telemetry import RunFinished
-
-        resume_start_time = time.perf_counter()
 
         # When shutdown_event is provided (testing), skip signal handler
         # installation and use the caller's event directly.
         shutdown_ctx = nullcontext(shutdown_event) if shutdown_event is not None else self._shutdown_handler_context()
 
         try:
+            if not unprocessed_rows and not restored_state and restored_coalesce_state is None:
+                factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
+
+                # All rows were processed - complete the run.
+                #
+                # Phase 2.2 (elspeth-0de989c56d): the resume's local counters
+                # are 0 here because nothing was reprocessed, but the audit DB
+                # carries the truth.  Aggregate token_outcomes to derive the
+                # correct four-value terminal status and feed it to both the
+                # Landscape finalize and the local RunResult.
+                (
+                    terminal_status,
+                    audit_rows_processed,
+                    audit_rows_succeeded,
+                    audit_rows_failed,
+                    audit_rows_routed_success,
+                    audit_rows_routed_failure,
+                    audit_rows_quarantined,
+                ) = self._derive_resume_terminal_status_from_audit(factory, run_id)
+                factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
+
+                # Emit RunFinished telemetry (matching the normal completion path)
+                self._emit_telemetry(
+                    RunFinished(
+                        timestamp=datetime.now(UTC),
+                        run_id=run_id,
+                        status=terminal_status,
+                        row_count=audit_rows_processed,
+                        duration_ms=0.0,
+                    )
+                )
+
+                # Emit RunSummary event
+                cli_status, exit_code = self._cli_completion_for(terminal_status)
+                self._events.emit(
+                    RunSummary(
+                        run_id=run_id,
+                        status=cli_status,
+                        total_rows=audit_rows_processed,
+                        succeeded=audit_rows_succeeded,
+                        failed=audit_rows_failed,
+                        quarantined=audit_rows_quarantined,
+                        duration_seconds=0.0,
+                        exit_code=exit_code,
+                        routed_success=audit_rows_routed_success,
+                        routed_failure=audit_rows_routed_failure,
+                        routed_destinations=(),
+                    )
+                )
+
+                # Delete checkpoints on successful completion
+                self._delete_checkpoints(run_id)
+
+                return RunResult(
+                    run_id=run_id,
+                    status=terminal_status,
+                    rows_processed=audit_rows_processed,
+                    rows_succeeded=audit_rows_succeeded,
+                    rows_failed=audit_rows_failed,
+                    rows_routed_success=audit_rows_routed_success,
+                    rows_routed_failure=audit_rows_routed_failure,
+                    rows_quarantined=audit_rows_quarantined,
+                    routed_destinations={},
+                )
+
             with shutdown_ctx as active_event:
                 result = self._process_resumed_rows(
                     factory=factory,
@@ -3506,6 +3519,10 @@ class Orchestrator:
                 on_token_written_factory=self._make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
                 shutdown_checkpoint_source_id=artifacts.source_id,
             )
+
+            # ADR-019 Phase 4: resumed row processing reaches stable I1a/I1b
+            # postconditions only after resume sink writes finish.
+            factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
         except GracefulShutdownError:
             raise
         except Exception as exc:

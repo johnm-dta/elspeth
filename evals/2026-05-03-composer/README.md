@@ -48,8 +48,8 @@ If a claim in the brief or either technical report seems too strong or unclear, 
 2. **Find the scenario directory** under `basic/<sN>/` or `hardmode/results/<scenario_id>/`
 3. **Read `scenario.json`** (hard-mode) or the relevant prompt files (basic-mode) for the test definition
 4. **Read user-side messages** (`turn{N}.user.txt`) and **composer responses** (`msg.t{N}.resp.json` — extract with `jq -r '.message.content'`)
-5. **Read engine artefacts**: `validate.json`, `final_yaml.json` (for the actual config), `run.json` (for the run summary), `diagnostics.json` (for per-row engine errors with verbatim exception text)
-6. **Read `ledger.json`** (hard-mode only) for the consolidated per-scenario summary
+5. **Read engine artefacts**: `validate.json`, `final_yaml.json` (for the actual config), `run.json` (for the run summary), `diagnostics.json` (for per-row engine errors with verbatim exception text), and **`outputs/`** (per-row engine output streams — `MANIFEST.json` plus the actual JSONL/CSV files written by each sink)
+6. **Read `ledger.json`** (hard-mode only) for the consolidated per-scenario summary, including the new `artifacts[]` summary (sink_node_id / size_bytes / exists_now / content_hash for each captured output)
 
 Worked examples for the two most-likely challenges:
 
@@ -66,7 +66,50 @@ cat data/outputs/q3_regional_compliance_categories.csv
 
 # "What did Linda actually say across her 3 turns?"
 cat evals/2026-05-03-composer/hardmode/results/p1_t1_happy/turn{1,2,3}.user.txt
+
+# "Did INT-1002 really route to fraud_only.jsonl?" (uses backfilled outputs/)
+jq 'select(.interaction_id=="INT-1002")' \
+  evals/2026-05-03-composer/basic/s4/outputs/q3_fraud_security_flags.csv 2>/dev/null \
+  || head -3 evals/2026-05-03-composer/basic/s4/outputs/q3_fraud_security_flags.csv
+
+# "Which sinks did the engine actually write for hardmode P1-T1?"
+jq '.artifacts[] | {sink_node_id, size_bytes, exists_now}' \
+  evals/2026-05-03-composer/hardmode/results/p1_t1_happy/outputs/MANIFEST.json
 ```
+
+## Backfilled vs live-captured outputs
+
+Per-row engine outputs in this tree fall into two provenance categories:
+
+1. **Retroactive backfill (2026-05-06)** — the original eval harness in
+   2026-05-03 captured run summaries and diagnostics but not the
+   per-row sink output streams. Files were copied from the staging
+   deploy's `data/outputs/` directory and timestamp-correlated against
+   each run's start/finish window. Each `outputs/MANIFEST.json` records
+   the configured path, the actually-written path (which can differ via
+   `auto_increment` collision policy), sha256, mtime, and a
+   `correlation_confidence` flag. Only HIGH-confidence files were
+   archived; LOW-confidence candidates are recorded in
+   `skipped_low_confidence` for forensic completeness but NOT copied —
+   their bytes may not be from the run we're trying to evidence.
+   See `scripts/eval/backfill_2026_05_03_outputs.py`.
+
+2. **Live capture (future evals)** — `hardmode/finalize_scenario.sh` and
+   `basic/finalize_scenario.sh` now call the new
+   `GET /api/runs/{rid}/outputs` (full manifest, no preview cap) and
+   `GET /api/runs/{rid}/outputs/{artifact_id}/content` (per-artifact
+   bytes, path-allowlist guarded) at finalize time. These are run-id
+   stamped through the audit DB and do not need timestamp correlation.
+
+**Known limitation** (`elspeth-obs-e87152484a`): the 2026-05-03 hardmode
+harness ran `finalize_scenario.sh` once per session, so when an operator
+re-executed within the same session after a fix (e.g., the model swap
+producing run `023eb897-...` for `p1_t1_happy`), the recapture didn't
+happen. `scenario_dir/run.json` for those scenarios reflects the FIRST
+/execute attempt (failed v1), not the proof-of-fix v3. The README's
+"Audit-trail evidence outside this folder" table below carries the v3
+run-ids; recovering their per-row outputs requires a separate
+rerun-mode pass against staging using those IDs.
 
 ## Provenance and what was redacted
 
@@ -107,6 +150,12 @@ For runs that reached `/execute`, the full Tier-1 audit row lives in `/home/john
 | basic | S4 v1 (gate routing) | `f8b35c56-ffd0-4abc-b122-894a401cf548` | completed, 8/8 routed |
 | basic | S4 v2 (gate routing patched) | `b50133e4-cf17-45bb-9e83-f04b1011b0cf` | completed, 8/8 routed |
 | hardmode | P1-T1 v3 (proof-of-fix model swap) | `023eb897-3049-4ad5-a502-e9eb81a4faee` | completed, 8/8 routed |
+
+For each run above, per-row outputs are now also archived under each
+scenario's `outputs/` directory where backfill confidence was HIGH; the
+load-bearing P1-T1 v3 outputs require a separate rerun-mode pass (see
+`elspeth-obs-e87152484a` and the "Backfilled vs live-captured outputs"
+section above).
 
 Query the audit DB with e.g.:
 ```sql

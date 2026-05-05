@@ -1,5 +1,33 @@
 # Eval Per-Row Output Archival Implementation Plan
 
+## Status (2026-05-06): Infrastructure landed, archival deferred
+
+Phases B, C, D, and E.1/E.3 landed on branch
+`feat/eval-per-row-output-archival` (commits `17ba6c13..99986128`). Phase A
+**library + driver landed but `--apply` was NOT run** — a dry-run revealed
+that `scenario_dir/run.json` captures only the FIRST `/execute` attempt
+per session (per `elspeth-obs-e87152484a`), so the bytes the walkthrough's
+INT-1001/INT-1002 routing claim rests on (the `023eb897-...` v3 proof-of-fix
+run for `p1_t1_happy`) are NOT what the as-written driver targets.
+
+The **per-row engine output evidence gap for the 2026-05-03 evals
+remains open**. Closing it requires a **v3-rerun mode** for the driver
+that takes a `(scenario, run_id)` mapping driven from the README's
+"Audit-trail evidence outside this folder" run-id table, fetches each
+run's window from staging via the (now-deployed) `/api/runs/{rid}` and
+`/api/runs/{rid}/outputs` endpoints, and emits sibling
+`outputs_v3/MANIFEST.json` directories. That work needs an operator JWT
+against staging and is tracked in the closeout comment on
+`elspeth-77d2641032`.
+
+**Tasks A.6, A.7, A.8 in the plan body below are stale** — A.6 in
+particular ("Apply hardmode backfill") would archive failed-run
+errors-sink data that's largely redundant with the existing
+`diagnostics.json`. Read the body below as historical context; refer to
+the closeout comment on `elspeth-77d2641032` for current state.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close the per-row engine output evidence gap in `evals/2026-05-03-composer/` by retroactively backfilling row-level outputs from staging disk, adding a durable `/api/runs/{rid}/outputs` endpoint, mirroring the harness across hardmode and basic-mode, and updating the README so any reader can verify row-level claims from in-tree evidence alone.

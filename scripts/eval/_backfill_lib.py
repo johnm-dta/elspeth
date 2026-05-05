@@ -12,15 +12,18 @@ standard in CLAUDE.md for why audit-grade evidence demands the
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 
 CONFIDENCE_GRACE_SECONDS = 60
+DEFAULT_CAPTURED_BY = "scripts/eval/backfill_2026_05_03_outputs.py"
+SHA256_CHUNK_BYTES = 65536
 
 Confidence = Literal["high", "low"]
 
@@ -108,3 +111,76 @@ def classify_correlation_confidence(
     if file_mtime > run_finished_at + timedelta(seconds=CONFIDENCE_GRACE_SECONDS):
         return "low"
     return "high"
+
+
+def _sha256_of_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(SHA256_CHUNK_BYTES), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def build_scenario_manifest(
+    *,
+    scenario_id: str,
+    run_id: str,
+    run_started_at: datetime,
+    run_finished_at: datetime,
+    sinks: Sequence[tuple[str, str]],
+    captured_by: str = DEFAULT_CAPTURED_BY,
+) -> dict[str, Any]:
+    """Build a manifest dict for one scenario from a (sink_name, configured_path) list.
+
+    HIGH-confidence files go into ``files`` (eligible for archive copy).
+    LOW-confidence files go into ``skipped_low_confidence`` (recorded for
+    forensic completeness but NOT recommended for archive copy — their
+    bytes may not be from the run we're trying to evidence).
+    """
+    captured_at = datetime.now(UTC).isoformat()
+    files: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for sink_name, configured_path in sinks:
+        for candidate in enumerate_candidate_files(configured_path):
+            stat = candidate.stat()
+            mtime = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+            confidence = classify_correlation_confidence(mtime, run_started_at, run_finished_at)
+            if confidence == "high":
+                files.append(
+                    {
+                        "sink_name": sink_name,
+                        "configured_path": configured_path,
+                        "actual_path": str(candidate),
+                        "archived_as": f"outputs/{candidate.name}",
+                        "size": stat.st_size,
+                        "sha256": _sha256_of_file(candidate),
+                        "mtime": mtime.isoformat(),
+                        "correlation_confidence": confidence,
+                        "captured_at": captured_at,
+                        "captured_by": captured_by,
+                    }
+                )
+            else:
+                skipped.append(
+                    {
+                        "sink_name": sink_name,
+                        "configured_path": configured_path,
+                        "actual_path": str(candidate),
+                        "mtime": mtime.isoformat(),
+                        "reason": (
+                            f"mtime {mtime.isoformat()} outside run window [{run_started_at.isoformat()}, {run_finished_at.isoformat()}]"
+                        ),
+                    }
+                )
+
+    return {
+        "scenario_id": scenario_id,
+        "run_id": run_id,
+        "run_window": {
+            "started_at": run_started_at.isoformat(),
+            "finished_at": run_finished_at.isoformat(),
+        },
+        "files": files,
+        "skipped_low_confidence": skipped,
+    }

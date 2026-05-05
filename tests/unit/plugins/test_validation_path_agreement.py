@@ -60,6 +60,39 @@ _TRANSFORM_REJECTION_CASES = [
         "group_by.*collides",
         id="batch_stats-group_by-sum-collision",
     ),
+    # ── batch_distribution_profile ───────────────────────────────────────
+    pytest.param(
+        "batch_distribution_profile",
+        {
+            "schema": _make_observed_schema(),
+            "value_field": "score",
+            "group_by": "mean",  # collides with profile output key
+        },
+        "group_by.*collides",
+        id="batch_distribution_profile-group_by-collision",
+    ),
+    # ── batch_experiment_compare ─────────────────────────────────────────
+    pytest.param(
+        "batch_experiment_compare",
+        {
+            "schema": _make_observed_schema(),
+            "variant_field": "score",
+            "score_field": "score",  # input and score fields must be distinct
+        },
+        "variant_field and score_field must differ",
+        id="batch_experiment_compare-field-collision",
+    ),
+    # ── batch_classifier_metrics ─────────────────────────────────────────
+    pytest.param(
+        "batch_classifier_metrics",
+        {
+            "schema": _make_observed_schema(),
+            "actual_field": "label",
+            "predicted_field": "label",  # actual and predicted fields must be distinct
+        },
+        "actual_field and predicted_field must differ",
+        id="batch_classifier_metrics-field-collision",
+    ),
     # ── field_mapper ──────────────────────────────────────────────────────
     pytest.param(
         "field_mapper",

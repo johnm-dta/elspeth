@@ -46,7 +46,7 @@ _EXCLUDED_FILES = frozenset(
     }
 )
 
-EXPECTED_PLUGIN_COUNT = 28
+EXPECTED_PLUGIN_COUNT = 31
 
 
 def _discover_plugin_files(root: Path) -> list[Path]:

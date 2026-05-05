@@ -30,7 +30,7 @@ from elspeth.web.execution.schemas import RunOutputArtifact, RunOutputsResponse
 _FILE_URI_PREFIX = "file://"
 
 
-def _path_or_uri_to_filesystem_path(path_or_uri: str) -> Path | None:
+def path_or_uri_to_filesystem_path(path_or_uri: str) -> Path | None:
     """Return a ``Path`` for filesystem-backed artefacts; ``None`` for
     object-store URIs (``azure://``, ``dataverse://``, …).
 
@@ -67,7 +67,7 @@ def load_run_outputs_from_db(
     artifacts: list[RunOutputArtifact] = []
     with db.read_only_connection() as conn:
         for row in conn.execute(stmt):
-            fs_path = _path_or_uri_to_filesystem_path(str(row.path_or_uri))
+            fs_path = path_or_uri_to_filesystem_path(str(row.path_or_uri))
             exists_now = fs_path.exists() if fs_path is not None else False
             artifacts.append(
                 RunOutputArtifact(

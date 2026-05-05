@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 import pydantic
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.middleware import get_current_user
@@ -32,6 +33,10 @@ from elspeth.web.composer.protocol import ComposerService, ComposerServiceError
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.diagnostics import load_run_diagnostics_for_settings
 from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
+from elspeth.web.execution.outputs import (
+    load_run_outputs_for_settings,
+    path_or_uri_to_filesystem_path,
+)
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.protocol import ExecutionService, StateAccessError
 from elspeth.web.execution.schemas import (
@@ -44,10 +49,12 @@ from elspeth.web.execution.schemas import (
     RunDiagnosticsResponse,
     RunDiagnosticsWorkingView,
     RunEvent,
+    RunOutputsResponse,
     RunResultsResponse,
     RunStatusResponse,
     ValidationResult,
 )
+from elspeth.web.paths import allowed_sink_directories
 from elspeth.web.sessions.protocol import SessionServiceProtocol, TerminalSessionRunStatus
 
 slog = structlog.get_logger()
@@ -709,5 +716,127 @@ def create_execution_router() -> APIRouter:
                 slog.error("websocket_close_failed", run_id=run_id, error=str(close_err))
         finally:
             broadcaster.unsubscribe(run_id, queue)
+
+    # NOTE on placement: the run-outputs endpoints sit AFTER
+    # websocket_run_progress in this file rather than next to
+    # get_run_diagnostics (their conceptual sibling). Reason: the
+    # tier-model allowlist (config/cicd/enforce_tier_model/web.yaml)
+    # uses AST-path-based fingerprints which include the function's
+    # body-level index. Inserting siblings BEFORE websocket_run_progress
+    # shifts that index and invalidates the existing allowlist entries.
+    # Appending here keeps existing fingerprints stable.
+
+    @router.get(
+        "/api/runs/{run_id}/outputs",
+        response_model=RunOutputsResponse,
+    )
+    async def get_run_outputs(
+        run_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+        service: ExecutionService = Depends(_get_execution_service),  # noqa: B008
+    ) -> RunOutputsResponse:
+        """Return the FULL manifest of sink-write artefacts for a run.
+
+        Distinct from ``GET /api/runs/{run_id}/diagnostics``, whose
+        ``artifacts`` field is capped at 20 for operator-UI pacing. This
+        endpoint is the audit-evidence retrieval surface — every artefact
+        the run wrote, with ``content_hash`` and ``exists_now``.
+        """
+        await _verify_run_ownership(run_id, user, request)
+        try:
+            status = await service.get_status(run_id)
+        except ValueError:
+            raise _run_not_found_http() from None
+
+        landscape_run_id = status.landscape_run_id or status.run_id
+        return await run_sync_in_worker(
+            load_run_outputs_for_settings,
+            request.app.state.settings,
+            run_id=status.run_id,
+            landscape_run_id=landscape_run_id,
+        )
+
+    @router.get("/api/runs/{run_id}/outputs/{artifact_id}/content")
+    async def get_run_output_content(
+        run_id: UUID,
+        artifact_id: str,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+        service: ExecutionService = Depends(_get_execution_service),  # noqa: B008
+    ) -> Any:
+        """Stream the bytes of one artefact written by a run.
+
+        Path-allowlist guard: refuses any artefact whose ``path_or_uri``
+        resolves outside ``allowed_sink_directories(data_dir)`` (the
+        canonical ``data_dir/{outputs,blobs}`` set). This is
+        defence-in-depth — the path was already allowlisted at write
+        time, but the audit row is read-mutable in principle and the
+        read-side guard MUST NOT trust it.
+
+        Returns:
+        * 200 with file bytes when path is in-allowlist and exists.
+        * 403 when path is outside allowlist.
+        * 404 when artefact is not in the run's manifest.
+        * 410 when path was in-allowlist but file no longer exists.
+        """
+        await _verify_run_ownership(run_id, user, request)
+        try:
+            status = await service.get_status(run_id)
+        except ValueError:
+            raise _run_not_found_http() from None
+
+        landscape_run_id = status.landscape_run_id or status.run_id
+        manifest = await run_sync_in_worker(
+            load_run_outputs_for_settings,
+            request.app.state.settings,
+            run_id=status.run_id,
+            landscape_run_id=landscape_run_id,
+        )
+        artifact = next(
+            (a for a in manifest.artifacts if a.artifact_id == artifact_id),
+            None,
+        )
+        if artifact is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error_type": "artifact_not_found", "artifact_id": artifact_id},
+            )
+
+        fs_path = path_or_uri_to_filesystem_path(artifact.path_or_uri)
+        if fs_path is None:
+            # Object-store URI (azure://, dataverse://) — content streaming
+            # is not implemented for these. Audit-evidence retrieval for
+            # remote sinks goes through their own retrieval API.
+            raise HTTPException(
+                status_code=415,
+                detail={
+                    "error_type": "object_store_artifact_not_streamable",
+                    "path_or_uri": artifact.path_or_uri,
+                },
+            )
+
+        resolved = fs_path.resolve()
+        data_dir = request.app.state.settings.data_dir
+        allowed = allowed_sink_directories(data_dir)
+        if not any(resolved.is_relative_to(base) for base in allowed):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error_type": "output_path_outside_allowlist",
+                    "path_or_uri": artifact.path_or_uri,
+                },
+            )
+
+        if not resolved.exists():
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "error_type": "artifact_purged_or_moved",
+                    "path_or_uri": artifact.path_or_uri,
+                },
+            )
+
+        return FileResponse(resolved, filename=resolved.name)
 
     return router

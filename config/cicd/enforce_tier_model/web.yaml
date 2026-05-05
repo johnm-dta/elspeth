@@ -704,47 +704,47 @@ allow_hits:
     still propagate
   safety: Recovery failure appended to errors list as RecoveryFailed[<type>]; not a silent swallow
   expires: null
-- key: web/execution/routes.py:R1:create_execution_router:websocket_run_progress:fp=9ff45025f16939b7
+- key: web/execution/routes.py:R1:create_execution_router:websocket_run_progress:fp=655a2bbd06e3df4e
   owner: web-execution
   reason: False positive — asyncio.Queue.get() is an async queue method, not dict.get()
   safety: No dict access involved
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=59eb3ed5a9c59d64
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=6f235822381216b6
   owner: web-execution
   reason: Heartbeat timeout is an expected idle path, not an error swallow
   safety: Sends heartbeat to keep connection alive
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=a08151dd826caa66
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=677989ad628ab97f
   owner: web-execution
   reason: Idle-timeout status recheck — run may be deleted between heartbeat polls
   safety: Only not-found errors close with 4004; infrastructure errors propagate to the outer handler
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=003ec748d84d1e5a
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=ef593e0c706fc3c2
   owner: web-execution
   reason: WebSocketDisconnect is the expected disconnect control-flow path
   safety: Falls through to unsubscribe cleanup
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=6ddae18ae4d8a9af
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=1e0fe70d57f6f720
   owner: web-execution
   reason: Narrowed outer handler to (ConnectionError, OSError) — programming errors now propagate
   safety: Logged with slog.error; clean 1011 close sent to client
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=08647ae877994684
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=7dc307a1b8c16e9c
   owner: web-execution
   reason: Narrowed close catch to (WebSocketDisconnect, ConnectionError, OSError)
   safety: Logged; already in error path
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=ac8b5ae1657d7430
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=897d402525a745d8
   owner: web-execution
   reason: WebSocket auth — narrowed from except (AuthenticationError, Exception) to except AuthenticationError only
   safety: Only auth failures close with 4001; infrastructure errors propagate to outer handler
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=c82ab0ae477d840d
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=e549b54b972986fe
   owner: web-execution
   reason: Run-ownership IDOR gate — narrowed from except Exception to except ValueError
   safety: Only not-found errors return 4004; infrastructure errors propagate to outer handler
   expires: null
-- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=10e73ce68f35bd65
+- key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=44111868c8e1939e
   owner: web-execution
   reason: TOCTOU guard — run may be deleted between verify_run_ownership and get_status
   safety: Only not-found errors close with 4004; returns immediately

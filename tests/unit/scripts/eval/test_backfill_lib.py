@@ -4,7 +4,10 @@ the 2026-05-03 eval per-row output backfill (elspeth-77d2641032).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from scripts.eval._backfill_lib import (
+    classify_correlation_confidence,
     enumerate_candidate_files,
     extract_sink_paths_from_final_yaml,
 )
@@ -80,3 +83,37 @@ def test_enumerate_candidate_files_returns_empty_when_no_candidates_match(tmp_pa
     (tmp_path / "other.jsonl").write_text("nope\n")
     target = tmp_path / "results.jsonl"
     assert enumerate_candidate_files(str(target)) == []
+
+
+def test_classify_correlation_confidence_high_when_mtime_inside_run_window() -> None:
+    started = datetime(2026, 5, 3, 13, 28, 0, tzinfo=UTC)
+    finished = datetime(2026, 5, 3, 13, 28, 30, tzinfo=UTC)
+    file_mtime = datetime(2026, 5, 3, 13, 28, 14, tzinfo=UTC)
+    assert classify_correlation_confidence(file_mtime, started, finished) == "high"
+
+
+def test_classify_correlation_confidence_high_within_grace_after_finish() -> None:
+    started = datetime(2026, 5, 3, 13, 28, 0, tzinfo=UTC)
+    finished = datetime(2026, 5, 3, 13, 28, 30, tzinfo=UTC)
+    file_mtime = finished + timedelta(seconds=45)
+    assert classify_correlation_confidence(file_mtime, started, finished) == "high"
+
+
+def test_classify_correlation_confidence_low_when_mtime_long_after_finish() -> None:
+    started = datetime(2026, 5, 3, 13, 28, 0, tzinfo=UTC)
+    finished = datetime(2026, 5, 3, 13, 28, 30, tzinfo=UTC)
+    file_mtime = datetime(2026, 5, 4, 7, 55, 0, tzinfo=UTC)
+    assert classify_correlation_confidence(file_mtime, started, finished) == "low"
+
+
+def test_classify_correlation_confidence_low_when_mtime_before_start() -> None:
+    started = datetime(2026, 5, 3, 13, 28, 0, tzinfo=UTC)
+    finished = datetime(2026, 5, 3, 13, 28, 30, tzinfo=UTC)
+    file_mtime = started - timedelta(seconds=10)
+    assert classify_correlation_confidence(file_mtime, started, finished) == "low"
+
+
+def test_classify_correlation_confidence_high_at_exact_start_boundary() -> None:
+    started = datetime(2026, 5, 3, 13, 28, 0, tzinfo=UTC)
+    finished = datetime(2026, 5, 3, 13, 28, 30, tzinfo=UTC)
+    assert classify_correlation_confidence(started, started, finished) == "high"

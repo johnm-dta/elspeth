@@ -14,9 +14,15 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 import yaml
+
+CONFIDENCE_GRACE_SECONDS = 60
+
+Confidence = Literal["high", "low"]
 
 
 def extract_sink_paths_from_final_yaml(
@@ -75,3 +81,30 @@ def enumerate_candidate_files(configured_path: str) -> list[Path]:
         if entry.is_file() and sibling_re.match(entry.name):
             candidates.append(entry)
     return sorted(candidates, key=lambda p: p.name)
+
+
+def classify_correlation_confidence(
+    file_mtime: datetime,
+    run_started_at: datetime,
+    run_finished_at: datetime,
+) -> Confidence:
+    """Return ``"high"`` when ``file_mtime`` falls inside the run window
+    (``[run_started_at, run_finished_at + grace]``), else ``"low"``.
+
+    Why a grace window: sinks may flush slightly after the engine reports
+    finish; the 60-second grace tolerates clock skew and post-loop flush.
+    Mtimes BEFORE start are unambiguously a different run.
+
+    The classification is the only mechanism standing between
+    "byte-equivalent eval evidence" and "fabricated audit evidence" — be
+    strict about LOW classifications. Per CLAUDE.md ("inference from
+    adjacent fields is still fabrication"), borderline cases should
+    classify LOW so the operator surfaces the ambiguity in the manifest's
+    ``skipped_low_confidence`` list rather than silently archiving bytes
+    of unclear provenance.
+    """
+    if file_mtime < run_started_at:
+        return "low"
+    if file_mtime > run_finished_at + timedelta(seconds=CONFIDENCE_GRACE_SECONDS):
+        return "low"
+    return "high"

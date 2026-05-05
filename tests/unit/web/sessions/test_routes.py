@@ -17,9 +17,9 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
-from starlette.testclient import TestClient
 
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
     nodes_table,
@@ -50,6 +50,7 @@ from elspeth.web.sessions.protocol import (
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
+from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # Sentinel empty state for mock composer responses
 _EMPTY_STATE = CompositionState(
@@ -502,8 +503,9 @@ def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
                 outcome_id="tout_discard",
                 run_id=run_id,
                 token_id="token-sink",
-                outcome="failed",
-                is_terminal=1,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.SINK_DISCARDED,
+                completed=1,
                 recorded_at=now,
                 sink_name="__discard__",
             )

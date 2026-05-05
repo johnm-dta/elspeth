@@ -202,10 +202,10 @@ class TestOrchestrator:
         orchestrator = Orchestrator(landscape_db)
         run_result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
-        # (rows_routed_success). Gate-routed-only run -> COMPLETED.
+        # ADR-019: gate route_to_sink is intentional MOVE provenance on top of
+        # lifecycle SUCCESS. Gate-routed-only run -> COMPLETED.
         assert run_result.status == RunStatus.COMPLETED
-        assert run_result.rows_succeeded == 0
+        assert run_result.rows_succeeded == 3
         assert run_result.rows_routed_success == 3
         # value=10 and value=30 go to default, value=100 goes to high
         assert len(default_sink.results) == 2
@@ -240,6 +240,13 @@ class TestOrchestrator:
             policy="require_all",
             merge="union",
         )
+        runtime_coalesce = CoalesceSettings(
+            name="merge_paths",
+            branches=["path_a", "path_b"],
+            policy="require_all",
+            merge="union",
+            on_success="output",
+        )
 
         config = PipelineConfig(
             source=as_source(source),
@@ -259,7 +266,7 @@ class TestOrchestrator:
                 "source_sink": {"plugin": "test", "on_write_failure": "discard"},
             },
             gates=[fork_gate, terminal_gate],
-            coalesce=[coalesce],
+            coalesce=[runtime_coalesce],
         )
 
         orchestrator = Orchestrator(landscape_db)
@@ -270,11 +277,11 @@ class TestOrchestrator:
             payload_store=payload_store,
         )
 
-        # elspeth-5069612f3c: gate route_to_sink is intentional MOVE
-        # (rows_routed_success). Gate-routed-only run -> COMPLETED.
+        # ADR-019: gate route_to_sink is intentional MOVE provenance on top of
+        # lifecycle SUCCESS. Gate-routed-only run -> COMPLETED.
         assert run_result.status == RunStatus.COMPLETED
         assert run_result.rows_processed == 2
-        assert run_result.rows_succeeded == 0
+        assert run_result.rows_succeeded == 2
         assert run_result.rows_routed_success == 2
         assert len(output_sink.results) == 2
         assert len(source_sink.results) == 0

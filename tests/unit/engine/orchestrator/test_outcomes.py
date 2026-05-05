@@ -15,7 +15,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from elspeth.contracts import PendingOutcome, RowOutcome, TokenInfo
+from elspeth.contracts import PendingOutcome, TokenInfo
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.engine.orchestrator.outcomes import (
@@ -33,31 +33,18 @@ from elspeth.testing import make_row, make_token_info
 
 
 def _make_result(
-    outcome: RowOutcome,
+    outcome: TerminalOutcome | None,
+    path: TerminalPath,
     *,
     token: TokenInfo | None = None,
     sink_name: str | None = None,
 ) -> Mock:
-    """Create a mock RowResult with the terminal-pair mapped outcome."""
-    outcome_pair: dict[RowOutcome, tuple[TerminalOutcome | None, TerminalPath]] = {
-        RowOutcome.COMPLETED: (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW),
-        RowOutcome.ROUTED: (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED),
-        RowOutcome.ROUTED_ON_ERROR: (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED),
-        RowOutcome.FAILED: (TerminalOutcome.FAILURE, TerminalPath.UNROUTED),
-        RowOutcome.QUARANTINED: (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE),
-        RowOutcome.FORKED: (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT),
-        RowOutcome.CONSUMED_IN_BATCH: (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED),
-        RowOutcome.DROPPED_BY_FILTER: (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED),
-        RowOutcome.COALESCED: (TerminalOutcome.SUCCESS, TerminalPath.COALESCED),
-        RowOutcome.EXPANDED: (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT),
-        RowOutcome.BUFFERED: (None, TerminalPath.BUFFERED),
-    }
-    terminal_outcome, path = outcome_pair[outcome]
+    """Create a mock RowResult with the two-axis terminal pair."""
     result_token = token or make_token_info()
     if path == TerminalPath.COALESCED and result_token.join_group_id is None:
         result_token = replace(result_token, join_group_id="join-1")
     result = Mock()
-    result.outcome = terminal_outcome
+    result.outcome = outcome
     result.path = path
     result.token = result_token
     result.sink_name = sink_name
@@ -84,7 +71,7 @@ class TestAccumulateRowOutcomesCompleted:
     def test_completed_increments_succeeded(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.COMPLETED, sink_name="output")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, sink_name="output")]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -93,7 +80,7 @@ class TestAccumulateRowOutcomesCompleted:
     def test_completed_appends_to_sink(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.COMPLETED, sink_name="output")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, sink_name="output")]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -108,7 +95,7 @@ class TestAccumulateRowOutcomesCompleted:
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "branch_a": []}
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="branch_a")
-        results = [_make_result(RowOutcome.COMPLETED, token=token, sink_name="output")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -120,7 +107,7 @@ class TestAccumulateRowOutcomesCompleted:
         counters = _make_counters()
         pending = _make_pending()
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="nonexistent")
-        results = [_make_result(RowOutcome.COMPLETED, token=token, sink_name="output")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -133,7 +120,7 @@ class TestAccumulateRowOutcomesRouted:
     def test_routed_increments_counter(self) -> None:
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "risk_sink": []}
-        results = [_make_result(RowOutcome.ROUTED, sink_name="risk_sink")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="risk_sink")]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -144,7 +131,7 @@ class TestAccumulateRowOutcomesRouted:
     def test_routed_tracks_destination(self) -> None:
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "risk_sink": []}
-        results = [_make_result(RowOutcome.ROUTED, sink_name="risk_sink")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="risk_sink")]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -153,7 +140,7 @@ class TestAccumulateRowOutcomesRouted:
     def test_routed_appends_to_named_sink(self) -> None:
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "risk_sink": []}
-        results = [_make_result(RowOutcome.ROUTED, sink_name="risk_sink")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="risk_sink")]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -169,7 +156,7 @@ class TestAccumulateRowOutcomesRouted:
 
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.ROUTED, sink_name=None)]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name=None)]
 
         with pytest.raises(OrchestrationInvariantError, match="missing sink_name"):
             accumulate_row_outcomes(results, counters, pending)
@@ -220,7 +207,7 @@ class TestAccumulateRowOutcomesRoutedOnError:
             "output": [],
             "risk_sink": [],
         }
-        results = [_make_result(RowOutcome.ROUTED, sink_name="risk_sink")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="risk_sink")]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -235,7 +222,7 @@ class TestAccumulateRowOutcomesTerminal:
     def test_failed_increments_counter(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.FAILED)]
+        results = [_make_result(TerminalOutcome.FAILURE, TerminalPath.UNROUTED)]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -245,7 +232,7 @@ class TestAccumulateRowOutcomesTerminal:
     def test_quarantined_increments_counter(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.QUARANTINED)]
+        results = [_make_result(TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE)]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -255,7 +242,7 @@ class TestAccumulateRowOutcomesTerminal:
     def test_forked_increments_counter(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.FORKED)]
+        results = [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT)]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -264,7 +251,7 @@ class TestAccumulateRowOutcomesTerminal:
     def test_expanded_increments_counter(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.EXPANDED)]
+        results = [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT)]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -273,7 +260,7 @@ class TestAccumulateRowOutcomesTerminal:
     def test_buffered_increments_counter(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.BUFFERED)]
+        results = [_make_result(None, TerminalPath.BUFFERED)]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -282,7 +269,7 @@ class TestAccumulateRowOutcomesTerminal:
     def test_dropped_by_filter_counts_as_succeeded(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.DROPPED_BY_FILTER)]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED)]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -293,7 +280,7 @@ class TestAccumulateRowOutcomesTerminal:
         """CONSUMED_IN_BATCH doesn't increment any counter (counted on batch flush)."""
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.CONSUMED_IN_BATCH)]
+        results = [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -308,7 +295,7 @@ class TestAccumulateRowOutcomesCoalesced:
         """COALESCED increments both rows_coalesced AND rows_succeeded."""
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.COALESCED, sink_name="output")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, sink_name="output")]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -318,7 +305,7 @@ class TestAccumulateRowOutcomesCoalesced:
     def test_coalesced_routes_to_sink(self) -> None:
         counters = _make_counters()
         pending = _make_pending()
-        results = [_make_result(RowOutcome.COALESCED, sink_name="output")]
+        results = [_make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, sink_name="output")]
 
         accumulate_row_outcomes(results, counters, pending)
 
@@ -370,7 +357,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.COMPLETED, sink_name="output")],
+            [_make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, sink_name="output")],
             counters,
             pending,
         )
@@ -382,7 +369,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending: dict[str, list[tuple[TokenInfo, PendingOutcome | None]]] = {"output": [], "risk": []}
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.ROUTED, sink_name="risk")],
+            [_make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="risk")],
             counters,
             pending,
         )
@@ -395,7 +382,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.FAILED)],
+            [_make_result(TerminalOutcome.FAILURE, TerminalPath.UNROUTED)],
             counters,
             pending,
         )
@@ -406,7 +393,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.QUARANTINED)],
+            [_make_result(TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE)],
             counters,
             pending,
         )
@@ -417,7 +404,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.FORKED)],
+            [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT)],
             counters,
             pending,
         )
@@ -428,7 +415,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.CONSUMED_IN_BATCH)],
+            [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)],
             counters,
             pending,
         )
@@ -439,7 +426,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.COALESCED, sink_name="output")],
+            [_make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, sink_name="output")],
             counters,
             pending,
         )
@@ -450,7 +437,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.EXPANDED)],
+            [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT)],
             counters,
             pending,
         )
@@ -461,7 +448,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.BUFFERED)],
+            [_make_result(None, TerminalPath.BUFFERED)],
             counters,
             pending,
         )
@@ -478,7 +465,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.CONSUMED_IN_BATCH)],
+            [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)],
             counters,
             pending,
         )
@@ -494,7 +481,7 @@ class TestAccumulateRowOutcomesExclusiveCounters:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.FORKED)],
+            [_make_result(TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT)],
             counters,
             pending,
         )
@@ -525,7 +512,7 @@ class TestCoalesceCountingOwnership:
 
         processor = Mock()
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COALESCED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
         ]
 
         counters = _make_counters()
@@ -557,7 +544,7 @@ class TestCoalesceCountingOwnership:
 
         processor = Mock()
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COALESCED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
         ]
 
         counters = _make_counters()
@@ -589,7 +576,7 @@ class TestCoalesceCountingOwnership:
 
         processor = Mock()
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COMPLETED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
         ]
 
         counters = _make_counters()
@@ -617,10 +604,10 @@ class TestAccumulateRowOutcomesMixed:
         counters = _make_counters()
         pending = _make_pending()
         results = [
-            _make_result(RowOutcome.COMPLETED, sink_name="output"),
-            _make_result(RowOutcome.COMPLETED, sink_name="output"),
-            _make_result(RowOutcome.FAILED),
-            _make_result(RowOutcome.QUARANTINED),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, sink_name="output"),
+            _make_result(TerminalOutcome.FAILURE, TerminalPath.UNROUTED),
+            _make_result(TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE),
         ]
 
         accumulate_row_outcomes(results, counters, pending)
@@ -667,7 +654,7 @@ class TestReconcileSinkWriteDiversions:
         counters = _make_counters()
         pending = _make_pending()
         accumulate_row_outcomes(
-            [_make_result(RowOutcome.COALESCED, sink_name="output")],
+            [_make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, sink_name="output")],
             counters,
             pending,
         )
@@ -748,7 +735,7 @@ class TestHandleCoalesceTimeouts:
         )
         # Non-terminal: downstream transforms produce COMPLETED
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COMPLETED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
         ]
 
         ctx = Mock()
@@ -785,7 +772,7 @@ class TestHandleCoalesceTimeouts:
         )
         # Terminal: processor returns COALESCED (no downstream transforms)
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COALESCED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
         ]
 
         ctx = Mock()
@@ -893,7 +880,7 @@ class TestFlushCoalescePending:
 
         processor = Mock()
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COMPLETED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
         ]
         processor.resolve_node_step.return_value = 0
 
@@ -935,7 +922,7 @@ class TestFlushCoalescePending:
         processor = Mock()
         processor.resolve_node_step.return_value = 1
         processor.process_token.return_value = [
-            _make_result(RowOutcome.COALESCED, token=merged_token, sink_name="output"),
+            _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
         ]
         counters = _make_counters()
         pending = _make_pending()

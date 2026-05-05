@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from elspeth.contracts import RowOutcome, RunStatus
-from elspeth.contracts.enums import NodeStateStatus
+from elspeth.contracts import RunStatus
+from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import SourceGuaranteedFieldsViolation
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.schema import node_states_table, runs_table, token_outcomes_table
@@ -44,7 +44,8 @@ def test_orchestrator_records_source_boundary_failure_before_reraising() -> None
     assert run_row.status == RunStatus.FAILED
     assert sink.results == []
     assert len(outcome_rows) == 1
-    assert outcome_rows[0].outcome == RowOutcome.FAILED.value
+    assert outcome_rows[0].outcome == TerminalOutcome.FAILURE.value
+    assert outcome_rows[0].path == TerminalPath.UNROUTED.value
 
     source_states = [row for row in state_rows if row.node_id == source.node_id]
     assert len(source_states) == 1

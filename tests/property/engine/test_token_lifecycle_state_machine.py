@@ -40,7 +40,8 @@ from elspeth.contracts import (
     Determinism,
     NodeStateStatus,
     NodeType,
-    RowOutcome,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.schema import SchemaConfig
@@ -386,7 +387,9 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
         for sib_id in sibling_ids:
             self.factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=sib_id, run_id=self.run.run_id),
-                outcome=RowOutcome.COALESCED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.COALESCED,
+                sink_name="default",
                 join_group_id=merged.join_group_id,
             )
             self.model_tokens[sib_id].state = TokenState.COALESCED
@@ -417,7 +420,8 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
         # Record outcome in database
         self.factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token_id, run_id=self.run.run_id),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="default",
         )
 
@@ -436,7 +440,8 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
         # Record outcome in database
         self.factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token_id, run_id=self.run.run_id),
-            outcome=RowOutcome.QUARANTINED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
             error_hash="test_error_hash",
         )
 
@@ -511,7 +516,7 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
             for token_id, model in self.model_tokens.items():
                 if model.state in {TokenState.COMPLETED, TokenState.QUARANTINED}:
                     result = conn.execute(
-                        text("SELECT outcome FROM token_outcomes WHERE token_id = :token_id"),
+                        text("SELECT outcome, path FROM token_outcomes WHERE token_id = :token_id"),
                         {"token_id": token_id},
                     ).fetchone()
 
@@ -520,22 +525,24 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
                 elif model.state == TokenState.FORKED:
                     # FORKED tokens have outcome recorded by factory.data_flow.fork_token()
                     result = conn.execute(
-                        text("SELECT outcome FROM token_outcomes WHERE token_id = :token_id"),
+                        text("SELECT outcome, path FROM token_outcomes WHERE token_id = :token_id"),
                         {"token_id": token_id},
                     ).fetchone()
 
                     assert result is not None, f"Forked parent {token_id} has no FORKED outcome"
-                    assert result[0] == RowOutcome.FORKED, f"Wrong outcome for forked token: {result[0]}"
+                    assert result[0] == TerminalOutcome.TRANSIENT.value
+                    assert result[1] == TerminalPath.FORK_PARENT.value, f"Wrong path for forked token: {result[1]}"
 
                 elif model.state == TokenState.COALESCED:
                     # COALESCED tokens have outcome recorded by coalesce rule
                     result = conn.execute(
-                        text("SELECT outcome FROM token_outcomes WHERE token_id = :token_id"),
+                        text("SELECT outcome, path FROM token_outcomes WHERE token_id = :token_id"),
                         {"token_id": token_id},
                     ).fetchone()
 
                     assert result is not None, f"Coalesced token {token_id} has no COALESCED outcome"
-                    assert result[0] == RowOutcome.COALESCED, f"Wrong outcome for coalesced token: {result[0]}"
+                    assert result[0] == TerminalOutcome.SUCCESS.value
+                    assert result[1] == TerminalPath.COALESCED.value, f"Wrong path for coalesced token: {result[1]}"
 
     @invariant()
     def coalesce_merged_tokens_have_parent_links(self) -> None:
@@ -658,12 +665,13 @@ class TestTokenLifecycleInvariants:
             # Verify parent has FORKED outcome
             with db.connection() as conn:
                 result = conn.execute(
-                    text("SELECT outcome FROM token_outcomes WHERE token_id = :token_id"),
+                    text("SELECT outcome, path FROM token_outcomes WHERE token_id = :token_id"),
                     {"token_id": token.token_id},
                 ).fetchone()
 
                 assert result is not None, "Parent token missing outcome after fork"
-                assert result[0] == RowOutcome.FORKED, f"Wrong outcome: {result[0]}"
+                assert result[0] == TerminalOutcome.TRANSIENT.value
+                assert result[1] == TerminalPath.FORK_PARENT.value, f"Wrong path: {result[1]}"
 
             # Verify children exist with parent links
             assert len(children) == branch_count
@@ -704,7 +712,8 @@ class TestTokenLifecycleInvariants:
             # Record COMPLETED outcome
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="default",
             )
 
@@ -715,7 +724,8 @@ class TestTokenLifecycleInvariants:
             with pytest.raises(LandscapeRecordError) as exc_info:
                 factory.data_flow.record_token_outcome(
                     ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
-                    outcome=RowOutcome.QUARANTINED,
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.QUARANTINED_AT_SOURCE,
                     error_hash="test_error_hash",
                 )
             assert isinstance(exc_info.value.__cause__, IntegrityError)

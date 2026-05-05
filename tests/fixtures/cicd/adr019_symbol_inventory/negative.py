@@ -1,6 +1,6 @@
-def clean(outcome):
+def clean(outcome, status):
     terminal = True
     payload = {"completed": True}
-    if outcome in {"completed", "failed"}:
+    if status in {"completed", "failed"}:
         return terminal
     return payload

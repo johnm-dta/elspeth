@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from elspeth.contracts import NodeType, RowOutcome
+from elspeth.contracts import NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
@@ -39,6 +39,46 @@ def _make_row(factory: RecorderFactory, *, run_id: str = "run-1", row_index: int
     )
     token = factory.data_flow.create_token(row.row_id)
     return row, token
+
+
+def _record_completed_sink_state_with_artifact(
+    factory: RecorderFactory,
+    *,
+    run_id: str,
+    token_id: str,
+    sink_node_id: str = "sink-0",
+) -> str:
+    """Create the I1c node-state and artifact witnesses for failsink fallback."""
+    register_test_node(
+        factory.data_flow,
+        run_id,
+        sink_node_id,
+        node_type=NodeType.SINK,
+        plugin_name="failsink",
+    )
+    state = factory.execution.begin_node_state(
+        token_id=token_id,
+        node_id=sink_node_id,
+        run_id=run_id,
+        step_index=0,
+        input_data={},
+    )
+    factory.execution.complete_node_state(
+        state_id=state.state_id,
+        status=NodeStateStatus.COMPLETED,
+        output_data={"written": True},
+        duration_ms=1.0,
+    )
+    artifact = factory.execution.register_artifact(
+        run_id=run_id,
+        state_id=state.state_id,
+        sink_node_id=sink_node_id,
+        artifact_type="test",
+        path=f"memory://unit/{token_id}",
+        content_hash="deadbeef" * 8,
+        size_bytes=0,
+    )
+    return artifact.artifact_id
 
 
 class TestCreateRow:
@@ -285,8 +325,9 @@ class TestForkToken:
         )
         outcome = factory.data_flow.get_token_outcome(token.token_id)
         assert outcome is not None
-        assert outcome.outcome == RowOutcome.FORKED
-        assert outcome.is_terminal is True
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.FORK_PARENT
+        assert outcome.completed is True
         assert outcome.fork_group_id == fork_group_id
 
     def test_empty_branches_raises_value_error(self):
@@ -418,8 +459,9 @@ class TestExpandToken:
         )
         outcome = factory.data_flow.get_token_outcome(token.token_id)
         assert outcome is not None
-        assert outcome.outcome == RowOutcome.EXPANDED
-        assert outcome.is_terminal is True
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.EXPAND_PARENT
+        assert outcome.completed is True
         assert outcome.expand_group_id == expand_group_id
 
     def test_count_less_than_one_raises_value_error(self):
@@ -503,7 +545,8 @@ class TestValidateOutcomeFields:
         with pytest.raises(ValueError, match="sink_name"):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
             )
 
     def test_completed_accepts_sink_name(self):
@@ -511,7 +554,8 @@ class TestValidateOutcomeFields:
         _row, token = _make_row(factory)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
         assert outcome_id is not None
@@ -522,7 +566,8 @@ class TestValidateOutcomeFields:
         with pytest.raises(ValueError, match="sink_name"):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                outcome=RowOutcome.ROUTED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_ROUTED,
             )
 
     def test_routed_accepts_sink_name(self):
@@ -530,7 +575,8 @@ class TestValidateOutcomeFields:
         _row, token = _make_row(factory)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.ROUTED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.GATE_ROUTED,
             sink_name="reject-sink",
         )
         assert outcome_id is not None
@@ -541,7 +587,8 @@ class TestValidateOutcomeFields:
         with pytest.raises(ValueError, match="fork_group_id"):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                outcome=RowOutcome.FORKED,
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.FORK_PARENT,
             )
 
     def test_forked_accepts_fork_group_id(self):
@@ -549,7 +596,8 @@ class TestValidateOutcomeFields:
         _row, token = _make_row(factory)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.FORKED,
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.FORK_PARENT,
             fork_group_id="fg-1",
         )
         assert outcome_id is not None
@@ -560,7 +608,8 @@ class TestValidateOutcomeFields:
         with pytest.raises(ValueError, match="error_hash"):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                outcome=RowOutcome.FAILED,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
             )
 
     def test_failed_accepts_error_hash(self):
@@ -568,7 +617,8 @@ class TestValidateOutcomeFields:
         _row, token = _make_row(factory)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.FAILED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
             error_hash="abc123",
         )
         assert outcome_id is not None
@@ -579,7 +629,8 @@ class TestValidateOutcomeFields:
         with pytest.raises(ValueError, match="error_hash"):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                outcome=RowOutcome.QUARANTINED,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.QUARANTINED_AT_SOURCE,
             )
 
     def test_quarantined_accepts_error_hash(self):
@@ -587,7 +638,8 @@ class TestValidateOutcomeFields:
         _row, token = _make_row(factory)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.QUARANTINED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
             error_hash="abc123",
         )
         assert outcome_id is not None
@@ -598,7 +650,8 @@ class TestValidateOutcomeFields:
         with pytest.raises(ValueError, match="batch_id"):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                outcome=RowOutcome.CONSUMED_IN_BATCH,
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.BATCH_CONSUMED,
             )
 
     def test_consumed_in_batch_accepts_batch_id(self):
@@ -607,7 +660,8 @@ class TestValidateOutcomeFields:
         _row, token = _make_row(factory)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.CONSUMED_IN_BATCH,
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.BATCH_CONSUMED,
             batch_id=batch_id,
         )
         assert outcome_id is not None
@@ -618,7 +672,9 @@ class TestValidateOutcomeFields:
         with pytest.raises(ValueError, match="join_group_id"):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                outcome=RowOutcome.COALESCED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.COALESCED,
+                sink_name="output",
             )
 
     def test_coalesced_accepts_join_group_id(self):
@@ -626,7 +682,9 @@ class TestValidateOutcomeFields:
         _row, token = _make_row(factory)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.COALESCED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.COALESCED,
+            sink_name="output",
             join_group_id="jg-1",
         )
         assert outcome_id is not None
@@ -637,7 +695,8 @@ class TestValidateOutcomeFields:
         with pytest.raises(ValueError, match="expand_group_id"):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                outcome=RowOutcome.EXPANDED,
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.EXPAND_PARENT,
             )
 
     def test_expanded_accepts_expand_group_id(self):
@@ -645,7 +704,8 @@ class TestValidateOutcomeFields:
         _row, token = _make_row(factory)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.EXPANDED,
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.EXPAND_PARENT,
             expand_group_id="eg-1",
         )
         assert outcome_id is not None
@@ -656,7 +716,8 @@ class TestValidateOutcomeFields:
         with pytest.raises(ValueError, match="sink_name"):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                outcome=RowOutcome.DIVERTED,
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
                 error_hash="abc123",
             )
 
@@ -666,17 +727,27 @@ class TestValidateOutcomeFields:
         with pytest.raises(ValueError, match="error_hash"):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                outcome=RowOutcome.DIVERTED,
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
                 sink_name="failsink",
             )
 
     def test_diverted_accepts_sink_name_and_error_hash(self):
         _db, factory = _setup()
         _row, token = _make_row(factory)
+        artifact_id = _record_completed_sink_state_with_artifact(
+            factory,
+            run_id="run-1",
+            token_id=token.token_id,
+            sink_node_id="sink-0",
+        )
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.DIVERTED,
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
             sink_name="failsink",
+            sink_node_id="sink-0",
+            artifact_id=artifact_id,
             error_hash="abc123",
         )
         assert outcome_id is not None
@@ -687,7 +758,8 @@ class TestValidateOutcomeFields:
         with pytest.raises(ValueError, match="batch_id"):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                outcome=RowOutcome.BUFFERED,
+                outcome=None,
+                path=TerminalPath.BUFFERED,
             )
 
     def test_buffered_accepts_batch_id(self):
@@ -696,7 +768,8 @@ class TestValidateOutcomeFields:
         _row, token = _make_row(factory)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.BUFFERED,
+            outcome=None,
+            path=TerminalPath.BUFFERED,
             batch_id=batch_id,
         )
         assert outcome_id is not None
@@ -710,7 +783,8 @@ class TestRecordTokenOutcome:
         _row, token = _make_row(factory)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
         assert outcome_id is not None
@@ -720,7 +794,8 @@ class TestRecordTokenOutcome:
         _row, token = _make_row(factory)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
         assert isinstance(outcome_id, str)
@@ -731,55 +806,63 @@ class TestRecordTokenOutcome:
         _row, token = _make_row(factory)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
         fetched = factory.data_flow.get_token_outcome(token.token_id)
         assert fetched is not None
         assert fetched.outcome_id == outcome_id
         assert fetched.token_id == token.token_id
-        assert fetched.outcome == RowOutcome.COMPLETED
+        assert fetched.outcome == TerminalOutcome.SUCCESS
+        assert fetched.path == TerminalPath.DEFAULT_FLOW
         assert fetched.sink_name == "output"
-        assert fetched.is_terminal is True
+        assert fetched.completed is True
 
     def test_records_failed_outcome_with_error_hash(self):
         _db, factory = _setup()
         _row, token = _make_row(factory)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.FAILED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
             error_hash="err-hash-abc",
         )
         fetched = factory.data_flow.get_token_outcome(token.token_id)
         assert fetched is not None
-        assert fetched.outcome == RowOutcome.FAILED
+        assert fetched.outcome == TerminalOutcome.FAILURE
+        assert fetched.path == TerminalPath.UNROUTED
         assert fetched.error_hash == "err-hash-abc"
-        assert fetched.is_terminal is True
+        assert fetched.completed is True
 
     def test_records_quarantined_outcome(self):
         _db, factory = _setup()
         _row, token = _make_row(factory)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.QUARANTINED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
             error_hash="quarantine-hash",
         )
         fetched = factory.data_flow.get_token_outcome(token.token_id)
         assert fetched is not None
-        assert fetched.outcome == RowOutcome.QUARANTINED
-        assert fetched.is_terminal is True
+        assert fetched.outcome == TerminalOutcome.FAILURE
+        assert fetched.path == TerminalPath.QUARANTINED_AT_SOURCE
+        assert fetched.completed is True
 
     def test_records_routed_outcome(self):
         _db, factory = _setup()
         _row, token = _make_row(factory)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.ROUTED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.GATE_ROUTED,
             sink_name="reject",
         )
         fetched = factory.data_flow.get_token_outcome(token.token_id)
         assert fetched is not None
-        assert fetched.outcome == RowOutcome.ROUTED
+        assert fetched.outcome == TerminalOutcome.SUCCESS
+        assert fetched.path == TerminalPath.GATE_ROUTED
         assert fetched.sink_name == "reject"
 
     def test_records_consumed_in_batch_outcome(self):
@@ -788,12 +871,14 @@ class TestRecordTokenOutcome:
         _row, token = _make_row(factory)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.CONSUMED_IN_BATCH,
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.BATCH_CONSUMED,
             batch_id=batch_id,
         )
         fetched = factory.data_flow.get_token_outcome(token.token_id)
         assert fetched is not None
-        assert fetched.outcome == RowOutcome.CONSUMED_IN_BATCH
+        assert fetched.outcome == TerminalOutcome.TRANSIENT
+        assert fetched.path == TerminalPath.BATCH_CONSUMED
         assert fetched.batch_id == "batch-42"
 
     def test_records_buffered_outcome(self):
@@ -802,20 +887,23 @@ class TestRecordTokenOutcome:
         _row, token = _make_row(factory)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.BUFFERED,
+            outcome=None,
+            path=TerminalPath.BUFFERED,
             batch_id=batch_id,
         )
         fetched = factory.data_flow.get_token_outcome(token.token_id)
         assert fetched is not None
-        assert fetched.outcome == RowOutcome.BUFFERED
-        assert fetched.is_terminal is False
+        assert fetched.outcome is None
+        assert fetched.path == TerminalPath.BUFFERED
+        assert fetched.completed is False
 
     def test_records_outcome_with_context(self):
         _db, factory = _setup()
         _row, token = _make_row(factory)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
             context={"reason": "all good"},
         )
@@ -828,7 +916,8 @@ class TestRecordTokenOutcome:
         _row, token = _make_row(factory)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
         fetched = factory.data_flow.get_token_outcome(token.token_id)
@@ -851,19 +940,22 @@ class TestGetTokenOutcome:
         # Record non-terminal first
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.BUFFERED,
+            outcome=None,
+            path=TerminalPath.BUFFERED,
             batch_id=batch_id,
         )
         # Then record terminal
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
         fetched = factory.data_flow.get_token_outcome(token.token_id)
         assert fetched is not None
-        assert fetched.outcome == RowOutcome.COMPLETED
-        assert fetched.is_terminal is True
+        assert fetched.outcome == TerminalOutcome.SUCCESS
+        assert fetched.path == TerminalPath.DEFAULT_FLOW
+        assert fetched.completed is True
 
     def test_returns_non_terminal_when_no_terminal_exists(self):
         _db, factory = _setup()
@@ -871,13 +963,15 @@ class TestGetTokenOutcome:
         _row, token = _make_row(factory)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.BUFFERED,
+            outcome=None,
+            path=TerminalPath.BUFFERED,
             batch_id=batch_id,
         )
         fetched = factory.data_flow.get_token_outcome(token.token_id)
         assert fetched is not None
-        assert fetched.outcome == RowOutcome.BUFFERED
-        assert fetched.is_terminal is False
+        assert fetched.outcome is None
+        assert fetched.path == TerminalPath.BUFFERED
+        assert fetched.completed is False
 
     def test_terminal_preferred_regardless_of_insertion_order(self):
         _db, factory = _setup()
@@ -886,19 +980,22 @@ class TestGetTokenOutcome:
         # Record terminal first
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
         # Then record non-terminal
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.BUFFERED,
+            outcome=None,
+            path=TerminalPath.BUFFERED,
             batch_id=batch_id,
         )
         fetched = factory.data_flow.get_token_outcome(token.token_id)
         assert fetched is not None
-        assert fetched.outcome == RowOutcome.COMPLETED
-        assert fetched.is_terminal is True
+        assert fetched.outcome == TerminalOutcome.SUCCESS
+        assert fetched.path == TerminalPath.DEFAULT_FLOW
+        assert fetched.completed is True
 
 
 class TestGetTokenOutcomesForRow:
@@ -916,19 +1013,21 @@ class TestGetTokenOutcomesForRow:
         token_b = factory.data_flow.create_token(row.row_id)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token_a.token_id, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token_b.token_id, run_id="run-1"),
-            outcome=RowOutcome.ROUTED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.GATE_ROUTED,
             sink_name="reject",
         )
         outcomes = factory.data_flow.get_token_outcomes_for_row(run_id="run-1", row_id=row.row_id)
         assert len(outcomes) == 2
-        outcome_types = {o.outcome for o in outcomes}
-        assert RowOutcome.COMPLETED in outcome_types
-        assert RowOutcome.ROUTED in outcome_types
+        pairs = {(o.outcome, o.path) for o in outcomes}
+        assert (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW) in pairs
+        assert (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED) in pairs
 
     def test_does_not_return_outcomes_from_other_rows(self):
         _db, factory = _setup()
@@ -936,17 +1035,20 @@ class TestGetTokenOutcomesForRow:
         _row_b, token_b = _make_row(factory, row_index=1)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token_a.token_id, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token_b.token_id, run_id="run-1"),
-            outcome=RowOutcome.FAILED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
             error_hash="err-hash",
         )
         outcomes_a = factory.data_flow.get_token_outcomes_for_row(run_id="run-1", row_id=row_a.row_id)
         assert len(outcomes_a) == 1
-        assert outcomes_a[0].outcome == RowOutcome.COMPLETED
+        assert outcomes_a[0].outcome == TerminalOutcome.SUCCESS
+        assert outcomes_a[0].path == TerminalPath.DEFAULT_FLOW
 
     def test_returns_empty_for_nonexistent_row(self):
         _db, factory = _setup()
@@ -959,12 +1061,14 @@ class TestGetTokenOutcomesForRow:
         row, token = _make_row(factory, row_index=0)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.BUFFERED,
+            outcome=None,
+            path=TerminalPath.BUFFERED,
             batch_id=batch_id,
         )
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
         outcomes = factory.data_flow.get_token_outcomes_for_row(run_id="run-1", row_id=row.row_id)
@@ -975,7 +1079,8 @@ class TestGetTokenOutcomesForRow:
         row_a, token_a = _make_row(factory_a, run_id="run-A", row_index=0)
         factory_a.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token_a.token_id, run_id="run-A"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
         # Query with a different run_id
@@ -1063,7 +1168,8 @@ class TestCrossRunContaminationPrevention:
         with pytest.raises(AuditIntegrityError, match="Cross-run contamination"):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token_a.token_id, run_id="run-B"),
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="output",
             )
 
@@ -1082,7 +1188,8 @@ class TestCrossRunContaminationPrevention:
         # Recording with the correct run_id should succeed
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token_a.token_id, run_id="run-A"),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="output",
         )
         assert outcome_id is not None
@@ -1416,8 +1523,9 @@ class TestTokenRunIdConsistency:
                     outcome_id=f"out_{generate_id()[:12]}",
                     run_id="run-B",
                     token_id=token_a.token_id,
-                    outcome=RowOutcome.COMPLETED.value,
-                    is_terminal=1,
+                    outcome=TerminalOutcome.SUCCESS.value,
+                    path=TerminalPath.DEFAULT_FLOW.value,
+                    completed=1,
                     recorded_at=now(),
                     sink_name="output",
                 )

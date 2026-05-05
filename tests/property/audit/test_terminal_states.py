@@ -34,7 +34,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from sqlalchemy import text
 
-from elspeth.contracts.enums import RowOutcome
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -75,7 +75,7 @@ def count_tokens_missing_terminal(db: LandscapeDB, run_id: str) -> int:
                 FROM tokens t
                 JOIN rows r ON r.row_id = t.row_id
                 LEFT JOIN token_outcomes o
-                  ON o.token_id = t.token_id AND o.is_terminal = 1
+                  ON o.token_id = t.token_id AND o.completed = 1
                 WHERE r.run_id = :run_id
                   AND o.token_id IS NULL
             """),
@@ -98,7 +98,7 @@ def count_duplicate_terminal_outcomes(db: LandscapeDB, run_id: str) -> int:
                     FROM token_outcomes o
                     JOIN tokens t ON t.token_id = o.token_id
                     JOIN rows r ON r.row_id = t.row_id
-                    WHERE o.is_terminal = 1 AND r.run_id = :run_id
+                    WHERE o.completed = 1 AND r.run_id = :run_id
                     GROUP BY o.token_id
                     HAVING COUNT(*) > 1
                 ) duplicates
@@ -108,16 +108,16 @@ def count_duplicate_terminal_outcomes(db: LandscapeDB, run_id: str) -> int:
         return result or 0
 
 
-def get_all_token_outcomes(db: LandscapeDB, run_id: str) -> list[tuple[str, str, bool]]:
+def get_all_token_outcomes(db: LandscapeDB, run_id: str) -> list[tuple[str, str | None, str, bool]]:
     """Get all token outcomes for a run.
 
-    Returns list of (token_id, outcome, is_terminal) tuples.
+    Returns list of (token_id, outcome, path, completed) tuples.
     Used for detailed debugging when invariants fail.
     """
     with db.connection() as conn:
         results = conn.execute(
             text("""
-                SELECT o.token_id, o.outcome, o.is_terminal
+                SELECT o.token_id, o.outcome, o.path, o.completed
                 FROM token_outcomes o
                 JOIN tokens t ON t.token_id = o.token_id
                 JOIN rows r ON r.row_id = t.row_id
@@ -126,7 +126,7 @@ def get_all_token_outcomes(db: LandscapeDB, run_id: str) -> list[tuple[str, str,
             """),
             {"run_id": run_id},
         ).fetchall()
-        return [(r[0], r[1], bool(r[2])) for r in results]
+        return [(r[0], r[1], r[2], bool(r[3])) for r in results]
 
 
 # =============================================================================
@@ -285,7 +285,7 @@ class TestTerminalStateProperty:
     @given(rows=st.lists(single_row, min_size=0, max_size=20))
     @settings(max_examples=50, deadline=None)
     def test_terminal_outcomes_have_correct_type(self, rows: list[dict[str, Any]]) -> None:
-        """Property: All terminal outcomes are valid RowOutcome enum values."""
+        """Property: All terminal outcomes use valid ADR-019 enum values."""
         db = make_landscape_db()
         payload_store = MockPayloadStore()
         source = ListSource(rows)
@@ -303,17 +303,18 @@ class TestTerminalStateProperty:
 
         # Get all outcomes and verify they're valid enum values
         outcomes = get_all_token_outcomes(db, run.run_id)
-        valid_outcomes = {o.value for o in RowOutcome}
+        valid_outcomes = {o.value for o in TerminalOutcome}
+        valid_paths = {p.value for p in TerminalPath}
 
-        for token_id, outcome, is_terminal in outcomes:
-            assert outcome in valid_outcomes, f"Invalid outcome '{outcome}' for token {token_id}. Valid outcomes: {valid_outcomes}"
+        for token_id, outcome, path, completed in outcomes:
+            if completed:
+                assert outcome in valid_outcomes, f"Invalid outcome '{outcome}' for token {token_id}. Valid outcomes: {valid_outcomes}"
+            else:
+                assert outcome is None, f"Non-terminal token {token_id} must have NULL outcome, got {outcome!r}"
+            assert path in valid_paths, f"Invalid path '{path}' for token {token_id}. Valid paths: {valid_paths}"
 
-            # Verify is_terminal flag matches the outcome
-            expected_terminal = RowOutcome(outcome).is_terminal
-            assert is_terminal == expected_terminal, (
-                f"is_terminal mismatch for token {token_id}: "
-                f"outcome={outcome}, is_terminal={is_terminal}, "
-                f"expected is_terminal={expected_terminal}"
+            assert completed == (outcome is not None), (
+                f"completed mismatch for token {token_id}: outcome={outcome}, path={path}, completed={completed}"
             )
 
 
@@ -511,34 +512,17 @@ class TestTerminalStateAggregation:
         assert run.rows_buffered == n, f"Expected {n} rows_buffered, got {run.rows_buffered}"
 
 
-class TestRowOutcomeEnumProperties:
-    """Property tests for the RowOutcome enum itself."""
+class TestTerminalPairEnumProperties:
+    """Property tests for the ADR-019 terminal enum split."""
 
-    def test_all_outcomes_have_is_terminal_defined(self) -> None:
-        """Property: Every RowOutcome has is_terminal property defined."""
-        for outcome in RowOutcome:
-            # Should not raise
-            _ = outcome.is_terminal
+    def test_outcome_values_are_closed(self) -> None:
+        """Property: TerminalOutcome exposes the lifecycle axis values."""
+        assert {outcome.value for outcome in TerminalOutcome} == {"success", "failure", "transient"}
 
-    def test_only_buffered_is_non_terminal(self) -> None:
-        """Property: BUFFERED is the only non-terminal outcome."""
-        non_terminal = [o for o in RowOutcome if not o.is_terminal]
-        assert non_terminal == [RowOutcome.BUFFERED], f"Expected only BUFFERED to be non-terminal, but found: {non_terminal}"
+    def test_only_buffered_path_is_non_terminal(self) -> None:
+        """Property: BUFFERED is the only non-terminal path."""
+        assert TerminalPath.BUFFERED.value == "buffered"
 
-    def test_terminal_outcomes_count(self) -> None:
-        """Property: There are exactly 11 terminal outcomes."""
-        terminal = [o for o in RowOutcome if o.is_terminal]
-        expected = [
-            RowOutcome.COMPLETED,
-            RowOutcome.ROUTED,
-            RowOutcome.ROUTED_ON_ERROR,
-            RowOutcome.FORKED,
-            RowOutcome.FAILED,
-            RowOutcome.QUARANTINED,
-            RowOutcome.DIVERTED,
-            RowOutcome.CONSUMED_IN_BATCH,
-            RowOutcome.DROPPED_BY_FILTER,
-            RowOutcome.COALESCED,
-            RowOutcome.EXPANDED,
-        ]
-        assert set(terminal) == set(expected), f"Terminal outcomes mismatch. Got: {terminal}, Expected: {expected}"
+    def test_terminal_paths_count(self) -> None:
+        """Property: There are exactly 12 terminal paths plus BUFFERED."""
+        assert len(TerminalPath) == 13

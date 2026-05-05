@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-from elspeth.contracts import Determinism, NodeType, RoutingMode, RowOutcome, RunStatus
+from elspeth.contracts import Determinism, NodeType, RoutingMode, RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
@@ -279,7 +279,8 @@ class TestResumeComprehensive:
         for i in range(3):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=f"t{i}", run_id=run_id),
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="sink",
             )
 
@@ -386,7 +387,8 @@ class TestResumeComprehensive:
         for i in range(3):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=f"t{i}", run_id=run_id),
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="sink",
             )
 
@@ -604,7 +606,8 @@ class TestResumeComprehensive:
         factory = make_factory(db)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id="t0", run_id=run_id),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="sink",
         )
 
@@ -817,7 +820,8 @@ class TestResumeComprehensive:
         factory = make_factory(db)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id="t0", run_id=run_id),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="sink",
         )
 
@@ -1018,7 +1022,8 @@ class TestResumeComprehensive:
         factory = make_factory(db)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id="t0", run_id=run_id),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="sink",
         )
 
@@ -1221,7 +1226,8 @@ class TestResumeComprehensive:
         factory = make_factory(db)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id="t0", run_id=run_id),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="sink",
         )
 
@@ -1481,10 +1487,9 @@ class TestResumeComprehensive:
            Landscape and calls ``derive_terminal_run_status`` with the
            accumulated counters.
         3. Verify: ``result.status == RunStatus.COMPLETED`` (not FAILED).
-        4. Verify: ``result.rows_succeeded == 0`` — routed successes do not
-           also occupy the ordinary success bucket because terminal web
-           schemas treat ``rows_succeeded`` and ``rows_routed_success`` as
-           additive buckets.
+        4. Verify: ``result.rows_succeeded == 5`` — routed successes occupy
+           the lifecycle success bucket while ``rows_routed_success`` records
+           the orthogonal routing provenance.
         5. Verify: ``result.rows_routed_success == 5`` — the resume-side
            accumulator must surface the existing ``ROUTED`` outcomes via the
            split counter (orthogonal attribution: which gate, which sink).
@@ -1516,7 +1521,8 @@ class TestResumeComprehensive:
         for i in range(5):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=f"t{i}", run_id=run_id),
-                outcome=RowOutcome.ROUTED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_ROUTED,
                 sink_name="sink",
             )
 
@@ -1602,9 +1608,8 @@ class TestResumeComprehensive:
             f"early-exit Landscape readback). "
             f"result={result.to_dict()}"
         )
-        # ROUTED rows are terminal successes via rows_routed_success; they
-        # must not also be counted in the ordinary rows_succeeded bucket.
-        assert result.rows_succeeded == 0
+        # ROUTED rows are lifecycle successes with gate-routing provenance.
+        assert result.rows_succeeded == 5
         assert result.rows_routed_success == 5  # All rows recorded as ROUTED.
         assert result.rows_routed_failure == 0  # No on_error reroutes.
 
@@ -1614,9 +1619,11 @@ class TestResumeComprehensive:
 
         with db.engine.connect() as conn:
             outcomes = conn.execute(
-                select(token_outcomes_table.c.outcome, token_outcomes_table.c.sink_name).where(token_outcomes_table.c.run_id == run_id)
+                select(token_outcomes_table.c.outcome, token_outcomes_table.c.path, token_outcomes_table.c.sink_name).where(
+                    token_outcomes_table.c.run_id == run_id
+                )
             ).fetchall()
-        routed_outcomes = [o for o in outcomes if o.outcome == "routed"]
+        routed_outcomes = [o for o in outcomes if (o.outcome, o.path) == (TerminalOutcome.SUCCESS.value, TerminalPath.GATE_ROUTED.value)]
         assert len(routed_outcomes) == 5
 
     def test_resume_routed_on_error_pipeline_classifies_as_failed(
@@ -1654,7 +1661,7 @@ class TestResumeComprehensive:
         4. Verify: ``result.status == RunStatus.FAILED`` — predicate
            output for ``(rows_processed=5, rows_succeeded=0,
            rows_routed_success=0, rows_routed_failure=5,
-           rows_failed=0, rows_quarantined=0)``.  Reasoning:
+           rows_failed=5, rows_quarantined=0)``.  Reasoning:
            ``success_indicator = (rows_succeeded > 0) OR
            (rows_routed_success > 0) = False`` and ``rows_processed > 0``
            drives the ``not success_indicator -> FAILED`` arm of
@@ -1664,9 +1671,9 @@ class TestResumeComprehensive:
            failure-side split counter.
         6. Verify: ``result.rows_routed_success == 0`` — no MOVE rows.
         7. Verify: ``result.rows_succeeded == 0`` and
-           ``result.rows_failed == 0`` — no on_success completions and no
-           FAILED outcomes (the DIVERT side is operationally distinct
-           from FAILED — the row reached an error sink).
+           ``result.rows_failed == 5`` — every row has lifecycle FAILURE,
+           with ``rows_routed_failure`` preserving the on_error routing
+           provenance.
 
         Regression catcher: an inversion of the two ``rows_routed_*``
         increments in ``_derive_resume_terminal_status_from_audit``'s
@@ -1695,7 +1702,8 @@ class TestResumeComprehensive:
         for i in range(5):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=f"t{i}", run_id=run_id),
-                outcome=RowOutcome.ROUTED_ON_ERROR,
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.ON_ERROR_ROUTED,
                 sink_name="error_sink",
                 error_hash="0123456789abcdef",
             )
@@ -1787,7 +1795,7 @@ class TestResumeComprehensive:
         assert result.rows_succeeded == 0  # No on_success success-path sink.
         assert result.rows_routed_failure == 5  # All rows recorded as ROUTED_ON_ERROR.
         assert result.rows_routed_success == 0  # No gate MOVE rows.
-        assert result.rows_failed == 0  # DIVERT is operationally distinct from FAILED.
+        assert result.rows_failed == 5  # Lifecycle FAILURE plus on_error provenance.
         assert result.rows_quarantined == 0  # No quarantine outcomes.
 
         # Cross-check against Landscape: every token_outcomes row has the
@@ -1797,9 +1805,13 @@ class TestResumeComprehensive:
 
         with db.engine.connect() as conn:
             outcomes = conn.execute(
-                select(token_outcomes_table.c.outcome, token_outcomes_table.c.sink_name).where(token_outcomes_table.c.run_id == run_id)
+                select(token_outcomes_table.c.outcome, token_outcomes_table.c.path, token_outcomes_table.c.sink_name).where(
+                    token_outcomes_table.c.run_id == run_id
+                )
             ).fetchall()
-        routed_on_error_outcomes = [o for o in outcomes if o.outcome == "routed_on_error"]
+        routed_on_error_outcomes = [
+            o for o in outcomes if (o.outcome, o.path) == (TerminalOutcome.FAILURE.value, TerminalPath.ON_ERROR_ROUTED.value)
+        ]
         assert len(routed_on_error_outcomes) == 5
         # Every ROUTED_ON_ERROR row carries the error sink, distinct from
         # the gate-MOVE shape (where ``sink_name`` matches the on_success

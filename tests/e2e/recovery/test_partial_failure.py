@@ -21,8 +21,9 @@ from elspeth.contracts import (
     Determinism,
     PipelineRow,
     PluginSchema,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.core.config import SourceSettings
 from elspeth.core.dag import ExecutionGraph
@@ -169,15 +170,16 @@ class TestPartialFailure:
                 select(
                     token_outcomes_table.c.token_id,
                     token_outcomes_table.c.outcome,
+                    token_outcomes_table.c.path,
                 )
                 .where(token_outcomes_table.c.run_id == result.run_id)
-                .where(token_outcomes_table.c.is_terminal == 1)
+                .where(token_outcomes_table.c.completed == 1)
             ).fetchall()
 
         assert len(outcomes) == 10
-        outcome_values = {o.outcome for o in outcomes}
+        outcome_values = {(o.outcome, o.path) for o in outcomes}
         # Should contain both COMPLETED and QUARANTINED/FAILED outcomes
-        assert RowOutcome.COMPLETED in outcome_values
+        assert (TerminalOutcome.SUCCESS.value, TerminalPath.DEFAULT_FLOW.value) in outcome_values
 
         # 5. Explain query works for both successful and failed rows
         factory = RecorderFactory(db, payload_store=payload_store)
@@ -301,7 +303,7 @@ class TestPartialFailure:
             outcomes = conn.execute(
                 select(token_outcomes_table.c.outcome)
                 .where(token_outcomes_table.c.run_id == result.run_id)
-                .where(token_outcomes_table.c.is_terminal == 1)
+                .where(token_outcomes_table.c.completed == 1)
             ).fetchall()
 
         assert len(outcomes) == 5

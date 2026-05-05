@@ -29,8 +29,9 @@ from elspeth.contracts import (
     Determinism,
     NodeStateStatus,
     NodeType,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.schema import SchemaConfig
@@ -59,10 +60,6 @@ determinism_levels = st.sampled_from(list(Determinism))
 
 # Strategy for valid row indices
 row_indices = st.integers(min_value=0, max_value=1_000_000)
-
-# Strategy for terminal outcomes (excluding BUFFERED which is non-terminal)
-terminal_outcomes = st.sampled_from([o for o in RowOutcome if o.is_terminal and o != RowOutcome.FORKED])
-
 
 # =============================================================================
 # Test Helpers
@@ -531,7 +528,8 @@ class TestTokenOutcomeProperties:
         # Record COMPLETED outcome (requires sink_name)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
-            outcome=RowOutcome.COMPLETED,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
             sink_name="default",
         )
 
@@ -540,8 +538,9 @@ class TestTokenOutcomeProperties:
         # Verify persisted
         outcome = factory.data_flow.get_token_outcome(token.token_id)
         assert outcome is not None
-        assert outcome.outcome == RowOutcome.COMPLETED
-        assert outcome.is_terminal is True
+        assert outcome.outcome == TerminalOutcome.SUCCESS
+        assert outcome.path == TerminalPath.DEFAULT_FLOW
+        assert outcome.completed is True
         assert outcome.sink_name == "default"
 
     @given(config=run_configs, data=row_data)
@@ -573,7 +572,8 @@ class TestTokenOutcomeProperties:
         error_hash = stable_hash({"reason": "validation_failed"})
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
-            outcome=RowOutcome.QUARANTINED,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
             error_hash=error_hash,
         )
 
@@ -582,8 +582,9 @@ class TestTokenOutcomeProperties:
         # Verify persisted
         outcome = factory.data_flow.get_token_outcome(token.token_id)
         assert outcome is not None
-        assert outcome.outcome == RowOutcome.QUARANTINED
-        assert outcome.is_terminal is True
+        assert outcome.outcome == TerminalOutcome.FAILURE
+        assert outcome.path == TerminalPath.QUARANTINED_AT_SOURCE
+        assert outcome.completed is True
         assert outcome.error_hash == error_hash
 
     @given(config=run_configs, n_rows=st.integers(min_value=1, max_value=20))
@@ -613,7 +614,8 @@ class TestTokenOutcomeProperties:
             token = factory.data_flow.create_token(row_id=row.row_id)
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="default",
             )
 
@@ -622,27 +624,29 @@ class TestTokenOutcomeProperties:
         assert outcome_count == n_rows, f"Expected {n_rows} outcomes, got {outcome_count}. Data was lost!"
 
     @pytest.mark.parametrize(
-        ("outcome", "required_field", "kwargs"),
+        ("outcome", "path", "required_field", "kwargs"),
         [
-            (RowOutcome.COMPLETED, "sink_name", {}),
-            (RowOutcome.ROUTED, "sink_name", {}),
-            # ROUTED_ON_ERROR (elspeth-5069612f3c) requires BOTH sink_name AND error_hash.
+            (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, "sink_name", {}),
+            (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, "sink_name", {}),
+            # ON_ERROR_ROUTED (elspeth-5069612f3c) requires BOTH sink_name AND error_hash.
             # Missing sink_name fires first (ordered check in recorder).
-            (RowOutcome.ROUTED_ON_ERROR, "sink_name", {}),
+            (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED, "sink_name", {}),
             # Missing error_hash when sink_name is provided.
-            (RowOutcome.ROUTED_ON_ERROR, "error_hash", {"sink_name": "failsink"}),
-            (RowOutcome.FORKED, "fork_group_id", {}),
-            (RowOutcome.FAILED, "error_hash", {}),
-            (RowOutcome.QUARANTINED, "error_hash", {}),
-            (RowOutcome.CONSUMED_IN_BATCH, "batch_id", {}),
-            (RowOutcome.COALESCED, "join_group_id", {}),
-            (RowOutcome.EXPANDED, "expand_group_id", {}),
-            (RowOutcome.BUFFERED, "batch_id", {}),
+            (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED, "error_hash", {"sink_name": "failsink"}),
+            (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT, "fork_group_id", {}),
+            (TerminalOutcome.FAILURE, TerminalPath.UNROUTED, "error_hash", {}),
+            (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE, "error_hash", {}),
+            (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED, "batch_id", {}),
+            (TerminalOutcome.SUCCESS, TerminalPath.COALESCED, "sink_name", {}),
+            (TerminalOutcome.SUCCESS, TerminalPath.COALESCED, "join_group_id", {"sink_name": "default"}),
+            (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT, "expand_group_id", {}),
+            (None, TerminalPath.BUFFERED, "batch_id", {}),
         ],
     )
     def test_record_outcome_requires_fields(
         self,
-        outcome: RowOutcome,
+        outcome: TerminalOutcome | None,
+        path: TerminalPath,
         required_field: str,
         kwargs: dict[str, Any],
     ) -> None:
@@ -671,33 +675,40 @@ class TestTokenOutcomeProperties:
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
                 outcome=outcome,
+                path=path,
                 **kwargs,
             )
 
     @pytest.mark.parametrize(
-        ("outcome", "kwargs"),
+        ("outcome", "path", "kwargs"),
         [
-            (RowOutcome.COMPLETED, {"sink_name": "default"}),
-            (RowOutcome.ROUTED, {"sink_name": "error_sink"}),
-            # ROUTED_ON_ERROR (elspeth-5069612f3c): both sink_name AND error_hash required.
+            (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, {"sink_name": "default"}),
+            (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, {"sink_name": "error_sink"}),
+            # ON_ERROR_ROUTED (elspeth-5069612f3c): both sink_name AND error_hash required.
             (
-                RowOutcome.ROUTED_ON_ERROR,
+                TerminalOutcome.FAILURE,
+                TerminalPath.ON_ERROR_ROUTED,
                 {
                     "sink_name": "failsink",
                     "error_hash": stable_hash({"reason": "on_error"}),
                 },
             ),
-            (RowOutcome.FORKED, {"fork_group_id": "fork_group_1"}),
-            (RowOutcome.FAILED, {"error_hash": stable_hash({"reason": "failure"})}),
-            (RowOutcome.QUARANTINED, {"error_hash": stable_hash({"reason": "validation"})}),
-            (RowOutcome.CONSUMED_IN_BATCH, {"batch_id": "batch_1"}),
-            (RowOutcome.DROPPED_BY_FILTER, {}),
-            (RowOutcome.COALESCED, {"join_group_id": "join_group_1"}),
-            (RowOutcome.EXPANDED, {"expand_group_id": "expand_group_1"}),
-            (RowOutcome.BUFFERED, {"batch_id": "batch_2"}),
+            (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT, {"fork_group_id": "fork_group_1"}),
+            (TerminalOutcome.FAILURE, TerminalPath.UNROUTED, {"error_hash": stable_hash({"reason": "failure"})}),
+            (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE, {"error_hash": stable_hash({"reason": "validation"})}),
+            (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED, {"batch_id": "batch_1"}),
+            (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED, {}),
+            (TerminalOutcome.SUCCESS, TerminalPath.COALESCED, {"sink_name": "default", "join_group_id": "join_group_1"}),
+            (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT, {"expand_group_id": "expand_group_1"}),
+            (None, TerminalPath.BUFFERED, {"batch_id": "batch_2"}),
         ],
     )
-    def test_record_outcome_accepts_required_fields(self, outcome: RowOutcome, kwargs: dict[str, Any]) -> None:
+    def test_record_outcome_accepts_required_fields(
+        self,
+        outcome: TerminalOutcome | None,
+        path: TerminalPath,
+        kwargs: dict[str, Any],
+    ) -> None:
         """Outcomes with required fields are recorded and retrievable."""
         db = make_landscape_db()
         factory = make_factory(db)
@@ -719,7 +730,7 @@ class TestTokenOutcomeProperties:
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
-        if outcome in {RowOutcome.CONSUMED_IN_BATCH, RowOutcome.BUFFERED}:
+        if path in {TerminalPath.BATCH_CONSUMED, TerminalPath.BUFFERED}:
             aggregation_node = factory.data_flow.register_node(
                 run_id=run.run_id,
                 plugin_name="test_aggregation",
@@ -738,14 +749,16 @@ class TestTokenOutcomeProperties:
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
             outcome=outcome,
+            path=path,
             **kwargs,
         )
         assert outcome_id is not None
 
         persisted = factory.data_flow.get_token_outcome(token.token_id)
         assert persisted is not None
-        assert persisted.outcome == outcome.value
-        assert persisted.is_terminal == outcome.is_terminal
+        assert persisted.outcome == outcome
+        assert persisted.path == path
+        assert persisted.completed is (outcome is not None)
 
 
 # =============================================================================
@@ -975,7 +988,8 @@ class TestForeignKeyIntegrity:
             token = factory.data_flow.create_token(row_id=row.row_id)
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="default",
             )
 

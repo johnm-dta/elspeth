@@ -8,21 +8,57 @@ failures close AFTER accept (connection established, then terminated).
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
-from starlette.testclient import TestClient
+from fastapi.routing import APIWebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
 from elspeth.web.auth.models import AuthenticationError
-from elspeth.web.execution.schemas import CompletedData, ProgressData, RunEvent, RunStatusResponse
+from elspeth.web.execution.schemas import ProgressData, RunEvent, RunStatusResponse
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
 _TEST_USER_ID = "ws-test-user"
+
+
+class FakeWebSocket:
+    """Minimal WebSocket double for direct route-handler tests."""
+
+    def __init__(self, app: FastAPI) -> None:
+        self.app = app
+        self.accepted = False
+        self.sent_json: list[dict[str, Any]] = []
+        self.close_code: int | None = None
+        self.close_reason: str | None = None
+
+    async def accept(self) -> None:
+        self.accepted = True
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        self.close_code = code
+        self.close_reason = reason
+
+    async def send_json(self, data: dict[str, Any]) -> None:
+        self.sent_json.append(data)
+
+
+def _websocket_endpoint(app: FastAPI) -> Callable[[FakeWebSocket, str, str | None], Awaitable[None]]:
+    for route in app.routes:
+        if isinstance(route, APIWebSocketRoute) and route.path == "/ws/runs/{run_id}":
+            return cast(Callable[[FakeWebSocket, str, str | None], Awaitable[None]], route.endpoint)
+    raise AssertionError("WebSocket route not found")
+
+
+async def _call_websocket(app: FastAPI, run_id: str, token: str | None = None) -> FakeWebSocket:
+    websocket = FakeWebSocket(app)
+    await _websocket_endpoint(app)(websocket, run_id, token)
+    return websocket
 
 
 def _create_ws_test_app(
@@ -60,25 +96,25 @@ def _make_broadcaster() -> MagicMock:
 class TestWebSocketAuth:
     """Close code 4001 on authentication failure."""
 
-    def test_missing_token_closes_4001(self) -> None:
+    @pytest.mark.asyncio
+    async def test_missing_token_closes_4001(self) -> None:
         """No ?token= query parameter → 4001 before accept."""
         app = _create_ws_test_app()
-        client = TestClient(app)
-        with pytest.raises(WebSocketDisconnect) as exc_info, client.websocket_connect("/ws/runs/some-run-id"):
-            pass  # Should not reach here
-        assert exc_info.value.code == 4001
-        assert "Missing" in (exc_info.value.reason or "")
+        websocket = await _call_websocket(app, "some-run-id")
+        assert websocket.accepted is False
+        assert websocket.close_code == 4001
+        assert "Missing" in (websocket.close_reason or "")
 
-    def test_invalid_token_closes_4001(self) -> None:
+    @pytest.mark.asyncio
+    async def test_invalid_token_closes_4001(self) -> None:
         """Invalid JWT → auth_provider.authenticate() raises → 4001."""
         auth = MagicMock()
         auth.authenticate = AsyncMock(side_effect=AuthenticationError("bad token"))
         app = _create_ws_test_app(auth_provider=auth)
-        client = TestClient(app)
-        with pytest.raises(WebSocketDisconnect) as exc_info, client.websocket_connect("/ws/runs/some-run-id?token=bad-jwt"):
-            pass
-        assert exc_info.value.code == 4001
-        assert "Invalid" in (exc_info.value.reason or "")
+        websocket = await _call_websocket(app, "some-run-id", token="bad-jwt")
+        assert websocket.accepted is False
+        assert websocket.close_code == 4001
+        assert "Invalid" in (websocket.close_reason or "")
 
 
 # ── IDOR Close Code Tests (4004 — after accept) ─────────────────────
@@ -87,7 +123,8 @@ class TestWebSocketAuth:
 class TestWebSocketIDOR:
     """Close code 4004 on ownership verification failure."""
 
-    def test_wrong_user_closes_4004(self) -> None:
+    @pytest.mark.asyncio
+    async def test_wrong_user_closes_4004(self) -> None:
         """Authenticated user does not own the run's session → 4004."""
         from elspeth.web.auth.models import UserIdentity
 
@@ -104,13 +141,13 @@ class TestWebSocketIDOR:
             execution_service=svc,
             broadcaster=broadcaster,
         )
-        client = TestClient(app)
-        with client.websocket_connect("/ws/runs/some-run-id?token=valid") as ws, pytest.raises(WebSocketDisconnect) as exc_info:
-            ws.receive_json()
-        assert exc_info.value.code == 4004
-        assert "not found" in (exc_info.value.reason or "").lower()
+        websocket = await _call_websocket(app, "some-run-id", token="valid")
+        assert websocket.accepted is True
+        assert websocket.close_code == 4004
+        assert "not found" in (websocket.close_reason or "").lower()
 
-    def test_nonexistent_run_closes_4004(self) -> None:
+    @pytest.mark.asyncio
+    async def test_nonexistent_run_closes_4004(self) -> None:
         """Run ID not found → verify_run_ownership raises ValueError → 4004."""
         from elspeth.web.auth.models import UserIdentity
 
@@ -127,11 +164,10 @@ class TestWebSocketIDOR:
             execution_service=svc,
             broadcaster=broadcaster,
         )
-        client = TestClient(app)
-        with client.websocket_connect("/ws/runs/nonexistent?token=valid") as ws, pytest.raises(WebSocketDisconnect) as exc_info:
-            ws.receive_json()
-        assert exc_info.value.code == 4004
-        assert "not found" in (exc_info.value.reason or "").lower()
+        websocket = await _call_websocket(app, "nonexistent", token="valid")
+        assert websocket.accepted is True
+        assert websocket.close_code == 4004
+        assert "not found" in (websocket.close_reason or "").lower()
 
 
 class TestWebSocketTimeoutRecovery:
@@ -150,7 +186,8 @@ class TestWebSocketTimeoutRecovery:
             broadcaster=broadcaster,
         )
 
-    def test_timeout_with_still_running_status_does_not_emit_heartbeat_payload(self) -> None:
+    @pytest.mark.asyncio
+    async def test_timeout_with_still_running_status_does_not_emit_heartbeat_payload(self) -> None:
         """After an idle timeout, the next payload must still be a real RunEvent."""
         run_id = uuid4()
         svc = MagicMock()
@@ -207,15 +244,12 @@ class TestWebSocketTimeoutRecovery:
             ),
         )
 
-        with (
-            patch(
-                "elspeth.web.execution.routes.asyncio.wait_for",
-                new=AsyncMock(side_effect=[TimeoutError(), queued_event, WebSocketDisconnect(code=1000)]),
-            ),
-            TestClient(app) as client,
-            client.websocket_connect(f"/ws/runs/{run_id}?token=valid") as ws,
+        with patch(
+            "elspeth.web.execution.routes.asyncio.wait_for",
+            new=AsyncMock(side_effect=[TimeoutError(), queued_event, WebSocketDisconnect(code=1000)]),
         ):
-            payload = ws.receive_json()
+            websocket = await _call_websocket(app, str(run_id), token="valid")
+        payload = websocket.sent_json[0]
 
         assert payload["event_type"] == "progress"
         assert payload["data"]["rows_processed"] == 2
@@ -223,7 +257,8 @@ class TestWebSocketTimeoutRecovery:
         assert payload["data"]["rows_routed_failure"] == 1
         assert "type" not in payload
 
-    def test_timeout_synthesizes_terminal_event_when_status_turned_completed(self) -> None:
+    @pytest.mark.asyncio
+    async def test_timeout_synthesizes_terminal_event_when_status_turned_completed(self) -> None:
         """Missed terminal broadcasts must be recovered from authoritative status."""
         run_id = uuid4()
         svc = MagicMock()
@@ -261,34 +296,12 @@ class TestWebSocketTimeoutRecovery:
             ]
         )
         app = self._make_authed_app(svc)
-        queued_event = RunEvent(
-            run_id=str(run_id),
-            timestamp=datetime.now(tz=UTC),
-            event_type="completed",
-            data=CompletedData(
-                status="completed",
-                rows_processed=1,
-                rows_succeeded=1,
-                rows_failed=0,
-                rows_routed_success=0,
-                rows_routed_failure=0,
-                rows_quarantined=0,
-                landscape_run_id="land-1",
-            ),
-        )
-
-        with (
-            patch(
-                "elspeth.web.execution.routes.asyncio.wait_for",
-                new=AsyncMock(side_effect=[TimeoutError(), queued_event]),
-            ),
-            TestClient(app) as client,
-            client.websocket_connect(f"/ws/runs/{run_id}?token=valid") as ws,
+        with patch(
+            "elspeth.web.execution.routes.asyncio.wait_for",
+            new=AsyncMock(side_effect=[TimeoutError()]),
         ):
-            payload = ws.receive_json()
-            assert payload["event_type"] == "completed"
-            assert payload["data"]["landscape_run_id"] == "land-1"
-            with pytest.raises(WebSocketDisconnect) as exc_info:
-                ws.receive_json()
-
-        assert exc_info.value.code == 1000
+            websocket = await _call_websocket(app, str(run_id), token="valid")
+        payload = websocket.sent_json[0]
+        assert payload["event_type"] == "completed"
+        assert payload["data"]["landscape_run_id"] == "land-1"
+        assert websocket.close_code == 1000

@@ -5,7 +5,7 @@ The landscape recording system is the audit backbone of ELSPETH. These tests
 verify invariants that must hold for the audit trail to be trustworthy:
 
 1. Run lifecycle: begin→get round-trip preserves all fields
-2. Token outcome contracts: each RowOutcome requires specific fields
+2. Token outcome contracts: each ADR-019 terminal pair requires specific fields
 3. Schema contract round-trip: store→retrieve preserves contract content
 4. Config hash determinism: same config → same hash
 5. Row recording referential integrity: rows link to valid runs
@@ -28,10 +28,10 @@ from sqlalchemy import text
 
 from elspeth.contracts import (
     NodeType,
-    RowOutcome,
     RunStatus,
 )
 from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.landscape import LandscapeDB
@@ -208,7 +208,7 @@ class TestRunLifecycleProperties:
 
 
 class TestTokenOutcomeContractProperties:
-    """Each RowOutcome requires specific fields — missing ones must raise ValueError."""
+    """Each terminal pair requires specific fields — missing ones must raise ValueError."""
 
     def _setup(self) -> tuple[LandscapeDB, RecorderFactory, str, str]:
         """Create a run with a source row and token for testing outcomes."""
@@ -224,77 +224,117 @@ class TestTokenOutcomeContractProperties:
         return db, factory, run_id, token.token_id
 
     def test_completed_requires_sink_name(self) -> None:
-        """Property: COMPLETED without sink_name raises ValueError."""
+        """Property: (SUCCESS, DEFAULT_FLOW) without sink_name raises ValueError."""
         db, factory, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="COMPLETED outcome requires sink_name"):
-            factory.data_flow.record_token_outcome(ref=TokenRef(token_id=token_id, run_id=run_id), outcome=RowOutcome.COMPLETED)
+        with pytest.raises(ValueError, match=r"\(SUCCESS, DEFAULT_FLOW\) outcome requires sink_name"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+            )
         db.close()
 
     @given(sink=sink_names)
     @settings(max_examples=30, deadline=None)
     def test_completed_with_sink_name_succeeds(self, sink: str) -> None:
-        """Property: COMPLETED with valid sink_name succeeds."""
+        """Property: (SUCCESS, DEFAULT_FLOW) with valid sink_name succeeds."""
         db, factory, run_id, token_id = self._setup()
         outcome_id = factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token_id, run_id=run_id), outcome=RowOutcome.COMPLETED, sink_name=sink
+            ref=TokenRef(token_id=token_id, run_id=run_id),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name=sink,
         )
         assert outcome_id is not None
         db.close()
 
     def test_routed_requires_sink_name(self) -> None:
-        """Property: ROUTED without sink_name raises ValueError."""
+        """Property: (SUCCESS, GATE_ROUTED) without sink_name raises ValueError."""
         db, factory, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="ROUTED outcome requires sink_name"):
-            factory.data_flow.record_token_outcome(ref=TokenRef(token_id=token_id, run_id=run_id), outcome=RowOutcome.ROUTED)
+        with pytest.raises(ValueError, match=r"\(SUCCESS, GATE_ROUTED\) outcome requires sink_name"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.GATE_ROUTED,
+            )
         db.close()
 
     def test_forked_requires_fork_group_id(self) -> None:
-        """Property: FORKED without fork_group_id raises ValueError."""
+        """Property: (TRANSIENT, FORK_PARENT) without fork_group_id raises ValueError."""
         db, factory, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="FORKED outcome requires fork_group_id"):
-            factory.data_flow.record_token_outcome(ref=TokenRef(token_id=token_id, run_id=run_id), outcome=RowOutcome.FORKED)
+        with pytest.raises(ValueError, match=r"\(TRANSIENT, FORK_PARENT\) outcome requires fork_group_id"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.FORK_PARENT,
+            )
         db.close()
 
     def test_failed_requires_error_hash(self) -> None:
-        """Property: FAILED without error_hash raises ValueError."""
+        """Property: (FAILURE, UNROUTED) without error_hash raises ValueError."""
         db, factory, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="FAILED outcome requires error_hash"):
-            factory.data_flow.record_token_outcome(ref=TokenRef(token_id=token_id, run_id=run_id), outcome=RowOutcome.FAILED)
+        with pytest.raises(ValueError, match=r"\(FAILURE, UNROUTED\) outcome requires error_hash"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
+            )
         db.close()
 
     def test_quarantined_requires_error_hash(self) -> None:
-        """Property: QUARANTINED without error_hash raises ValueError."""
+        """Property: (FAILURE, QUARANTINED_AT_SOURCE) without error_hash raises ValueError."""
         db, factory, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="QUARANTINED outcome requires error_hash"):
-            factory.data_flow.record_token_outcome(ref=TokenRef(token_id=token_id, run_id=run_id), outcome=RowOutcome.QUARANTINED)
+        with pytest.raises(ValueError, match=r"\(FAILURE, QUARANTINED_AT_SOURCE\) outcome requires error_hash"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.QUARANTINED_AT_SOURCE,
+            )
         db.close()
 
     def test_consumed_in_batch_requires_batch_id(self) -> None:
-        """Property: CONSUMED_IN_BATCH without batch_id raises ValueError."""
+        """Property: (TRANSIENT, BATCH_CONSUMED) without batch_id raises ValueError."""
         db, factory, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="CONSUMED_IN_BATCH outcome requires batch_id"):
-            factory.data_flow.record_token_outcome(ref=TokenRef(token_id=token_id, run_id=run_id), outcome=RowOutcome.CONSUMED_IN_BATCH)
+        with pytest.raises(ValueError, match=r"\(TRANSIENT, BATCH_CONSUMED\) outcome requires batch_id"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.BATCH_CONSUMED,
+            )
         db.close()
 
     def test_coalesced_requires_join_group_id(self) -> None:
-        """Property: COALESCED without join_group_id raises ValueError."""
+        """Property: (SUCCESS, COALESCED) without join_group_id raises ValueError."""
         db, factory, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="COALESCED outcome requires join_group_id"):
-            factory.data_flow.record_token_outcome(ref=TokenRef(token_id=token_id, run_id=run_id), outcome=RowOutcome.COALESCED)
+        with pytest.raises(ValueError, match=r"\(SUCCESS, COALESCED\) outcome requires join_group_id"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.COALESCED,
+                sink_name="default",
+            )
         db.close()
 
     def test_expanded_requires_expand_group_id(self) -> None:
-        """Property: EXPANDED without expand_group_id raises ValueError."""
+        """Property: (TRANSIENT, EXPAND_PARENT) without expand_group_id raises ValueError."""
         db, factory, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="EXPANDED outcome requires expand_group_id"):
-            factory.data_flow.record_token_outcome(ref=TokenRef(token_id=token_id, run_id=run_id), outcome=RowOutcome.EXPANDED)
+        with pytest.raises(ValueError, match=r"\(TRANSIENT, EXPAND_PARENT\) outcome requires expand_group_id"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.EXPAND_PARENT,
+            )
         db.close()
 
     def test_buffered_requires_batch_id(self) -> None:
-        """Property: BUFFERED without batch_id raises ValueError."""
+        """Property: (NULL, BUFFERED) without batch_id raises ValueError."""
         db, factory, run_id, token_id = self._setup()
-        with pytest.raises(ValueError, match="BUFFERED outcome requires batch_id"):
-            factory.data_flow.record_token_outcome(ref=TokenRef(token_id=token_id, run_id=run_id), outcome=RowOutcome.BUFFERED)
+        with pytest.raises(ValueError, match=r"\(NULL, BUFFERED\) outcome requires batch_id"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id=run_id),
+                outcome=None,
+                path=TerminalPath.BUFFERED,
+            )
         db.close()
 
     def test_dropped_by_filter_requires_no_auxiliary_fields(self) -> None:
@@ -302,7 +342,8 @@ class TestTokenOutcomeContractProperties:
         db, factory, run_id, token_id = self._setup()
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token_id, run_id=run_id),
-            outcome=RowOutcome.DROPPED_BY_FILTER,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.FILTER_DROPPED,
         )
         assert outcome_id is not None
         db.close()

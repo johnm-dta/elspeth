@@ -22,12 +22,14 @@ from unittest.mock import Mock, patch
 import pytest
 
 # For node registration
-from elspeth.contracts import NodeType, RouteDestination, RowOutcome, RowResult, SourceRow, TokenInfo, TransformProtocol, TransformResult
+from elspeth.contracts import NodeType, RouteDestination, RowResult, SourceRow, TokenInfo, TransformProtocol, TransformResult
 from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
 from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.enums import (
     NodeStateStatus,
     RoutingKind,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
 )
 from elspeth.contracts.errors import (
@@ -79,6 +81,15 @@ def _make_source_row(data: dict[str, Any] | None = None) -> SourceRow:
     """Create a valid SourceRow with contract."""
     contract = _make_contract()
     return make_source_row(data or {"value": 42}, contract=contract)
+
+
+def _assert_outcome_pair(
+    result: RowResult,
+    outcome: TerminalOutcome | None,
+    path: TerminalPath,
+) -> None:
+    assert result.outcome == outcome
+    assert result.path == path
 
 
 def _make_factory(
@@ -479,7 +490,7 @@ class TestProcessRowNoTransforms:
         )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.COMPLETED
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
         assert results[0].sink_name == "default"
         assert results[0].token.row_data["value"] == 42
 
@@ -580,7 +591,7 @@ class TestProcessRowNoTransforms:
         assert len(states) >= 1
         assert states[0].status == NodeStateStatus.FAILED
         assert len(outcomes) == 1
-        assert outcomes[0].outcome == RowOutcome.FAILED.value
+        _assert_outcome_pair(outcomes[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
 
     def test_source_boundary_landscape_record_error_raises_audit_integrity_error(self) -> None:
         """Narrow recorder failures outrank the original boundary violation."""
@@ -800,7 +811,7 @@ class TestProcessRowNoTransforms:
         assert len(states) >= 1
         assert states[0].status == NodeStateStatus.FAILED
         assert len(outcomes) == 1
-        assert outcomes[0].outcome == RowOutcome.FAILED.value
+        _assert_outcome_pair(outcomes[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
 
     def test_source_boundary_framework_bug_records_failed_outcome_and_failed_source_state(self) -> None:
         """Tier-1 framework bugs after token creation must still leave terminal audit evidence."""
@@ -837,7 +848,7 @@ class TestProcessRowNoTransforms:
         assert len(states) >= 1
         assert states[0].status == NodeStateStatus.FAILED
         assert len(outcomes) == 1
-        assert outcomes[0].outcome == RowOutcome.FAILED.value
+        _assert_outcome_pair(outcomes[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
 
     def test_batch_flush_token_completed_telemetry_failure_does_not_interrupt_failed_audit_recording(self) -> None:
         """Best-effort telemetry must not interrupt per-token FAILED batch-flush audit writes."""
@@ -930,10 +941,10 @@ class TestProcessRowNoTransforms:
         recorded_refs = [call.kwargs["ref"].token_id for call in mock_record_token_outcome.call_args_list]
         assert recorded_refs == ["token-a", "token-b", "token-c"]
         assert tuple(result.token.token_id for result in results) == ("token-a", "token-b", "token-c")
-        assert tuple(result.outcome for result in results) == (
-            RowOutcome.FAILED,
-            RowOutcome.FAILED,
-            RowOutcome.FAILED,
+        assert tuple((result.outcome, result.path) for result in results) == (
+            (TerminalOutcome.FAILURE, TerminalPath.UNROUTED),
+            (TerminalOutcome.FAILURE, TerminalPath.UNROUTED),
+            (TerminalOutcome.FAILURE, TerminalPath.UNROUTED),
         )
 
     def test_handle_flush_error_recorder_failure_raises_audit_integrity_error(self) -> None:
@@ -1020,10 +1031,10 @@ class TestProcessRowNoTransforms:
         assert recorded_refs == {"token-a", "token-b", "token-c"}
         assert telemetry_manager.handle_event.call_count == 3
         assert child_items == []
-        assert tuple(result.outcome for result in results) == (
-            RowOutcome.DROPPED_BY_FILTER,
-            RowOutcome.DROPPED_BY_FILTER,
-            RowOutcome.DROPPED_BY_FILTER,
+        assert tuple((result.outcome, result.path) for result in results) == (
+            (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED),
+            (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED),
+            (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED),
         )
 
     def test_empty_batch_flush_recorder_failure_raises_audit_integrity_error(self) -> None:
@@ -1200,7 +1211,7 @@ class TestProcessRowSingleTransform:
             )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.COMPLETED
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
         assert results[0].sink_name == "default"
 
     def test_transform_error_with_discard_returns_quarantined(self) -> None:
@@ -1231,7 +1242,7 @@ class TestProcessRowSingleTransform:
             )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.QUARANTINED
+        _assert_outcome_pair(results[0], TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE)
 
     def test_transform_error_with_named_sink_returns_routed_on_error(self) -> None:
         """Transform error with on_error='errors' → ROUTED_ON_ERROR (DIVERT) to error sink.
@@ -1266,7 +1277,7 @@ class TestProcessRowSingleTransform:
             )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.ROUTED_ON_ERROR
+        _assert_outcome_pair(results[0], TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED)
         assert results[0].sink_name == "errors"
 
     def test_max_retries_exceeded_returns_failed(self) -> None:
@@ -1289,7 +1300,7 @@ class TestProcessRowSingleTransform:
             )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.FAILED
+        _assert_outcome_pair(results[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
         assert results[0].error is not None
 
 
@@ -1379,11 +1390,11 @@ class TestAggregationFailureMatrix:
             )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.FAILED
+        _assert_outcome_pair(results[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
         # BUFFERED is always recorded before the flush check, then FAILED on flush error.
-        assert [call.kwargs["outcome"] for call in record_outcome.call_args_list] == [
-            RowOutcome.BUFFERED,
-            RowOutcome.FAILED,
+        assert [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list] == [
+            (None, TerminalPath.BUFFERED),
+            (TerminalOutcome.FAILURE, TerminalPath.UNROUTED),
         ]
 
     def test_flush_failure_transform_records_failed_for_buffered_tokens(self) -> None:
@@ -1424,10 +1435,10 @@ class TestAggregationFailureMatrix:
             )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.FAILED
-        outcomes = [call.kwargs["outcome"] for call in record_outcome.call_args_list]
+        _assert_outcome_pair(results[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
+        outcomes = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
         # BUFFERED is always recorded before the flush check, then FAILED on flush error.
-        assert outcomes == [RowOutcome.BUFFERED, RowOutcome.FAILED]
+        assert outcomes == [(None, TerminalPath.BUFFERED), (TerminalOutcome.FAILURE, TerminalPath.UNROUTED)]
 
     def test_passthrough_success_with_rows_none_raises(self) -> None:
         """Passthrough flush requires rows list; rows=None is an invariant violation."""
@@ -1557,7 +1568,7 @@ class TestAggregationFailureMatrix:
 
         assert child_items == []
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.COMPLETED
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
         assert results[0].sink_name == "agg_sink"
 
     def test_transform_mode_triggering_token_quarantined_outcome(self) -> None:
@@ -1608,15 +1619,15 @@ class TestAggregationFailureMatrix:
             )
 
         # The triggering token must be returned as QUARANTINED, matching the data_flow.
-        triggering_results = [r for r in results if r.outcome == RowOutcome.QUARANTINED]
+        triggering_results = [r for r in results if (r.outcome, r.path) == (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE)]
         assert len(triggering_results) == 1, (
             f"Expected triggering token RowResult with QUARANTINED outcome, got outcomes: {[r.outcome for r in results]}"
         )
 
         # Recorder must also have recorded QUARANTINED (not CONSUMED_IN_BATCH).
-        recorded_outcomes = [call.kwargs["outcome"] for call in record_outcome.call_args_list]
-        assert RowOutcome.QUARANTINED in recorded_outcomes
-        assert RowOutcome.CONSUMED_IN_BATCH not in recorded_outcomes
+        recorded_pairs = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
+        assert (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE) in recorded_pairs
+        assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) not in recorded_pairs
 
     def test_transform_mode_triggering_token_consumed_when_not_quarantined(self) -> None:
         """Triggering token's RowResult is CONSUMED_IN_BATCH when not in quarantined_indices.
@@ -1660,14 +1671,14 @@ class TestAggregationFailureMatrix:
             )
 
         # Triggering token should be CONSUMED_IN_BATCH (no quarantine).
-        triggering_results = [r for r in results if r.outcome == RowOutcome.CONSUMED_IN_BATCH]
+        triggering_results = [r for r in results if (r.outcome, r.path) == (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)]
         assert len(triggering_results) == 1, (
             f"Expected triggering token RowResult with CONSUMED_IN_BATCH outcome, got outcomes: {[r.outcome for r in results]}"
         )
 
         # Recorder should have CONSUMED_IN_BATCH, not QUARANTINED.
-        recorded_outcomes = [call.kwargs["outcome"] for call in record_outcome.call_args_list]
-        assert RowOutcome.CONSUMED_IN_BATCH in recorded_outcomes
+        recorded_pairs = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
+        assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) in recorded_pairs
 
 
 class TestTransformModeOutcomeOrdering:
@@ -1765,10 +1776,10 @@ class TestTransformModeOutcomeOrdering:
 
         # Parent tokens must NOT have been recorded as terminal before the error.
         # Only BUFFERED is acceptable (non-terminal, allows recovery retry).
-        recorded_outcomes = [call.kwargs["outcome"] for call in record_outcome.call_args_list]
-        assert RowOutcome.CONSUMED_IN_BATCH not in recorded_outcomes, (
+        recorded_pairs = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
+        assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) not in recorded_pairs, (
             f"CONSUMED_IN_BATCH was recorded before cardinality check failed — "
-            f"recovery would skip this row. Recorded outcomes: {recorded_outcomes}"
+            f"recovery would skip this row. Recorded pairs: {recorded_pairs}"
         )
 
     def test_expand_token_failure_does_not_record_parent_terminal_outcome(self) -> None:
@@ -1817,10 +1828,9 @@ class TestTransformModeOutcomeOrdering:
             )
 
         # Parent tokens must NOT have terminal outcomes recorded before expand_token.
-        recorded_outcomes = [call.kwargs["outcome"] for call in record_outcome.call_args_list]
-        assert RowOutcome.CONSUMED_IN_BATCH not in recorded_outcomes, (
-            f"CONSUMED_IN_BATCH was recorded before expand_token failed — "
-            f"recovery would skip this row. Recorded outcomes: {recorded_outcomes}"
+        recorded_pairs = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
+        assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) not in recorded_pairs, (
+            f"CONSUMED_IN_BATCH was recorded before expand_token failed — recovery would skip this row. Recorded pairs: {recorded_pairs}"
         )
 
 
@@ -1929,7 +1939,7 @@ class TestProcessRowGateBranching:
                 ctx=ctx,
             )
 
-        completed = [r for r in results if r.outcome == RowOutcome.COMPLETED]
+        completed = [r for r in results if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)]
         assert len(completed) == 2
         assert inherited_sinks == ["branch_sink", "branch_sink"]
         assert all(r.sink_name == "branch_sink" for r in completed)
@@ -2034,7 +2044,7 @@ class TestProcessRowGateBranching:
         )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.COMPLETED
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
         assert results[0].sink_name == "branch_sink"
 
     def test_fork_to_sink_children_bypass_gate_continuation_successor(self) -> None:
@@ -2139,11 +2149,11 @@ class TestProcessRowGateBranching:
         )
 
         # Parent should be FORKED
-        forked = [r for r in results if r.outcome == RowOutcome.FORKED]
+        forked = [r for r in results if (r.outcome, r.path) == (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT)]
         assert len(forked) == 1
 
         # Fork children should complete at their branch sinks
-        completed = [r for r in results if r.outcome == RowOutcome.COMPLETED]
+        completed = [r for r in results if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)]
         assert len(completed) == 2
         sink_names = sorted(r.sink_name for r in completed if r.sink_name is not None)
         assert sink_names == ["sink_a", "sink_b"]
@@ -2218,9 +2228,9 @@ class TestProcessRowMultiRowOutput:
             )
 
         # Parent should be EXPANDED, children should be COMPLETED
-        outcomes = {r.outcome for r in results}
-        assert RowOutcome.EXPANDED in outcomes
-        assert RowOutcome.COMPLETED in outcomes
+        pairs = {(r.outcome, r.path) for r in results}
+        assert (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT) in pairs
+        assert (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW) in pairs
 
     def test_multi_row_without_creates_tokens_raises(self) -> None:
         """Transform returning multi-row without creates_tokens=True → RuntimeError."""
@@ -2325,7 +2335,7 @@ class TestProcessExistingRow:
         )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.COMPLETED
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
         assert results[0].sink_name == "default"
         # The row_id should match the existing row
         assert results[0].token.row_id == existing_row_id
@@ -2356,7 +2366,7 @@ class TestProcessToken:
         )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.COMPLETED
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
         assert results[0].sink_name == "default"
 
     def test_terminal_coalesce_continuation_uses_coalesce_on_success_sink(self) -> None:
@@ -2383,7 +2393,7 @@ class TestProcessToken:
         )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.COMPLETED
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
         assert results[0].sink_name == "coalesce_sink"
 
     def test_non_terminal_coalesce_continuation_uses_downstream_sink(self) -> None:
@@ -2423,7 +2433,7 @@ class TestProcessToken:
             )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.COMPLETED
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
         assert results[0].sink_name == "downstream_sink"
 
 
@@ -3006,7 +3016,7 @@ class TestMaybeCoalesceToken:
 
         assert handled is True
         assert result is not None
-        assert result.outcome == RowOutcome.FAILED
+        _assert_outcome_pair(result, TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
         record_outcome.assert_not_called()
         emit_token_completed.assert_called_once()
 
@@ -3040,7 +3050,7 @@ class TestMaybeCoalesceToken:
 
         assert handled is True
         assert result is not None
-        assert result.outcome == RowOutcome.COALESCED
+        _assert_outcome_pair(result, TerminalOutcome.SUCCESS, TerminalPath.COALESCED)
         assert result.sink_name == "output"
 
     def test_coalesce_merged_at_terminal_missing_sink_mapping_raises(self) -> None:
@@ -3241,7 +3251,7 @@ class TestNotifyCoalesceOfLostBranch:
         )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.FAILED
+        _assert_outcome_pair(results[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
         assert results[0].error is not None
         assert "not enough branches" in results[0].error.message
 
@@ -3277,7 +3287,7 @@ class TestNotifyCoalesceOfLostBranch:
         )
 
         assert len(results) == 1
-        assert results[0].outcome == RowOutcome.COALESCED
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.COALESCED)
         assert results[0].sink_name == "output"
 
     def test_lost_branch_terminal_merge_missing_sink_mapping_raises(self) -> None:
@@ -3582,11 +3592,11 @@ class TestTerminalDeaggregationSinkRouting:
             )
 
         # Parent should be EXPANDED (no sink_name)
-        expanded = [r for r in results if r.outcome == RowOutcome.EXPANDED]
+        expanded = [r for r in results if (r.outcome, r.path) == (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT)]
         assert len(expanded) == 1
 
         # Children should be COMPLETED with transform's on_success sink
-        completed = [r for r in results if r.outcome == RowOutcome.COMPLETED]
+        completed = [r for r in results if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)]
         assert len(completed) == 2
         for r in completed:
             assert r.sink_name == "transform_sink", (
@@ -3664,7 +3674,7 @@ class TestTerminalDeaggregationSinkRouting:
             )
 
         # Should have 1 EXPANDED + 2 COMPLETED (children processed through terminal)
-        completed = [r for r in results if r.outcome == RowOutcome.COMPLETED]
+        completed = [r for r in results if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)]
         assert len(completed) == 2
         for r in completed:
             assert r.sink_name == "final_sink"
@@ -3833,7 +3843,7 @@ class TestTerminalWorkItemInvariant:
 
         assert result is not None
         assert not isinstance(result, tuple)
-        assert result.outcome == RowOutcome.COMPLETED
+        _assert_outcome_pair(result, TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
         assert result.sink_name == "terminal_sink"
 
 
@@ -3927,12 +3937,12 @@ class TestGateSinkRoutingNotifiesCoalesce:
 
         # Gate should produce ROUTED result
         if isinstance(result, tuple):
-            routed = [r for r in result if r.outcome == RowOutcome.ROUTED]
+            routed = [r for r in result if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED)]
             assert len(routed) == 1
             assert routed[0].sink_name == "error_sink"
         else:
             assert result is not None
-            assert result.outcome == RowOutcome.ROUTED
+            _assert_outcome_pair(result, TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED)
             assert result.sink_name == "error_sink"
 
         # Coalesce must have been notified of the lost branch
@@ -4022,8 +4032,8 @@ class TestGateSinkRoutingNotifiesCoalesce:
         assert isinstance(result, tuple)
         assert len(result) == 2
 
-        routed = [r for r in result if r.outcome == RowOutcome.ROUTED]
-        failed = [r for r in result if r.outcome == RowOutcome.FAILED]
+        routed = [r for r in result if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED)]
+        failed = [r for r in result if (r.outcome, r.path) == (TerminalOutcome.FAILURE, TerminalPath.UNROUTED)]
         assert len(routed) == 1
         assert routed[0].sink_name == "error_sink"
         assert len(failed) == 1
@@ -4099,7 +4109,7 @@ class TestGateSinkRoutingNotifiesCoalesce:
         # Should still route correctly
         assert result is not None
         assert not isinstance(result, tuple)
-        assert result.outcome == RowOutcome.ROUTED
+        _assert_outcome_pair(result, TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED)
         assert result.sink_name == "error_sink"
 
         # notify_branch_lost should NOT have been called (no branch_name)
@@ -4580,7 +4590,7 @@ class TestHandleTransformErrorStatusRoutedOnError:
         )
         result = terminal.result
         assert not isinstance(result, tuple)
-        assert result.outcome == RowOutcome.ROUTED_ON_ERROR
+        _assert_outcome_pair(result, TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED)
         assert result.sink_name == "error-sink"
         assert isinstance(result.error, FailureInfo)
         assert result.error.exception_type == "TransformError"

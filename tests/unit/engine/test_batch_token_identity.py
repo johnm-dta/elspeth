@@ -18,7 +18,7 @@ from typing import Any
 
 from elspeth.contracts import Determinism, NodeType, SourceRow
 from elspeth.contracts.contexts import TransformContext
-from elspeth.contracts.enums import RowOutcome
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID
 from elspeth.core.config import AggregationSettings, TriggerConfig
@@ -45,7 +45,7 @@ def _assert_all_batch_members_consumed(
     """Assert ALL tokens in a batch have CONSUMED_IN_BATCH as their terminal outcome.
 
     T26: Tokens now have two outcome records — BUFFERED (non-terminal, at buffer time)
-    and CONSUMED_IN_BATCH (terminal, at flush time). We filter by is_terminal=1 to
+    and CONSUMED_IN_BATCH (terminal, at flush time). We filter by completed=1 to
     check the final outcome.
     """
     with db.connection() as conn:
@@ -66,17 +66,16 @@ def _assert_all_batch_members_consumed(
             ordinal = member.ordinal
 
             outcome_row = conn.execute(
-                select(token_outcomes_table.c.outcome)
+                select(token_outcomes_table.c.outcome, token_outcomes_table.c.path)
                 .where(token_outcomes_table.c.token_id == token_id)
-                .where(token_outcomes_table.c.is_terminal == 1)
+                .where(token_outcomes_table.c.completed == 1)
             ).fetchone()
 
             assert outcome_row is not None, f"Batch member {token_id} (ordinal {ordinal}) has no terminal outcome recorded"
 
-            actual = RowOutcome(outcome_row.outcome)
-            assert actual == RowOutcome.CONSUMED_IN_BATCH, (
-                f"Batch member {token_id} (ordinal {ordinal}) has terminal outcome {actual}, expected CONSUMED_IN_BATCH."
-            )
+            actual = (outcome_row.outcome, outcome_row.path)
+            expected = (TerminalOutcome.TRANSIENT.value, TerminalPath.BATCH_CONSUMED.value)
+            assert actual == expected, f"Batch member {token_id} (ordinal {ordinal}) has terminal pair {actual}, expected {expected}."
 
 
 def _assert_output_token_distinct_from_inputs(
@@ -172,7 +171,10 @@ class TestBatchTokenIdentity:
         input_token_ids = []
         # T26: Buffer-time returns BUFFERED; flush-time returns CONSUMED_IN_BATCH
         # for the triggering token. Collect both to get all input tokens.
-        _batch_outcomes = {RowOutcome.BUFFERED, RowOutcome.CONSUMED_IN_BATCH}
+        _batch_outcomes = {
+            (None, TerminalPath.BUFFERED),
+            (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED),
+        }
         for i in range(3):
             pipeline_row = make_pipeline_row({"value": (i + 1) * 10})  # 10, 20, 30
             source_row = SourceRow.valid(pipeline_row.to_dict(), contract=pipeline_row.contract)
@@ -184,7 +186,7 @@ class TestBatchTokenIdentity:
             )
             all_results.extend(results)
             for r in results:
-                if r.outcome in _batch_outcomes:
+                if (r.outcome, r.path) in _batch_outcomes:
                     input_token_ids.append(r.token.token_id)
 
         # Get the batch_id from the database
@@ -201,7 +203,7 @@ class TestBatchTokenIdentity:
         _assert_all_batch_members_consumed(setup.db, run_id, batch_id)
 
         # Get output token
-        completed = [r for r in all_results if r.outcome == RowOutcome.COMPLETED]
+        completed = [r for r in all_results if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)]
         assert len(completed) == 1, f"Expected 1 COMPLETED, got {len(completed)}"
         output_token_id = completed[0].token.token_id
 
@@ -257,7 +259,8 @@ class TestBatchTokenIdentity:
             ctx=ctx,
         )
         assert len(results_0) == 1
-        assert results_0[0].outcome == RowOutcome.BUFFERED
+        assert results_0[0].outcome is None
+        assert results_0[0].path == TerminalPath.BUFFERED
         first_token_id = results_0[0].token.token_id
 
         # Process row 1 - triggers flush
@@ -271,8 +274,8 @@ class TestBatchTokenIdentity:
         )
 
         # Should have: CONSUMED_IN_BATCH (triggering token) + COMPLETED (output)
-        consumed = [r for r in results_1 if r.outcome == RowOutcome.CONSUMED_IN_BATCH]
-        completed = [r for r in results_1 if r.outcome == RowOutcome.COMPLETED]
+        consumed = [r for r in results_1 if (r.outcome, r.path) == (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)]
+        completed = [r for r in results_1 if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)]
 
         assert len(consumed) == 1, "Triggering token must be CONSUMED_IN_BATCH"
         assert len(completed) == 1, "Must have exactly 1 COMPLETED output"
@@ -332,7 +335,10 @@ class TestBatchTokenIdentity:
         input_token_ids = []
         # T26: Buffer-time returns BUFFERED; flush-time returns CONSUMED_IN_BATCH
         # for the triggering token. Collect both to get all input tokens.
-        _batch_outcomes = {RowOutcome.BUFFERED, RowOutcome.CONSUMED_IN_BATCH}
+        _batch_outcomes = {
+            (None, TerminalPath.BUFFERED),
+            (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED),
+        }
         for i in range(3):
             pipeline_row = make_pipeline_row({"value": (i + 1) * 10})
             source_row = SourceRow.valid(pipeline_row.to_dict(), contract=pipeline_row.contract)
@@ -344,7 +350,7 @@ class TestBatchTokenIdentity:
             )
             all_results.extend(results)
             for r in results:
-                if r.outcome in _batch_outcomes:
+                if (r.outcome, r.path) in _batch_outcomes:
                     input_token_ids.append(r.token.token_id)
 
         # Verify we got all 3 batch member tokens

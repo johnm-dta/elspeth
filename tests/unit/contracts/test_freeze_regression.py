@@ -22,7 +22,7 @@ from elspeth.contracts.audit import Node, RowLineage
 from elspeth.contracts.batch_checkpoint import BatchCheckpointState, RowMappingEntry
 from elspeth.contracts.call_data import HTTPCallResponse
 from elspeth.contracts.engine import PendingOutcome
-from elspeth.contracts.enums import Determinism, NodeType, RowOutcome
+from elspeth.contracts.enums import Determinism, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.freeze import deep_freeze
 
@@ -327,48 +327,50 @@ class TestGracefulShutdownErrorCopyOnWrap:
         assert len(error.routed_destinations) == 0
 
 
-# ── PendingOutcome._REQUIRES_ERROR_HASH_OUTCOMES ────────────────────────────
+# ── PendingOutcome._REQUIRES_ERROR_HASH_PATHS ───────────────────────────────
 
 
 class TestPendingOutcomeClassVar:
     """Bug: requires-error-hash set recreated on every construction."""
 
     def test_requires_error_hash_outcomes_is_class_level(self) -> None:
-        assert isinstance(PendingOutcome._REQUIRES_ERROR_HASH_OUTCOMES, frozenset)
+        assert isinstance(PendingOutcome._REQUIRES_ERROR_HASH_PATHS, frozenset)
 
     def test_requires_error_hash_outcomes_shared_across_instances(self) -> None:
         """Both instances must reference the same ClassVar frozenset object."""
-        a = PendingOutcome(outcome=RowOutcome.COMPLETED)
-        b = PendingOutcome(outcome=RowOutcome.ROUTED)
-        assert a._REQUIRES_ERROR_HASH_OUTCOMES is b._REQUIRES_ERROR_HASH_OUTCOMES
+        a = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
+        b = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.GATE_ROUTED)
+        assert a._REQUIRES_ERROR_HASH_PATHS is b._REQUIRES_ERROR_HASH_PATHS
 
     def test_validation_still_works(self) -> None:
-        with pytest.raises(ValueError, match="QUARANTINED outcome must have a non-empty error_hash"):
-            PendingOutcome(outcome=RowOutcome.QUARANTINED, error_hash=None)
-        po = PendingOutcome(outcome=RowOutcome.QUARANTINED, error_hash="abc")
+        with pytest.raises(ValueError, match="requires non-empty error_hash"):
+            PendingOutcome(outcome=TerminalOutcome.FAILURE, path=TerminalPath.QUARANTINED_AT_SOURCE, error_hash=None)
+        po = PendingOutcome(outcome=TerminalOutcome.FAILURE, path=TerminalPath.QUARANTINED_AT_SOURCE, error_hash="abc")
         assert po.error_hash == "abc"
 
 
 def test_pending_outcome_routed_on_error_with_valid_hash_succeeds() -> None:
     """ROUTED_ON_ERROR + non-empty error_hash is the contract-conforming shape."""
     outcome = PendingOutcome(
-        outcome=RowOutcome.ROUTED_ON_ERROR,
+        outcome=TerminalOutcome.FAILURE,
+        path=TerminalPath.ON_ERROR_ROUTED,
         error_hash="0123456789abcdef",
     )
-    assert outcome.outcome == RowOutcome.ROUTED_ON_ERROR
+    assert outcome.outcome == TerminalOutcome.FAILURE
+    assert outcome.path == TerminalPath.ON_ERROR_ROUTED
     assert outcome.error_hash == "0123456789abcdef"
 
 
 def test_pending_outcome_routed_on_error_without_hash_raises() -> None:
-    """ROUTED_ON_ERROR without error_hash violates the _REQUIRES_ERROR_HASH_OUTCOMES contract."""
-    with pytest.raises(ValueError, match="must have a non-empty error_hash"):
-        PendingOutcome(outcome=RowOutcome.ROUTED_ON_ERROR)
+    """ROUTED_ON_ERROR without error_hash violates the _REQUIRES_ERROR_HASH_PATHS contract."""
+    with pytest.raises(ValueError, match="requires non-empty error_hash"):
+        PendingOutcome(outcome=TerminalOutcome.FAILURE, path=TerminalPath.ON_ERROR_ROUTED)
 
 
 def test_pending_outcome_routed_on_error_with_empty_hash_raises() -> None:
     """Empty-string error_hash counts as missing per `__post_init__` whitespace check."""
-    with pytest.raises(ValueError, match="must have a non-empty error_hash"):
-        PendingOutcome(outcome=RowOutcome.ROUTED_ON_ERROR, error_hash="")
+    with pytest.raises(ValueError, match="requires non-empty error_hash"):
+        PendingOutcome(outcome=TerminalOutcome.FAILURE, path=TerminalPath.ON_ERROR_ROUTED, error_hash="")
 
 
 # ── deep_freeze: set and frozenset branches ─────────────────────────────────

@@ -22,25 +22,25 @@ def _get_catalog(request: Request) -> CatalogService:
 
 
 @catalog_router.get("/sources", response_model=list[PluginSummary])
-def list_sources(request: Request) -> list[PluginSummary]:
+async def list_sources(request: Request) -> list[PluginSummary]:
     """List all registered source plugins."""
     return _get_catalog(request).list_sources()
 
 
 @catalog_router.get("/transforms", response_model=list[PluginSummary])
-def list_transforms(request: Request) -> list[PluginSummary]:
+async def list_transforms(request: Request) -> list[PluginSummary]:
     """List all registered transform plugins."""
     return _get_catalog(request).list_transforms()
 
 
 @catalog_router.get("/sinks", response_model=list[PluginSummary])
-def list_sinks(request: Request) -> list[PluginSummary]:
+async def list_sinks(request: Request) -> list[PluginSummary]:
     """List all registered sink plugins."""
     return _get_catalog(request).list_sinks()
 
 
 @catalog_router.get("/{plugin_type}/{name}/schema", response_model=PluginSchemaInfo)
-def get_schema(plugin_type: str, name: str, request: Request) -> PluginSchemaInfo:
+async def get_schema(plugin_type: str, name: str, request: Request) -> PluginSchemaInfo:
     """Get full JSON schema for a plugin's configuration."""
     singular = _PLURAL_TO_SINGULAR.get(plugin_type)
     if singular is None:

@@ -19,7 +19,7 @@ import pytest
 import sqlalchemy as sa
 
 from elspeth.contracts import TokenInfo, TransformProtocol, TransformResult
-from elspeth.contracts.enums import OutputMode
+from elspeth.contracts.enums import OutputMode, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import PassThroughContractViolation
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.contracts.types import NodeID
@@ -141,6 +141,7 @@ class TestAuditRoundTrip:
                 """
                 SELECT
                     outcome,
+                    path,
                     error_hash,
                     json_extract(context_json, '$.token_id') AS ctx_token_id,
                     json_extract(context_json, '$.row_id') AS ctx_row_id,
@@ -152,9 +153,15 @@ class TestAuditRoundTrip:
                     json_extract(context_json, '$.static_contract') AS ctx_static_contract,
                     json_extract(context_json, '$.message') AS ctx_message
                 FROM token_outcomes
-                WHERE token_id = :tid AND outcome = 'failed'
+                WHERE token_id = :tid
+                  AND outcome = :outcome
+                  AND path = :path
                 """
-            ).bindparams(tid=token.token_id)
+            ).bindparams(
+                tid=token.token_id,
+                outcome=TerminalOutcome.FAILURE.value,
+                path=TerminalPath.UNROUTED.value,
+            )
             row = processor._data_flow._ops.execute_fetchone(query)
 
             assert row is not None, f"Token {token.token_id} has no FAILED record"
@@ -210,8 +217,8 @@ class TestAuditRoundTrip:
 
         query = sa.text(
             "SELECT json_extract(context_json, '$.definitely_not_a_real_key') AS missing "
-            "FROM token_outcomes WHERE token_id = :tid AND outcome = 'failed'"
-        ).bindparams(tid="t0")
+            "FROM token_outcomes WHERE token_id = :tid AND outcome = :outcome AND path = :path"
+        ).bindparams(tid="t0", outcome=TerminalOutcome.FAILURE.value, path=TerminalPath.UNROUTED.value)
         row = processor._data_flow._ops.execute_fetchone(query)
         assert row is not None
         assert row.missing is None  # NULL — the key doesn't exist in the payload.
@@ -241,9 +248,10 @@ class TestAuditRoundTrip:
 
         query = sa.text(
             "SELECT COUNT(*) AS cnt FROM token_outcomes "
-            "WHERE outcome = 'failed' "
+            "WHERE outcome = :outcome "
+            "AND path = :path "
             "AND json_extract(context_json, '$.exception_type') = 'PassThroughContractViolation'"
-        )
+        ).bindparams(outcome=TerminalOutcome.FAILURE.value, path=TerminalPath.UNROUTED.value)
         row = processor._data_flow._ops.execute_fetchone(query)
         assert row is not None
         assert row.cnt == 5

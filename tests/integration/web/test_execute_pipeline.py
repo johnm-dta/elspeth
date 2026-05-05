@@ -240,7 +240,8 @@ class TestGateRoutedPipelineExecution:
 
         Pre-PR (commit cc895589): /api/runs/{run_id} returns status='failed'
         with the synthetic structural error. Post-PR: returns
-        status='completed' with rows_routed_success > 0.
+        status='completed' with routed successes represented as both lifecycle
+        successes and the rows_routed_success subset counter.
         """
         from elspeth.web.app import create_app
         from elspeth.web.composer.state import (
@@ -419,7 +420,7 @@ class TestGateRoutedPipelineExecution:
                 "is supposed to fix this end-to-end."
             )
             assert status["rows_processed"] > 0
-            assert status["rows_succeeded"] == 0
+            assert status["rows_succeeded"] >= status["rows_routed_success"]
             assert status["rows_routed_success"] > 0
             assert status["rows_routed_failure"] == 0
             assert status["error"] is None

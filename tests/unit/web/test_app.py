@@ -9,10 +9,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import Depends
 from pydantic import ValidationError
 from sqlalchemy.exc import CompileError, OperationalError
-from starlette.testclient import TestClient
+from starlette.requests import Request
 
 from elspeth.web.app import (
     _JSON_COLLECTION_FIELDS,
@@ -23,6 +22,7 @@ from elspeth.web.app import (
 )
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import get_settings
+from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
 def _settings(tmp_path: Path, **overrides) -> WebSettings:
@@ -156,19 +156,17 @@ class TestGetSettingsDependency:
         settings = _settings(tmp_path, port=4242)
         app = create_app(settings)
 
-        # Remove the SPA catch-all mount so the dynamically added test
-        # route is reachable (the SPA mount at "/" with html=True serves
-        # index.html for any unmatched path, swallowing late-added routes).
-        app.routes[:] = [r for r in app.routes if getattr(r, "name", None) != "spa"]
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/_test_settings",
+                "headers": [],
+                "app": app,
+            }
+        )
 
-        @app.get("/api/_test_settings")
-        async def _test_endpoint(s: WebSettings = Depends(get_settings)) -> dict[str, int]:  # noqa: B008
-            return {"port": s.port}
-
-        client = TestClient(app)
-        response = client.get("/api/_test_settings")
-        assert response.status_code == 200
-        assert response.json() == {"port": 4242}
+        assert get_settings(request).port == 4242
 
 
 class TestCatalogWiring:
@@ -918,7 +916,7 @@ class TestSecretsExceptionHandlers:
             raise OperationalError(
                 "SELECT * FROM user_secrets WHERE name = ?",
                 {"name": "LEAK_ME"},
-                Exception("postgresql://admin:sekretpass@db.internal/prod"),
+                Exception("postgresql://admin:sekretpass@db.internal/prod"),  # secret-scan: allow-this-line
             )
 
         app = client.app

@@ -26,7 +26,7 @@ from hypothesis import strategies as st
 from sqlalchemy import text
 
 from elspeth.contracts import CoalesceName, GateName, RoutingAction, RoutingMode, SinkName
-from elspeth.contracts.enums import RowOutcome
+from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, TerminalOutcome, TerminalPath
 from elspeth.core.config import CoalesceSettings, GateSettings, SourceSettings
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
 from elspeth.core.landscape import LandscapeDB
@@ -82,7 +82,8 @@ def count_forked_outcomes(db: LandscapeDB, run_id: str) -> int:
                 JOIN tokens t ON t.token_id = o.token_id
                 JOIN rows r ON r.row_id = t.row_id
                 WHERE r.run_id = :run_id
-                  AND o.outcome = 'forked'
+                  AND o.outcome = 'transient'
+                  AND o.path = 'fork_parent'
             """),
             {"run_id": run_id},
         ).scalar()
@@ -495,13 +496,13 @@ class TestForkJoinRuntimeBalance:
 class TestForkJoinEnumProperties:
     """Property tests for fork-related enums and outcomes."""
 
-    def test_forked_is_terminal(self) -> None:
-        """FORKED is a terminal outcome (parent token's journey ends)."""
-        assert RowOutcome.FORKED.is_terminal
+    def test_fork_parent_is_terminal_pair(self) -> None:
+        """FORK_PARENT is a terminal pair (parent token's journey ends)."""
+        assert (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT) in _LEGAL_TERMINAL_PAIRS
 
-    def test_coalesced_is_terminal(self) -> None:
-        """COALESCED is a terminal outcome (branch tokens merge)."""
-        assert RowOutcome.COALESCED.is_terminal
+    def test_coalesced_is_terminal_pair(self) -> None:
+        """COALESCED is a terminal pair (branch tokens merge)."""
+        assert (TerminalOutcome.SUCCESS, TerminalPath.COALESCED) in _LEGAL_TERMINAL_PAIRS
 
     def test_routing_action_fork_requires_paths(self) -> None:
         """RoutingAction.fork_to_paths() requires at least one path."""

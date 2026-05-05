@@ -31,8 +31,9 @@ from elspeth.contracts import (
     NodeStateStatus,
     NodeType,
     RoutingMode,
-    RowOutcome,
     RunStatus,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
@@ -126,10 +127,12 @@ def _build_linear_pipeline(
         )
 
     if complete_token:
-        outcome = RowOutcome.FAILED if fail_transform else RowOutcome.COMPLETED
+        outcome = TerminalOutcome.FAILURE if fail_transform else TerminalOutcome.SUCCESS
+        path = TerminalPath.UNROUTED if fail_transform else TerminalPath.DEFAULT_FLOW
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id=run_id),
             outcome=outcome,
+            path=path,
             sink_name=None if fail_transform else "csv_sink",
             error_hash="e" * 64 if fail_transform else None,
         )
@@ -181,7 +184,8 @@ class TestExplainTokenLineage:
         assert len(result.node_states) == 1
         assert result.node_states[0].status == NodeStateStatus.COMPLETED
         assert result.outcome is not None
-        assert result.outcome.outcome == RowOutcome.COMPLETED
+        assert result.outcome.outcome == TerminalOutcome.SUCCESS
+        assert result.outcome.path == TerminalPath.DEFAULT_FLOW
 
     def test_explain_by_row_id_resolves_token(self) -> None:
         """explain() resolves token from row_id when one terminal token exists."""
@@ -259,7 +263,10 @@ class TestExplainTokenLineage:
             destination="quarantine",
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token.token_id, run_id=run_id), outcome=RowOutcome.QUARANTINED, error_hash="b" * 64
+            ref=TokenRef(token_id=token.token_id, run_id=run_id),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            error_hash="b" * 64,
         )
         factory.run_lifecycle.complete_run(run_id, RunStatus.FAILED)
 
@@ -389,7 +396,10 @@ class TestGetFailureContext:
             destination="quarantine",
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token.token_id, run_id="terr-run"), outcome=RowOutcome.QUARANTINED, error_hash="c" * 64
+            ref=TokenRef(token_id=token.token_id, run_id="terr-run"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            error_hash="c" * 64,
         )
         factory.run_lifecycle.complete_run("terr-run", RunStatus.FAILED)
 
@@ -465,7 +475,10 @@ class TestGetFailureContext:
         )
 
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token.token_id, run_id="retry-run"), outcome=RowOutcome.FAILED, error_hash="d" * 64
+            ref=TokenRef(token_id=token.token_id, run_id="retry-run"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+            error_hash="d" * 64,
         )
         factory.run_lifecycle.complete_run("retry-run", RunStatus.FAILED)
 
@@ -505,7 +518,10 @@ class TestGetFailureContext:
         )
 
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token.token_id, run_id="first-retry-run"), outcome=RowOutcome.FAILED, error_hash="e" * 64
+            ref=TokenRef(token_id=token.token_id, run_id="first-retry-run"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+            error_hash="e" * 64,
         )
         factory.run_lifecycle.complete_run("first-retry-run", RunStatus.FAILED)
 
@@ -546,7 +562,10 @@ class TestGetFailureContext:
             error=ExecutionError(exception="test_failure", exception_type="TestFailure"),
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token_x.token_id, run_id="run-X"), outcome=RowOutcome.FAILED, error_hash="e" * 64
+            ref=TokenRef(token_id=token_x.token_id, run_id="run-X"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+            error_hash="e" * 64,
         )
         factory.run_lifecycle.complete_run("run-X", RunStatus.FAILED)
 
@@ -566,7 +585,10 @@ class TestGetFailureContext:
             error=ExecutionError(exception="test_failure", exception_type="TestFailure"),
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token_y.token_id, run_id="run-Y"), outcome=RowOutcome.FAILED, error_hash="f" * 64
+            ref=TokenRef(token_id=token_y.token_id, run_id="run-Y"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+            error_hash="f" * 64,
         )
         factory.run_lifecycle.complete_run("run-Y", RunStatus.FAILED)
 
@@ -605,7 +627,10 @@ class TestGetFailureContext:
             destination="quarantine",
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token_p.token_id, run_id="run-P"), outcome=RowOutcome.QUARANTINED, error_hash="a" * 64
+            ref=TokenRef(token_id=token_p.token_id, run_id="run-P"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            error_hash="a" * 64,
         )
         factory.run_lifecycle.complete_run("run-P", RunStatus.FAILED)
 
@@ -624,7 +649,10 @@ class TestGetFailureContext:
             destination="quarantine",
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token_q.token_id, run_id="run-Q"), outcome=RowOutcome.QUARANTINED, error_hash="b" * 64
+            ref=TokenRef(token_id=token_q.token_id, run_id="run-Q"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            error_hash="b" * 64,
         )
         factory.run_lifecycle.complete_run("run-Q", RunStatus.FAILED)
 
@@ -655,7 +683,10 @@ class TestGetFailureContext:
                 error=ExecutionError(exception="test_failure", exception_type="TestFailure"),
             )
             factory.data_flow.record_token_outcome(
-                ref=TokenRef(token_id=token.token_id, run_id="limit-run"), outcome=RowOutcome.FAILED, error_hash="a" * 64
+                ref=TokenRef(token_id=token.token_id, run_id="limit-run"),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.UNROUTED,
+                error_hash="a" * 64,
             )
 
         factory.run_lifecycle.complete_run("limit-run", RunStatus.FAILED)
@@ -685,7 +716,10 @@ class TestGetFailureContext:
             error=ExecutionError(exception="test_failure", exception_type="TestFailure"),
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token0.token_id, run_id="pattern-run"), outcome=RowOutcome.FAILED, error_hash="a" * 64
+            ref=TokenRef(token_id=token0.token_id, run_id="pattern-run"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+            error_hash="a" * 64,
         )
 
         # Fail in xform-b
@@ -699,7 +733,10 @@ class TestGetFailureContext:
             error=ExecutionError(exception="test_failure", exception_type="TestFailure"),
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token1.token_id, run_id="pattern-run"), outcome=RowOutcome.FAILED, error_hash="b" * 64
+            ref=TokenRef(token_id=token1.token_id, run_id="pattern-run"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+            error_hash="b" * 64,
         )
 
         factory.run_lifecycle.complete_run("pattern-run", RunStatus.FAILED)
@@ -735,7 +772,8 @@ class TestGetRunSummary:
         assert result["errors"]["validation"] == 0
         assert result["errors"]["transform"] == 0
         assert result["errors"]["total"] == 0
-        assert result["outcome_distribution"]["completed"] == 1
+        distribution = {(entry["outcome"], entry["path"], entry["completed"]): entry["count"] for entry in result["outcome_distribution"]}
+        assert distribution[(TerminalOutcome.SUCCESS.value, TerminalPath.DEFAULT_FLOW.value, True)] == 1
 
     def test_summary_for_nonexistent_run(self) -> None:
         """get_run_summary returns error for unknown run_id."""
@@ -766,7 +804,10 @@ class TestGetRunSummary:
             destination="quarantine",
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token.token_id, run_id="err-run"), outcome=RowOutcome.QUARANTINED, error_hash="a" * 64
+            ref=TokenRef(token_id=token.token_id, run_id="err-run"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            error_hash="a" * 64,
         )
         factory.run_lifecycle.complete_run("err-run", RunStatus.COMPLETED)
 
@@ -789,21 +830,30 @@ class TestGetRunSummary:
         row0 = factory.data_flow.create_row("dist-run", "src", row_index=0, data={"i": 0})
         token0 = factory.data_flow.create_token(row0.row_id)
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token0.token_id, run_id="dist-run"), outcome=RowOutcome.COMPLETED, sink_name="csv_sink"
+            ref=TokenRef(token_id=token0.token_id, run_id="dist-run"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="csv_sink",
         )
 
         # Row 1: quarantined
         row1 = factory.data_flow.create_row("dist-run", "src", row_index=1, data={"i": 1})
         token1 = factory.data_flow.create_token(row1.row_id)
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token1.token_id, run_id="dist-run"), outcome=RowOutcome.QUARANTINED, error_hash="b" * 64
+            ref=TokenRef(token_id=token1.token_id, run_id="dist-run"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            error_hash="b" * 64,
         )
 
         # Row 2: completed
         row2 = factory.data_flow.create_row("dist-run", "src", row_index=2, data={"i": 2})
         token2 = factory.data_flow.create_token(row2.row_id)
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token2.token_id, run_id="dist-run"), outcome=RowOutcome.COMPLETED, sink_name="csv_sink"
+            ref=TokenRef(token_id=token2.token_id, run_id="dist-run"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="csv_sink",
         )
 
         # Row 3: routed_on_error (DIVERT path) — elspeth-5069612f3c new outcome.
@@ -813,7 +863,8 @@ class TestGetRunSummary:
         token3 = factory.data_flow.create_token(row3.row_id)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token3.token_id, run_id="dist-run"),
-            outcome=RowOutcome.ROUTED_ON_ERROR,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.ON_ERROR_ROUTED,
             sink_name="csv_sink",
             error_hash="c" * 64,
         )
@@ -823,12 +874,12 @@ class TestGetRunSummary:
         result = get_run_summary(db, factory, "dist-run")
 
         assert "error" not in result
-        assert result["outcome_distribution"]["completed"] == 2
-        assert result["outcome_distribution"]["quarantined"] == 1
-        # MCP does NOT split historical "routed" rows; the runbook/ADR handles
-        # the upgrade-boundary limitation.  ROUTED_ON_ERROR is preserved as its
-        # own bucket key (not merged into "routed").
-        assert result["outcome_distribution"]["routed_on_error"] == 1
+        distribution = {(entry["outcome"], entry["path"], entry["completed"]): entry["count"] for entry in result["outcome_distribution"]}
+        assert distribution[(TerminalOutcome.SUCCESS.value, TerminalPath.DEFAULT_FLOW.value, True)] == 2
+        assert distribution[(TerminalOutcome.FAILURE.value, TerminalPath.QUARANTINED_AT_SOURCE.value, True)] == 1
+        # MCP surfaces the full ADR-019 pair rather than collapsing routing
+        # provenance into a legacy single-axis bucket.
+        assert distribution[(TerminalOutcome.FAILURE.value, TerminalPath.ON_ERROR_ROUTED.value, True)] == 1
 
     def test_summary_avg_state_duration(self) -> None:
         """get_run_summary returns average node state duration."""
@@ -936,7 +987,10 @@ class TestFailureContextCorruptionGuards:
             destination="quarantine",
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token.token_id, run_id="corrupt-te"), outcome=RowOutcome.QUARANTINED, error_hash="a" * 64
+            ref=TokenRef(token_id=token.token_id, run_id="corrupt-te"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            error_hash="a" * 64,
         )
         factory.run_lifecycle.complete_run("corrupt-te", RunStatus.FAILED)
 
@@ -992,7 +1046,10 @@ class TestErrorAnalysisCorruptionGuard:
             destination="quarantine",
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token.token_id, run_id="corrupt-ea"), outcome=RowOutcome.QUARANTINED, error_hash="a" * 64
+            ref=TokenRef(token_id=token.token_id, run_id="corrupt-ea"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            error_hash="a" * 64,
         )
         factory.run_lifecycle.complete_run("corrupt-ea", RunStatus.FAILED)
 
@@ -1019,7 +1076,10 @@ class TestErrorAnalysisCorruptionGuard:
             destination="quarantine",
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token.token_id, run_id="clean-ea"), outcome=RowOutcome.QUARANTINED, error_hash="a" * 64
+            ref=TokenRef(token_id=token.token_id, run_id="clean-ea"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            error_hash="a" * 64,
         )
         factory.run_lifecycle.complete_run("clean-ea", RunStatus.FAILED)
 
@@ -1065,10 +1125,16 @@ class TestExplainTokenErrorHandling:
         token_a = factory.data_flow.create_token(row.row_id)
         token_b = factory.data_flow.create_token(row.row_id)
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token_a.token_id, run_id="et-ambig"), outcome=RowOutcome.COMPLETED, sink_name="sink_a"
+            ref=TokenRef(token_id=token_a.token_id, run_id="et-ambig"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="sink_a",
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id=token_b.token_id, run_id="et-ambig"), outcome=RowOutcome.COMPLETED, sink_name="sink_b"
+            ref=TokenRef(token_id=token_b.token_id, run_id="et-ambig"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="sink_b",
         )
         factory.run_lifecycle.complete_run("et-ambig", RunStatus.COMPLETED)
 

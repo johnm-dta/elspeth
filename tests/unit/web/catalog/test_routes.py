@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from elspeth.plugins.infrastructure.manager import PluginManager
 from elspeth.web.catalog.routes import catalog_router
 from elspeth.web.catalog.service import CatalogServiceImpl
+from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
 @pytest.fixture

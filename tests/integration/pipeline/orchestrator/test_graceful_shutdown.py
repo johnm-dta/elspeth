@@ -777,9 +777,9 @@ class TestInterruptAndResume:
 
         from sqlalchemy import insert
 
-        from elspeth.contracts import NodeType, RowOutcome
+        from elspeth.contracts import NodeType
         from elspeth.contracts.contract_records import ContractAuditRecord
-        from elspeth.contracts.enums import Determinism, RoutingMode
+        from elspeth.contracts.enums import Determinism, RoutingMode, TerminalOutcome, TerminalPath
         from elspeth.contracts.schema_contract import FieldContract, SchemaContract
         from elspeth.core.checkpoint import CheckpointManager
         from elspeth.core.landscape.schema import (
@@ -905,7 +905,8 @@ class TestInterruptAndResume:
         for i in range(processed_count):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=f"t{i}", run_id=run_id),
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="default",
             )
 

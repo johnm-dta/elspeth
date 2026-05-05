@@ -128,7 +128,8 @@ class TestEnumRejection:
     verify that arbitrary strings that are not valid enum members raise ValueError.
 
     This is critical for audit integrity: if we accept "invalid_status" as a
-    RowOutcome, the audit trail would contain garbage that can't be interpreted.
+    terminal outcome/path, the audit trail would contain garbage that can't be
+    interpreted.
     """
 
     @given(
@@ -150,12 +151,42 @@ class TestEnumRejection:
         )
     )
     @settings(max_examples=50)
-    def test_invalid_row_outcome_rejected(self, invalid_value: str) -> None:
-        """Property: Invalid RowOutcome values raise ValueError."""
-        from elspeth.contracts.enums import RowOutcome
+    def test_invalid_terminal_outcome_rejected(self, invalid_value: str) -> None:
+        """Property: Invalid TerminalOutcome values raise ValueError."""
+        from elspeth.contracts.enums import TerminalOutcome
 
         with pytest.raises(ValueError):
-            RowOutcome(invalid_value)
+            TerminalOutcome(invalid_value)
+
+    @given(
+        invalid_value=st.text(min_size=1, max_size=20).filter(
+            lambda s: (
+                s
+                not in (
+                    "default_flow",
+                    "gate_routed",
+                    "on_error_routed",
+                    "filter_dropped",
+                    "coalesced",
+                    "unrouted",
+                    "quarantined_at_source",
+                    "sink_fallback_to_failsink",
+                    "sink_discarded",
+                    "fork_parent",
+                    "expand_parent",
+                    "batch_consumed",
+                    "buffered",
+                )
+            )
+        )
+    )
+    @settings(max_examples=50)
+    def test_invalid_terminal_path_rejected(self, invalid_value: str) -> None:
+        """Property: Invalid TerminalPath values raise ValueError."""
+        from elspeth.contracts.enums import TerminalPath
+
+        with pytest.raises(ValueError):
+            TerminalPath(invalid_value)
 
     @given(invalid_value=st.text(min_size=1, max_size=20).filter(lambda s: s not in ("continue", "route", "fork_to_paths")))
     @settings(max_examples=50)

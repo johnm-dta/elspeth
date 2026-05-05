@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-from elspeth.contracts import NodeType, RowOutcome
+from elspeth.contracts import NodeType
 from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.canonical import CANONICAL_VERSION
 from elspeth.core.landscape.database import LandscapeDB
@@ -220,7 +221,8 @@ def test_record_outcome_throughput() -> None:
         for i in range(iterations):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token_ids[i], run_id=run_id),
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="default",
             )
 

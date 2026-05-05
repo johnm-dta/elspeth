@@ -12,13 +12,14 @@ These are pure delegation functions — no internal state — tested via mocks.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
 
-from elspeth.contracts import PendingOutcome, RowOutcome, TokenInfo
-from elspeth.contracts.enums import BatchStatus, TriggerType
+from elspeth.contracts import PendingOutcome, TokenInfo
+from elspeth.contracts.enums import BatchStatus, TerminalOutcome, TerminalPath, TriggerType
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import NodeID
 from elspeth.engine.orchestrator.aggregation import (
@@ -69,14 +70,18 @@ def _make_agg_settings(*, name: str = "batch_agg") -> Mock:
 
 
 def _make_result(
-    outcome: RowOutcome,
+    outcome: TerminalOutcome | None,
+    path: TerminalPath,
     *,
     token: TokenInfo | None = None,
     sink_name: str | None = None,
 ) -> Mock:
     result = Mock()
     result.outcome = outcome
+    result.path = path
     result.token = token or make_token_info()
+    if path == TerminalPath.COALESCED and result.token.join_group_id is None:
+        result.token = replace(result.token, join_group_id="join-1")
     result.sink_name = sink_name
     return result
 
@@ -430,7 +435,7 @@ class TestCheckAggregationTimeouts:
         (not hardcoded as TIMEOUT).
         """
         token = make_token_info()
-        completed = Mock(outcome=RowOutcome.COMPLETED, token=token, sink_name="output")
+        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -482,7 +487,7 @@ class TestCheckAggregationTimeouts:
     def test_timeout_flush_completed_results(self) -> None:
         """Timeout flush produces completed tokens routed to sink."""
         token = make_token_info()
-        completed = Mock(outcome=RowOutcome.COMPLETED, token=token, sink_name="output")
+        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -510,7 +515,7 @@ class TestCheckAggregationTimeouts:
 
     def test_timeout_flush_failed_results(self) -> None:
         """Failed results from flush increment failed counter."""
-        failed = Mock(outcome=RowOutcome.FAILED)
+        failed = Mock(outcome=TerminalOutcome.FAILURE, path=TerminalPath.UNROUTED)
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -540,7 +545,7 @@ class TestCheckAggregationTimeouts:
         """Work items from flush continue through remaining transforms."""
         work_token = make_token_info()
         work_item = _make_work_item(token=work_token, current_node_id=NodeID("continue-node"))
-        downstream_result = _make_result(RowOutcome.COMPLETED, token=work_token, sink_name="output")
+        downstream_result = _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=work_token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -605,7 +610,7 @@ class TestCheckAggregationTimeouts:
     def test_downstream_routed_outcome(self) -> None:
         """ROUTED outcome from downstream is tracked."""
         work_item = _make_work_item()
-        routed = _make_result(RowOutcome.ROUTED, sink_name="risk_sink")
+        routed = _make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="risk_sink")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -630,7 +635,7 @@ class TestCheckAggregationTimeouts:
         )
 
         assert result.rows_routed_success == 1
-        assert result.rows_succeeded == 0
+        assert result.rows_succeeded == 1
         assert result.rows_routed_failure == 0
         assert result.routed_destinations == {"risk_sink": 1}
         assert len(pending["risk_sink"]) == 1
@@ -638,7 +643,7 @@ class TestCheckAggregationTimeouts:
     def test_downstream_quarantined_outcome(self) -> None:
         """QUARANTINED outcome from downstream is counted."""
         work_item = _make_work_item()
-        quarantined = _make_result(RowOutcome.QUARANTINED)
+        quarantined = _make_result(TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE)
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -667,7 +672,7 @@ class TestCheckAggregationTimeouts:
     def test_downstream_coalesced_outcome(self) -> None:
         """COALESCED outcome increments both coalesced and succeeded."""
         work_item = _make_work_item()
-        coalesced = _make_result(RowOutcome.COALESCED, sink_name="output")
+        coalesced = _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -697,7 +702,7 @@ class TestCheckAggregationTimeouts:
     def test_downstream_failed_in_timeout(self) -> None:
         """FAILED downstream outcome from work items in timeout check."""
         work_item = _make_work_item()
-        failed = _make_result(RowOutcome.FAILED)
+        failed = _make_result(TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -727,7 +732,7 @@ class TestCheckAggregationTimeouts:
         """COMPLETED work item with unknown branch routes to sink_name from result."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="unknown")
         work_item = _make_work_item(token=token)
-        completed = _make_result(RowOutcome.COMPLETED, token=token, sink_name="output")
+        completed = _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -758,9 +763,9 @@ class TestCheckAggregationTimeouts:
         """FORKED, EXPANDED, BUFFERED outcomes each tracked separately."""
         work_item = _make_work_item()
         outcomes = [
-            _make_result(RowOutcome.FORKED),
-            _make_result(RowOutcome.EXPANDED),
-            _make_result(RowOutcome.BUFFERED),
+            _make_result(TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT),
+            _make_result(TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT),
+            _make_result(None, TerminalPath.BUFFERED),
         ]
 
         agg_transform = _make_batch_transform(node_id="agg-1")
@@ -792,7 +797,7 @@ class TestCheckAggregationTimeouts:
     def test_completed_result_branch_fallback_in_timeout(self) -> None:
         """Completed result with branch not in pending routes to sink_name from result."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="missing_sink")
-        completed = Mock(outcome=RowOutcome.COMPLETED, token=token, sink_name="output")
+        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -872,7 +877,7 @@ class TestFlushRemainingAggregationBuffers:
     def test_flush_completed_results(self) -> None:
         """Completed results from flush go to sink."""
         token = make_token_info()
-        completed = Mock(outcome=RowOutcome.COMPLETED, token=token, sink_name="output")
+        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -922,7 +927,7 @@ class TestFlushRemainingAggregationBuffers:
         """Work items from flush continue through remaining transforms."""
         work_token = make_token_info()
         work_item = _make_work_item(token=work_token, current_node_id=NodeID("continue-node"))
-        downstream = _make_result(RowOutcome.COMPLETED, token=work_token, sink_name="output")
+        downstream = _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=work_token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -948,7 +953,7 @@ class TestFlushRemainingAggregationBuffers:
     def test_downstream_routed_tokens_counted(self) -> None:
         """ROUTED downstream outcome is counted correctly."""
         work_item = _make_work_item()
-        routed = _make_result(RowOutcome.ROUTED, sink_name="risk")
+        routed = _make_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="risk")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -970,13 +975,13 @@ class TestFlushRemainingAggregationBuffers:
         )
 
         assert result.rows_routed_success == 1
-        assert result.rows_succeeded == 0
+        assert result.rows_succeeded == 1
         assert result.rows_routed_failure == 0
 
     def test_downstream_coalesced_tokens_counted(self) -> None:
         """COALESCED downstream outcome increments both counters."""
         work_item = _make_work_item()
-        coalesced = _make_result(RowOutcome.COALESCED, sink_name="output")
+        coalesced = _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -1003,7 +1008,7 @@ class TestFlushRemainingAggregationBuffers:
     def test_branch_routing_for_completed_tokens(self) -> None:
         """Completed tokens route via result.sink_name, not branch_name."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="path_a")
-        completed = Mock(outcome=RowOutcome.COMPLETED, token=token, sink_name="output")
+        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -1030,7 +1035,7 @@ class TestFlushRemainingAggregationBuffers:
     def test_downstream_failed_in_flush(self) -> None:
         """FAILED outcome from downstream work items counted in flush."""
         work_item = _make_work_item()
-        failed = _make_result(RowOutcome.FAILED)
+        failed = _make_result(TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -1057,7 +1062,7 @@ class TestFlushRemainingAggregationBuffers:
         """COMPLETED work item with unknown branch routes to sink_name from result."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="unknown")
         work_item = _make_work_item(token=token)
-        completed = _make_result(RowOutcome.COMPLETED, token=token, sink_name="output")
+        completed = _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -1084,7 +1089,7 @@ class TestFlushRemainingAggregationBuffers:
     def test_downstream_quarantined_in_flush(self) -> None:
         """QUARANTINED outcome from downstream work items counted in flush."""
         work_item = _make_work_item()
-        quarantined = _make_result(RowOutcome.QUARANTINED)
+        quarantined = _make_result(TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE)
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -1111,9 +1116,9 @@ class TestFlushRemainingAggregationBuffers:
         """FORKED, EXPANDED, BUFFERED outcomes from work items tracked in flush."""
         work_item = _make_work_item()
         outcomes = [
-            _make_result(RowOutcome.FORKED),
-            _make_result(RowOutcome.EXPANDED),
-            _make_result(RowOutcome.BUFFERED),
+            _make_result(TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT),
+            _make_result(TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT),
+            _make_result(None, TerminalPath.BUFFERED),
         ]
 
         agg_transform = _make_batch_transform(node_id="agg-1")
@@ -1172,7 +1177,7 @@ class TestFlushRemainingAggregationBuffers:
     def test_completed_result_branch_fallback_to_sink_name(self) -> None:
         """Completed result with branch not in pending routes to sink_name from result."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="missing")
-        completed = Mock(outcome=RowOutcome.COMPLETED, token=token, sink_name="output")
+        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -1198,7 +1203,7 @@ class TestFlushRemainingAggregationBuffers:
     def test_branch_routing_falls_back_to_sink_name(self) -> None:
         """Branch name not in pending_tokens routes to sink_name from result."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="nonexistent")
-        completed = Mock(outcome=RowOutcome.COMPLETED, token=token, sink_name="output")
+        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(

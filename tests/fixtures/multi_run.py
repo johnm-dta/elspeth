@@ -27,7 +27,8 @@ from elspeth.contracts import (
     NodeStateStatus,
     NodeType,
     RoutingMode,
-    RowOutcome,
+    TerminalOutcome,
+    TerminalPath,
     TriggerType,
 )
 from elspeth.contracts.audit import TokenRef
@@ -213,7 +214,10 @@ def _build_multi_run_landscape() -> MultiRunFixture:
 
             # Record token outcome
             factory.data_flow.record_token_outcome(
-                ref=TokenRef(token_id=tok_id, run_id=run_id), outcome=RowOutcome.COMPLETED, sink_name="output"
+                ref=TokenRef(token_id=tok_id, run_id=run_id),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
             )
 
             row_ids.append(row_id)

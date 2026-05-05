@@ -1,23 +1,17 @@
 # ADR-019 migration allowlist for forbid_new_row_outcome.py.
 #
-# Files listed here may freely reference RowOutcome.X during the migration
-# window. They are EXISTING migration sites that Stages 2/3/4 will flip to
-# (TerminalOutcome, TerminalPath) pairs. Any file outside this list that
-# introduces a RowOutcome.X reference fails the lint guard.
+# Files listed here may reference RowOutcome.X during the remaining migration
+# window. New source files outside this list must use
+# (TerminalOutcome, TerminalPath) pairs and must not hardcode legacy
+# RowOutcome value strings against an outcome symbol.
 #
-# Allowlist scope at Stage 1 PR time (2026-05-04):
-# - The contracts layer: enums.py defines RowOutcome until Stage 5.
-# - The recorder, repository, contract dataclasses, producers, accumulator,
-#   and resume aggregation have been removed after the ADR-019 Stage 2/3 flip.
-# - Producer sites have been removed from this allowlist after the ADR-019
-#   Phase 2 producer flip.
-# - The checkpoint recovery path: recovery.py reads RowOutcome from saved
-#   state to restore in-flight runs; flips in Stage 2 with the recorder.
-# - The testing helpers: testing/__init__.py exposes RowOutcome to
-#   plugin-developer scaffolding and ChaosEngine fixtures; flips in Stage 4.
-# - The entire tests/ tree: ~645 RowOutcome.X references across 90-150
-#   assertion sites that flip mechanically in Stage 4. Allowing the whole
-#   subtree avoids per-file churn during the migration window.
+# Final Phase 5 scope:
+# - enums.py defines RowOutcome until Stage 5 deletes it.
+# - testing/__init__.py re-exports RowOutcome alongside the new enums until
+#   Stage 5 trims the testing helper surface.
+# - tests/ retains only compatibility fixtures, mapping-table tests, scanner
+#   fixtures, and commentary references; real engine-output assertions have
+#   been migrated to (TerminalOutcome, TerminalPath).
 #
 # Stage 5 deletes RowOutcome and this allowlist (and the script that
 # consults it) — the partition assertion in contracts/enums.py becomes the
@@ -34,12 +28,12 @@
 #   still has work scheduled."
 
 allowed:
-  # Contracts layer — RowOutcome itself.
+  # Contracts layer: RowOutcome itself.
   - file: src/elspeth/contracts/enums.py
-    justification: ADR-019 migration site — defines RowOutcome (kept through Stage 4); also defines TerminalOutcome / TerminalPath added in Stage 1.
-  # Testing helpers — exposed to plugin-developer scaffolding.
+    justification: ADR-019 migration site — defines RowOutcome until Stage 5; also defines TerminalOutcome / TerminalPath.
+  # Testing helpers: exposed to plugin-developer scaffolding.
   - file: src/elspeth/testing/__init__.py
-    justification: testing pack re-exports RowOutcome for ChaosEngine / plugin-test fixtures; flips in Stage 4 to also expose TerminalOutcome and TerminalPath, then drops RowOutcome in Stage 5.
-  # Tests subtree — bulk assertion-site flip in Stage 4.
+    justification: testing pack re-exports RowOutcome alongside TerminalOutcome/TerminalPath; Stage 5 trims to TerminalOutcome/TerminalPath only.
+  # Tests subtree: compatibility fixtures and migrated-test commentary.
   - file: tests/
-    justification: ~645 RowOutcome.X references across ~143 assertion sites; Stage 4 mechanically flips each ``assert outcome == RowOutcome.X`` to ``assert (outcome, path) == (TerminalOutcome.Y, TerminalPath.Z)`` per the canonical mapping.
+    justification: compatibility fixtures, mapping-table tests, scanner fixtures, and commentary references only; no real-engine-output outcome == RowOutcome.X assertions may remain after Phase 5.

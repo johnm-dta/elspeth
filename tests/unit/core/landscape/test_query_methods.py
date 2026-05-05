@@ -10,7 +10,8 @@ from elspeth.contracts import (
     CallType,
     NodeType,
     RoutingMode,
-    RowOutcome,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
@@ -1765,18 +1766,24 @@ class TestGetAllTokenOutcomesForRun:
         factory.data_flow.create_token("row-1", token_id="tok-1")
         factory.data_flow.create_token("row-2", token_id="tok-2")
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id="tok-1", run_id="run-1"), outcome=RowOutcome.COMPLETED, sink_name="output"
+            ref=TokenRef(token_id="tok-1", run_id="run-1"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="output",
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id="tok-2", run_id="run-1"), outcome=RowOutcome.QUARANTINED, error_hash="abc123"
+            ref=TokenRef(token_id="tok-2", run_id="run-1"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.QUARANTINED_AT_SOURCE,
+            error_hash="abc123",
         )
 
         outcomes = factory.query.get_all_token_outcomes_for_run("run-1")
 
         assert len(outcomes) == 2
-        outcome_map = {o.token_id: o.outcome for o in outcomes}
-        assert outcome_map["tok-1"] == RowOutcome.COMPLETED
-        assert outcome_map["tok-2"] == RowOutcome.QUARANTINED
+        pair_map = {o.token_id: (o.outcome, o.path) for o in outcomes}
+        assert pair_map["tok-1"] == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+        assert pair_map["tok-2"] == (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE)
 
     def test_run_isolation(self):
         """Outcomes from other runs must not leak."""
@@ -1796,7 +1803,10 @@ class TestGetAllTokenOutcomesForRun:
         factory.data_flow.create_row("run-a", "src-a", 0, {"v": 1}, row_id="row-a1")
         factory.data_flow.create_token("row-a1", token_id="tok-a1")
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id="tok-a1", run_id="run-a"), outcome=RowOutcome.COMPLETED, sink_name="output"
+            ref=TokenRef(token_id="tok-a1", run_id="run-a"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="output",
         )
 
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-b")
@@ -1812,7 +1822,10 @@ class TestGetAllTokenOutcomesForRun:
         factory.data_flow.create_row("run-b", "src-b", 0, {"v": 2}, row_id="row-b1")
         factory.data_flow.create_token("row-b1", token_id="tok-b1")
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id="tok-b1", run_id="run-b"), outcome=RowOutcome.FAILED, error_hash="err-hash-1"
+            ref=TokenRef(token_id="tok-b1", run_id="run-b"),
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+            error_hash="err-hash-1",
         )
 
         outcomes_a = factory.query.get_all_token_outcomes_for_run("run-a")
@@ -1838,10 +1851,16 @@ class TestGetAllTokenOutcomesForRun:
         factory.data_flow.create_token("row-1", token_id="tok-aaa")
         factory.data_flow.create_token("row-1", token_id="tok-zzz")
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id="tok-zzz", run_id="run-1"), outcome=RowOutcome.COMPLETED, sink_name="output"
+            ref=TokenRef(token_id="tok-zzz", run_id="run-1"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="output",
         )
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id="tok-aaa", run_id="run-1"), outcome=RowOutcome.COMPLETED, sink_name="output"
+            ref=TokenRef(token_id="tok-aaa", run_id="run-1"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="output",
         )
 
         outcomes = factory.query.get_all_token_outcomes_for_run("run-1")
@@ -1855,11 +1874,15 @@ class TestGetAllTokenOutcomesForRun:
         _, factory = _setup_full()
         # First outcome: FORKED
         factory.data_flow.record_token_outcome(
-            ref=TokenRef(token_id="tok-1", run_id="run-1"), outcome=RowOutcome.FORKED, fork_group_id="fg-1"
+            ref=TokenRef(token_id="tok-1", run_id="run-1"),
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.FORK_PARENT,
+            fork_group_id="fg-1",
         )
 
         outcomes = factory.query.get_all_token_outcomes_for_run("run-1")
 
         assert len(outcomes) == 1
         assert outcomes[0].token_id == "tok-1"
-        assert outcomes[0].outcome == RowOutcome.FORKED
+        assert outcomes[0].outcome == TerminalOutcome.TRANSIENT
+        assert outcomes[0].path == TerminalPath.FORK_PARENT

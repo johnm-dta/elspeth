@@ -7,7 +7,7 @@ from typing import Any, TypedDict
 
 from sqlalchemy import text
 
-from elspeth.contracts import NodeStateFailed, NodeType, PluginSchema, RowOutcome, TransformResult
+from elspeth.contracts import NodeStateFailed, NodeType, PluginSchema, TransformResult
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
     BatchFlushInputs,
@@ -24,7 +24,7 @@ from elspeth.contracts.declaration_contracts import (
     implements_dispatch_site,
     register_declaration_contract,
 )
-from elspeth.contracts.enums import NodeStateStatus
+from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import ExecutionError, UnexpectedEmptyEmissionViolation
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.core.config import SourceSettings
@@ -417,7 +417,7 @@ def test_legitimate_filter_records_queryable_dropped_by_filter_terminal_state() 
     with db.connection() as conn:
         outcomes = conn.execute(
             text("""
-                SELECT o.outcome, o.is_terminal, o.error_hash
+                SELECT o.outcome, o.path, o.completed, o.error_hash
                 FROM token_outcomes o
                 JOIN tokens t ON t.token_id = o.token_id
                 JOIN rows r ON r.row_id = t.row_id
@@ -428,6 +428,7 @@ def test_legitimate_filter_records_queryable_dropped_by_filter_terminal_state() 
         ).fetchall()
 
     assert len(outcomes) == 1
-    assert outcomes[0].outcome == RowOutcome.DROPPED_BY_FILTER.value
-    assert outcomes[0].is_terminal == 1
+    assert outcomes[0].outcome == TerminalOutcome.SUCCESS.value
+    assert outcomes[0].path == TerminalPath.FILTER_DROPPED.value
+    assert outcomes[0].completed == 1
     assert outcomes[0].error_hash is None

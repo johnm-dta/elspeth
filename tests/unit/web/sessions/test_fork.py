@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import FastAPI
 from sqlalchemy.pool import StaticPool
-from starlette.testclient import TestClient
 
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
@@ -23,6 +22,7 @@ from elspeth.web.sessions.protocol import (
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
+from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
 @pytest.fixture

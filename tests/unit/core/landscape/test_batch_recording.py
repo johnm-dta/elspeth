@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from elspeth.contracts import BatchStatus, NodeType, RowOutcome, TriggerType
+from elspeth.contracts import BatchStatus, NodeType, TriggerType
 from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.enums import TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape import LandscapeDB
@@ -849,7 +850,8 @@ class TestBatchRunOwnership:
         with pytest.raises(AuditIntegrityError):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id="tok-B", run_id="run-B"),
-                outcome=RowOutcome.BUFFERED,
+                outcome=None,
+                path=TerminalPath.BUFFERED,
                 batch_id="batch-A",
             )
 

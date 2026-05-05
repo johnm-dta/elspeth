@@ -22,6 +22,9 @@ def test_positive_fixture_reports_every_finding_kind() -> None:
         FindingKind.ROW_OUTCOME_STRING_COMPARE,
         FindingKind.TERMINAL_OUTCOME_STRING_COMPARE,
         FindingKind.TERMINAL_PATH_STRING_COMPARE,
+        FindingKind.ROW_OUTCOME_STRING_MEMBERSHIP,
+        FindingKind.TERMINAL_OUTCOME_STRING_MEMBERSHIP,
+        FindingKind.TERMINAL_PATH_STRING_MEMBERSHIP,
     }
 
 

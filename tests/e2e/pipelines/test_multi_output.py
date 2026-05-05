@@ -127,7 +127,7 @@ class TestMultiOutput:
                 .select_from(token_outcomes_table)
                 .where(
                     token_outcomes_table.c.run_id == result.run_id,
-                    token_outcomes_table.c.is_terminal == 1,
+                    token_outcomes_table.c.completed == 1,
                 )
             ).scalar()
             assert terminal_count == 5
@@ -139,7 +139,7 @@ class TestMultiOutput:
                 .where(
                     token_outcomes_table.c.run_id == result.run_id,
                     token_outcomes_table.c.sink_name == "sink_a",
-                    token_outcomes_table.c.is_terminal == 1,
+                    token_outcomes_table.c.completed == 1,
                 )
             ).scalar()
 
@@ -149,7 +149,7 @@ class TestMultiOutput:
                 .where(
                     token_outcomes_table.c.run_id == result.run_id,
                     token_outcomes_table.c.sink_name == "sink_b",
-                    token_outcomes_table.c.is_terminal == 1,
+                    token_outcomes_table.c.completed == 1,
                 )
             ).scalar()
 

@@ -24,7 +24,6 @@ from elspeth.contracts import (
     PipelineRow,
     PluginSchema,
     RoutingMode,
-    RowOutcome,
     RunStatus,
     SourceRow,
 )
@@ -37,6 +36,7 @@ from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
 from elspeth.contracts.contract_records import ContractAuditRecord
 from elspeth.contracts.diversion import SinkWriteResult
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import NodeID, SinkName
@@ -435,7 +435,8 @@ class TestResumeIdempotence:
         for i in range(3):
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token_ids[i], run_id=run_id),
-                outcome=RowOutcome.COMPLETED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
                 sink_name="default",
             )
 
@@ -726,8 +727,9 @@ class TestCheckpointRecovery:
                             outcome_id=f"outcome-{i:03d}",
                             run_id=run_id,
                             token_id=token_id,
-                            outcome=RowOutcome.COMPLETED.value,
-                            is_terminal=1,
+                            outcome=TerminalOutcome.SUCCESS.value,
+                            path=TerminalPath.DEFAULT_FLOW.value,
+                            completed=1,
                             recorded_at=now,
                             sink_name="default",
                         )

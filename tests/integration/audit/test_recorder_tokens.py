@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from elspeth.contracts.audit import TokenRef
-from elspeth.contracts.enums import Determinism, NodeType
+from elspeth.contracts.enums import Determinism, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
@@ -540,8 +540,6 @@ class TestAtomicTokenOperations:
         the parent outcome isn't recorded, recovery can't identify the fork.
         """
 
-        from elspeth.contracts.enums import RowOutcome
-
         db = LandscapeDB.in_memory()
         factory = RecorderFactory(db)
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
@@ -571,9 +569,10 @@ class TestAtomicTokenOperations:
         # Verify parent has FORKED outcome recorded atomically
         outcome = factory.data_flow.get_token_outcome(parent_token.token_id)
         assert outcome is not None, "Parent token should have FORKED outcome"
-        assert outcome.outcome == RowOutcome.FORKED
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.FORK_PARENT
         assert outcome.fork_group_id == fork_group_id
-        assert outcome.is_terminal == 1
+        assert outcome.completed is True
 
     def test_fork_token_stores_expected_branches_contract(self) -> None:
         """fork_token stores branch names in expected_branches_json for contract validation."""
@@ -619,8 +618,6 @@ class TestAtomicTokenOperations:
         same transaction as creating children, eliminating the crash window.
         """
 
-        from elspeth.contracts.enums import RowOutcome
-
         db = LandscapeDB.in_memory()
         factory = RecorderFactory(db)
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
@@ -652,9 +649,10 @@ class TestAtomicTokenOperations:
         # Verify parent has EXPANDED outcome recorded atomically
         outcome = factory.data_flow.get_token_outcome(parent_token.token_id)
         assert outcome is not None, "Parent token should have EXPANDED outcome"
-        assert outcome.outcome == RowOutcome.EXPANDED
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.EXPAND_PARENT
         assert outcome.expand_group_id == expand_group_id
-        assert outcome.is_terminal == 1
+        assert outcome.completed is True
 
     def test_expand_token_stores_expected_count_contract(self) -> None:
         """expand_token stores count in expected_branches_json for contract validation."""
@@ -751,8 +749,6 @@ class TestAtomicTokenOperations:
         coalesce_tokens first, then record_token_outcome for each parent.
         """
 
-        from elspeth.contracts.enums import RowOutcome
-
         db = LandscapeDB.in_memory()
         factory = RecorderFactory(db)
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
@@ -787,7 +783,9 @@ class TestAtomicTokenOperations:
         for child in children:
             factory.data_flow.record_token_outcome(
                 ref=TokenRef(token_id=child.token_id, run_id=run.run_id),
-                outcome=RowOutcome.COALESCED,
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.COALESCED,
+                sink_name="output",
                 join_group_id=merged.join_group_id,
             )
 
@@ -795,9 +793,11 @@ class TestAtomicTokenOperations:
         for child in children:
             outcome = factory.data_flow.get_token_outcome(child.token_id)
             assert outcome is not None, f"Parent {child.token_id} should have COALESCED outcome"
-            assert outcome.outcome == RowOutcome.COALESCED
+            assert outcome.outcome == TerminalOutcome.SUCCESS
+            assert outcome.path == TerminalPath.COALESCED
+            assert outcome.sink_name == "output"
             assert outcome.join_group_id == merged.join_group_id
-            assert outcome.is_terminal == 1
+            assert outcome.completed is True
 
     def test_coalesce_tokens_creates_parent_links(self) -> None:
         """coalesce_tokens records parent-child relationships in token_parents table.

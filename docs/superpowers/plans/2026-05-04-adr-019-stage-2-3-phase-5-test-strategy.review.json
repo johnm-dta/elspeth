@@ -1,0 +1,133 @@
+{
+  "verdict": "CHANGES_APPLIED_PENDING_REVIEW",
+  "go_no_go": "PHASE_5_REVIEW_REQUIRED",
+  "summary": "Patch pass applied for the Phase 5 review blockers. The plan now adds a RED-first AST-backed test inventory, broadens Category B/C triage beyond exact grep shapes, moves FNR2 before final verification with equality and membership detection, removes the nonexistent noop_sink recommendation, hardens the destructive audit-store runbook with live path resolution and stale/current guards, aligns final gates with CI/pre-commit scopes, and adds dirty-tree/staged-manifest/remote-check requirements. Rerun plan-review before executing Phase 5.",
+  "plan_file": "docs/superpowers/plans/2026-05-04-adr-019-stage-2-3-phase-5-test-strategy.md",
+  "reviewed_at": "2026-05-05T10:34:34Z",
+  "patched_at": "2026-05-05T10:34:34Z",
+  "review_mode": "phase-5 plan-review patch pass",
+  "standards_loaded": [
+    "plan-review",
+    "engine-patterns-reference",
+    "tier-model-deep-dive",
+    "logging-telemetry-policy",
+    "config-contracts-guide"
+  ],
+  "issue_counts": {
+    "blocking_open_after_patch": 0,
+    "warnings_open_after_patch": 0,
+    "requires_review": true
+  },
+  "patched_blockers": [
+    {
+      "id": "B1",
+      "title": "Test triage misses raw SQL and non-exact RowOutcome comparison shapes",
+      "status": "patched_pending_review",
+      "changes": [
+        "Added Task 5.0a for a tests-only AST inventory covering raw token_outcomes SQL, SQLAlchemy schema reads, arbitrary RowOutcome attribute/comparison/collection/membership uses, and hardcoded old outcome string checks.",
+        "Broadened Category B from exact outcome == RowOutcome.X to assertion/comparison-only sites including reversed equality, list/set equality, membership, and old string values.",
+        "Changed triage commands to source-only rg patterns that avoid __pycache__ and binary .pyc noise.",
+        "Replaced stale count expectations with live-scan count recording."
+      ]
+    },
+    {
+      "id": "B2",
+      "title": "Task 5.7 is not RED-first and leaves hardcoded-string membership bypasses",
+      "status": "patched_pending_review",
+      "changes": [
+        "Moved the FNR2 work to Task 5.5a before final verification.",
+        "Required RED tests before changing forbid_new_row_outcome.py.",
+        "Changed FNR2 scope to equality, inequality, in, and not-in comparisons against known RowOutcome value strings.",
+        "Updated the ADR-019 symbol inventory requirements so source closeout also detects RowOutcome, TerminalOutcome, and TerminalPath membership checks."
+      ]
+    },
+    {
+      "id": "B3",
+      "title": "Operator migration doc recommends nonexistent noop_sink",
+      "status": "patched_pending_review",
+      "changes": [
+        "Replaced the noop_sink recommendation with an explicit warning that no built-in no-op sink exists today.",
+        "Marked the noop_sink YAML as invalid unless a real plugin is added and tested.",
+        "Listed supported operator choices: use a real success sink, add a tested no-op sink feature, or accept/rebaseline ADR-019 semantics."
+      ]
+    },
+    {
+      "id": "B4",
+      "title": "Destructive audit-store runbook has path, idempotence, and backup-safety hazards",
+      "status": "patched_pending_review",
+      "changes": [
+        "Changed the staging SQLite path to /home/john/elspeth/data/runs/audit.db and added a note to resolve any deploy env landscape_url override before backup/delete.",
+        "Added pre-delete guards that require a present DB, abort when completed already exists, and require stale is_terminal before deletion.",
+        "Changed backup directory creation to a unique operator-owned directory and removed unsafe redirection into root-owned paths.",
+        "Added a Postgres stale/current schema guard before dropdb."
+      ]
+    },
+    {
+      "id": "B5",
+      "title": "Final verification gates are not CI/pre-commit equivalent",
+      "status": "patched_pending_review",
+      "changes": [
+        "Added pre-commit run --all-files.",
+        "Aligned ruff with src/ tests/ scripts/ examples/ and mypy with src/ tests/.",
+        "Added coverage threshold, audit-evidence nominal, Tier-1 decoration, and adr019_test_inventory gates.",
+        "Required remote GitHub checks to go green after PR creation, including the Python 3.12/3.13 matrix."
+      ]
+    },
+    {
+      "id": "B6",
+      "title": "Commit and PR steps are unsafe against dirty tree and remote-check timing",
+      "status": "patched_pending_review",
+      "changes": [
+        "Added pre-staging git status and intended-file manifest review.",
+        "Added staged diff/stat and staged file manifest review before commit.",
+        "Added explicit no-stash guidance and stop conditions for unrelated dirty work.",
+        "Added gh pr checks --watch after PR creation."
+      ]
+    }
+  ],
+  "patched_warnings": [
+    {
+      "id": "W1",
+      "title": "RowOutcome counts and PR template numbers are stale",
+      "status": "patched_pending_review",
+      "changes": [
+        "Removed stale hardcoded totals from the PR template.",
+        "Required live counts from the phase execution scans."
+      ]
+    },
+    {
+      "id": "W2",
+      "title": "diagnostics.py:181 context claim is stale",
+      "status": "patched_pending_review",
+      "changes": [
+        "Reworded the FNR2 context as a historical string-literal bypass class instead of a current diagnostics.py line claim."
+      ]
+    },
+    {
+      "id": "W3",
+      "title": "Impacted-test loop omits property/e2e and importlib probing is weak",
+      "status": "patched_pending_review",
+      "changes": [
+        "Changed affected-file validation to pytest --collect-only.",
+        "Added tests/property/ and tests/e2e/ to impacted runs."
+      ]
+    },
+    {
+      "id": "W4",
+      "title": "Task 5.7 appears after the final gate it precedes",
+      "status": "patched_pending_review",
+      "changes": [
+        "Renumbered and moved the FNR2 task to Task 5.5a before final verification."
+      ]
+    }
+  ],
+  "clean_checks": [
+    "Patch is documentation-only plus sidecar synchronization.",
+    "JSON sidecar must parse with jq after this patch pass.",
+    "Phase 5 remains pending review; do not execute until a fresh plan-review pass approves it."
+  ],
+  "next_actions": [
+    "Rerun plan-review against the updated Phase 5 plan.",
+    "Do not execute Phase 5 until the rerun returns APPROVED or APPROVED_WITH_WARNINGS."
+  ]
+}

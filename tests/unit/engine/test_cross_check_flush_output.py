@@ -15,7 +15,7 @@ import pytest
 
 from elspeth.contracts import TokenInfo, TransformProtocol, TransformResult
 from elspeth.contracts.declaration_contracts import AggregateDeclarationContractViolation
-from elspeth.contracts.enums import OutputMode
+from elspeth.contracts.enums import OutputMode, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     PassThroughContractViolation,
     UnexpectedEmptyEmissionViolation,
@@ -342,8 +342,12 @@ class TestRecordFlushViolation:
         import sqlalchemy as sa
 
         for token in tokens:
-            query = sa.text("SELECT outcome, context_json FROM token_outcomes WHERE token_id = :tid AND outcome = 'failed'").bindparams(
-                tid=token.token_id
+            query = sa.text(
+                "SELECT outcome, path, context_json FROM token_outcomes WHERE token_id = :tid AND outcome = :outcome AND path = :path"
+            ).bindparams(
+                tid=token.token_id,
+                outcome=TerminalOutcome.FAILURE.value,
+                path=TerminalPath.UNROUTED.value,
             )
             row = processor._data_flow._ops.execute_fetchone(query)
             assert row is not None, f"Token {token.token_id} has no FAILED record"

@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from elspeth.contracts import PendingOutcome, RowOutcome, TokenInfo
+from elspeth.contracts import PendingOutcome, TerminalOutcome, TerminalPath, TokenInfo
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.engine.executors.sink import SinkExecutor
@@ -85,12 +85,20 @@ def test_partition_completeness(batch_size: int, diverted_indices_raw: list[int]
         ctx=MagicMock(run_id="run-1"),
         step_in_pipeline=5,
         sink_name="primary",
-        pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+        pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
     )
 
     outcome_calls = data_flow.record_token_outcome.call_args_list
-    completed_ids = {c.kwargs["ref"].token_id for c in outcome_calls if c.kwargs["outcome"] == RowOutcome.COMPLETED}
-    diverted_ids = {c.kwargs["ref"].token_id for c in outcome_calls if c.kwargs["outcome"] == RowOutcome.DIVERTED}
+    completed_ids = {
+        c.kwargs["ref"].token_id
+        for c in outcome_calls
+        if (c.kwargs["outcome"], c.kwargs["path"]) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+    }
+    diverted_ids = {
+        c.kwargs["ref"].token_id
+        for c in outcome_calls
+        if (c.kwargs["outcome"], c.kwargs["path"]) == (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED)
+    }
 
     # Partition completeness: every token accounted for
     assert len(completed_ids) + len(diverted_ids) == batch_size
@@ -118,7 +126,7 @@ def test_exactly_once_terminal_state(batch_size: int, diverted_indices_raw: list
         ctx=MagicMock(run_id="run-1"),
         step_in_pipeline=5,
         sink_name="primary",
-        pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+        pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
     )
 
     outcome_calls = data_flow.record_token_outcome.call_args_list
@@ -175,15 +183,23 @@ def test_failsink_partition_completeness(batch_size: int, diverted_indices_raw: 
         ctx=MagicMock(run_id="run-1"),
         step_in_pipeline=5,
         sink_name="primary",
-        pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+        pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
         failsink=failsink,
         failsink_name="csv_failsink",
         failsink_edge_id="edge-failsink-1",
     )
 
     outcome_calls = data_flow.record_token_outcome.call_args_list
-    completed_ids = {c.kwargs["ref"].token_id for c in outcome_calls if c.kwargs["outcome"] == RowOutcome.COMPLETED}
-    diverted_ids = {c.kwargs["ref"].token_id for c in outcome_calls if c.kwargs["outcome"] == RowOutcome.DIVERTED}
+    completed_ids = {
+        c.kwargs["ref"].token_id
+        for c in outcome_calls
+        if (c.kwargs["outcome"], c.kwargs["path"]) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+    }
+    diverted_ids = {
+        c.kwargs["ref"].token_id
+        for c in outcome_calls
+        if (c.kwargs["outcome"], c.kwargs["path"]) == (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK)
+    }
 
     assert len(completed_ids) + len(diverted_ids) == batch_size
     assert completed_ids & diverted_ids == set()
@@ -207,7 +223,7 @@ def test_failsink_exactly_once_terminal_state(batch_size: int, diverted_indices_
         ctx=MagicMock(run_id="run-1"),
         step_in_pipeline=5,
         sink_name="primary",
-        pending_outcome=PendingOutcome(RowOutcome.COMPLETED),
+        pending_outcome=PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW),
         failsink=failsink,
         failsink_name="csv_failsink",
         failsink_edge_id="edge-failsink-1",

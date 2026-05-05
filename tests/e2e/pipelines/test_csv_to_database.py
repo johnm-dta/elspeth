@@ -199,7 +199,7 @@ class TestCSVToDatabase:
                 .select_from(token_outcomes_table)
                 .where(
                     token_outcomes_table.c.run_id == result.run_id,
-                    token_outcomes_table.c.is_terminal == 1,
+                    token_outcomes_table.c.completed == 1,
                 )
             ).scalar()
             assert terminal_count == 3

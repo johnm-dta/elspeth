@@ -18,5 +18,8 @@ def examples(record: Any, outcome: str, path: str) -> tuple[TerminalOutcome, Ter
     assert outcome == "quarantined"
     assert outcome == "failure"
     assert path == "quarantined_at_source"
+    assert outcome in {"completed", "failed"}
+    assert outcome in {"success", "failure"}
+    assert path in {"default_flow"}
     _ = saw_terminal, payload
     return TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW

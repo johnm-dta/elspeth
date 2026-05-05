@@ -604,32 +604,20 @@ class TestExecuteIDORAndPathTraversal:
 
 
 class TestWebSocketReconnectTier1Guards:
-    """WebSocket reconnect path must crash on Tier 1 audit trail anomalies.
+    """Reconnect terminal-event seeding must crash on Tier 1 audit trail anomalies.
 
     When a client connects to a terminal run, the handler reconstructs
     a typed event payload from the DB record. Impossible states in the
     DB must raise RuntimeError, not silently degrade.
-
-    Uses Starlette's sync TestClient which provides built-in WebSocket
-    support without requiring httpx-ws.
     """
 
     @staticmethod
-    def _make_ws_app(
-        status_response: RunStatusResponse,
-    ) -> FastAPI:
-        """Build a minimal app wired for WebSocket reconnect testing."""
-        import asyncio
+    def _assert_terminal_event_build_raises(status_response: RunStatusResponse, match: str) -> None:
+        """Exercise the exact terminal event builder used by reconnect seeding."""
+        from elspeth.web.execution.routes import _build_terminal_run_event
 
-        app = _create_test_app(execution_service=MagicMock())
-        app.state.execution_service.get_status = AsyncMock(return_value=status_response)
-        app.state.execution_service.verify_run_ownership = AsyncMock(return_value=True)
-        app.state.auth_provider.authenticate = AsyncMock(return_value=MagicMock(user_id=_TEST_USER_ID, username="testuser"))
-        broadcaster = MagicMock()
-        broadcaster.subscribe = MagicMock(return_value=asyncio.Queue())
-        broadcaster.unsubscribe = MagicMock()
-        app.state.broadcaster = broadcaster
-        return app
+        with pytest.raises(RuntimeError, match=match):
+            _build_terminal_run_event(status_response)
 
     @pytest.mark.parametrize(
         ("terminal_status", "rows_processed", "rows_succeeded", "rows_failed"),
@@ -674,10 +662,8 @@ class TestWebSocketReconnectTier1Guards:
 
     def test_completed_run_without_landscape_run_id_raises(self) -> None:
         """Tier 1 anomaly: completed run with NULL landscape_run_id."""
-        from starlette.testclient import TestClient
-
         run_id = uuid4()
-        app = self._make_ws_app(
+        self._assert_terminal_event_build_raises(
             RunStatusResponse.model_construct(
                 run_id=str(run_id),
                 status="completed",
@@ -691,21 +677,14 @@ class TestWebSocketReconnectTier1Guards:
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
-            )
+            ),
+            "landscape_run_id",
         )
-        with (
-            pytest.raises(RuntimeError, match="landscape_run_id"),
-            TestClient(app) as client,
-            client.websocket_connect(f"/ws/runs/{run_id}?token=fake"),
-        ):
-            pass
 
     def test_failed_run_without_error_raises(self) -> None:
         """Tier 1 anomaly: failed run with NULL error column."""
-        from starlette.testclient import TestClient
-
         run_id = uuid4()
-        app = self._make_ws_app(
+        self._assert_terminal_event_build_raises(
             RunStatusResponse.model_construct(
                 run_id=str(run_id),
                 status="failed",
@@ -719,21 +698,14 @@ class TestWebSocketReconnectTier1Guards:
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
-            )
+            ),
+            "error column NULL",
         )
-        with (
-            pytest.raises(RuntimeError, match="error column NULL"),
-            TestClient(app) as client,
-            client.websocket_connect(f"/ws/runs/{run_id}?token=fake"),
-        ):
-            pass
 
     def test_terminal_run_without_timestamps_raises(self) -> None:
         """Tier 1 anomaly: terminal run with both timestamps NULL."""
-        from starlette.testclient import TestClient
-
         run_id = uuid4()
-        app = self._make_ws_app(
+        self._assert_terminal_event_build_raises(
             RunStatusResponse.model_construct(
                 run_id=str(run_id),
                 status="cancelled",
@@ -747,14 +719,9 @@ class TestWebSocketReconnectTier1Guards:
                 rows_quarantined=0,
                 error=None,
                 landscape_run_id=None,
-            )
+            ),
+            "both finished_at and started_at are NULL",
         )
-        with (
-            pytest.raises(RuntimeError, match="both finished_at and started_at are NULL"),
-            TestClient(app) as client,
-            client.websocket_connect(f"/ws/runs/{run_id}?token=fake"),
-        ):
-            pass
 
     def test_completed_run_with_overcounted_row_counts_raises(self) -> None:
         """Tier 1 anomaly: row count over-counting in completed run.
@@ -771,8 +738,6 @@ class TestWebSocketReconnectTier1Guards:
         is the legitimate aggregation-pipeline shape and must pass.
         Full DAG-aware balance is tracked in elspeth-cf84eb1b52 (P0).
         """
-        from starlette.testclient import TestClient
-
         run_id = uuid4()
         # Bypass the RunStatusResponse validator to simulate a bad DB read
         # reaching the WebSocket seeding path.  Real callers never do this
@@ -791,13 +756,7 @@ class TestWebSocketReconnectTier1Guards:
             error=None,
             landscape_run_id="lscape-1",
         )
-        app = self._make_ws_app(bad_status)
-        with (
-            pytest.raises(RuntimeError, match=r"Tier 1 anomaly.*audit trail inconsistent"),
-            TestClient(app) as client,
-            client.websocket_connect(f"/ws/runs/{run_id}?token=fake"),
-        ):
-            pass
+        self._assert_terminal_event_build_raises(bad_status, r"Tier 1 anomaly.*audit trail inconsistent")
 
 
 class TestRunStatusEndpoint:

@@ -19,13 +19,14 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import Determinism, NodeType, RowOutcome, RunStatus
+from elspeth.contracts import Determinism, NodeType, RunStatus
 from elspeth.contracts.aggregation_checkpoint import (
     AggregationCheckpointState,
     AggregationNodeCheckpoint,
     AggregationTokenCheckpoint,
 )
 from elspeth.contracts.contract_records import ContractAuditRecord
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.checkpoint import CheckpointManager
 from elspeth.core.dag import ExecutionGraph
@@ -361,8 +362,9 @@ class TestCheckpointRecoveryIntegration:
                             outcome_id=f"outcome-{run_suffix}-{i:03d}",
                             run_id=run_id,
                             token_id=token_id,
-                            outcome=RowOutcome.COMPLETED.value,
-                            is_terminal=1,
+                            outcome=TerminalOutcome.SUCCESS.value,
+                            path=TerminalPath.DEFAULT_FLOW.value,
+                            completed=1,
                             recorded_at=now,
                             sink_name="default",
                         )

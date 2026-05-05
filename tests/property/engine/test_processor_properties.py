@@ -33,7 +33,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from sqlalchemy import text
 
-from elspeth.contracts.enums import RowOutcome
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.config import CoalesceSettings, GateSettings, SourceSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
@@ -135,7 +135,7 @@ def count_tokens_missing_terminal(db: LandscapeDB, run_id: str) -> int:
                 FROM tokens t
                 JOIN rows r ON r.row_id = t.row_id
                 LEFT JOIN token_outcomes o
-                  ON o.token_id = t.token_id AND o.is_terminal = 1
+                  ON o.token_id = t.token_id AND o.completed = 1
                 WHERE r.run_id = :run_id
                   AND o.token_id IS NULL
             """),
@@ -181,8 +181,8 @@ def get_transform_execution_order(db: LandscapeDB, run_id: str, token_id: str) -
         return [r[0] for r in results]
 
 
-def count_outcome_by_type(db: LandscapeDB, run_id: str, outcome: RowOutcome) -> int:
-    """Count tokens with a specific outcome."""
+def count_outcome_by_type(db: LandscapeDB, run_id: str, outcome: TerminalOutcome, path: TerminalPath) -> int:
+    """Count tokens with a specific ADR-019 terminal pair."""
     with db.connection() as conn:
         result = conn.execute(
             text("""
@@ -192,8 +192,9 @@ def count_outcome_by_type(db: LandscapeDB, run_id: str, outcome: RowOutcome) -> 
                 JOIN rows r ON r.row_id = t.row_id
                 WHERE r.run_id = :run_id
                   AND o.outcome = :outcome
+                  AND o.path = :path
             """),
-            {"run_id": run_id, "outcome": outcome.value},
+            {"run_id": run_id, "outcome": outcome.value, "path": path.value},
         ).scalar()
         return result or 0
 
@@ -331,7 +332,12 @@ class TestWorkQueueConservation:
             assert len(sink.results) == expected_success, f"Expected {expected_success} successful rows, got {len(sink.results)}"
 
             # Verify quarantine count
-            quarantine_count = count_outcome_by_type(db, run.run_id, RowOutcome.QUARANTINED)
+            quarantine_count = count_outcome_by_type(
+                db,
+                run.run_id,
+                TerminalOutcome.FAILURE,
+                TerminalPath.QUARANTINED_AT_SOURCE,
+            )
             assert quarantine_count == expected_errors, f"Expected {expected_errors} quarantined rows, got {quarantine_count}"
 
             # ALL tokens (success AND error) must have terminal state
@@ -392,7 +398,7 @@ class TestWorkQueueConservation:
             assert len(sink_b.results) == num_rows, f"sink_b: expected {num_rows}, got {len(sink_b.results)}"
 
             # FORKED outcomes for parents (one per input row)
-            forked_count = count_outcome_by_type(db, run.run_id, RowOutcome.FORKED)
+            forked_count = count_outcome_by_type(db, run.run_id, TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT)
             assert forked_count == num_rows, f"Expected {num_rows} FORKED parents, got {forked_count}"
 
             # No tokens missing terminal
@@ -859,7 +865,12 @@ class TestWorkQueueEdgeCases:
             assert len(sink.results) == 0
 
             # All quarantined
-            quarantine_count = count_outcome_by_type(db, run.run_id, RowOutcome.QUARANTINED)
+            quarantine_count = count_outcome_by_type(
+                db,
+                run.run_id,
+                TerminalOutcome.FAILURE,
+                TerminalPath.QUARANTINED_AT_SOURCE,
+            )
             assert quarantine_count == num_rows
 
             # No missing outcomes
@@ -875,7 +886,7 @@ class TestWorkQueueEdgeCases:
         For each source row:
         - 1 parent token gets FORKED
         - 2 child tokens get COALESCED
-        - 1 merged token reaches the sink (COMPLETED)
+        - 1 terminal merged token reaches the sink as COALESCED
 
         Note: This test uses a transform before the fork to match the pattern
         in test_fork_coalesce_flow.py, which is required for proper coalesce routing.
@@ -931,12 +942,12 @@ class TestWorkQueueEdgeCases:
             assert len(sink.results) == num_rows, f"Expected {num_rows} results after coalesce, got {len(sink.results)}"
 
             # Verify FORKED count (parent tokens)
-            forked_count = count_outcome_by_type(db, run.run_id, RowOutcome.FORKED)
+            forked_count = count_outcome_by_type(db, run.run_id, TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT)
             assert forked_count == num_rows, f"Expected {num_rows} FORKED outcomes, got {forked_count}"
 
-            # Verify COALESCED count (2 children per row)
-            coalesced_count = count_outcome_by_type(db, run.run_id, RowOutcome.COALESCED)
-            assert coalesced_count == num_rows * 2, f"Expected {num_rows * 2} COALESCED outcomes, got {coalesced_count}"
+            # Verify COALESCED count (2 consumed branches + terminal merged token per row)
+            coalesced_count = count_outcome_by_type(db, run.run_id, TerminalOutcome.SUCCESS, TerminalPath.COALESCED)
+            assert coalesced_count == num_rows * 3, f"Expected {num_rows * 3} COALESCED outcomes, got {coalesced_count}"
 
             # No missing terminal outcomes
             missing = count_tokens_missing_terminal(db, run.run_id)

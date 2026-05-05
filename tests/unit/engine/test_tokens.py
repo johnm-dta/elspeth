@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from elspeth.contracts import SourceRow
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID
@@ -950,9 +951,8 @@ class TestExpandTokenDefaultOutcome:
             "If record_parent_outcome default mutant (True→False) is active, "
             "outcome will be None."
         )
-        from elspeth.contracts.enums import RowOutcome
-
-        assert outcome.outcome == RowOutcome.EXPANDED
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.EXPAND_PARENT
 
     def test_expand_with_explicit_false_skips_parent_outcome(self) -> None:
         """Call expand_token with record_parent_outcome=False — no EXPANDED outcome."""

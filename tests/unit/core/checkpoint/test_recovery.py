@@ -15,7 +15,6 @@ from elspeth.contracts import (
     NodeType,
     PayloadStore,
     PluginSchema,
-    RowOutcome,
     RunStatus,
     TerminalOutcome,
     TerminalPath,
@@ -159,49 +158,18 @@ def _insert_token(conn: Connection, run_id: str, token_id: str, row_id: str) -> 
     )
 
 
-def _row_outcome_to_pair(outcome: RowOutcome) -> tuple[TerminalOutcome | None, TerminalPath, bool]:
-    if outcome == RowOutcome.COMPLETED:
-        return TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, True
-    if outcome == RowOutcome.ROUTED:
-        return TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, True
-    if outcome == RowOutcome.ROUTED_ON_ERROR:
-        return TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED, True
-    if outcome == RowOutcome.FORKED:
-        return TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT, True
-    if outcome == RowOutcome.FAILED:
-        return TerminalOutcome.FAILURE, TerminalPath.UNROUTED, True
-    if outcome == RowOutcome.QUARANTINED:
-        return TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE, True
-    if outcome == RowOutcome.DIVERTED:
-        return TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK, True
-    if outcome == RowOutcome.CONSUMED_IN_BATCH:
-        return TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED, True
-    if outcome == RowOutcome.DROPPED_BY_FILTER:
-        return TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED, True
-    if outcome == RowOutcome.COALESCED:
-        return TerminalOutcome.SUCCESS, TerminalPath.COALESCED, True
-    if outcome == RowOutcome.EXPANDED:
-        return TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT, True
-    if outcome == RowOutcome.BUFFERED:
-        return None, TerminalPath.BUFFERED, False
-    raise AssertionError(f"Unhandled RowOutcome in test helper: {outcome!r}")
-
-
 def _insert_terminal_outcome(
     conn: Connection,
     run_id: str,
     token_id: str,
     *,
-    outcome: TerminalOutcome | RowOutcome | None = TerminalOutcome.SUCCESS,
+    outcome: TerminalOutcome | None = TerminalOutcome.SUCCESS,
     path: TerminalPath | None = None,
     completed: bool | None = None,
 ) -> None:
-    if isinstance(outcome, RowOutcome):
-        resolved_outcome, resolved_path, resolved_completed = _row_outcome_to_pair(outcome)
-    else:
-        resolved_outcome = outcome
-        resolved_path = path or TerminalPath.DEFAULT_FLOW
-        resolved_completed = completed if completed is not None else outcome is not None
+    resolved_outcome = outcome
+    resolved_path = path or TerminalPath.DEFAULT_FLOW
+    resolved_completed = completed if completed is not None else outcome is not None
     if path is not None:
         resolved_path = path
     if completed is not None:
@@ -456,17 +424,17 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
         # row-completed: one completed token -> should be excluded.
         _insert_row(conn, run_id, "row-completed", row_index=0, source_data_ref=None)
         _insert_token(conn, run_id, "tok-completed", "row-completed")
-        _insert_terminal_outcome(conn, run_id, "tok-completed", outcome=RowOutcome.COMPLETED)
+        _insert_terminal_outcome(conn, run_id, "tok-completed", outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
 
         # row-delegation-only: FORKED parent only, no child terminal -> should be included.
         _insert_row(conn, run_id, "row-delegation-only", row_index=1, source_data_ref=None)
         _insert_token(conn, run_id, "tok-parent", "row-delegation-only")
-        _insert_terminal_outcome(conn, run_id, "tok-parent", outcome=RowOutcome.FORKED)
+        _insert_terminal_outcome(conn, run_id, "tok-parent", outcome=TerminalOutcome.TRANSIENT, path=TerminalPath.FORK_PARENT)
 
         # row-child-pending: one completed child + one pending child -> should be included.
         _insert_row(conn, run_id, "row-child-pending", row_index=2, source_data_ref=None)
         _insert_token(conn, run_id, "tok-child-ok", "row-child-pending")
-        _insert_terminal_outcome(conn, run_id, "tok-child-ok", outcome=RowOutcome.COMPLETED)
+        _insert_terminal_outcome(conn, run_id, "tok-child-ok", outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
         _insert_token(conn, run_id, "tok-child-pending", "row-child-pending")
 
         # row-buffered: appears incomplete but all incomplete tokens are buffered
@@ -1011,9 +979,9 @@ def test_get_unprocessed_rows_handles_delegation_token_with_completed_leaf(
         _insert_node(conn, run_id, "checkpoint-node")
         _insert_row(conn, run_id, "row-forked-complete", row_index=1, source_data_ref=None)
         _insert_token(conn, run_id, "tok-parent", "row-forked-complete")
-        _insert_terminal_outcome(conn, run_id, "tok-parent", outcome=RowOutcome.FORKED)
+        _insert_terminal_outcome(conn, run_id, "tok-parent", outcome=TerminalOutcome.TRANSIENT, path=TerminalPath.FORK_PARENT)
         _insert_token(conn, run_id, "tok-child", "row-forked-complete")
-        _insert_terminal_outcome(conn, run_id, "tok-child", outcome=RowOutcome.COMPLETED)
+        _insert_terminal_outcome(conn, run_id, "tok-child", outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
 
     checkpoint_manager.create_checkpoint(
         run_id=run_id,
@@ -1127,7 +1095,9 @@ def test_get_unprocessed_rows_excludes_diverted_rows(
         # row-diverted: one token diverted to failsink -> terminal, exclude.
         _insert_row(conn, run_id, "row-diverted", row_index=0, source_data_ref=None)
         _insert_token(conn, run_id, "tok-diverted", "row-diverted")
-        _insert_terminal_outcome(conn, run_id, "tok-diverted", outcome=RowOutcome.DIVERTED)
+        _insert_terminal_outcome(
+            conn, run_id, "tok-diverted", outcome=TerminalOutcome.TRANSIENT, path=TerminalPath.SINK_FALLBACK_TO_FAILSINK
+        )
 
         # row-pending: no terminal outcome -> should be included.
         _insert_row(conn, run_id, "row-pending", row_index=1, source_data_ref=None)

@@ -14,7 +14,6 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI, Request
 from sqlalchemy.pool import StaticPool
-from starlette.testclient import TestClient
 
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
@@ -24,6 +23,7 @@ from elspeth.web.secrets.service import WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.schema import initialize_session_schema
+from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
 @pytest.fixture(autouse=True)
@@ -419,7 +419,11 @@ class TestCrossUserIsolation:
         # App for User A
         app_a = FastAPI()
         identity_a = UserIdentity(user_id="alice", username="alice")
-        app_a.dependency_overrides[get_current_user] = lambda: identity_a
+
+        async def mock_user_a() -> UserIdentity:
+            return identity_a
+
+        app_a.dependency_overrides[get_current_user] = mock_user_a
         app_a.state.secret_service = secret_service
         app_a.state.settings = mock_settings
         app_a.include_router(create_secrets_router())
@@ -427,7 +431,11 @@ class TestCrossUserIsolation:
         # App for User B — same service, different identity
         app_b = FastAPI()
         identity_b = UserIdentity(user_id="bob", username="bob")
-        app_b.dependency_overrides[get_current_user] = lambda: identity_b
+
+        async def mock_user_b() -> UserIdentity:
+            return identity_b
+
+        app_b.dependency_overrides[get_current_user] = mock_user_b
         app_b.state.secret_service = secret_service
         app_b.state.settings = mock_settings
         app_b.include_router(create_secrets_router())

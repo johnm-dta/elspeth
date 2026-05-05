@@ -2358,10 +2358,10 @@ class TestComposerRuntimeRunStatusAgreement:
     * ``FAILED`` — every row fails via ``on_error: discard`` (S1B msg2 shape).
     * ``EMPTY`` — empty source, no failures, no rows.
     * Design call (post-split, ``elspeth-5069612f3c``) — every row routes
-      via ``on_error`` to a sink (``rows_routed_failure == N``,
-      ``rows_succeeded == 0``).  Now classifies as ``FAILED`` because
-      ``rows_routed_failure`` is a first-class failure indicator in the
-      predicate.  Locked here as
+      via ``on_error`` to a sink (``rows_failed == N`` plus
+      ``rows_routed_failure == N``).  Now classifies as ``FAILED`` because
+      lifecycle failure and routing provenance are recorded independently.
+      Locked here as
       ``test_runstatus_on_error_routed_only_classifies_as_failed``.
       Companion: ``test_runstatus_gate_routed_only_classifies_as_completed``
       pins the symmetric MOVE shape (gate ``route_to_sink``) classifying as
@@ -2432,11 +2432,11 @@ class TestComposerRuntimeRunStatusAgreement:
         self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.COMPLETED_WITH_FAILURES)
         assert run_result.rows_processed == 2
         assert run_result.rows_succeeded == 1
-        # Predicate check (closure rationale comment 693): has_failures =
-        # rows_failed > 0 OR rows_quarantined > 0 OR rows_coalesce_failed > 0.
-        # ``on_error: discard`` lands rows in the quarantine bucket; the
-        # contract is the predicate, not a specific bucket name.
-        assert (run_result.rows_failed + run_result.rows_quarantined + run_result.rows_coalesce_failed) == 1
+        # ADR-019 records lifecycle failure independently from discard-mode
+        # quarantine provenance.
+        assert run_result.rows_failed == 1
+        assert run_result.rows_quarantined == 1
+        assert run_result.rows_coalesce_failed == 0
 
     def test_agreement_runstatus_failed_engine_landscape(self, landscape_db: LandscapeDB, payload_store) -> None:
         """All-rows-failed (S1B msg2 shape) — RunResult and Landscape both report FAILED.
@@ -2459,10 +2459,11 @@ class TestComposerRuntimeRunStatusAgreement:
         self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.FAILED)
         assert run_result.rows_processed == 2
         assert run_result.rows_succeeded == 0
-        # All rows failed; ``on_error: discard`` lands them in the
-        # quarantine bucket per the engine's terminal-state model.  The
-        # predicate is "no rows succeeded", not "rows_failed bucket".
-        assert (run_result.rows_failed + run_result.rows_quarantined + run_result.rows_coalesce_failed) == 2
+        # ADR-019 records lifecycle failure independently from discard-mode
+        # quarantine provenance.
+        assert run_result.rows_failed == 2
+        assert run_result.rows_quarantined == 2
+        assert run_result.rows_coalesce_failed == 0
 
     def test_agreement_runstatus_empty_engine_landscape(self, landscape_db: LandscapeDB, payload_store) -> None:
         """Empty source — RunResult and Landscape both report EMPTY.
@@ -2533,7 +2534,8 @@ class TestComposerRuntimeRunStatusAgreement:
         rows to another, no on_success success-path sink. Every row is
         intentionally gate-routed via RoutingMode.MOVE (RowOutcome.ROUTED).
 
-        After the rows_routed split, this shape produces rows_routed_success > 0
+        ADR-019 records lifecycle SUCCESS plus gate-routing provenance, so
+        this shape produces rows_succeeded > 0 and rows_routed_success > 0
         with no failure indicator, and the predicate classifies as COMPLETED.
 
         Before the split (commit cc895589), this shape misclassified as
@@ -2577,10 +2579,8 @@ class TestComposerRuntimeRunStatusAgreement:
 
         self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.COMPLETED)
         assert run_result.rows_processed == 4
-        # Gate-routed rows are terminal successes via rows_routed_success;
-        # they do not also occupy the ordinary rows_succeeded bucket because
-        # terminal response models treat the buckets as additive.
-        assert run_result.rows_succeeded == 0
+        # Gate-routed rows are lifecycle successes with MOVE provenance.
+        assert run_result.rows_succeeded == 4
         assert run_result.rows_routed_success == 4  # All routed via MOVE
         assert run_result.rows_routed_failure == 0  # No on_error reroutes
         assert len(high_sink.results) == 2

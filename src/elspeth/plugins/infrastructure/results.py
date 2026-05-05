@@ -6,14 +6,16 @@ This module re-exports them as part of the public plugin API.
 
 from elspeth.contracts import (
     RoutingAction,
-    RowOutcome,
     SourceRow,
+    TerminalOutcome,
+    TerminalPath,
     TransformResult,
 )
 
 __all__ = [
     "RoutingAction",
-    "RowOutcome",
     "SourceRow",
+    "TerminalOutcome",
+    "TerminalPath",
     "TransformResult",
 ]

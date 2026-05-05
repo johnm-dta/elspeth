@@ -18,7 +18,7 @@ import pytest
 
 from elspeth.contracts import TokenInfo
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
-from elspeth.contracts.enums import NodeStateStatus, RowOutcome
+from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     AuditIntegrityError,
     CoalesceCollisionError,
@@ -55,6 +55,8 @@ class _TestCoalesceExecutor(CoalesceExecutor):
         branch_schemas: dict[str, tuple[str, ...]] | None = None,
         output_schema: SchemaContract | None = None,
     ) -> None:
+        if settings.on_success is None:
+            settings = settings.model_copy(update={"on_success": "default"})
         # Auto-provide OBSERVED schema for union merge if not specified.
         # OBSERVED mode = "infer schema from data" — matches test fixture contracts.
         if output_schema is None and settings.merge == "union":
@@ -413,7 +415,8 @@ class TestRequireAllPolicy:
         outcome_calls = data_flow.record_token_outcome.call_args_list
         assert len(outcome_calls) == 2
         for c in outcome_calls:
-            assert c.kwargs["outcome"] == RowOutcome.COALESCED
+            assert c.kwargs["outcome"] == TerminalOutcome.SUCCESS
+            assert c.kwargs["path"] == TerminalPath.COALESCED
 
     def test_token_manager_coalesce_tokens_called(self):
         executor, _, _, tm, _ = self._setup()
@@ -571,7 +574,8 @@ class TestLateArrival:
         data_flow.record_token_outcome.assert_called_once()
         outcome_call = data_flow.record_token_outcome.call_args
         assert outcome_call.kwargs["ref"].token_id == "t_late"
-        assert outcome_call.kwargs["outcome"] == RowOutcome.FAILED
+        assert outcome_call.kwargs["outcome"] == TerminalOutcome.FAILURE
+        assert outcome_call.kwargs["path"] == TerminalPath.UNROUTED
         assert isinstance(outcome_call.kwargs["error_hash"], str)
         assert len(outcome_call.kwargs["error_hash"]) == 16
 
@@ -909,7 +913,8 @@ class TestUnionMerge:
         outcome_calls = data_flow.record_token_outcome.call_args_list
         assert len(outcome_calls) == 2, f"expected record_token_outcome(FAILED) for both consumed tokens; got {len(outcome_calls)} calls"
         for c in outcome_calls:
-            assert c.kwargs["outcome"] == RowOutcome.FAILED
+            assert c.kwargs["outcome"] == TerminalOutcome.FAILURE
+            assert c.kwargs["path"] == TerminalPath.UNROUTED
             assert "error_hash" in c.kwargs
 
         token_ids = {c.kwargs["ref"].token_id for c in outcome_calls}
@@ -1911,7 +1916,8 @@ class TestFailPendingDetails:
         executor.check_timeouts("merge")
         outcome_calls = data_flow.record_token_outcome.call_args_list
         assert len(outcome_calls) == 1
-        assert outcome_calls[0].kwargs["outcome"] == RowOutcome.FAILED
+        assert outcome_calls[0].kwargs["outcome"] == TerminalOutcome.FAILURE
+        assert outcome_calls[0].kwargs["path"] == TerminalPath.UNROUTED
 
     def test_failure_metadata_includes_policy(self):
         executor, _, _, _, clock = _make_executor()

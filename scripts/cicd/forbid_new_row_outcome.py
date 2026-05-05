@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forbid new ``RowOutcome.X`` references during the ADR-019 migration window.
+"""Forbid new ``RowOutcome`` references during the ADR-019 migration window.
 
 The ADR-019 two-axis terminal-model migration replaces the single-axis
 ``RowOutcome`` enum with paired ``(TerminalOutcome, TerminalPath)`` fields
@@ -17,10 +17,10 @@ Stage 1 PR time, plus the entire ``tests/`` tree (Stage 4 flips test
 assertions). Any file outside the allowlist that contains a
 ``RowOutcome.X`` reference fails the check.
 
-Detection uses AST traversal (not regex), matching ``ast.Attribute`` nodes
+Detection uses AST traversal (not regex). FNR1 matches ``ast.Attribute`` nodes
 where the value is ``ast.Name(id="RowOutcome")`` — i.e., ``RowOutcome.X``
-attribute accesses. String literals containing ``"RowOutcome."`` are NOT
-matched (they have no semantic effect on the migration).
+attribute accesses. FNR2 matches hardcoded legacy ``RowOutcome`` value strings
+compared against an ``outcome`` symbol under ``src/elspeth``.
 
 Stage 5 (post-migration) deletes both ``RowOutcome`` itself and this script.
 
@@ -53,20 +53,53 @@ RULE_DESCRIPTION = (
     "in Stage 2/3/4."
 )
 
+RULE_ID_2 = "FNR2"
+RULE_NAME_2 = "no-hardcoded-row-outcome-value-string"
+RULE_DESCRIPTION_2 = (
+    "String-literal comparison against a known RowOutcome value — use "
+    "(TerminalOutcome, TerminalPath) pairs in new code, or add this file "
+    "to the migration allowlist with a justification."
+)
+
+_ROW_OUTCOME_VALUE_STRINGS: frozenset[str] = frozenset(
+    {
+        "completed",
+        "routed",
+        "routed_on_error",
+        "forked",
+        "failed",
+        "quarantined",
+        "diverted",
+        "consumed_in_batch",
+        "dropped_by_filter",
+        "coalesced",
+        "expanded",
+        "buffered",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Finding:
+    rule_id: str
     file_path: str
     lineno: int
-    member_name: str
+    symbol: str
 
     def render(self) -> str:
+        if self.rule_id == RULE_ID:
+            return (
+                f"[{RULE_ID}] {self.file_path}:{self.lineno} — "
+                f"RowOutcome.{self.symbol} reference outside the ADR-019 migration "
+                "allowlist. Use (TerminalOutcome, TerminalPath) pairs per the ADR-019 "
+                "mapping table, or add this file to the allowlist if it is a legitimate "
+                "migration site."
+            )
         return (
-            f"[{RULE_ID}] {self.file_path}:{self.lineno} — "
-            f"RowOutcome.{self.member_name} reference outside the ADR-019 migration "
-            "allowlist. Use (TerminalOutcome, TerminalPath) pairs per the ADR-019 "
-            "mapping table, or add this file to the allowlist if it is a legitimate "
-            "migration site."
+            f"[{RULE_ID_2}] {self.file_path}:{self.lineno} — "
+            f"{RULE_NAME_2}: hardcoded RowOutcome value string {self.symbol!r} "
+            "compared against an outcome symbol outside the ADR-019 migration "
+            "allowlist. Use typed (TerminalOutcome, TerminalPath) pairs."
         )
 
 
@@ -88,7 +121,70 @@ def _is_row_outcome_attribute(node: ast.AST) -> str | None:
     return node.attr
 
 
-def scan_file(path: Path, root: Path) -> list[Finding]:
+def _string_constant(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _literal_string_values(node: ast.AST) -> frozenset[str]:
+    if not isinstance(node, ast.List | ast.Tuple | ast.Set):
+        return frozenset()
+    values = {_string_constant(element) for element in node.elts}
+    return frozenset(value for value in values if value is not None)
+
+
+def _is_outcome_symbol(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "outcome"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "outcome"
+    return False
+
+
+class _HardcodedValueVisitor(ast.NodeVisitor):
+    """Find hardcoded RowOutcome value strings compared to outcome symbols."""
+
+    def __init__(self, file_path: str) -> None:
+        self.file_path = file_path
+        self.findings: list[Finding] = []
+
+    def visit_Compare(self, node: ast.Compare) -> None:
+        sides = [node.left, *node.comparators]
+        for left, op, right in zip(sides[:-1], node.ops, sides[1:], strict=True):
+            if isinstance(op, ast.Eq | ast.NotEq):
+                self._visit_equality(node, left, right)
+                self._visit_equality(node, right, left)
+            elif isinstance(op, ast.In | ast.NotIn):
+                self._visit_membership(node, left, right)
+        self.generic_visit(node)
+
+    def _add(self, node: ast.AST, symbol: str) -> None:
+        self.findings.append(
+            Finding(
+                rule_id=RULE_ID_2,
+                file_path=self.file_path,
+                lineno=getattr(node, "lineno", 0),
+                symbol=symbol,
+            )
+        )
+
+    def _visit_equality(self, node: ast.Compare, symbol_side: ast.AST, value_side: ast.AST) -> None:
+        value = _string_constant(value_side)
+        if value is None:
+            return
+        if _is_outcome_symbol(symbol_side) and value in _ROW_OUTCOME_VALUE_STRINGS:
+            self._add(node, value)
+
+    def _visit_membership(self, node: ast.Compare, symbol_side: ast.AST, values_side: ast.AST) -> None:
+        if not _is_outcome_symbol(symbol_side):
+            return
+        matched = sorted(_literal_string_values(values_side) & _ROW_OUTCOME_VALUE_STRINGS)
+        if matched:
+            self._add(node, ",".join(matched))
+
+
+def scan_file(path: Path, root: Path, *, include_hardcoded_values: bool = False) -> list[Finding]:
     """AST-scan a single Python file for ``RowOutcome.X`` attribute accesses.
 
     The ``file_path`` in returned findings is the path relative to ``root``;
@@ -117,12 +213,25 @@ def scan_file(path: Path, root: Path) -> list[Finding]:
             continue
         findings.append(
             Finding(
+                rule_id=RULE_ID,
                 file_path=rel,
                 lineno=node.lineno,
-                member_name=member,
+                symbol=member,
             )
         )
+    if include_hardcoded_values:
+        visitor = _HardcodedValueVisitor(rel)
+        visitor.visit(tree)
+        findings.extend(visitor.findings)
     return findings
+
+
+def _is_within_src_root(path: Path, src_root: Path) -> bool:
+    try:
+        path.resolve().relative_to(src_root.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def _load_allowlist(allowlist_dir: Path | None) -> list[str]:
@@ -233,6 +342,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Directory containing allowlist YAML files",
     )
+    check.add_argument(
+        "--src-root",
+        type=Path,
+        default=Path("src/elspeth"),
+        help="Source root for FNR2 hardcoded RowOutcome value-string checks",
+    )
     args = parser.parse_args(argv)
 
     root: Path = args.root.resolve()
@@ -241,17 +356,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     patterns = _load_allowlist(args.allowlist)
+    src_root = args.src_root if args.src_root.is_absolute() else root / args.src_root
 
     findings: list[Finding] = []
     for py in _iter_python_files(root):
-        for finding in scan_file(py, root):
+        for finding in scan_file(py, root, include_hardcoded_values=_is_within_src_root(py, src_root)):
             if _is_allowed(finding.file_path, patterns):
                 continue
             findings.append(finding)
 
     if findings:
         print(f"\n{'=' * 70}")
-        print(f"FORBIDDEN RowOutcome.X REFERENCES: {len(findings)} (rule {RULE_ID}: {RULE_NAME})")
+        print(f"FORBIDDEN RowOutcome MIGRATION REFERENCES: {len(findings)} (rules {RULE_ID}: {RULE_NAME}, {RULE_ID_2}: {RULE_NAME_2})")
         print(f"{'=' * 70}\n")
         for f in findings:
             print(f.render())

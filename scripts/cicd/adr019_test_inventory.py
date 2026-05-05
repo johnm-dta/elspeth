@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Inventory ADR-019 migration-sensitive symbols and brittle string checks."""
+"""Inventory ADR-019 migration-sensitive expectations under tests/."""
 
 from __future__ import annotations
 
 import argparse
 import ast
 import json
+import re
 import sys
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -17,16 +18,14 @@ import yaml
 
 
 class FindingKind(StrEnum):
-    IS_TERMINAL_ANNOTATION = "is_terminal_annotation"
-    IS_TERMINAL_ATTRIBUTE = "is_terminal_attribute"
-    IS_TERMINAL_KEYWORD = "is_terminal_keyword"
-    IS_TERMINAL_DICT_KEY = "is_terminal_dict_key"
-    ROW_OUTCOME_STRING_COMPARE = "row_outcome_string_compare"
-    TERMINAL_OUTCOME_STRING_COMPARE = "terminal_outcome_string_compare"
-    TERMINAL_PATH_STRING_COMPARE = "terminal_path_string_compare"
-    ROW_OUTCOME_STRING_MEMBERSHIP = "row_outcome_string_membership"
-    TERMINAL_OUTCOME_STRING_MEMBERSHIP = "terminal_outcome_string_membership"
-    TERMINAL_PATH_STRING_MEMBERSHIP = "terminal_path_string_membership"
+    ROW_OUTCOME_ATTRIBUTE = "row_outcome_attribute"
+    ROW_OUTCOME_COMPARE = "row_outcome_compare"
+    ROW_OUTCOME_COLLECTION = "row_outcome_collection"
+    ROW_OUTCOME_MEMBERSHIP = "row_outcome_membership"
+    OLD_OUTCOME_STRING_COMPARE = "old_outcome_string_compare"
+    OLD_OUTCOME_STRING_MEMBERSHIP = "old_outcome_string_membership"
+    RAW_TOKEN_OUTCOMES_SQL = "raw_token_outcomes_sql"
+    TOKEN_OUTCOMES_SCHEMA_READ = "token_outcomes_schema_read"
 
 
 ROW_OUTCOME_VALUES = frozenset(
@@ -45,24 +44,14 @@ ROW_OUTCOME_VALUES = frozenset(
         "buffered",
     }
 )
-TERMINAL_OUTCOME_VALUES = frozenset({"success", "failure", "transient"})
-TERMINAL_PATH_VALUES = frozenset(
-    {
-        "default_flow",
-        "gate_routed",
-        "on_error_routed",
-        "filter_dropped",
-        "coalesced",
-        "unrouted",
-        "quarantined_at_source",
-        "sink_fallback_to_failsink",
-        "sink_discarded",
-        "fork_parent",
-        "expand_parent",
-        "batch_consumed",
-        "buffered",
-    }
+
+SQL_TEXT_RE = re.compile(
+    r"\b(select|from|where|join|insert|update|delete|create|alter|pragma)\b|count\s*\(",
+    re.IGNORECASE,
 )
+TOKEN_OUTCOME_COLUMN_RE = re.compile(r"\boutcome\b", re.IGNORECASE)
+TOKEN_OUTCOME_PATH_RE = re.compile(r"\bpath\b", re.IGNORECASE)
+TOKEN_OUTCOME_IS_TERMINAL_RE = re.compile(r"\bis_terminal\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,12 +80,12 @@ def _node_location(node: ast.AST) -> tuple[int, int]:
     return getattr(node, "lineno", 0), getattr(node, "col_offset", 0)
 
 
-def _name_for_compare_side(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return None
+def _display_path(path: Path, project_root: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        return resolved.as_posix()
 
 
 def _string_constant(node: ast.AST) -> str | None:
@@ -112,8 +101,53 @@ def _literal_string_values(node: ast.AST) -> frozenset[str]:
     return frozenset(value for value in values if value is not None)
 
 
-class ADR019Visitor(ast.NodeVisitor):
-    """AST visitor for ADR-019 single-axis leftovers and brittle string checks."""
+def _is_outcome_symbol(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "outcome"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "outcome"
+    return False
+
+
+def _row_outcome_member(node: ast.AST) -> str | None:
+    if not isinstance(node, ast.Attribute):
+        return None
+    if not isinstance(node.value, ast.Name):
+        return None
+    if node.value.id != "RowOutcome":
+        return None
+    return node.attr
+
+
+def _contains_row_outcome_member(node: ast.AST) -> bool:
+    return any(_row_outcome_member(child) is not None for child in ast.walk(node))
+
+
+def _token_outcomes_column(node: ast.AST) -> str | None:
+    if not isinstance(node, ast.Attribute):
+        return None
+    if node.attr != "is_terminal":
+        return None
+    value = node.value
+    if not isinstance(value, ast.Attribute) or value.attr != "c":
+        return None
+    table = value.value
+    if not isinstance(table, ast.Name) or table.id != "token_outcomes_table":
+        return None
+    return node.attr
+
+
+def _is_raw_token_outcomes_sql(value: str) -> bool:
+    lower_value = value.lower()
+    if SQL_TEXT_RE.search(value) is None or "token_outcomes" not in lower_value:
+        return False
+    if TOKEN_OUTCOME_IS_TERMINAL_RE.search(value) is not None:
+        return True
+    return TOKEN_OUTCOME_COLUMN_RE.search(value) is not None and TOKEN_OUTCOME_PATH_RE.search(value) is None
+
+
+class ADR019TestInventoryVisitor(ast.NodeVisitor):
+    """AST visitor for stale tests-tree ADR-019 expectations."""
 
     def __init__(self, path: str) -> None:
         self.path = path
@@ -132,34 +166,41 @@ class ADR019Visitor(ast.NodeVisitor):
             )
         )
 
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        target = node.target
-        if (isinstance(target, ast.Name) and target.id == "is_terminal") or (
-            isinstance(target, ast.Attribute) and target.attr == "is_terminal"
-        ):
-            self._add(FindingKind.IS_TERMINAL_ANNOTATION, node, "is_terminal")
-        self.generic_visit(node)
-
-    def visit_arg(self, node: ast.arg) -> None:
-        if node.arg == "is_terminal" and node.annotation is not None:
-            self._add(FindingKind.IS_TERMINAL_ANNOTATION, node, "is_terminal")
-        self.generic_visit(node)
-
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        if node.attr == "is_terminal":
-            self._add(FindingKind.IS_TERMINAL_ATTRIBUTE, node, "is_terminal")
+        member = _row_outcome_member(node)
+        if member is not None:
+            self._add(FindingKind.ROW_OUTCOME_ATTRIBUTE, node, member)
+
+        column = _token_outcomes_column(node)
+        if column is not None:
+            self._add(FindingKind.TOKEN_OUTCOMES_SCHEMA_READ, node, column)
+
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        for keyword in node.keywords:
-            if keyword.arg == "is_terminal":
-                self._add(FindingKind.IS_TERMINAL_KEYWORD, keyword.value, "is_terminal")
+        if isinstance(node.func, ast.Name) and node.func.id == "RowOutcome":
+            self._add(FindingKind.ROW_OUTCOME_ATTRIBUTE, node, "RowOutcome")
         self.generic_visit(node)
 
-    def visit_Dict(self, node: ast.Dict) -> None:
-        for key in node.keys:
-            if _string_constant(key) == "is_terminal":
-                self._add(FindingKind.IS_TERMINAL_DICT_KEY, key, "is_terminal")
+    def visit_List(self, node: ast.List) -> None:
+        self._visit_collection(node)
+        self.generic_visit(node)
+
+    def visit_Tuple(self, node: ast.Tuple) -> None:
+        self._visit_collection(node)
+        self.generic_visit(node)
+
+    def visit_Set(self, node: ast.Set) -> None:
+        self._visit_collection(node)
+        self.generic_visit(node)
+
+    def _visit_collection(self, node: ast.List | ast.Tuple | ast.Set) -> None:
+        if _contains_row_outcome_member(node):
+            self._add(FindingKind.ROW_OUTCOME_COLLECTION, node, "RowOutcome")
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if isinstance(node.value, str) and _is_raw_token_outcomes_sql(node.value):
+            self._add(FindingKind.RAW_TOKEN_OUTCOMES_SQL, node, "token_outcomes")
         self.generic_visit(node)
 
     def visit_Compare(self, node: ast.Compare) -> None:
@@ -172,49 +213,28 @@ class ADR019Visitor(ast.NodeVisitor):
     def _visit_equality_compare(self, node: ast.Compare) -> None:
         sides = [node.left, *node.comparators]
         for left, right in pairwise(sides):
-            self._maybe_add_string_compare(node, left, right)
-            self._maybe_add_string_compare(node, right, left)
+            if _contains_row_outcome_member(left) or _contains_row_outcome_member(right):
+                self._add(FindingKind.ROW_OUTCOME_COMPARE, node, "RowOutcome")
+                continue
+            self._maybe_add_old_string_compare(node, left, right)
+            self._maybe_add_old_string_compare(node, right, left)
 
-    def _maybe_add_string_compare(self, node: ast.Compare, symbol_side: ast.AST, value_side: ast.AST) -> None:
+    def _maybe_add_old_string_compare(self, node: ast.Compare, symbol_side: ast.AST, value_side: ast.AST) -> None:
         value = _string_constant(value_side)
         if value is None:
             return
-        symbol_name = _name_for_compare_side(symbol_side) or "<literal>"
-        if value in TERMINAL_PATH_VALUES and symbol_name.endswith("path"):
-            self._add(FindingKind.TERMINAL_PATH_STRING_COMPARE, node, value)
-        elif value in TERMINAL_OUTCOME_VALUES and symbol_name.endswith("outcome"):
-            self._add(FindingKind.TERMINAL_OUTCOME_STRING_COMPARE, node, value)
-        elif value in ROW_OUTCOME_VALUES and symbol_name.endswith("outcome"):
-            self._add(FindingKind.ROW_OUTCOME_STRING_COMPARE, node, value)
+        if _is_outcome_symbol(symbol_side) and value in ROW_OUTCOME_VALUES:
+            self._add(FindingKind.OLD_OUTCOME_STRING_COMPARE, node, value)
 
     def _visit_membership_compare(self, node: ast.Compare) -> None:
         sides = [node.left, *node.comparators]
-        for symbol_side, collection_side in pairwise(sides):
-            self._maybe_add_string_membership(node, symbol_side, collection_side)
-
-    def _maybe_add_string_membership(self, node: ast.Compare, symbol_side: ast.AST, collection_side: ast.AST) -> None:
-        symbol_name = _name_for_compare_side(symbol_side) or "<literal>"
-        values = _literal_string_values(collection_side)
-        if not values:
-            return
-        if symbol_name.endswith("path") and values & TERMINAL_PATH_VALUES:
-            self._add(FindingKind.TERMINAL_PATH_STRING_MEMBERSHIP, node, ",".join(sorted(values & TERMINAL_PATH_VALUES)))
-        if symbol_name.endswith("outcome") and values & TERMINAL_OUTCOME_VALUES:
-            self._add(
-                FindingKind.TERMINAL_OUTCOME_STRING_MEMBERSHIP,
-                node,
-                ",".join(sorted(values & TERMINAL_OUTCOME_VALUES)),
-            )
-        if symbol_name.endswith("outcome") and values & ROW_OUTCOME_VALUES:
-            self._add(FindingKind.ROW_OUTCOME_STRING_MEMBERSHIP, node, ",".join(sorted(values & ROW_OUTCOME_VALUES)))
-
-
-def _display_path(path: Path, project_root: Path) -> str:
-    resolved = path.resolve()
-    try:
-        return resolved.relative_to(project_root.resolve()).as_posix()
-    except ValueError:
-        return path.resolve().as_posix()
+        for left, right in pairwise(sides):
+            if _contains_row_outcome_member(left) or _contains_row_outcome_member(right):
+                self._add(FindingKind.ROW_OUTCOME_MEMBERSHIP, node, "RowOutcome")
+                continue
+            values = _literal_string_values(right)
+            if _is_outcome_symbol(left) and values & ROW_OUTCOME_VALUES:
+                self._add(FindingKind.OLD_OUTCOME_STRING_MEMBERSHIP, node, ",".join(sorted(values & ROW_OUTCOME_VALUES)))
 
 
 def scan_file(path: Path, project_root: Path | None = None) -> list[Finding]:
@@ -227,7 +247,7 @@ def scan_file(path: Path, project_root: Path | None = None) -> list[Finding]:
         tree = ast.parse(source, filename=str(path))
     except SyntaxError:
         return []
-    visitor = ADR019Visitor(_display_path(path, project_root))
+    visitor = ADR019TestInventoryVisitor(_display_path(path, project_root))
     visitor.visit(tree)
     return visitor.findings
 
@@ -289,20 +309,24 @@ def filter_findings(findings: Iterable[Finding], allowlist: Path | None) -> list
     return [finding for finding in findings if not _is_allowed(finding.path, patterns)]
 
 
-def run_check(root: Path, allowlist: Path | None) -> list[Finding]:
+def _project_root_for(root: Path) -> Path:
     project_root = Path.cwd()
     try:
         root.resolve().relative_to(project_root.resolve())
+        return project_root
     except ValueError:
-        project_root = root
-    return filter_findings(scan_tree(root, project_root), allowlist)
+        return root.parent if root.name == "tests" else root
+
+
+def run_check(root: Path, allowlist: Path | None) -> list[Finding]:
+    return filter_findings(scan_tree(root, _project_root_for(root)), allowlist)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    check = subparsers.add_parser("check", help="Scan a Python tree")
-    check.add_argument("--root", type=Path, default=Path("src/elspeth"))
+    check = subparsers.add_parser("check", help="Scan a Python tests tree")
+    check.add_argument("--root", type=Path, default=Path("tests"))
     check.add_argument("--allowlist", type=Path, default=None)
     args = parser.parse_args(argv)
 

@@ -30,6 +30,8 @@ class MockCoalesceExecutor(CoalesceExecutor):
         branch_schemas: dict[str, tuple[str, ...]] | None = None,
         output_schema: SchemaContract | None = None,
     ) -> None:
+        if settings.on_success is None:
+            settings = settings.model_copy(update={"on_success": "default"})
         if output_schema is None and settings.merge == "union":
             output_schema = SchemaContract(mode="OBSERVED", fields=(), locked=False)
         super().register_coalesce(settings, node_id, branch_schemas, output_schema)

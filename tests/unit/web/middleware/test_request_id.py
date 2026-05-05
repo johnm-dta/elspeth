@@ -17,13 +17,13 @@ import uuid
 
 import pytest
 from fastapi import FastAPI, Request
-from starlette.testclient import TestClient
 
 from elspeth.web.middleware.request_id import (
     MAX_REQUEST_ID_LENGTH,
     REQUEST_ID_HEADER,
     RequestIdMiddleware,
 )
+from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
 def _make_app() -> FastAPI:

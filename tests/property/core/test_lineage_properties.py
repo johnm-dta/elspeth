@@ -148,7 +148,7 @@ class TestExplainRowResolutionProperties:
 
         # Create mock non-terminal outcome
         non_terminal = MagicMock()
-        non_terminal.is_terminal = False
+        non_terminal.completed = False
 
         data_flow.get_token_outcomes_for_row.return_value = [non_terminal]
 
@@ -165,7 +165,7 @@ class TestExplainRowResolutionProperties:
 
         # Terminal outcome at different sink
         terminal = MagicMock()
-        terminal.is_terminal = True
+        terminal.completed = True
         terminal.sink_name = "other_sink"
 
         data_flow.get_token_outcomes_for_row.return_value = [terminal]
@@ -196,11 +196,11 @@ class TestExplainAmbiguityProperties:
 
         # Two terminal outcomes at different sinks
         terminal1 = MagicMock()
-        terminal1.is_terminal = True
+        terminal1.completed = True
         terminal1.sink_name = "sink_a"
 
         terminal2 = MagicMock()
-        terminal2.is_terminal = True
+        terminal2.completed = True
         terminal2.sink_name = "sink_b"
 
         data_flow.get_token_outcomes_for_row.return_value = [terminal1, terminal2]
@@ -221,12 +221,12 @@ class TestExplainAmbiguityProperties:
 
         # Two terminal outcomes at SAME sink
         terminal1 = MagicMock()
-        terminal1.is_terminal = True
+        terminal1.completed = True
         terminal1.sink_name = sink
         terminal1.token_id = "token_1"
 
         terminal2 = MagicMock()
-        terminal2.is_terminal = True
+        terminal2.completed = True
         terminal2.sink_name = sink
         terminal2.token_id = "token_2"
 

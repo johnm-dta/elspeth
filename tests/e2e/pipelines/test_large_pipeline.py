@@ -116,7 +116,7 @@ class TestLargePipeline:
                 .select_from(token_outcomes_table)
                 .where(
                     token_outcomes_table.c.run_id == result.run_id,
-                    token_outcomes_table.c.is_terminal == 1,
+                    token_outcomes_table.c.completed == 1,
                 )
             ).scalar()
             assert terminal_count == 1000
@@ -127,7 +127,7 @@ class TestLargePipeline:
                 .select_from(token_outcomes_table)
                 .where(
                     token_outcomes_table.c.run_id == result.run_id,
-                    token_outcomes_table.c.is_terminal == 0,
+                    token_outcomes_table.c.completed == 0,
                 )
             ).scalar()
             assert non_terminal_count == 0

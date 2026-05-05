@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-from elspeth.contracts import NodeType, RoutingMode, RoutingSpec, RowOutcome
+from elspeth.contracts import NodeType, RoutingMode, RoutingSpec, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.errors import ConfigGateReason
 from elspeth.contracts.schema import SchemaConfig
@@ -427,6 +427,7 @@ def _fetch_single_outcome_for_sink(
         select(
             token_outcomes_table.c.token_id,
             token_outcomes_table.c.outcome,
+            token_outcomes_table.c.path,
             token_outcomes_table.c.error_hash,
             token_outcomes_table.c.sink_name,
         )
@@ -495,7 +496,8 @@ class TestRoutingEventDistinguishability:
             run_id=run_result.run_id,
             sink_name="high_priority",
         )
-        assert outcome["outcome"] == RowOutcome.ROUTED.value
+        assert outcome["outcome"] == TerminalOutcome.SUCCESS.value
+        assert outcome["path"] == TerminalPath.GATE_ROUTED.value
         assert outcome["error_hash"] is None
 
         modes = _fetch_routing_modes_to_sink(
@@ -521,7 +523,8 @@ class TestRoutingEventDistinguishability:
             run_id=run_result.run_id,
             sink_name="error_sink",
         )
-        assert outcome["outcome"] == RowOutcome.ROUTED_ON_ERROR.value
+        assert outcome["outcome"] == TerminalOutcome.FAILURE.value
+        assert outcome["path"] == TerminalPath.ON_ERROR_ROUTED.value
         assert outcome["error_hash"] is not None
         assert re.fullmatch(r"[0-9a-f]{16}", str(outcome["error_hash"]))
 
@@ -570,14 +573,16 @@ class TestRoutingEventDistinguishability:
 
         assert gate_lineage is not None
         assert gate_lineage.outcome is not None
-        assert gate_lineage.outcome.outcome == RowOutcome.ROUTED
+        assert gate_lineage.outcome.outcome == TerminalOutcome.SUCCESS
+        assert gate_lineage.outcome.path == TerminalPath.GATE_ROUTED
         assert gate_lineage.outcome.sink_name == "high_priority"
         assert gate_lineage.outcome.error_hash is None
         assert any(event.mode == RoutingMode.MOVE for event in gate_lineage.routing_events)
 
         assert error_lineage is not None
         assert error_lineage.outcome is not None
-        assert error_lineage.outcome.outcome == RowOutcome.ROUTED_ON_ERROR
+        assert error_lineage.outcome.outcome == TerminalOutcome.FAILURE
+        assert error_lineage.outcome.path == TerminalPath.ON_ERROR_ROUTED
         assert error_lineage.outcome.sink_name == "error_sink"
         assert error_lineage.outcome.error_hash is not None
         assert re.fullmatch(r"[0-9a-f]{16}", error_lineage.outcome.error_hash)
@@ -612,7 +617,8 @@ class TestRoutingEventDistinguishability:
 
         factory.data_flow.record_token_outcome(
             ref,
-            RowOutcome.ROUTED_ON_ERROR,
+            TerminalOutcome.FAILURE,
+            TerminalPath.ON_ERROR_ROUTED,
             sink_name="error_sink",
             error_hash="0123456789abcdef",
         )
@@ -620,6 +626,7 @@ class TestRoutingEventDistinguishability:
         with pytest.raises(LandscapeRecordError, match="UNIQUE constraint failed"):
             factory.data_flow.record_token_outcome(
                 ref,
-                RowOutcome.COMPLETED,
+                TerminalOutcome.SUCCESS,
+                TerminalPath.DEFAULT_FLOW,
                 sink_name="default",
             )

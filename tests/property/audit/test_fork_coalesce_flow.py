@@ -4,8 +4,8 @@
 FORK-COALESCE INVARIANTS:
 1. Every forked row produces exactly 1 FORKED outcome (parent token)
 2. Each branch creates a child token that reaches the coalesce point
-3. When all branches arrive, children get COALESCED outcome
-4. The merged token continues and reaches a terminal state (COMPLETED)
+3. When all branches arrive, children get COALESCED outcomes
+4. The terminal merged token reaches the sink with a COALESCED outcome
 5. Token accounting: no tokens lost, no tokens duplicated
 
 This tests the FULL fork->coalesce->continue path, not just fork-to-sinks.
@@ -20,7 +20,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from sqlalchemy import text
 
-from elspeth.contracts import ArtifactDescriptor, SourceRow
+from elspeth.contracts import ArtifactDescriptor, SourceRow, TerminalOutcome, TerminalPath
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.core.config import CoalesceSettings, ElspethSettings, GateSettings, SourceSettings
 from elspeth.core.dag import ExecutionGraph
@@ -50,21 +50,21 @@ if TYPE_CHECKING:
 # =============================================================================
 
 
-def get_outcome_counts(db: LandscapeDB, run_id: str) -> dict[str, int]:
-    """Get counts of each outcome type for a run."""
+def get_outcome_counts(db: LandscapeDB, run_id: str) -> dict[tuple[str | None, str], int]:
+    """Get counts of each outcome/path pair for a run."""
     with db.connection() as conn:
         results = conn.execute(
             text("""
-                SELECT o.outcome, COUNT(*) as cnt
+                SELECT o.outcome, o.path, COUNT(*) as cnt
                 FROM token_outcomes o
                 JOIN tokens t ON t.token_id = o.token_id
                 JOIN rows r ON r.row_id = t.row_id
                 WHERE r.run_id = :run_id
-                GROUP BY o.outcome
+                GROUP BY o.outcome, o.path
             """),
             {"run_id": run_id},
         ).fetchall()
-        return {row[0]: row[1] for row in results}
+        return {(row[0], row[1]): row[2] for row in results}
 
 
 def get_fork_coalesce_stats(db: LandscapeDB, run_id: str) -> dict[str, Any]:
@@ -79,7 +79,9 @@ def get_fork_coalesce_stats(db: LandscapeDB, run_id: str) -> dict[str, Any]:
                 text("""
                 SELECT COUNT(DISTINCT fork_group_id)
                 FROM token_outcomes
-                WHERE run_id = :run_id AND outcome = 'forked'
+                WHERE run_id = :run_id
+                  AND outcome = 'transient'
+                  AND path = 'fork_parent'
             """),
                 {"run_id": run_id},
             ).scalar()
@@ -87,13 +89,13 @@ def get_fork_coalesce_stats(db: LandscapeDB, run_id: str) -> dict[str, Any]:
         )
 
         # Count coalesced tokens
-        coalesced_count = outcome_counts.get("coalesced", 0)
+        coalesced_count = outcome_counts.get((TerminalOutcome.SUCCESS.value, TerminalPath.COALESCED.value), 0)
 
         # Count completed tokens (final output)
-        completed_count = outcome_counts.get("completed", 0)
+        completed_count = outcome_counts.get((TerminalOutcome.SUCCESS.value, TerminalPath.DEFAULT_FLOW.value), 0)
 
         # Count forked tokens (parent tokens that were split)
-        forked_count = outcome_counts.get("forked", 0)
+        forked_count = outcome_counts.get((TerminalOutcome.TRANSIENT.value, TerminalPath.FORK_PARENT.value), 0)
 
         # Verify coalesced tokens have parent links
         coalesced_without_parents = (
@@ -105,7 +107,8 @@ def get_fork_coalesce_stats(db: LandscapeDB, run_id: str) -> dict[str, Any]:
                 JOIN rows r ON r.row_id = t.row_id
                 LEFT JOIN token_parents p ON p.token_id = t.token_id
                 WHERE r.run_id = :run_id
-                  AND o.outcome = 'coalesced'
+                  AND o.outcome = 'success'
+                  AND o.path = 'coalesced'
                   AND p.token_id IS NULL
             """),
                 {"run_id": run_id},
@@ -132,7 +135,7 @@ def count_tokens_missing_terminal(db: LandscapeDB, run_id: str) -> int:
                 FROM tokens t
                 JOIN rows r ON r.row_id = t.row_id
                 LEFT JOIN token_outcomes o
-                  ON o.token_id = t.token_id AND o.is_terminal = 1
+                  ON o.token_id = t.token_id AND o.completed = 1
                 WHERE r.run_id = :run_id
                   AND o.token_id IS NULL
             """),
@@ -244,9 +247,9 @@ class TestForkCoalesceFlow:
         - N parent tokens get FORKED
         - 2*N child tokens created (one per branch per row)
         - 2*N child tokens get COALESCED
-        - N merged tokens get COMPLETED
+        - N terminal merged tokens get COALESCED
 
-        Total terminal outcomes: N FORKED + 2*N COALESCED + N COMPLETED = 4*N
+        Total terminal outcomes: N FORKED + 3*N COALESCED = 4*N
         """
         db = make_landscape_db()
         payload_store = MockPayloadStore()
@@ -307,10 +310,10 @@ class TestForkCoalesceFlow:
         stats = get_fork_coalesce_stats(db, run.run_id)
 
         # Verify token accounting
-        # For 2-branch fork: each row produces 1 FORKED + 2 COALESCED + 1 COMPLETED
+        # For 2-branch terminal coalesce: each row produces 1 FORKED + 3 COALESCED.
         expected_forked = n_rows
-        expected_coalesced = n_rows * 2  # 2 branches per row
-        expected_completed = n_rows  # Merged token completes
+        expected_coalesced = n_rows * 3  # 2 consumed branches + terminal merged token
+        expected_completed = 0
 
         assert stats["forked_count"] == expected_forked, (
             f"Expected {expected_forked} FORKED outcomes, got {stats['forked_count']}. "
@@ -320,12 +323,12 @@ class TestForkCoalesceFlow:
 
         assert stats["coalesced_count"] == expected_coalesced, (
             f"Expected {expected_coalesced} COALESCED outcomes, got {stats['coalesced_count']}. "
-            f"Each fork branch should produce a COALESCED child token."
+            f"Each fork branch plus the terminal merged token should produce COALESCED outcomes."
         )
 
         assert stats["completed_count"] == expected_completed, (
-            f"Expected {expected_completed} COMPLETED outcomes, got {stats['completed_count']}. "
-            f"Each merged token should reach the sink and complete."
+            f"Expected {expected_completed} DEFAULT_FLOW outcomes, got {stats['completed_count']}. "
+            f"Terminal coalesce records the merged sink write as COALESCED."
         )
 
         # Verify no tokens lost
@@ -598,10 +601,10 @@ class TestForkCoalesceEdgeCases:
 
         stats = get_fork_coalesce_stats(db, run.run_id)
 
-        # Single row: 1 FORKED, 2 COALESCED, 1 COMPLETED
+        # Single row: 1 FORKED, 3 COALESCED (2 consumed branches + terminal merged token)
         assert stats["forked_count"] == 1
-        assert stats["coalesced_count"] == 2
-        assert stats["completed_count"] == 1
+        assert stats["coalesced_count"] == 3
+        assert stats["completed_count"] == 0
         assert len(sink.results) == 1
         assert sink.results[0]["value"] == 42
         assert sink.results[0]["enriched"] is True

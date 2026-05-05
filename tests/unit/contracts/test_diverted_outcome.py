@@ -1,18 +1,17 @@
-"""Test DIVERTED RowOutcome and RunResult.rows_diverted."""
+"""Test ADR-019 sink diversion pair and RunResult.rows_diverted."""
 
 from __future__ import annotations
 
 import pytest
 
-from elspeth.contracts.enums import RowOutcome, RunStatus
+from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.run_result import RunResult
 
 
-class TestDivertedOutcome:
-    def test_diverted_in_terminal_set(self) -> None:
-        """DIVERTED should be in the same category as QUARANTINED and ROUTED."""
-        terminal_outcomes = [o for o in RowOutcome if o.is_terminal]
-        assert RowOutcome.DIVERTED in terminal_outcomes
+class TestSinkDiversionPairs:
+    def test_discard_mode_diversion_is_terminal_failure(self) -> None:
+        """Discard-mode diversion is a terminal failure under ADR-019."""
+        assert (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED) in _LEGAL_TERMINAL_PAIRS
 
 
 class TestRunResultDiverted:

@@ -29,9 +29,10 @@ from elspeth.contracts.enums import (
     CallType,
     NodeStateStatus,
     RoutingMode,
-    RowOutcome,
     RunStatus,
     TelemetryGranularity,
+    TerminalOutcome,
+    TerminalPath,
 )
 from elspeth.contracts.events import (
     ExternalCallCompleted,
@@ -136,7 +137,8 @@ row_events = st.one_of(
         run_id=run_ids,
         row_id=_short_ids,
         token_id=_short_ids,
-        outcome=st.sampled_from(list(RowOutcome)),
+        outcome=st.sampled_from(list(TerminalOutcome)),
+        path=st.sampled_from(list(TerminalPath)),
         sink_name=_sink_names,
     ),
     st.builds(

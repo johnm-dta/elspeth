@@ -54,6 +54,10 @@ eggs/
 .eggs/
 lib/
 lib64/
+# evals/lib/ is the eval-harness shared library, NOT a Python build artefact —
+# the generic `lib/` rule above would otherwise hide it.
+!evals/lib/
+!evals/lib/**
 parts/
 sdist/
 var/

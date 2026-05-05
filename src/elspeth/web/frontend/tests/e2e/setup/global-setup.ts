@@ -1,0 +1,81 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+
+import { request, type FullConfig } from "@playwright/test";
+
+// Placeholder credential consumed only by the local playwright webServer,
+// which spins up a fresh ELSPETH_WEB__data_dir per test session. Not a
+// real password; the hook's credential scanner flags any high-entropy
+// quoted string here, so keep this short and obviously synthetic.
+const TEST_USER = {
+  username: "e2e-tester",
+  password: "pw-placeholder", // secret-scan: allow-this-line
+  display_name: "E2E Tester",
+};
+
+const FRONTEND_ORIGIN = "http://localhost:5173";
+const BACKEND_BASE_URL = "http://127.0.0.1:8451";
+const TOKEN_KEY = "auth_token";
+
+async function obtainToken(apiBaseURL: string): Promise<string> {
+  const ctx = await request.newContext({ baseURL: apiBaseURL });
+  try {
+    const registerResp = await ctx.post("/api/auth/register", {
+      data: TEST_USER,
+    });
+
+    if (registerResp.ok()) {
+      const body = (await registerResp.json()) as { access_token: string };
+      return body.access_token;
+    }
+
+    if (registerResp.status() !== 409) {
+      const detail = await registerResp.text();
+      throw new Error(
+        `register failed (${registerResp.status()}): ${detail.slice(0, 500)}`,
+      );
+    }
+
+    const loginResp = await ctx.post("/api/auth/login", {
+      data: { username: TEST_USER.username, password: TEST_USER.password },
+    });
+    if (!loginResp.ok()) {
+      const detail = await loginResp.text();
+      throw new Error(
+        `login fallback failed (${loginResp.status()}): ${detail.slice(0, 500)}`,
+      );
+    }
+    const body = (await loginResp.json()) as { access_token: string };
+    return body.access_token;
+  } finally {
+    await ctx.dispose();
+  }
+}
+
+function writeStorageState(path: string, token: string): void {
+  const state = {
+    cookies: [],
+    origins: [
+      {
+        origin: FRONTEND_ORIGIN,
+        localStorage: [{ name: TOKEN_KEY, value: token }],
+      },
+    ],
+  };
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(state, null, 2), { encoding: "utf-8" });
+}
+
+export default async function globalSetup(config: FullConfig): Promise<void> {
+  const storageStatePath = config.projects[0]?.use.storageState;
+  if (typeof storageStatePath !== "string") {
+    throw new Error(
+      "Expected projects[0].use.storageState to be a string path; " +
+        "globalSetup writes the resolved auth state to disk.",
+    );
+  }
+
+  const token = await obtainToken(BACKEND_BASE_URL);
+  const absolutePath = resolve(config.rootDir, storageStatePath);
+  writeStorageState(absolutePath, token);
+}

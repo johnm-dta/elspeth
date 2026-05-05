@@ -12,7 +12,9 @@ standard in CLAUDE.md for why audit-grade evidence demands the
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 import yaml
 
@@ -46,3 +48,30 @@ def extract_sink_paths_from_final_yaml(
         if isinstance(name, str) and isinstance(path, str):
             result.append((name, path))
     return result
+
+
+def enumerate_candidate_files(configured_path: str) -> list[Path]:
+    """Return the base file (if it exists) plus any auto-increment siblings
+    matching ``stem-N.ext`` in the same directory.
+
+    Mirrors the rename behaviour of
+    ``elspeth.plugins.infrastructure.output_paths.next_available_output_path``:
+    when ``collision_policy='auto_increment'``, the actually-written path
+    becomes ``stem-1.ext`` if the configured path already exists, then
+    ``stem-2.ext``, etc. Backfill must consider all of these as candidates
+    so a downstream confidence-classification step can pick the right one.
+    """
+    base = Path(configured_path)
+    parent = base.parent
+    if not parent.is_dir():
+        return []
+    suffix = "".join(base.suffixes)
+    stem = base.name[: -len(suffix)] if suffix else base.name
+    sibling_re = re.compile(rf"^{re.escape(stem)}-\d+{re.escape(suffix)}$")
+    candidates: list[Path] = []
+    if base.exists():
+        candidates.append(base)
+    for entry in parent.iterdir():
+        if entry.is_file() and sibling_re.match(entry.name):
+            candidates.append(entry)
+    return sorted(candidates, key=lambda p: p.name)

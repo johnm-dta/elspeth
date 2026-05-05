@@ -44,7 +44,6 @@ import elspeth.contracts.errors as contract_errors
 import elspeth.engine.executors.declaration_contract_bootstrap  # noqa: F401
 from elspeth import __version__ as ENGINE_VERSION
 from elspeth.contracts import (
-    BatchCheckpointState,
     ExportStatus,
     NodeType,
     PendingOutcome,
@@ -1467,7 +1466,6 @@ class Orchestrator:
         config: PipelineConfig,
         graph: ExecutionGraph | None = None,
         settings: ElspethSettings | None = None,
-        batch_checkpoints: dict[str, BatchCheckpointState] | None = None,
         *,
         payload_store: PayloadStore,
         secret_resolutions: list[SecretResolutionInput] | None = None,
@@ -1482,10 +1480,6 @@ class Orchestrator:
             config: Pipeline configuration with plugins
             graph: Pre-validated execution graph (required)
             settings: Full settings (for post-run hooks like export)
-            batch_checkpoints: Typed batch transform checkpoints to restore
-                (from previous BatchPendingError). Maps node_id ->
-                BatchCheckpointState. Used when retrying a run after a batch
-                transform raised BatchPendingError.
             payload_store: PayloadStore for persisting source row payloads.
             secret_resolutions: Optional secret resolution records from
                 load_secrets_from_config(). Recorded in audit trail after run creation.
@@ -1547,7 +1541,6 @@ class Orchestrator:
                     config,
                     graph,
                     settings,
-                    batch_checkpoints,
                     payload_store=payload_store,
                     shutdown_event=active_event,
                 )
@@ -1961,7 +1954,6 @@ class Orchestrator:
         graph: ExecutionGraph,
         settings: ElspethSettings | None,
         artifacts: GraphArtifacts,
-        batch_checkpoints: dict[str, BatchCheckpointState] | None,
         payload_store: PayloadStore,
         *,
         include_source_on_start: bool = True,
@@ -1999,7 +1991,6 @@ class Orchestrator:
         )
 
         # Create context with the PluginAuditWriter
-        # Restore batch checkpoints if provided (from previous BatchPendingError)
         ctx = PluginContext(
             run_id=run_id,
             config=config.config,
@@ -2007,7 +1998,6 @@ class Orchestrator:
             payload_store=factory.payload_store,
             rate_limit_registry=self._rate_limit_registry,
             concurrency_config=self._concurrency_config,
-            _batch_checkpoints=batch_checkpoints or {},
             telemetry_emit=self._emit_telemetry,
         )
 
@@ -2964,7 +2954,6 @@ class Orchestrator:
         config: PipelineConfig,
         graph: ExecutionGraph,
         settings: ElspethSettings | None = None,
-        batch_checkpoints: dict[str, BatchCheckpointState] | None = None,
         *,
         payload_store: PayloadStore,
         shutdown_event: threading.Event | None = None,
@@ -2988,7 +2977,6 @@ class Orchestrator:
             graph,
             settings,
             artifacts,
-            batch_checkpoints,
             payload_store,
         )
 
@@ -3452,7 +3440,6 @@ class Orchestrator:
             graph,
             settings,
             artifacts,
-            None,  # batch_checkpoints
             payload_store,
             include_source_on_start=False,
             restored_aggregation_state=restored_aggregation_state,

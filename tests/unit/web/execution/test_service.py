@@ -1799,7 +1799,7 @@ class TestPostCompletionExceptionRecovery:
         assert post_terminal_logs == []
 
     @pytest.mark.xfail(
-        strict=False,
+        strict=True,
         reason=(
             "elspeth-879f6de6bd known gap (sister to "
             "test_post_completion_get_run_probe_failure_falls_through). When the "

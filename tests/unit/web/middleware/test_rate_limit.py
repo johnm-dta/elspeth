@@ -43,11 +43,14 @@ class TestRateLimiterAllow:
         limiter = ComposerRateLimiter(limit=5)
         for _ in range(5):
             await limiter.check("user_1")
+        # Each successful check must record a bucket entry; otherwise the limiter is a no-op.
+        assert len(limiter._buckets["user_1"]) == 5
 
     @pytest.mark.asyncio
     async def test_first_request_always_allowed(self) -> None:
         limiter = ComposerRateLimiter(limit=1)
-        await limiter.check("user_1")  # Should not raise
+        await limiter.check("user_1")
+        assert len(limiter._buckets["user_1"]) == 1
 
 
 class TestRateLimiterDeny:
@@ -86,6 +89,9 @@ class TestRateLimiterWindowReset:
         limiter._buckets["user_1"] = [time.monotonic() - 61.0]
         # Should pass -- the old request is outside the window
         await limiter.check("user_1")
+        # The expired timestamp must be evicted; only the fresh call remains.
+        assert len(limiter._buckets["user_1"]) == 1
+        assert limiter._buckets["user_1"][0] > time.monotonic() - 1.0
 
 
 class TestRateLimiterConcurrentUsers:
@@ -97,6 +103,10 @@ class TestRateLimiterConcurrentUsers:
         await limiter.check("user_1")
         # user_2 should still be allowed -- separate bucket
         await limiter.check("user_2")
+        # Both users must hold their own bucket — a single shared bucket would conflate them.
+        assert len(limiter._buckets["user_1"]) == 1
+        assert len(limiter._buckets["user_2"]) == 1
+        assert limiter._buckets["user_1"] is not limiter._buckets["user_2"]
 
     @pytest.mark.asyncio
     async def test_user1_exhausted_user2_unaffected(self) -> None:

@@ -334,6 +334,59 @@ class TestPayloadStoreSettingsAlignment:
         )
 
 
+class TestTelemetrySettingsAlignment:
+    """Verify TelemetrySettings ↔ RuntimeTelemetryConfig alignment.
+
+    STATUS: WIRED
+    RuntimeTelemetryConfig.from_settings() maps every TelemetrySettings field
+    to runtime. Backpressure-mode validation fails fast on unimplemented modes.
+    """
+
+    WIRED_FIELDS: ClassVar[set[str]] = {
+        "enabled",
+        "granularity",
+        "backpressure_mode",
+        "fail_on_total_exporter_failure",
+        "max_consecutive_failures",
+        "exporters",
+    }
+
+    def test_documents_wired_fields(self) -> None:
+        """Every TelemetrySettings field is mapped through RuntimeTelemetryConfig.from_settings()."""
+        from elspeth.core.config import TelemetrySettings
+
+        actual_fields = set(TelemetrySettings.model_fields.keys())
+
+        assert actual_fields == self.WIRED_FIELDS, (
+            f"TelemetrySettings fields changed. "
+            f"New: {actual_fields - self.WIRED_FIELDS}, "
+            f"Removed: {self.WIRED_FIELDS - actual_fields}. "
+            f"Update WIRED_FIELDS and confirm RuntimeTelemetryConfig.from_settings() maps the change."
+        )
+
+    def test_from_settings_maps_all_fields(self) -> None:
+        """RuntimeTelemetryConfig.from_settings() preserves every field's value."""
+        from elspeth.contracts.config.runtime import RuntimeTelemetryConfig
+        from elspeth.core.config import TelemetrySettings
+
+        settings = TelemetrySettings(
+            enabled=True,
+            granularity="lifecycle",
+            backpressure_mode="block",
+            fail_on_total_exporter_failure=False,
+            max_consecutive_failures=5,
+            exporters=[],
+        )
+        config = RuntimeTelemetryConfig.from_settings(settings)
+
+        assert config.enabled is True
+        assert config.granularity.value == "lifecycle"
+        assert config.backpressure_mode.value == "block"
+        assert config.fail_on_total_exporter_failure is False
+        assert config.max_consecutive_failures == 5
+        assert config.exporter_configs == ()
+
+
 class TestElspethSettingsAlignment:
     """Verify top-level ElspethSettings structure."""
 
@@ -384,21 +437,34 @@ class TestElspethSettingsAlignment:
         assert not extra, f"Expected fields not in ElspethSettings: {extra}. Remove from test expectations."
 
     def test_subsystem_settings_have_alignment_tests(self) -> None:
-        """Each subsystem setting should have its own alignment test class."""
-        # This test documents which subsystems have alignment tests
-        # Add a class when wiring a new subsystem
-        tested_subsystems = {
-            "landscape",  # TestLandscapeSettingsAlignment
-            "checkpoint",  # TestCheckpointSettingsAlignment
-            "retry",  # TestRetryConfigAlignment
-            "payload_store",  # TestPayloadStoreSettingsAlignment
-            "concurrency",  # TestConcurrencySettingsAlignment (xfail - pending)
-            "rate_limit",  # TestRateLimitSettingsAlignment (xfail - pending)
-            "telemetry",  # TestTelemetrySettingsAlignment
-        }
+        """Each subsystem setting must have its own alignment test class.
 
-        assert tested_subsystems == self.SUBSYSTEM_SETTINGS, (
-            f"Subsystem alignment test mismatch. Missing tests: {self.SUBSYSTEM_SETTINGS - tested_subsystems}"
+        Discovers alignment classes by introspection — adding a subsystem to
+        SUBSYSTEM_SETTINGS without writing a Test*Alignment class fails this gate.
+        """
+        # Subsystems whose alignment class name doesn't follow the canonical
+        # f"Test{CamelCase(subsystem)}SettingsAlignment" pattern.
+        NAME_OVERRIDES: dict[str, str] = {
+            "retry": "TestRetryConfigAlignment",
+        }
+        import sys
+
+        module = sys.modules[__name__]
+
+        def expected_class_name(subsystem: str) -> str:
+            if subsystem in NAME_OVERRIDES:
+                return NAME_OVERRIDES[subsystem]
+            camel = "".join(part.capitalize() for part in subsystem.split("_"))
+            return f"Test{camel}SettingsAlignment"
+
+        defined_classes = set(vars(module))
+        tested_subsystems = {subsystem for subsystem in self.SUBSYSTEM_SETTINGS if expected_class_name(subsystem) in defined_classes}
+
+        missing = self.SUBSYSTEM_SETTINGS - tested_subsystems
+        assert not missing, (
+            f"Subsystems in SUBSYSTEM_SETTINGS without alignment test classes: {sorted(missing)}. "
+            f"Expected class names: {sorted(expected_class_name(s) for s in missing)}. "
+            f"Add the class or remove the subsystem from SUBSYSTEM_SETTINGS."
         )
 
 

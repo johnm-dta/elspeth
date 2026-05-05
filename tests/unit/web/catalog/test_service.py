@@ -87,6 +87,7 @@ class TestListTransforms:
 
     def test_all_entries_have_transform_type(self, catalog: CatalogServiceImpl) -> None:
         transforms = catalog.list_transforms()
+        assert len(transforms) > 0, "catalog returned no transforms; type assertion would be vacuously true"
         for t in transforms:
             assert t.plugin_type == "transform"
 

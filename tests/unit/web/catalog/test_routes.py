@@ -78,7 +78,9 @@ class TestListTransforms:
 
     def test_all_entries_have_transform_type(self, client: TestClient) -> None:
         resp = client.get("/api/catalog/transforms")
-        for entry in resp.json():
+        entries = resp.json()
+        assert len(entries) > 0, "catalog returned no entries; type assertion would be vacuously true"
+        for entry in entries:
             assert entry["plugin_type"] == "transform"
 
 

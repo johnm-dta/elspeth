@@ -16,39 +16,48 @@ from scripts.eval._backfill_lib import (
 )
 
 
-def test_extract_sink_paths_from_final_yaml_returns_name_and_path_for_each_sink() -> None:
+def test_extract_sink_paths_returns_absolute_path_per_sink_for_mapping_shape(tmp_path) -> None:
+    """The captured final_yaml.json carries `sinks: {name: config}` (mapping)."""
     final_yaml_dict = {
         "yaml": (
-            "outputs:\n"
-            "  - plugin: jsonl\n"
-            "    name: results\n"
+            "sinks:\n"
+            "  results:\n"
+            "    plugin: jsonl\n"
             "    options:\n"
-            "      path: /home/john/elspeth/data/outputs/results.jsonl\n"
-            "  - plugin: csv\n"
-            "    name: fraud_only\n"
+            "      path: outputs/results.jsonl\n"
+            "  fraud_only:\n"
+            "    plugin: csv\n"
             "    options:\n"
-            "      path: /home/john/elspeth/data/outputs/q3_fraud_security_flags.csv\n"
+            "      path: outputs/q3_fraud_security_flags.csv\n"
         )
     }
-    sinks = extract_sink_paths_from_final_yaml(final_yaml_dict)
-    assert sinks == [
-        ("results", "/home/john/elspeth/data/outputs/results.jsonl"),
-        ("fraud_only", "/home/john/elspeth/data/outputs/q3_fraud_security_flags.csv"),
-    ]
+    sinks = extract_sink_paths_from_final_yaml(final_yaml_dict, data_dir=str(tmp_path))
+    assert sorted(sinks) == sorted(
+        [
+            ("results", str((tmp_path / "outputs/results.jsonl").resolve())),
+            ("fraud_only", str((tmp_path / "outputs/q3_fraud_security_flags.csv").resolve())),
+        ]
+    )
 
 
-def test_extract_sink_paths_skips_outputs_without_path_options() -> None:
-    final_yaml_dict = {"yaml": "outputs:\n  - plugin: noop\n    name: ignore\n    options: {}\n"}
-    assert extract_sink_paths_from_final_yaml(final_yaml_dict) == []
+def test_extract_sink_paths_passes_through_absolute_paths_unchanged(tmp_path) -> None:
+    final_yaml_dict = {"yaml": ("sinks:\n  results:\n    plugin: jsonl\n    options:\n      path: /tmp/already-absolute/results.jsonl\n")}
+    sinks = extract_sink_paths_from_final_yaml(final_yaml_dict, data_dir=str(tmp_path))
+    assert sinks == [("results", "/tmp/already-absolute/results.jsonl")]
 
 
-def test_extract_sink_paths_handles_missing_yaml_key() -> None:
-    assert extract_sink_paths_from_final_yaml({}) == []
+def test_extract_sink_paths_skips_sinks_without_path_options(tmp_path) -> None:
+    final_yaml_dict = {"yaml": "sinks:\n  ignore:\n    plugin: noop\n    options: {}\n"}
+    assert extract_sink_paths_from_final_yaml(final_yaml_dict, data_dir=str(tmp_path)) == []
 
 
-def test_extract_sink_paths_handles_yaml_without_outputs_section() -> None:
+def test_extract_sink_paths_handles_missing_yaml_key(tmp_path) -> None:
+    assert extract_sink_paths_from_final_yaml({}, data_dir=str(tmp_path)) == []
+
+
+def test_extract_sink_paths_handles_yaml_without_sinks_section(tmp_path) -> None:
     final_yaml_dict = {"yaml": "source:\n  plugin: csv\n  options: {}\n"}
-    assert extract_sink_paths_from_final_yaml(final_yaml_dict) == []
+    assert extract_sink_paths_from_final_yaml(final_yaml_dict, data_dir=str(tmp_path)) == []
 
 
 def test_enumerate_candidate_files_includes_base_and_auto_increment_siblings(tmp_path) -> None:

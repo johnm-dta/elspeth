@@ -30,13 +30,28 @@ Confidence = Literal["high", "low"]
 
 def extract_sink_paths_from_final_yaml(
     final_yaml_dict: Mapping[str, object],
+    *,
+    data_dir: str | Path,
 ) -> list[tuple[str, str]]:
     """Parse the YAML string inside a ``final_yaml.json`` blob and return
-    ``(sink_name, configured_path)`` for each output that has a path option.
+    ``(sink_name, absolute_configured_path)`` for each sink that has a path
+    option.
 
     The ``final_yaml.json`` shape comes from
     ``GET /api/sessions/{sid}/state/yaml`` — a JSON object with a single
     ``"yaml"`` string field carrying the composed pipeline.
+
+    Pipeline schema (verified against the 2026-05-03 captured YAMLs):
+    ``sinks`` is a top-level **mapping** of ``sink_name → sink_config``,
+    where each ``sink_config`` carries ``options.path`` as a path that may
+    be absolute or relative to ``data_dir``. We resolve relative paths the
+    same way the runtime does (see ``elspeth.web.paths.resolve_data_path``):
+    relative paths are joined to ``data_dir`` and resolved.
+
+    Why ``data_dir`` is a parameter (not hard-coded): we want this function
+    testable with a ``tmp_path`` fixture, and it's the same primitive the
+    backfill driver and the future ``/api/runs/{rid}/outputs`` endpoint
+    will share.
     """
     yaml_text = final_yaml_dict.get("yaml")
     if not isinstance(yaml_text, str):
@@ -44,18 +59,23 @@ def extract_sink_paths_from_final_yaml(
     config = yaml.safe_load(yaml_text) or {}
     if not isinstance(config, Mapping):
         return []
-    outputs = config.get("outputs") or []
-    if not isinstance(outputs, Sequence) or isinstance(outputs, (str, bytes)):
+    sinks = config.get("sinks")
+    if not isinstance(sinks, Mapping):
         return []
+    base = Path(data_dir).resolve()
     result: list[tuple[str, str]] = []
-    for entry in outputs:
-        if not isinstance(entry, Mapping):
+    for sink_name, sink_config in sinks.items():
+        if not isinstance(sink_name, str) or not isinstance(sink_config, Mapping):
             continue
-        name = entry.get("name")
-        options = entry.get("options") or {}
-        path = options.get("path") if isinstance(options, Mapping) else None
-        if isinstance(name, str) and isinstance(path, str):
-            result.append((name, path))
+        options = sink_config.get("options") or {}
+        if not isinstance(options, Mapping):
+            continue
+        path = options.get("path")
+        if not isinstance(path, str):
+            continue
+        path_obj = Path(path)
+        absolute = path_obj.resolve() if path_obj.is_absolute() else (base / path_obj).resolve()
+        result.append((sink_name, str(absolute)))
     return result
 
 

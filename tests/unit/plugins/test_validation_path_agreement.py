@@ -93,6 +93,39 @@ _TRANSFORM_REJECTION_CASES = [
         "actual_field and predicted_field must differ",
         id="batch_classifier_metrics-field-collision",
     ),
+    # ── batch_paired_preference ──────────────────────────────────────────
+    pytest.param(
+        "batch_paired_preference",
+        {
+            "schema": _make_observed_schema(),
+            "pair_field": "case_id",
+            "variant_field": "score",
+            "score_field": "score",  # pair, variant, and score fields must be distinct
+        },
+        "pair_field, variant_field, and score_field must be distinct",
+        id="batch_paired_preference-field-collision",
+    ),
+    # ── batch_drift_compare ──────────────────────────────────────────────
+    pytest.param(
+        "batch_drift_compare",
+        {
+            "schema": _make_observed_schema(),
+            "cohort_field": "cohort",
+            "value_field": "cohort",  # cohort and value fields must be distinct
+        },
+        "cohort_field and value_field must differ",
+        id="batch_drift_compare-field-collision",
+    ),
+    # ── batch_outlier_annotator ──────────────────────────────────────────
+    pytest.param(
+        "batch_outlier_annotator",
+        {
+            "schema": _make_observed_schema(),
+            "value_field": "outlier_is_outlier",  # value field would be overwritten by annotation output
+        },
+        "collides with outlier annotation output key",
+        id="batch_outlier_annotator-value-field-collision",
+    ),
     # ── field_mapper ──────────────────────────────────────────────────────
     pytest.param(
         "field_mapper",

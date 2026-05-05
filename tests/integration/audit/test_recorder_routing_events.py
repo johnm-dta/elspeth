@@ -358,9 +358,9 @@ class TestRecorderFactoryRouting:
 # ── elspeth-5069612f3c — producer-scoped MOVE-vs-DIVERT distinguishability ──
 #
 # These tests pin the **producer-scoped biconditional** for the rows_routed
-# split: gate ``route_to_sink`` MOVE rows produce ``RowOutcome.ROUTED`` with
+# split: gate ``route_to_sink`` MOVE rows produce ``SUCCESS/GATE_ROUTED`` with
 # ``error_hash IS NULL``, while transform ``on_error`` DIVERT rows produce
-# ``RowOutcome.ROUTED_ON_ERROR`` with a non-empty ``error_hash``.  The scope is
+# ``FAILURE/ON_ERROR_ROUTED`` with a non-empty ``error_hash``.  The scope is
 # intentionally narrow: ``RoutingMode.DIVERT`` is also used by source
 # quarantine and sink failsink edges, so a global ``RoutingMode.DIVERT ⇔
 # token_outcomes.outcome='routed_on_error'`` biconditional would be false.
@@ -438,7 +438,7 @@ def _fetch_single_outcome_for_sink(
     with landscape_db.engine.connect() as conn:
         rows = conn.execute(stmt).mappings().all()
     assert len(rows) == 1, f"expected one token_outcomes row for sink {sink_name!r}, got {rows}"
-    return rows[0]
+    return dict(rows[0])
 
 
 def _fetch_routing_modes_to_sink(
@@ -474,8 +474,8 @@ class TestRoutingEventDistinguishability:
     on_error-routed DIVERT tokens.
 
     These assertions are deliberately producer-scoped: gate ``route_to_sink``
-    MOVE -> ``RowOutcome.ROUTED`` with ``error_hash IS NULL``; transform
-    ``on_error`` DIVERT -> ``RowOutcome.ROUTED_ON_ERROR`` with a non-empty
+    MOVE -> ``SUCCESS/GATE_ROUTED`` with ``error_hash IS NULL``; transform
+    ``on_error`` DIVERT -> ``FAILURE/ON_ERROR_ROUTED`` with a non-empty
     ``error_hash``.  ``RoutingMode.DIVERT`` is also emitted by source
     quarantine and sink failsink edges, so a global
     ``RoutingMode.DIVERT ⇔ token_outcomes.outcome='routed_on_error'``

@@ -1481,7 +1481,7 @@ class TestResumeComprehensive:
         pre-resume crash):
         1. Failed run with 5 rows (0-4), linear topology re-used from
            ``_setup_failed_run`` for the persisted DAG, but every row is
-           pre-marked as ``RowOutcome.ROUTED`` via ``record_token_outcome`` —
+           pre-marked as ``(SUCCESS, GATE_ROUTED)`` via ``record_token_outcome`` —
            the canonical pre-split-fix shape for gate-routed rows.
         2. Resume's early-exit path reads existing terminal outcomes from
            Landscape and calls ``derive_terminal_run_status`` with the
@@ -1511,7 +1511,7 @@ class TestResumeComprehensive:
         output_path = tmp_path / "gate_routed_output.csv"
         run_id, graph = self._setup_failed_run(db, payload_store, run_id, num_rows=5, checkpoint_at=4)
 
-        # Mark every row as gate-routed (RowOutcome.ROUTED, sink_name set,
+        # Mark every row as gate-routed (SUCCESS/GATE_ROUTED, sink_name set,
         # error_hash NULL — the canonical pre-split-fix shape for
         # intentional gate route_to_sink MOVE rows).  By marking ALL rows
         # as terminal, the resume takes the early-exit path; what we are
@@ -1637,8 +1637,8 @@ class TestResumeComprehensive:
 
         Why this test exists (and why the unit-level coverage is not
         sufficient): ``_derive_resume_terminal_status_from_audit`` has two
-        symmetric match arms — ``RowOutcome.ROUTED`` (gate MOVE; counts
-        toward ``rows_routed_success``) and ``RowOutcome.ROUTED_ON_ERROR``
+        symmetric match arms — ``(SUCCESS, GATE_ROUTED)`` (gate MOVE; counts
+        toward ``rows_routed_success``) and ``(FAILURE, ON_ERROR_ROUTED)``
         (transform on_error DIVERT; counts toward ``rows_routed_failure``).
         A regression that swapped the two ``rows_routed_*`` increments in
         the ROUTED_ON_ERROR arm would slip past the unit-level predicate
@@ -1652,7 +1652,7 @@ class TestResumeComprehensive:
         on_error before the pre-resume crash):
         1. Failed run with 5 rows (0-4), reusing ``_setup_failed_run`` for
            the persisted DAG.
-        2. Every row pre-marked as ``RowOutcome.ROUTED_ON_ERROR`` —
+        2. Every row pre-marked as ``(FAILURE, ON_ERROR_ROUTED)`` —
            ``sink_name="error_sink"`` and ``error_hash`` set per the
            outcome contract for DIVERT rows.
         3. Resume's early-exit path reads existing terminal outcomes and
@@ -1692,7 +1692,7 @@ class TestResumeComprehensive:
         output_path = tmp_path / "routed_on_error_output.csv"
         run_id, graph = self._setup_failed_run(db, payload_store, run_id, num_rows=5, checkpoint_at=4)
 
-        # Mark every row as on_error DIVERT (RowOutcome.ROUTED_ON_ERROR).
+        # Mark every row as on_error DIVERT (FAILURE/ON_ERROR_ROUTED).
         # Contract requires sink_name AND error_hash for this outcome
         # (see data_flow_repository._validate_outcome_fields:236-249 and
         # contracts/results.py:408-419).  The 16-char hex string mirrors

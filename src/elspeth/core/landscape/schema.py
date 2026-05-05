@@ -46,7 +46,7 @@ metadata = MetaData()
 #   6 → batches.retry_of_batch_id records retry lineage so retry_batch()
 #        can deduplicate per failed batch rather than per aggregation node.
 #   7 → ADR-019 Stage 2/3: token_outcomes stores the two-axis terminal model
-#        (`outcome`, `path`, `completed`) instead of RowOutcome + is_terminal.
+#        (`outcome`, `path`, `completed`) instead of the old single-axis outcome + is_terminal.
 SQLITE_SCHEMA_EPOCH = 7
 
 # Column width for node_id across all tables. Referenced by dag.py
@@ -190,7 +190,7 @@ token_outcomes_table = Table(
     ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
     # ADR-019 two-axis terminal model. ``completed`` mirrors the prior
     # ``is_terminal`` column (sub-decision 3). ``outcome`` value space changed
-    # from RowOutcome (12 values, non-NULL) to TerminalOutcome (3 values:
+    # from the old single-axis outcome (12 values, non-NULL) to TerminalOutcome (3 values:
     # success / failure / transient) with NULL when completed=False
     # (only ``BUFFERED`` today). ``path`` is producer-declared per ADR-019
     # § "Classification is producer-declared, not topology-derivable" and

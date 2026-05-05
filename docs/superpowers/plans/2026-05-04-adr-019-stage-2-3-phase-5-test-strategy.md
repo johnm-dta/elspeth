@@ -2,24 +2,24 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this phase task-by-task.
 >
-> **CRITICAL — atomic merge:** This phase is the LAST phase of the five-phase plan ([overview](2026-05-04-adr-019-stage-2-3-overview.md)). After Phase 5's commit, the PR opens — all gates must be green. There is no xfail/Stage-4 deferral for broken `outcome == RowOutcome.X` assertions in this PR; cross-enum equality returns `False`, so those tests would fail the required full-suite gate.
+> **CRITICAL — atomic merge:** This phase is the LAST phase of the five-phase plan ([overview](2026-05-04-adr-019-stage-2-3-overview.md)). After Phase 5's commit, the branch becomes eligible for direct merge back to the parent branch only when local gates are green. No PR is opened for this branch, and no remote PR-check status is claimed.
 
-**Goal:** Triage the `tests/` tree into three categories — schema-dependent, assertion-only, and direct-DB-read. Schema-dependent and direct-DB-read tests must move with this PR because the old schema no longer exists. Assertion-only tests must also move with this PR because `TerminalOutcome.X == RowOutcome.Y` silently returns `False`; leaving those assertions for a later PR is incompatible with `pytest tests/ -q` exiting 0. Run and refresh the AST-backed source inventory introduced in Phase 1 so downstream schema/wire-contract misses cannot hide behind grep blind spots. Update the tests so the suite is green end-to-end. Expand the Phase 1 operator migration stub into the full deployment and rollback runbook. Open the PR.
+**Goal:** Triage the `tests/` tree into three categories — schema-dependent, assertion-only, and direct-DB-read. Schema-dependent and direct-DB-read tests must move with this change set because the old schema no longer exists. Assertion-only tests must also move with this change set because old single-axis outcome expectations silently compare false against the new two-axis values; leaving those assertions for a later branch is incompatible with `pytest tests/ -q` exiting 0. Run and refresh the AST-backed source inventory introduced in Phase 1 so downstream schema/wire-contract misses cannot hide behind grep blind spots. Update the tests so the suite is green end-to-end. Expand the Phase 1 operator migration stub into the full deployment and rollback runbook. Delete the old single-axis enum and the temporary migration guard, then prepare the direct-merge summary.
 
 **Files touched in this phase:**
 
 - Modify: `tests/` — schema-dependent test fixtures (per the triage)
-- Modify/use: `scripts/cicd/adr019_symbol_inventory.py` — AST-backed inventory created in Phase 1 for `is_terminal` declarations/accessors/kwargs/dict keys and hardcoded RowOutcome value comparisons
+- Modify/use: `scripts/cicd/adr019_symbol_inventory.py` — AST-backed inventory created in Phase 1 for `is_terminal` declarations/accessors/kwargs/dict keys and hardcoded old outcome value comparisons
 - Modify/use: `config/cicd/adr019_symbol_inventory/` — temporary allowlist directory created in Phase 1 for migration-window source inventory findings
 - Test: `tests/unit/scripts/cicd/test_adr019_symbol_inventory.py`
-- Create/use: `scripts/cicd/adr019_test_inventory.py` — tests-only AST-backed inventory for RowOutcome comparisons, raw `token_outcomes` SQL, `is_terminal` schema reads, and hardcoded old outcome strings in tests
+- Create/use: `scripts/cicd/adr019_test_inventory.py` — tests-only AST-backed inventory for legacy enum comparisons, raw `token_outcomes` SQL, `is_terminal` schema reads, and hardcoded old outcome strings in tests
 - Create/use: `config/cicd/adr019_test_inventory/` — temporary allowlist directory for deliberate compatibility/mapping/commentary test fixtures
 - Test: `tests/unit/scripts/cicd/test_adr019_test_inventory.py`
 - Modify: `docs/operator/migrations/adr-019.md` — operator-facing migration guide stub created in Phase 1; expand to full runbook here
-- Modify: `config/cicd/forbid_new_row_outcome/migration_files.yaml` — final allowlist trim (after this PR, only `contracts/enums.py`, `testing/__init__.py`, `tests/` remain)
+- Delete: `scripts/cicd/forbid_new_row_outcome.py`, `config/cicd/forbid_new_row_outcome/`, `.github/workflows/forbid-new-row-outcome.yaml`, and the pre-commit hook entry — Stage 5 removes the temporary migration guard once the old enum is gone
 - Test: full suite green
 
-**Background reading:** Phase 3 introduced two RED-first integration tests. Phase 4 added six. This phase ensures the rest of the suite compiles and passes, including the mechanical translation of `outcome == RowOutcome.X` assertion sites that would otherwise fail after the contract retype.
+**Background reading:** Phase 3 introduced two RED-first integration tests. Phase 4 added six. This phase ensures the rest of the suite compiles and passes, including the mechanical translation of stale single-axis outcome assertion sites that would otherwise fail after the contract retype.
 
 ---
 
@@ -1327,10 +1327,10 @@ Operator-facing migration documentation at docs/operator/migrations/adr-019.md:
 
 Guard updates:
 - ADR-019 AST symbol inventory runs as a closeout gate for source wire-contract drift.
-- forbid_new_row_outcome.py now detects hardcoded RowOutcome value-string comparisons in src/.
+- The temporary forbid-new-outcome guard is deleted in Stage 5 once the legacy enum is removed.
 
-Final allowlist scope: contracts/enums.py + testing/__init__.py + tests/.
-Stage 5 trims testing/__init__.py and deletes RowOutcome + the lint guard.
+Final source/test scope: no legacy enum references remain under `src/` or `tests/`.
+Stage 5 trims testing exports and deletes the legacy enum + the lint guard.
 
 Refs: elspeth-949719575e (Stage 2), elspeth-edb60744f0 (Stage 3)
 ADR: docs/architecture/adr/019-two-axis-terminal-model.md
@@ -1340,56 +1340,58 @@ EOF
 )"
 ```
 
-**Step 4: Open the PR**
+**Step 4: Prepare the Direct-Merge Summary**
 
-```bash
-git push -u origin RC5-UX-RoutingVocabFix
+No PR is created for `RC5-UX-RoutingVocabFix`; this branch merges directly back
+to its parent branch after the local gates are green. Use this summary in the
+merge handoff:
 
-gh pr create --title "feat(adr-019): two-axis terminal model — recorder + producer + accumulator + predicate" \
-  --body "$(cat <<'EOF'
+```markdown
 ## Summary
 
-Implements ADR-019 Stages 2/3 (merged) — replaces the single-axis `RowOutcome` audit recording with the two-axis `(TerminalOutcome, TerminalPath, completed)` triple across the recorder, every producer emit site, the accumulator, the resume aggregator, the four contract dataclasses, the telemetry event payload, and the `RunResult.__post_init__` predicate.
+Implements ADR-019 Stages 2/3 (merged) — replaces the single-axis audit
+recording with the two-axis `(TerminalOutcome, TerminalPath, completed)` triple
+across the recorder, every producer emit site, the accumulator, the resume
+aggregator, the four contract dataclasses, the telemetry event payload, and the
+`RunResult.__post_init__` predicate.
 
-Ships three operator-visible behaviour changes (see [docs/operator/migrations/adr-019.md](docs/operator/migrations/adr-019.md)):
+Ships three operator-visible behaviour changes (see
+`docs/operator/migrations/adr-019.md`):
 
-1. **Discard-mode `RunStatus` flip** — pipelines using `sink_name="__discard__"` now report `COMPLETED_WITH_FAILURES` (or `FAILED` if all rows discard) instead of `COMPLETED`, per ADR-019 § Sub-decision 5.
-2. **`(SUCCESS, GATE_ROUTED)` counter doubling** — gate-routed rows now bump BOTH `rows_succeeded` and `rows_routed_success`.
-3. **`(FAILURE, ON_ERROR_ROUTED)` counter doubling** — symmetric for transform `on_error` routes.
+1. **Discard-mode `RunStatus` flip** — pipelines using
+   `sink_name="__discard__"` now report `COMPLETED_WITH_FAILURES` (or `FAILED`
+   if all rows discard) instead of `COMPLETED`, per ADR-019 § Sub-decision 5.
+2. **`(SUCCESS, GATE_ROUTED)` counter doubling** — gate-routed rows now bump
+   BOTH `rows_succeeded` and `rows_routed_success`.
+3. **`(FAILURE, ON_ERROR_ROUTED)` counter doubling** — symmetric for transform
+   `on_error` routes.
 
-Plus four NEW Tier 1 cross-table invariants (I1a, I1b, I1c, I3) per ADR-019 § Cross-check invariants.
+Also lands the four Tier 1 cross-table invariants (I1a, I1b, I1c, I3), deletes
+the legacy single-axis enum, removes the temporary migration guard, and closes
+Stage 5.
 
-**Operator action required at deploy time:** replace the Landscape audit store per `docs/operator/migrations/adr-019.md`. ELSPETH does not run Alembic migrations for this project. ADR-019 does not require deleting `sessions.db`.
-
-## Phase structure (3 commits)
-
-1. Atomic Phases 1-3 — schema/recorder/loader/dataclasses, producer site flip, accumulator/predicate/resume changes
-2. Phase 4 — cross-table invariants I1a, I1b, I1c, I3
-3. Phase 5 — schema-dependent + assertion-only test fixes + operator migration doc
-
-The merge is atomic per ADR-019 lines 318-320 — accumulator change ships in lockstep with the predicate rewrite. Squash-or-keep at merge time is reviewer's choice.
-
-## What's NOT in this PR
-
-- Deletion of `RowOutcome` itself — Stage 5 ticket `elspeth-774b1d3c2e`.
-- Counter renames — separate ADR-020 conversation if pursued.
+Operator action required at deploy time: replace the Landscape audit store per
+`docs/operator/migrations/adr-019.md`. ELSPETH does not run Alembic migrations
+for this project. ADR-019 does not require deleting `sessions.db`.
+```
 
 ## Test plan
 
-- [x] Full local test gate passes with CI-equivalent coverage command (`pytest tests/ ... --cov-fail-under=80 -m "not slow and not stress and not performance" --timeout=120`)
-- [x] ADR-019 behavioural integration test files green:
+- [x] Fast full local test gate passes: `.venv/bin/python -m pytest tests/ -q -m "not slow and not stress and not performance" --timeout=120` returned `16136 passed, 20 skipped, 1 xfailed` on 2026-05-06.
+- [ ] CI-equivalent coverage variant remains blocked by the local xdist/pytest-cov harness: `.venv/bin/python -m pytest tests/ -q -m "not slow and not stress and not performance" --timeout=120 --cov=src/elspeth --cov-fail-under=80` fails before test execution with `AttributeError: 'Central' object has no attribute 'configure_node'`; serial `-n 0` fallback was stopped after proving too slow for an interactive merge-readiness pass.
+- [x] ADR-019 behavioural integration test files green through the full-suite gate:
   - `tests/integration/test_adr_019_discard_mode_flip.py`
   - `tests/integration/test_adr_019_counter_changes.py`
   - `tests/integration/test_adr_019_cross_table_invariants.py`
   - `tests/integration/test_adr_019_sweep_durability.py`
-- [x] mypy clean across `src/ tests/`
-- [x] ruff lint + format clean across `src/ tests/ scripts/ examples/`
-- [x] All project gates pass (tier model, audit evidence nominal, Tier-1 decoration, contract manifest, plugin hashes, freeze guards, frozen annotations, forbid-new-row-outcome)
-- [x] Lint guard `forbid_new_row_outcome.py` passes including hardcoded RowOutcome value-string detection; src/ scope reaches zero RowOutcome references; tests/ retain only deliberate compatibility/mapping references
-- [x] ADR-019 AST symbol inventory passes with only deliberate migration-window allowlist entries
-- [x] ADR-019 test inventory passes with only deliberate compatibility/mapping/commentary allowlist entries
-- [x] Frontend session terminal-status gates pass: `npm run test` and `npm run build`
-- [x] Remote GitHub checks green for the PR, including Python 3.12 and 3.13
+- [x] Targeted mypy clean for Stage 5 touched source/tests; pre-commit's `mypy src/elspeth` hook passes.
+- [ ] Repo-wide `uv run mypy src tests` is not a usable merge gate yet: it reports the current broader baseline (`308 errors in 83 files`) outside this Stage 5 cleanup.
+- [x] ruff lint + format clean across `src/ tests/ scripts/ examples/`.
+- [x] ADR-019 file-scoped project hooks pass: tier model, contract checker, frozen annotations, plugin hashes, freeze guards, and declaration contract manifest.
+- [x] `rg -n "RowOutcome" src/elspeth tests` returns no matches.
+- [x] `rg -n "forbid_new_row_outcome|forbid-new-row-outcome" .pre-commit-config.yaml .github/workflows config/cicd scripts/cicd tests` returns no matches.
+- [x] Frontend session terminal-status gates pass: `npm run test` and `npm run build`.
+- [x] Remote PR checks are intentionally not applicable for this branch because the user selected direct merge instead of PR creation.
 
 ## Refs
 
@@ -1398,18 +1400,11 @@ The merge is atomic per ADR-019 lines 318-320 — accumulator change ships in lo
 - Stage 1 (already shipped): commit 60d30551
 - Stage 2 ticket: elspeth-949719575e
 - Stage 3 ticket: elspeth-edb60744f0
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-EOF
-)"
-
-gh pr checks --watch
-```
+- Stage 5 ticket: elspeth-774b1d3c2e
 
 **Definition of Done:**
-- [ ] All verification gates green
-- [ ] Phase 5 commit landed
-- [ ] PR opened with comprehensive description
-- [ ] Remote CI/checks green after PR creation, including Python 3.12 and 3.13 jobs
-- [ ] Operator migration doc linked from PR description
-- [ ] Stage 1 and Stage 5 ticket cross-references in PR description
+- [x] Available local verification gates green, with coverage and repo-wide mypy exceptions recorded above.
+- [ ] Phase 5 commit landed.
+- [x] Direct-merge summary prepared.
+- [x] Operator migration doc referenced in the merge summary.
+- [x] Stage 1 through Stage 5 Filigree ticket states synchronized with disk.

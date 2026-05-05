@@ -951,7 +951,7 @@ class TestOpenRouterBatchErrorKeyCollision:
     contained that key, triggering the error branch and silently
     dropping the LLM response.
 
-    The fix replaces raw dict sentinels with a typed _RowOutcome
+    The fix replaces raw dict sentinels with a typed per-row process result
     dataclass that branches on an explicit .ok flag.
     """
 
@@ -1047,7 +1047,7 @@ class TestBug4_8_FieldCollisionBeforeAPICall:
         assert len(transform.declared_output_fields) > 0
 
 
-class TestRowOutcomePostFreezeMutationGuards:
+class TestRowProcessResultPostFreezeMutationGuards:
     """Exercise the ``freeze_fields`` post-init guards on ``_RowSuccess`` /
     ``_RowFailure``.
 

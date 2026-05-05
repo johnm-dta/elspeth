@@ -1,9 +1,9 @@
 # tests/unit/engine/orchestrator/test_outcomes.py
-"""Tests for row outcome accumulation and coalesce handling functions.
+"""Tests for terminal-pair accumulation and coalesce handling functions.
 
-outcomes.py was extracted from duplicated RowOutcome switch blocks in
+outcomes.py was extracted from duplicated terminal classification switch blocks in
 _execute_run() and _process_resumed_rows(). These tests verify that:
-1. Every RowOutcome variant is correctly accumulated
+1. Every terminal pair is correctly accumulated
 2. Coalesce timeouts trigger downstream processing
 3. End-of-source coalesce flush handles all paths
 """
@@ -65,7 +65,7 @@ def _make_pending() -> dict[str, list[tuple[TokenInfo, PendingOutcome | None]]]:
 # =============================================================================
 
 
-class TestAccumulateRowOutcomesCompleted:
+class TestAccumulateTerminalPairsCompleted:
     """Tests for COMPLETED outcome handling."""
 
     def test_completed_increments_succeeded(self) -> None:
@@ -114,7 +114,7 @@ class TestAccumulateRowOutcomesCompleted:
         assert len(pending["output"]) == 1
 
 
-class TestAccumulateRowOutcomesRouted:
+class TestAccumulateTerminalPairsRouted:
     """Tests for ROUTED outcome handling."""
 
     def test_routed_increments_counter(self) -> None:
@@ -162,7 +162,7 @@ class TestAccumulateRowOutcomesRouted:
             accumulate_row_outcomes(results, counters, pending)
 
 
-class TestAccumulateRowOutcomesRoutedOnError:
+class TestAccumulateTerminalPairsRoutedOnError:
     """Tests for ROUTED_ON_ERROR outcome handling — DIVERT path."""
 
     def _make_routed_on_error_result(
@@ -216,7 +216,7 @@ class TestAccumulateRowOutcomesRoutedOnError:
         assert counters.rows_routed_failure == 0
 
 
-class TestAccumulateRowOutcomesTerminal:
+class TestAccumulateTerminalPairsTerminal:
     """Tests for terminal outcome types that only increment counters."""
 
     def test_failed_increments_counter(self) -> None:
@@ -288,7 +288,7 @@ class TestAccumulateRowOutcomesTerminal:
         assert counters.rows_failed == 0
 
 
-class TestAccumulateRowOutcomesCoalesced:
+class TestAccumulateTerminalPairsCoalesced:
     """Tests for COALESCED outcome handling."""
 
     def test_coalesced_increments_both_counters(self) -> None:
@@ -316,12 +316,11 @@ class TestAccumulateRowOutcomesCoalesced:
         assert pending_outcome.path == TerminalPath.COALESCED
 
 
-class TestAccumulateRowOutcomesExclusiveCounters:
+class TestAccumulateTerminalPairsExclusiveCounters:
     """Mutation-killing tests: each terminal pair increments only its counters.
 
-    The legacy RowOutcome fixtures are mapped to ADR-019 terminal pairs by the
-    helper above. Asserting every counter field per variant catches accidental
-    fallthrough in the pair switch.
+    Asserting every counter field per terminal pair catches accidental
+    fallthrough in the accumulator switch.
     """
 
     def _assert_counters(
@@ -494,7 +493,7 @@ class TestCoalesceCountingOwnership:
 
     _process_merged_coalesce_outcome must NOT increment rows_coalesced.
     All counting happens in accumulate_row_outcomes based on the terminal
-    RowOutcome. This prevents double-counting for terminal coalesces and
+    terminal pair. This prevents double-counting for terminal coalesces and
     ensures non-terminal coalesces (which reach COMPLETED) are consistently
     not counted as COALESCED across all paths.
     """
@@ -596,7 +595,7 @@ class TestCoalesceCountingOwnership:
         assert counters.rows_succeeded == 1
 
 
-class TestAccumulateRowOutcomesMixed:
+class TestAccumulateTerminalPairsMixed:
     """Tests for multiple results in a single call."""
 
     def test_multiple_results_accumulated(self) -> None:

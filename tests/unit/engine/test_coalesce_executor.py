@@ -889,7 +889,7 @@ class TestUnionMerge:
         assert md.union_field_origins["shared"] == "b"
 
     def test_union_collision_policy_fail_records_terminal_failed_outcomes(self):
-        """union_collision_policy=fail must record terminal RowOutcome.FAILED for consumed tokens.
+        """union_collision_policy=fail must record FAILURE/UNROUTED for consumed tokens.
 
         Bug: The exception handler in _execute_merge only calls complete_node_state(FAILED)
         but never calls record_token_outcome(FAILED). Without terminal outcomes:

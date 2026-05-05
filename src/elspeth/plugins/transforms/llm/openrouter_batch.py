@@ -102,7 +102,7 @@ class _RowFailure:
         freeze_fields(self, "error")
 
 
-_RowOutcome = _RowSuccess | _RowFailure
+_RowProcessResult = _RowSuccess | _RowFailure
 
 
 class OpenRouterBatchConfig(LLMConfig):
@@ -206,7 +206,7 @@ class OpenRouterBatchLLMTransform(BaseTransform):
 
     name = "openrouter_batch_llm"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:0139902ccd1a63ad"
+    source_file_hash: str | None = "sha256:a614e6f15393a170"
     is_batch_aware = True  # Engine passes list[dict] for batch processing
     config_model = OpenRouterBatchConfig
 
@@ -465,7 +465,7 @@ class OpenRouterBatchLLMTransform(BaseTransform):
 
         # Process rows in parallel using AuditedHTTPClient (one per state_id).
         # Each worker thread gets a cached client via _get_http_client().
-        results: dict[int, _RowOutcome | Exception] = {}
+        results: dict[int, _RowProcessResult | Exception] = {}
 
         try:
             with ThreadPoolExecutor(max_workers=self._pool_size) as executor:
@@ -636,7 +636,7 @@ class OpenRouterBatchLLMTransform(BaseTransform):
         idx: int,
         row: PipelineRow,
         ctx: TransformContext,
-    ) -> _RowOutcome:
+    ) -> _RowProcessResult:
         """Process a single row through OpenRouter API.
 
         Called by worker threads. Returns a _RowSuccess with

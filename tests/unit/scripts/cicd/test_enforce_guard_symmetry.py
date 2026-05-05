@@ -166,7 +166,7 @@ class TestDataclassDiscovery:
                 outcome: str
 
                 def __post_init__(self) -> None:
-                    _validate_enum(self.outcome, RowOutcome, "outcome")
+                    _validate_enum(self.outcome, TerminalOutcome, "outcome")
         """)
         visitor = scan_source(source)
         assert len(visitor.dataclasses) == 1

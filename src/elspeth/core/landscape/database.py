@@ -581,7 +581,7 @@ class LandscapeDB:
                 or token_outcomes_shape_errors
             ):
                 error_parts.append(
-                    "ADR-019 changed token_outcomes from RowOutcome/is_terminal to "
+                    "ADR-019 changed token_outcomes from the old single-axis outcome/is_terminal to "
                     "(TerminalOutcome, TerminalPath, completed). See "
                     f"{ADR019_MIGRATION_GUIDE} and replace the stale audit.db "
                     "before starting this ELSPETH version."

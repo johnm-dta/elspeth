@@ -157,147 +157,12 @@ class RoutingMode(StrEnum):
     DIVERT = "divert"
 
 
-class RowOutcome(StrEnum):
-    """Outcome for a token in the pipeline.
-
-    These outcomes are explicitly recorded in the `token_outcomes` table
-    (AUD-001) at determination time. The (StrEnum) base allows direct
-    database storage via .value.
-
-    Most outcomes are TERMINAL - the token's journey is complete:
-    - COMPLETED: Reached output sink successfully
-    - ROUTED: Sent to named sink by gate (intentional MOVE)
-    - ROUTED_ON_ERROR: Successful sink write capturing an upstream
-      transform error (DIVERT — operationally distinct from FAILED;
-      the row reached an error sink with the originating error_hash)
-    - FORKED: Split into multiple parallel paths (parent token)
-    - FAILED: Processing failed, not recoverable
-    - QUARANTINED: Failed validation, stored for investigation
-    - DIVERTED: Sink write failed for this row, diverted to failsink
-    - CONSUMED_IN_BATCH: Absorbed into aggregate (single/transform mode)
-    - DROPPED_BY_FILTER: Transform intentionally emitted zero rows
-    - COALESCED: Merged in join from parallel paths
-    - EXPANDED: Deaggregated into child tokens (parent token)
-
-    One outcome is NON-TERMINAL - the token will reappear:
-    - BUFFERED: Held for batch processing in passthrough mode
-
-    The terminal/non-terminal partition is enforced at module-import
-    time by the closed-set assertions following this class definition;
-    a future enum addition that fails to land in exactly one of
-    ``_TERMINAL_ROW_OUTCOMES`` / ``_NON_TERMINAL_ROW_OUTCOMES`` will
-    raise ``AssertionError`` before any code executes.
-    """
-
-    # Terminal outcomes
-    COMPLETED = "completed"
-    ROUTED = "routed"
-    ROUTED_ON_ERROR = "routed_on_error"
-    FORKED = "forked"
-    FAILED = "failed"
-    QUARANTINED = "quarantined"
-    DIVERTED = "diverted"
-    CONSUMED_IN_BATCH = "consumed_in_batch"
-    DROPPED_BY_FILTER = "dropped_by_filter"
-    COALESCED = "coalesced"
-    EXPANDED = "expanded"
-
-    # Non-terminal outcomes
-    BUFFERED = "buffered"
-
-    @property
-    def is_terminal(self) -> bool:
-        """Check if this outcome represents a final state for the token.
-
-        Terminal outcomes mean the token's journey is complete - it won't
-        appear again in results. Non-terminal outcomes (BUFFERED) mean
-        the token is temporarily held and will reappear with a final outcome.
-
-        Closed-set membership (rather than ``!= BUFFERED``): under the
-        negative-logic predicate, a future non-terminal addition would
-        silently classify as terminal and corrupt the Tier 1 cross-check
-        at ``core/landscape/model_loaders.py:539`` (DB-stored
-        ``is_terminal`` vs enum-derived ``is_terminal``).  Closed-set
-        membership combined with the module-level exhaustiveness
-        assertions below forces every new value to be classified
-        deliberately at definition time.
-        """
-        return self in _TERMINAL_ROW_OUTCOMES
-
-
-# elspeth-879f6de6bd-followup (S-2): closed-set partition of RowOutcome
-# members.  Mirrors the LEGAL_RUN_TRANSITIONS pattern in
-# web/sessions/protocol.py:62-80 — module-level assertions raise
-# AssertionError at import time if the partition drifts from the canonical
-# enum, so a future RowOutcome addition cannot ship without explicit
-# classification.
-#
-# Update discipline: when adding a new RowOutcome value, also add it to
-# exactly one of these sets in this same edit.  The exhaustiveness check
-# below will fail loudly otherwise.
-_TERMINAL_ROW_OUTCOMES: frozenset[RowOutcome] = frozenset(
-    {
-        RowOutcome.COMPLETED,
-        RowOutcome.ROUTED,
-        RowOutcome.ROUTED_ON_ERROR,
-        RowOutcome.FORKED,
-        RowOutcome.FAILED,
-        RowOutcome.QUARANTINED,
-        RowOutcome.DIVERTED,
-        RowOutcome.CONSUMED_IN_BATCH,
-        RowOutcome.DROPPED_BY_FILTER,
-        RowOutcome.COALESCED,
-        RowOutcome.EXPANDED,
-    }
-)
-
-_NON_TERMINAL_ROW_OUTCOMES: frozenset[RowOutcome] = frozenset(
-    {
-        RowOutcome.BUFFERED,
-    }
-)
-
-# Exhaustiveness: every RowOutcome value MUST appear in exactly one of
-# the two sets.  An unclassified value would silently miscount via the
-# ``case _:`` arms in resume aggregation (engine/orchestrator/core.py)
-# and corrupt the audit integrity invariant in
-# core/landscape/model_loaders.py:539.
-_all_row_outcomes = frozenset(RowOutcome)
-_classified_row_outcomes = _TERMINAL_ROW_OUTCOMES | _NON_TERMINAL_ROW_OUTCOMES
-if _classified_row_outcomes != _all_row_outcomes:
-    _unclassified = _all_row_outcomes - _classified_row_outcomes
-    raise AssertionError(
-        f"RowOutcome members {sorted(m.name for m in _unclassified)} are not "
-        f"classified into _TERMINAL_ROW_OUTCOMES or _NON_TERMINAL_ROW_OUTCOMES "
-        f"in contracts/enums.py — every new RowOutcome value must be added to "
-        f"exactly one of these sets."
-    )
-
-# Mutual exclusion: a value cannot be both terminal and non-terminal.
-# This guards against a copy-paste error that lands a value in both sets.
-_overlap = _TERMINAL_ROW_OUTCOMES & _NON_TERMINAL_ROW_OUTCOMES
-if _overlap:
-    raise AssertionError(
-        f"RowOutcome members {sorted(m.name for m in _overlap)} appear in BOTH "
-        f"_TERMINAL_ROW_OUTCOMES and _NON_TERMINAL_ROW_OUTCOMES — these sets must "
-        f"be disjoint."
-    )
-
-
 # ADR-019 (two-axis terminal model): TerminalOutcome and TerminalPath split the
-# single-axis ``RowOutcome`` into a lifecycle answer (outcome) and a provenance
-# answer (path).  See ``docs/architecture/adr/019-two-axis-terminal-model.md``
+# terminal state into a lifecycle answer (outcome) and a provenance answer
+# (path).  See ``docs/architecture/adr/019-two-axis-terminal-model.md``
 # § "Counter derivation contract — public API field names preserved" (round-4
 # amendment, 2026-05-04) for the normative ``(outcome, path) → counter
-# increment`` mapping that the migration's Stage 2/3 PR enforces.
-#
-# Stage 1 (this commit) introduces these enums ALONGSIDE the existing
-# ``RowOutcome``.  No producer/recorder/accumulator/test reads or writes the
-# new fields yet; ``RowOutcome`` continues to drive the audit trail.  Stage 5
-# removes ``RowOutcome`` once Stages 2-4 have flipped every reader and
-# producer.  Until then, the two-axis closed-set partition below runs in
-# parallel with the ``_TERMINAL_ROW_OUTCOMES`` / ``_NON_TERMINAL_ROW_OUTCOMES``
-# partition above; both must succeed at module-import time.
+# increment`` mapping.
 class TerminalOutcome(StrEnum):
     """Lifecycle answer for a row that has reached a terminal state.
 
@@ -353,20 +218,10 @@ class TerminalPath(StrEnum):
 
 
 # Closed-set partition over the cross-product of TerminalOutcome and
-# TerminalPath per the ADR-019 mapping table at lines 99-115.  Every legal terminal
-# pair is enumerated below; the assertion that follows verifies every
+# TerminalPath per the ADR-019 mapping table at lines 99-115.  Every legal
+# terminal pair is enumerated below; the assertion that follows verifies every
 # ``TerminalPath`` is either covered by a legal terminal pair OR present in
-# ``_NON_TERMINAL_PATHS``.  This mirrors the existing
-# ``_TERMINAL_ROW_OUTCOMES`` / ``_NON_TERMINAL_ROW_OUTCOMES`` partition above
-# (which protects the unchanged ``RowOutcome``); both run in parallel until
-# Stage 5 deletes ``RowOutcome``.
-#
-# NOTE: ``DIVERTED`` (the single ``RowOutcome`` value) maps to TWO legal pairs
-# under the two-axis model — ``(TRANSIENT, SINK_FALLBACK_TO_FAILSINK)`` for
-# the failsink-mode case (paired ``NodeStateStatus.COMPLETED`` + ``artifacts``
-# row at the failsink node) and ``(FAILURE, SINK_DISCARDED)`` for the
-# discard-mode case (no failsink, primary node_state at FAILED).  See ADR-019
-# § Sub-decisions Resolved by Panel Review (verdict 5).
+# ``_NON_TERMINAL_PATHS``.
 _LEGAL_TERMINAL_PAIRS: frozenset[tuple[TerminalOutcome, TerminalPath]] = frozenset(
     {
         (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW),
@@ -395,7 +250,7 @@ _NON_TERMINAL_PATHS: frozenset[TerminalPath] = frozenset(
 # terminal pair (paired with some TerminalOutcome) or the non-terminal set.
 # An unclassified path would silently land in the ``case _:`` arm of any
 # future (outcome, path) match in the recorder/accumulator and corrupt the
-# audit-integrity invariant the way an unclassified ``RowOutcome`` would.
+# audit-integrity invariant the way an unclassified terminal value would.
 _paths_in_terminal_pairs: frozenset[TerminalPath] = frozenset(path for _, path in _LEGAL_TERMINAL_PAIRS)
 _all_terminal_paths: frozenset[TerminalPath] = frozenset(TerminalPath)
 _classified_terminal_paths: frozenset[TerminalPath] = _paths_in_terminal_pairs | _NON_TERMINAL_PATHS

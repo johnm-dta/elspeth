@@ -585,8 +585,8 @@ class TestToRunResultProperties:
 # =============================================================================
 
 
-class TestAccumulateRowOutcomesProperties:
-    """Each RowOutcome must map to exactly the correct counter(s)."""
+class TestAccumulateTerminalPairsProperties:
+    """Each terminal pair must map to exactly the correct counter(s)."""
 
     def _run_accumulation(
         self,
@@ -631,9 +631,7 @@ class TestAccumulateRowOutcomesProperties:
         assert len(pending["alerts"]) == 0
 
     def test_routed_increments_routed_success(self) -> None:
-        """Property: RowOutcome.ROUTED (gate route_to_sink MOVE) increments
-        rows_routed_success.
-        """
+        """Property: gate route_to_sink MOVE increments rows_routed_success."""
         result = _make_row_result(TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED, sink_name="alerts")
         counters, pending = self._run_accumulation([result])
 

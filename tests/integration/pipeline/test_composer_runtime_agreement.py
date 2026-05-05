@@ -2532,7 +2532,7 @@ class TestComposerRuntimeRunStatusAgreement:
         """elspeth-5069612f3c / elspeth-71520f5e30 — user reproducer shape:
         csv source -> gate routes high-priority rows to one sink, low-priority
         rows to another, no on_success success-path sink. Every row is
-        intentionally gate-routed via RoutingMode.MOVE (RowOutcome.ROUTED).
+        intentionally gate-routed via RoutingMode.MOVE.
 
         ADR-019 records lifecycle SUCCESS plus gate-routing provenance, so
         this shape produces rows_succeeded > 0 and rows_routed_success > 0
@@ -2681,7 +2681,7 @@ class _BatchAggregateTransform(BaseTransform):
 
     Reproduces the structural shape that broke the equality formulation of
     ``_validate_row_decomposition``: source rows reach
-    ``RowOutcome.CONSUMED_IN_BATCH`` (no terminal-bucket counter) while the
+    ``(TRANSIENT, BATCH_CONSUMED)`` (no terminal-bucket counter) while the
     aggregated output row reaches ``COMPLETED``.  Net effect:
     ``rows_processed > rows_succeeded + rows_failed + rows_routed +
     rows_quarantined`` — pre-fix the readback validator rejected this with

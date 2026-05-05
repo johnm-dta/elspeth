@@ -24,7 +24,6 @@ from elspeth.contracts import (
     PipelineRow,
     SourceRow,
 )
-from elspeth.contracts.enums import RowOutcome as RowOutcome
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 

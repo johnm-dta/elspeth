@@ -11,7 +11,7 @@ state, the audit trail is incomplete and ELSPETH's core value proposition
 These tests use Hypothesis to generate thousands of random pipeline inputs
 and verify that the terminal state invariant holds for ALL of them.
 
-Terminal states (from RowOutcome):
+Terminal states (from ADR-019 terminal pairs):
 - COMPLETED: Reached output sink successfully
 - ROUTED: Sent to named sink by gate
 - FORKED: Split into multiple parallel paths (parent token)
@@ -399,7 +399,7 @@ class TestTerminalStateAggregation:
 
     These tests exercise the BUFFERED → terminal transition that only occurs
     in pipelines with aggregation. The BUFFERED outcome is the only non-terminal
-    outcome in RowOutcome — if a token is BUFFERED but never reaches terminal
+    terminal pair — if a token is BUFFERED but never reaches terminal
     state, the audit trail is incomplete.
 
     Fix for elspeth-27b9cd6f6c: existing terminal state property tests only

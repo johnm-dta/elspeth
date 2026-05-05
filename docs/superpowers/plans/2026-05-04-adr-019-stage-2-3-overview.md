@@ -2,13 +2,13 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task.
 >
-> **CRITICAL — atomic merge:** This plan is split into FIVE phase documents for review and execution organization. **The merge into `main` is atomic per ADR-019 lines 318-320: "the migration plan's Stage 2/3 (merged) PR ships the accumulator change in lockstep with the `RunResult.__post_init__` predicate rewrite — neither edit is safe in isolation."** Phases 1 and 2 are local checkpoints only, not git commit boundaries: each leaves known engine breakage that Phase 3 resolves. The first legal git commit combines Phases 1-3 and must leave the tree compiling with the Stage 2/3 accumulator and predicate flip in place. Phases 4 and 5 may then land as follow-up commits in the same PR. Do NOT push, commit, or propose landing Phase 1 alone, or Phases 1-2 alone. The PR opens with all five phases complete and tests green end-to-end.
+> **CRITICAL — atomic merge:** This plan is split into FIVE phase documents for review and execution organization. **The merge into the parent branch is atomic per ADR-019 lines 318-320: "the migration plan's Stage 2/3 (merged) PR ships the accumulator change in lockstep with the `RunResult.__post_init__` predicate rewrite — neither edit is safe in isolation."** Phases 1 and 2 are local checkpoints only, not git commit boundaries: each leaves known engine breakage that Phase 3 resolves. The first legal git commit combines Phases 1-3 and must leave the tree compiling with the Stage 2/3 accumulator and predicate flip in place. Phases 4 and 5 may then land as follow-up commits on the same branch. Do NOT push, commit, or propose landing Phase 1 alone, or Phases 1-2 alone. For this branch, there is no release PR wrapper; after all five phases and local gates are green, merge directly back to the parent branch.
 
 **Goal:** Replace the single-axis `RowOutcome` audit recording with the two-axis `(TerminalOutcome, TerminalPath, completed)` triple across the recorder, every producer emit site, the accumulator, the resume aggregator, the four contract dataclasses, the telemetry event payload, and the `RunResult.__post_init__` predicate. Ships the discard-mode behaviour change (operator-visible `RunStatus` flip from `COMPLETED` to `COMPLETED_WITH_FAILURES`) and the two accumulator counter-increment changes (`(SUCCESS, GATE_ROUTED)` and `(FAILURE, ON_ERROR_ROUTED)`) per ADR-019 § Counter derivation contract.
 
-**Architecture:** Producers emit `(outcome, path)` pairs at every recording site; the recorder writes the triple to `token_outcomes`; the loader reconstructs the dataclass and runs the new (outcome, path) cross-checks plus four NEW cross-table invariants (I1a/I1b/I1c/I3); the accumulator matches on `(outcome, path)` and increments per the canonical mapping; the predicate becomes `success_indicator = rows_succeeded > 0` and `failure_indicator = rows_failed > 0` — the bifurcated OR clauses go away. Stage 1 introduced `TerminalOutcome`/`TerminalPath`/`_LEGAL_TERMINAL_PAIRS` alongside the unchanged `RowOutcome` (commit `60d30551` on `RC5-UX-RoutingVocabFix`); Stages 4 (test mechanical translation) and 5 (delete `RowOutcome`) follow this PR.
+**Architecture:** Producers emit `(outcome, path)` pairs at every recording site; the recorder writes the triple to `token_outcomes`; the loader reconstructs the dataclass and runs the new (outcome, path) cross-checks plus four NEW cross-table invariants (I1a/I1b/I1c/I3); the accumulator matches on `(outcome, path)` and increments per the canonical mapping; the predicate becomes `success_indicator = rows_succeeded > 0` and `failure_indicator = rows_failed > 0` — the bifurcated OR clauses go away. Stage 1 introduced `TerminalOutcome`/`TerminalPath`/`_LEGAL_TERMINAL_PAIRS` (commit `60d30551` on `RC5-UX-RoutingVocabFix`); the direct-merge branch also carries Stage 4 test translation and Stage 5 legacy-enum cleanup.
 
-**Tech Stack:** Python 3.13, SQLAlchemy Core, pytest, mypy, ruff, pluggy. Audit DB is SQLite or Postgres (no Alembic — operator replaces the Landscape audit store, for example `audit.db`, between this PR and any pre-Stage-2 audit schema per ELSPETH's project DB migration policy recorded for this plan; ADR-019 does not require deleting `sessions.db`).
+**Tech Stack:** Python 3.13, SQLAlchemy Core, pytest, mypy, ruff, pluggy. Audit DB is SQLite or Postgres (no Alembic — operator replaces the Landscape audit store, for example `audit.db`, between this change set and any pre-Stage-2 audit schema per ELSPETH's project DB migration policy recorded for this plan; ADR-019 does not require deleting `sessions.db`).
 
 **Prerequisites:**
 - Stage 1 commit `60d30551` is on the branch (introduces `TerminalOutcome`, `TerminalPath`, `_LEGAL_TERMINAL_PAIRS`, `_NON_TERMINAL_PATHS`, the closed-set partition assertion, the property test, and the `forbid_new_row_outcome.py` lint guard with allowlist).
@@ -64,11 +64,11 @@ Stage 1 (already shipped, commit 60d30551)
                       ✅ no remaining broken ``outcome == RowOutcome.X`` assertions in tests/
 ```
 
-The PR is opened only after Phase 5 lands. Reviewers see three clean commits: the atomic Phases 1-3 migration, Phase 4 invariants, and Phase 5 tests/docs. The squash-or-keep choice is the reviewer's at merge time.
+No PR is opened for this branch. The direct-merge readiness wrapper starts only after Phase 5 lands and local gates are green; the parent-branch merge should carry the atomic Phases 1-3 migration, Phase 4 invariants, and Phase 5 tests/docs/final cleanup together.
 
 ---
 
-## Operator-visible changes that ship with this PR
+## Operator-visible changes that ship with this change set
 
 ### 1. Discard-sink `RunStatus` flip (ADR-019 § Behavior Change Notice)
 
@@ -95,7 +95,7 @@ The `token_outcomes` table changes:
 - `outcome` (String 32) changes value space from `RowOutcome.value` (non-NULL) to `TerminalOutcome.value | NULL` — NULL means non-terminal (`BUFFERED`).
 - `path` (String 64) added — always populated, never NULL.
 
-Per ELSPETH's project DB migration policy recorded for this plan, ELSPETH does not run Alembic on schema changes. **Operator action required at deploy time:** replace the old-schema Landscape audit store before deploying this PR, with service stop, immutable snapshot/backup, destructive delete/drop, restart, health check, and rollback steps documented in `docs/operator/migrations/adr-019.md` (stub added in Phase 1; full runbook expanded in Phase 5). ADR-019 does not change the web session schema, so do not delete `sessions.db` unless a separate compatibility check proves it stale and the operator runbook is explicitly amended with session backup/restore steps. Agents must not run destructive database commands without explicit operator approval for the target environment.
+Per ELSPETH's project DB migration policy recorded for this plan, ELSPETH does not run Alembic on schema changes. **Operator action required at deploy time:** replace the old-schema Landscape audit store before deploying this change set, with service stop, immutable snapshot/backup, destructive delete/drop, restart, health check, and rollback steps documented in `docs/operator/migrations/adr-019.md` (stub added in Phase 1; full runbook expanded in Phase 5). ADR-019 does not change the web session schema, so do not delete `sessions.db` unless a separate compatibility check proves it stale and the operator runbook is explicitly amended with session backup/restore steps. Agents must not run destructive database commands without explicit operator approval for the target environment.
 
 ---
 
@@ -132,7 +132,7 @@ Both are real-time verifiable per the ADR. I1c checks the failsink node_state + 
 ### D5: Operator release note location
 
 The Behavior Change Notice is documented in three places:
-1. **PR description** — top-level summary for reviewers.
+1. **Direct-merge summary** — top-level summary for the parent-branch merge.
 2. **`docs/operator/migrations/adr-019.md`** (stub added in Phase 1; full runbook expanded in Phase 5) — durable operator reference: what changed, what action to take, how to identify affected pipelines, the DB-delete command.
 3. **No CHANGELOG entry** — ELSPETH has no CHANGELOG today; commits + ADRs are the release record for this project.
 
@@ -238,16 +238,16 @@ gate. Phases 1-3 still must update every schema-dependent test that is in their
 focused gate or in a touched module, but the atomic Stage 2/3 commit is not
 required to make unrelated stale tests green. Short summary:
 - **Tests that construct dataclass instances (`TokenOutcome(outcome=RowOutcome.X, ...)`)** — schema-dependent. Won't compile after Phase 1. Move with Stage 2/3.
-- **Tests that assert on `result.outcome == RowOutcome.X` from a real engine execution** — assertion-only but pytest-blocking after Phase 1. These MUST move in this PR, translated mechanically against `tests/unit/contracts/test_enums.py::_ROW_OUTCOME_TO_TWO_AXIS_MAPPING`. Cross-enum equality returns `False`, not `TypeError`, so leaving these assertions for Stage 4 would make the full-suite gate impossible.
-- **Integration tests that exercise end-to-end engine execution and observe outputs** — schema-dependent if they read `token_outcomes` directly; assertion-only if they only check `RunResult` counters. Both pytest-blocking forms move in this PR.
+- **Tests that assert on old single-axis outcome enum members from a real engine execution** — assertion-only but pytest-blocking after Phase 1. These MUST move in this change set, translated mechanically against the ADR-019 mapping table. Cross-enum equality returns `False`, not `TypeError`, so leaving these assertions for Stage 4 would make the full-suite gate impossible.
+- **Integration tests that exercise end-to-end engine execution and observe outputs** — schema-dependent if they read `token_outcomes` directly; assertion-only if they only check `RunResult` counters. Both pytest-blocking forms move in this change set.
 
-The Phase 5 grep recipe distinguishes the categories deterministically so executing engineers don't have to invent it. Stage 4 remains useful only for non-blocking cleanup and eventual `RowOutcome` deletion prep; it is not allowed to carry failing `outcome == RowOutcome.X` assertions from this PR.
+The Phase 5 grep recipe distinguishes the categories deterministically so executing engineers don't have to invent it. Stage 4 remains useful only for non-blocking cleanup and final legacy-enum deletion prep; it is not allowed to carry failing single-axis outcome assertions from this change set.
 
 ---
 
 ## Verification gates (run before opening PR)
 
-After Phase 5 commit lands, all of these must pass before the PR opens:
+After Phase 5 commit lands, all of these must pass before direct merge:
 
 ```bash
 # Unit + integration tests
@@ -284,9 +284,9 @@ npm run build
 cd /home/john/elspeth
 ```
 
-After this PR merges, the migration files allowlist for `src/elspeth/` paths is now empty — every src/ migration site has flipped. Phase 5 also removes every pytest-blocking `outcome == RowOutcome.X` assertion. Stage 5 deletes the script entirely after `RowOutcome` itself is removed. Until Stage 5, the script + allowlist remain to guard against new `RowOutcome.X` introductions.
+After this change set merges, the migration files allowlist for `src/elspeth/` paths is empty — every src/ migration site has flipped. Phase 5 also removes every pytest-blocking legacy outcome assertion. Stage 5 deletes the temporary guard entirely after the old single-axis enum itself is removed.
 
-### Behavioural verification (NEW for this PR)
+### Behavioural verification
 
 Per Phase 5, the new ADR-019 integration-test fixtures must exist and be green:
 
@@ -308,13 +308,9 @@ These tests are described in Phase 5; their existence is gated by a Phase 3 Defi
 
 ---
 
-## Out of scope for this PR
+## Out of scope for this change set
 
-- **`RowOutcome` enum deletion** — Stage 5 ticket `elspeth-774b1d3c2e`. RowOutcome continues to exist alongside `TerminalOutcome` until every assertion site has flipped. Deleting it is the final sweep.
-
-- **The Stage 1 lint guard `forbid_new_row_outcome.py` and its allowlist** — Stage 5. The guard prevents drift during Stages 4 and earlier; once Stage 5 deletes `RowOutcome` itself, the guard becomes vacuous and is removed.
-
-- **Counter rename** — separate ADR-020 conversation. Public API field names (`rows_succeeded`, `rows_routed_success`, etc.) are preserved in this PR per ADR-019 § Counter derivation contract.
+- **Counter rename** — separate ADR-020 conversation. Public API field names (`rows_succeeded`, `rows_routed_success`, etc.) are preserved in this change set per ADR-019 § Counter derivation contract.
 
 - **Frontend counter-type redesign** — `web/frontend/src/types/index.ts` keeps the existing counter field names per ADR-019 § Counter derivation contract. The React layer is still in scope for the Phase 3 terminal-status fix: `SessionSidebar.tsx` must import the existing `TERMINAL_RUN_STATUS_VALUES` taxonomy and the frontend test/build gates must pass.
 
@@ -325,7 +321,7 @@ These tests are described in Phase 5; their existence is gated by a Phase 3 Defi
 1. Read this overview.
 2. Read each phase document in order.
 3. Execute phase-by-phase using `superpowers:executing-plans`. Each phase has its own RED→GREEN test cycle and Definition of Done.
-4. After Phase 5's Definition of Done is met, run all verification gates above. If all green, open the PR.
-5. The PR description summarizes the change, links to ADR-019, and includes the operator deletion command from `docs/operator/migrations/adr-019.md`.
+4. After Phase 5's Definition of Done is met, run all verification gates above. If all green, prepare the direct-merge summary and merge back to the parent branch.
+5. The merge summary links to ADR-019, includes the operator deletion command from `docs/operator/migrations/adr-019.md`, and notes the Stage 5 tracker closeout.
 
 If a phase reveals a gap the ADR doesn't cover, STOP and re-read this overview's decision log. If the gap is genuinely new, surface to the user before silently expanding scope — same discipline as Stage 1 used for the allowlist deviation.

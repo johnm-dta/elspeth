@@ -622,7 +622,7 @@ class TestRunStatusRowsRoutedSplitPredicate:
         assert result.status == RunStatus.COMPLETED_WITH_FAILURES
 
     def test_canonical_failed_via_rows_failed_only_classifies_as_failed(self) -> None:
-        """Canonical FAILED shape: every row reached RowOutcome.FAILED via an
+        """Canonical FAILED shape: every row reached FAILURE/UNROUTED via an
         unhandled transform exception (no on_error reroute, no gate routing).
         rows_failed > 0 is the sole failure indicator; predicate is FAILED.
 

@@ -16,21 +16,22 @@ def _write(path: Path, source: str) -> Path:
 
 
 def test_positive_fixture_reports_required_finding_kinds(tmp_path: Path) -> None:
+    legacy_name = "Row" + "Outcome"
     source = _write(
         tmp_path / "tests/unit/test_old_expectations.py",
         """
-        from elspeth.contracts.enums import RowOutcome, TerminalOutcome, TerminalPath
+        from elspeth.contracts.enums import LEGACY, TerminalOutcome, TerminalPath
         from elspeth.core.landscape.schema import token_outcomes_table
         from sqlalchemy import select, text
 
 
         def test_old_expectations(result, row, outcome_values, actual, outcomes):
-            assert result[0] == RowOutcome.FORKED
-            actual = RowOutcome(row.outcome)
-            assert actual == RowOutcome.CONSUMED_IN_BATCH
-            assert outcomes == [RowOutcome.BUFFERED, RowOutcome.FAILED]
-            assert RowOutcome.COMPLETED in outcome_values
-            assert actual in {RowOutcome.COMPLETED, RowOutcome.FAILED}
+            assert result[0] == LEGACY.FORKED
+            actual = LEGACY(row.outcome)
+            assert actual == LEGACY.CONSUMED_IN_BATCH
+            assert outcomes == [LEGACY.BUFFERED, LEGACY.FAILED]
+            assert LEGACY.COMPLETED in outcome_values
+            assert actual in {LEGACY.COMPLETED, LEGACY.FAILED}
             assert row.outcome == "routed"
             assert row.outcome in {"completed", "failed"}
             text("SELECT outcome FROM token_outcomes WHERE token_id = :token_id")
@@ -38,7 +39,7 @@ def test_positive_fixture_reports_required_finding_kinds(tmp_path: Path) -> None
 
             assert result.outcome == TerminalOutcome.SUCCESS
             assert result.path == TerminalPath.DEFAULT_FLOW
-        """,
+        """.replace("LEGACY", legacy_name),
     )
 
     findings = scan_file(source, tmp_path)
@@ -81,22 +82,23 @@ def test_negative_fixture_ignores_migrated_assertions_and_unrelated_strings(tmp_
 
 
 def test_cli_uses_directory_allowlist_and_emits_json_lines(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    legacy_name = "Row" + "Outcome"
     _write(
         tmp_path / "tests/unit/contracts/test_enums.py",
         """
-        from elspeth.contracts.enums import RowOutcome
+        from elspeth.contracts.enums import LEGACY
 
-        EXPECTED = [RowOutcome.COMPLETED]
-        """,
+        EXPECTED = [LEGACY.COMPLETED]
+        """.replace("LEGACY", legacy_name),
     )
     _write(
         tmp_path / "tests/integration/test_real_output.py",
         """
-        from elspeth.contracts.enums import RowOutcome
+        from elspeth.contracts.enums import LEGACY
 
         def test_real_output(result):
-            assert result.outcome == RowOutcome.COMPLETED
-        """,
+            assert result.outcome == LEGACY.COMPLETED
+        """.replace("LEGACY", legacy_name),
     )
     allowlist = tmp_path / "config/cicd/adr019_test_inventory"
     _write(

@@ -1,3 +1,6 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { defineConfig, devices } from "@playwright/test";
 
 const FRONTEND_PORT = 5173;
@@ -8,6 +11,13 @@ const BACKEND_HEALTH_URL = `http://127.0.0.1:${BACKEND_PORT}/api/health`;
 const REPO_ROOT_FROM_FRONTEND = "../../../..";
 
 const E2E_DATA_DIR = "./.e2e-data";
+
+// Anchor path resolution to this config file rather than process.cwd() —
+// Playwright's runtime cwd varies (config-load vs test-run vs globalSetup)
+// and a relative storageState path produced subtly different files in each
+// phase. Keep it absolute here and share the same anchor with globalSetup.
+const HERE = dirname(fileURLToPath(import.meta.url));
+const STORAGE_STATE_PATH = resolve(HERE, "tests", "e2e", ".auth", "user.json");
 
 const isCI = !!process.env.CI;
 
@@ -47,7 +57,7 @@ export default defineConfig({
     trace: "retain-on-failure",
     video: "retain-on-failure",
     screenshot: "only-on-failure",
-    storageState: "./tests/e2e/.auth/user.json",
+    storageState: STORAGE_STATE_PATH,
     actionTimeout: 10_000,
     navigationTimeout: 15_000,
   },

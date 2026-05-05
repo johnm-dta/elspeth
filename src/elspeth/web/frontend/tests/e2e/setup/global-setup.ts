@@ -1,7 +1,8 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { request, type FullConfig } from "@playwright/test";
+import { request } from "@playwright/test";
 
 // Placeholder credential consumed only by the local playwright webServer,
 // which spins up a fresh ELSPETH_WEB__data_dir per test session. Not a
@@ -66,16 +67,17 @@ function writeStorageState(path: string, token: string): void {
   writeFileSync(path, JSON.stringify(state, null, 2), { encoding: "utf-8" });
 }
 
-export default async function globalSetup(config: FullConfig): Promise<void> {
-  const storageStatePath = config.projects[0]?.use.storageState;
-  if (typeof storageStatePath !== "string") {
-    throw new Error(
-      "Expected projects[0].use.storageState to be a string path; " +
-        "globalSetup writes the resolved auth state to disk.",
-    );
-  }
+// The storageState path is resolved relative to this file rather than
+// FullConfig.rootDir or process.cwd() — both vary in confusing ways across
+// Playwright versions. import.meta.url is unambiguous.
+const HERE = dirname(fileURLToPath(import.meta.url));
+const STORAGE_STATE_PATH = resolve(HERE, "..", ".auth", "user.json");
 
+export default async function globalSetup(): Promise<void> {
   const token = await obtainToken(BACKEND_BASE_URL);
-  const absolutePath = resolve(config.rootDir, storageStatePath);
-  writeStorageState(absolutePath, token);
+  writeStorageState(STORAGE_STATE_PATH, token);
+  // Confirm to the operator that globalSetup completed — otherwise a
+  // mis-pathed write looks identical to "globalSetup never ran" in the
+  // failure output.
+  console.log(`[globalSetup] wrote storageState to ${STORAGE_STATE_PATH}`);
 }

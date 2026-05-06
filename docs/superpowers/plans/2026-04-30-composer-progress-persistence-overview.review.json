@@ -1,13 +1,13 @@
 {
   "verdict": "APPROVED",
-  "summary": "Go for the overview and Phase 1 handoff after the repair pass. The overview no longer inherits the advisory-lock, protocol, same-session parentage, CI-gating, or spec-cleanup blockers, and VAL ownership now points at the live composer progress-persistence feature instead of a closed historical evaluation ticket.",
+  "summary": "Go for the overview and Phase 1 handoff after the repair pass. The overview now names the concrete sync primitive plus protocol-public async dispatcher, stale-state compare-and-set protection, audit-access cascade, CI testcontainer aggregation, and supported Python versions without inheriting the earlier advisory-lock, protocol, parentage, CI-gating, or spec-cleanup blockers.",
   "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md",
   "related_plan_files": [
     "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1-data-layer.md",
     "/home/john/elspeth/docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md"
   ],
   "detailed_review_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1-data-layer.review.json",
-  "reviewed_at": "2026-05-05T21:23:52Z",
+  "reviewed_at": "2026-05-06T00:01:06Z",
   "reviewers": [
     "reality",
     "architecture",
@@ -33,7 +33,7 @@
       "id": "OB3",
       "status": "RESOLVED",
       "issue": "The overview promised a protocol method that Phase 1 did not plan.",
-      "resolution": "Phase 1 Task 11 now adds `SessionServiceProtocol.persist_compose_turn` with type-checking-only payload imports and mypy coverage."
+      "resolution": "Phase 1 Task 11 now keeps the sync `SessionServiceImpl.persist_compose_turn` concrete-only and adds protocol-public `SessionServiceProtocol.persist_compose_turn_async` with type-checking-only payload imports and mypy coverage."
     },
     {
       "id": "OB4",
@@ -45,7 +45,7 @@
       "id": "OW1",
       "status": "RESOLVED",
       "issue": "A separate testcontainer CI job needed to be included in the required summary job.",
-      "resolution": "Overview done conditions and Phase 1 Task 16 now require the testcontainer lane to feed `ci-success` if implemented as a standalone job."
+      "resolution": "Overview done conditions and Phase 1 Task 16 now require the testcontainer lane to feed `ci-success` and require the aggregate `needs.<job>.result` check to fail if the Docker lane fails or is skipped."
     },
     {
       "id": "OW2",

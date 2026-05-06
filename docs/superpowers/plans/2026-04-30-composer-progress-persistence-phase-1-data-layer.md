@@ -6,7 +6,7 @@
 
 **Architecture:** Pure data-layer work. No compose-loop changes; no redaction primitives; no frontend. The new primitive is dispatched via the existing `_run_sync` helper; current code creates a one-shot worker executor per call, so this plan must not describe a shared worker pool unless it introduces one explicitly. Tests use in-memory SQLite through `create_session_engine(..., StaticPool)` + `initialize_session_schema()` for schema/unit work and testcontainer PostgreSQL for the advisory-lock and concurrent-multi-session test (CL-PP-11).
 
-**Tech Stack:** Python 3.13, SQLAlchemy 2.x sync `Engine`, structlog, OpenTelemetry counters, pytest, testcontainers-python (PostgreSQL).
+**Tech Stack:** Python 3.12 and 3.13 (matching supported CI), SQLAlchemy 2.x sync `Engine`, structlog, OpenTelemetry counters, pytest, testcontainers-python (PostgreSQL).
 
 **Spec sections:** §3 (ADRs), §4.1 (schema), §4.5 (IntegrityError + OperationalError dispositions), §5.7 (SessionServiceImpl API), §8.1 unit tests bullets 1–3 + 5–7, §8.6 test-path-integrity rule, §11 Phase 1 scope.
 
@@ -17,12 +17,12 @@
 ### Files to modify
 
 - `src/elspeth/web/sessions/models.py` — add new columns and CHECK constraints to `chat_messages`; extend the role CHECK with the internal `"audit"` role for audit-only composer breadcrumbs that do not have a parent assistant row; add `provenance` column to `composition_states`; add `audit_access_log` table.
-- `src/elspeth/web/sessions/service.py` — add `persist_compose_turn` plus `_acquire_session_advisory_lock`, `_reserve_sequence_range`, `_insert_chat_message`, `_insert_composition_state`, and SQLite same-session serialization helpers; rewrite `add_message` (Task 14) to accept the required keyword-only `writer_principal` argument while preserving its pre-rev-4 behaviours (cross-session guard, `updated_at` write, `raw_content` persistence, `ChatMessageRecord` return). Task 10 keeps `save_composition_state` and `set_active_state` inline with provenance + lock additions, and refactors only `fork_session` to `_insert_composition_state`.
-- `src/elspeth/web/sessions/protocol.py` — add `SessionServiceProtocol.persist_compose_turn` when Task 11 introduces the primitive (using `TYPE_CHECKING` imports for `_RedactedToolRow` / `_AuditOutcome` to avoid a runtime circular import with `_persist_payload.py`); update `SessionServiceProtocol.add_message` declaration at lines 258-266 to match the new signature (atomic with the service.py change in Task 14); extend `ChatMessageRole` / `ChatMessageRecord` to include the internal `"audit"` role and new tool linkage fields.
+- `src/elspeth/web/sessions/service.py` — add the concrete sync primitive `persist_compose_turn`, the protocol-facing async dispatcher `persist_compose_turn_async`, `_acquire_session_advisory_lock`, `_reserve_sequence_range`, `_insert_chat_message`, `_insert_composition_state`, shared state-envelope helper, process-wide SQLite same-session serialization helpers, and stale-current-state checks; rewrite `add_message` (Task 14) to accept the required keyword-only `writer_principal` argument while preserving its pre-rev-4 behaviours (cross-session guard, `updated_at` write, `raw_content` persistence, `ChatMessageRecord` return). Task 10 keeps `save_composition_state` and `set_active_state` inline with provenance + lock additions, and refactors only `fork_session` to `_insert_composition_state`.
+- `src/elspeth/web/sessions/protocol.py` — add `SessionServiceProtocol.persist_compose_turn_async` when Task 11 introduces the primitive (using `TYPE_CHECKING` imports for `_RedactedToolRow` / `_AuditOutcome` to avoid a runtime circular import with `_persist_payload.py`); the sync `SessionServiceImpl.persist_compose_turn` remains concrete-only and guarded against direct async-loop use. Update `SessionServiceProtocol.add_message` declaration at lines 258-266 to match the new signature (atomic with the service.py change in Task 14); extend `ChatMessageRole` / `ChatMessageRecord` to include the internal `"audit"` role and new tool linkage fields.
 - `src/elspeth/web/sessions/routes.py` — update **all six** current production `service.add_message(...)` writers: `_persist_tool_invocations` (line ~703), `_persist_llm_calls` (line ~752), user message (line ~1599), assistant message send path (line ~1984), assistant message recompose path (line ~2431), and revert system message (line ~2641). Per-site mapping is in Task 14 §14.4. Always re-grep `service.add_message(` and `\.add_message(` in `routes.py` before editing; stale four-call-site inventories are explicitly wrong.
 - `pyproject.toml` and `uv.lock` — add `testcontainers[postgres]`, register the `testcontainer` marker, and keep frozen CI sync reproducible.
 - `.github/workflows/ci.yaml` — add an explicit Docker-enabled `pytest -m testcontainer tests/integration/web/ -v` lane or step; default non-Docker test jobs must continue deselecting `testcontainer`.
-- `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md` — amend or explicitly supersede stale Phase 1 snippets for role values, `_StatePayload`, advisory-lock SQL, `persist_compose_turn(raw_content)`, `_AuditOutcome`, and session-test engine construction before implementation begins. This is a Phase 1 preflight deliverable, not a later observation-only follow-up.
+- `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md` — amend or explicitly supersede stale Phase 1 snippets for role values, `_StatePayload`, advisory-lock SQL, `persist_compose_turn(raw_content, expected_current_state_id)`, the async dispatcher contract, `_AuditOutcome`, audit-access cascade, and session-test engine construction before implementation begins. This is a Phase 1 preflight deliverable, not a later observation-only follow-up.
 
 ### Files to create
 
@@ -75,8 +75,10 @@ snippets it supersedes:
   allocates versions under `_session_write_lock`.
 - PostgreSQL session write locks use
   `pg_advisory_xact_lock(ELSPETH_SESSIONS_LOCK_CLASSID, hashtext(session_id))`.
-- `persist_compose_turn` accepts optional `raw_content` and is exposed
-  on `SessionServiceProtocol`.
+- `SessionServiceImpl.persist_compose_turn` accepts optional
+  `raw_content` and `expected_current_state_id`, remains concrete-only,
+  and is wrapped by the protocol-public async
+  `SessionServiceProtocol.persist_compose_turn_async`.
 - `_AuditOutcome` has only `assistant_id` and `unwind_audit_failed`;
   Tier-1 audit-write failures raise.
 - Session tests use `create_session_engine(..., StaticPool)` plus
@@ -271,7 +273,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import delete, insert, select
+from sqlalchemy import insert
 from sqlalchemy.exc import IntegrityError
 
 from elspeth.web.sessions import models
@@ -972,7 +974,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import insert
+from sqlalchemy import delete, insert, select
 from sqlalchemy.exc import IntegrityError
 
 from elspeth.web.sessions import models
@@ -1011,6 +1013,38 @@ def test_writer_principal_check(engine):
                 query_args={},
                 writer_principal="rogue_view",
             ))
+
+
+def test_session_delete_cascades_audit_access_log(engine):
+    """Archive/delete lifecycle guard.
+
+    ``archive_session`` ultimately deletes the parent session row after
+    deleting the child tables it already knows about. Phase 3 writes
+    ``audit_access_log`` rows, so the FK must cascade or archived sessions
+    that have been viewed with ``include_tool_rows`` will fail deletion.
+    """
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        _make_session(conn, session_id="s_archive")
+        conn.execute(insert(models.audit_access_log_table).values(
+            id="log1",
+            timestamp=now,
+            session_id="s_archive",
+            requesting_principal="alice",
+            request_path="/api/sessions/s_archive/messages",
+            query_args={"include_tool_rows": True},
+            ip_address=None,
+            writer_principal="audit_grade_view",
+        ))
+        conn.execute(
+            delete(models.sessions_table)
+            .where(models.sessions_table.c.id == "s_archive")
+        )
+        remaining = conn.execute(
+            select(models.audit_access_log_table.c.id)
+            .where(models.audit_access_log_table.c.session_id == "s_archive")
+        ).fetchall()
+        assert remaining == []
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1033,7 +1067,7 @@ audit_access_log_table = Table(
     Column(
         "session_id",
         String,
-        ForeignKey("sessions.id"),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
         nullable=False,
     ),
     Column("requesting_principal", String, nullable=False),
@@ -1188,13 +1222,13 @@ def test_counter_records_attributes_dict():
     fake = telem.tool_row_tier1_violation_total
     assert isinstance(fake, _FakeCounter)
     assert fake.calls == [
-        (1, {"reason": "commit_failure", "session_id": "s_test"}),
+        (1, {"reason": "commit_failure", "session_id": "s_test"}, None),
     ]
 
 
 def test_production_meter_registers_named_metrics():
     """Closes synthesised review finding F-10 / L7. Verifies that the
-    eight ``meter.create_counter(...)`` strings in
+    four Phase-1 ``meter.create_counter(...)`` strings in
     ``build_sessions_telemetry`` match spec §1.4 exactly. Without this
     test, a typo (e.g. ``tool_row_tier1_violations_total`` with a
     spurious ``s``) would pass the field-name check (which inspects
@@ -1242,7 +1276,7 @@ wiring type-checks without ``# type: ignore`` and the real meter
 satisfies the structural contract.
 
 The fake counter records every ``add`` call as ``(amount,
-attributes)`` tuples. Tests inspect via the ``observed_value(counter)``
+attributes, context)`` tuples. Tests inspect via the ``observed_value(counter)``
 helper (cumulative sum) or directly through the ``calls`` attribute
 after type-narrowing with ``isinstance(counter, _FakeCounter)``.
 ``observed_value`` is intentionally NOT on the ``_Counter`` Protocol
@@ -1265,9 +1299,24 @@ phases add composer-owned telemetry separately.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypeAlias
+
+from opentelemetry.context import Context
+
+
+_AttributeValue: TypeAlias = (
+    str
+    | bool
+    | int
+    | float
+    | Sequence[str]
+    | Sequence[bool]
+    | Sequence[int]
+    | Sequence[float]
+)
+_Attributes: TypeAlias = Mapping[str, _AttributeValue]
 
 
 class _Counter(Protocol):
@@ -1275,18 +1324,19 @@ class _Counter(Protocol):
     code uses.
 
     The real OTel signature is ``add(amount, attributes=None,
-    context=None, **kwargs)``; we declare the two arguments callers
-    actually pass. ``context`` is left off because no caller in the
-    composer subsystem supplies it; if a future caller needs it, add
-    it here AND audit ``_FakeCounter.add`` to keep the recorded-call
-    shape symmetric.
+    context=None)``. Keep this Protocol as broad as the SDK surface that
+    callers may legally use: ``amount`` may be ``int`` or ``float``;
+    attributes may include every OTel scalar/sequence value type; and
+    ``context`` is accepted even though Phase 1 callers omit it. This
+    avoids a fake-narrow structural type that passes local tests but
+    rejects a real Counter-compatible call shape.
     """
 
     def add(
         self,
-        amount: int,
-        attributes: Mapping[str, str | int | bool] | None = None,
-        /,
+        amount: int | float,
+        attributes: _Attributes | None = None,
+        context: Context | None = None,
     ) -> None: ...
 
 
@@ -1308,21 +1358,23 @@ class _FakeCounter:
     """
 
     def __init__(self) -> None:
-        self.calls: list[tuple[int, Mapping[str, str | int | bool] | None]] = []
+        self.calls: list[
+            tuple[int | float, dict[str, _AttributeValue] | None, Context | None]
+        ] = []
 
     def add(
         self,
-        amount: int,
-        attributes: Mapping[str, str | int | bool] | None = None,
-        /,
+        amount: int | float,
+        attributes: _Attributes | None = None,
+        context: Context | None = None,
     ) -> None:
         # Defensive copy of the attributes mapping so later mutation
         # of the caller's dict cannot rewrite recorded history.
         recorded_attrs = dict(attributes) if attributes is not None else None
-        self.calls.append((amount, recorded_attrs))
+        self.calls.append((amount, recorded_attrs, context))
 
 
-def observed_value(counter: _Counter) -> int:
+def observed_value(counter: _Counter) -> int | float:
     """Return the cumulative ``add`` total for a fake counter.
 
     Test-only helper. Raises ``TypeError`` if ``counter`` is not a
@@ -1338,7 +1390,7 @@ def observed_value(counter: _Counter) -> int:
             f"build_sessions_telemetry() without a meter argument so "
             f"the container is populated with fake counters."
         )
-    return sum(amount for amount, _attrs in counter.calls)
+    return sum(amount for amount, _attrs, _context in counter.calls)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1878,9 +1930,10 @@ class _StatePayload:
     The plan's earlier ``payload_json: str`` design was a hallucination —
     no ``payload`` column exists, and the existing
     ``save_composition_state`` insert at ``service.py:395-418`` writes
-    each column individually via the ``_enveloped(...)`` and
-    ``deep_thaw(...)`` patterns. ``_StatePayload`` mirrors that real
-    schema by reusing :class:`CompositionStateData` rather than
+    each column individually via a method-local ``_enveloped(...)`` helper
+    and ``deep_thaw(...)`` patterns. Task 10 extracts that rule to the
+    shared ``_enveloped_state_column(...)`` helper. ``_StatePayload``
+    mirrors that real schema by reusing :class:`CompositionStateData` rather than
     duplicating its fields and freeze-guard machinery.
 
     ``derived_from_state_id`` is ``str | None`` rather than ``str``
@@ -2079,14 +2132,15 @@ single context manager, `_session_write_lock(conn, session_id)`, used
 by every session-scoped writer:
 
 - PostgreSQL branch: call `_acquire_session_advisory_lock(conn, session_id)` and yield.
-- SQLite branch: acquire a process-local reentrant lock keyed by `session_id`, then yield for the whole allocator + insert block.
+- SQLite branch: acquire a process-wide reentrant lock keyed by `(database_url, session_id)`, then yield for the whole allocator + insert block.
 
 This is sufficient for the current staging shape (one uvicorn process
 against one SQLite file) and is backed by explicit same-session
 concurrency tests. If staging becomes multi-process SQLite, Phase 1
 must switch SQLite to a database-level `BEGIN IMMEDIATE`/busy-timeout
 strategy before deploy; do not rely on the process lock across
-processes.
+processes. The key includes the engine URL so unrelated SQLite databases
+inside the same process do not serialize each other's sessions.
 
 **Files:**
 - Create: `src/elspeth/contracts/advisory_locks.py`
@@ -2201,7 +2255,7 @@ def test_advisory_lock_sqlite_is_noop(service):
 
 
 def test_session_write_lock_sqlite_is_reentrant(service):
-    """SQLite branch uses a process-local per-session RLock so nested
+    """SQLite branch uses a process-wide per-session RLock so nested
     helper calls inside one transaction cannot deadlock."""
     with service._engine.begin() as conn:
         with service._session_write_lock(conn, "session_1"):
@@ -2218,11 +2272,11 @@ Expected: FAIL — `_acquire_session_advisory_lock` does not exist.
 
 - [ ] **Step 4: Implement the helper**
 
-In `src/elspeth/web/sessions/service.py`, add the helpers inside the `SessionServiceImpl` class. Note the import of `ELSPETH_SESSIONS_LOCK_CLASSID` at module top — cite the constant by name at every call site so future grep finds them all (open-coded literals defeat the registry pattern). Add `import contextlib` and `import threading`, and initialise the SQLite lock registry in `__init__`:
+In `src/elspeth/web/sessions/service.py`, add the helpers inside the `SessionServiceImpl` class. Note the import of `ELSPETH_SESSIONS_LOCK_CLASSID` at module top — cite the constant by name at every call site so future grep finds them all (open-coded literals defeat the registry pattern). Add `import contextlib` and `import threading`, and define the SQLite lock registry at module top so every service instance in the process serializes on the same locks:
 
 ```python
-self._sqlite_session_locks_guard = threading.RLock()
-self._sqlite_session_locks: dict[str, threading.RLock] = {}
+_SQLITE_SESSION_LOCKS_GUARD = threading.RLock()
+_SQLITE_SESSION_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 ```
 
 ```python
@@ -2280,12 +2334,13 @@ def _acquire_session_advisory_lock(self, conn: Connection, session_id: str) -> N
 
 
 def _sqlite_lock_for_session(self, session_id: str) -> threading.RLock:
-    """Return the process-local SQLite write lock for one session."""
-    with self._sqlite_session_locks_guard:
-        lock = self._sqlite_session_locks.get(session_id)
+    """Return the process-wide SQLite write lock for one DB/session pair."""
+    key = (str(self._engine.url), session_id)
+    with _SQLITE_SESSION_LOCKS_GUARD:
+        lock = _SQLITE_SESSION_LOCKS.get(key)
         if lock is None:
             lock = threading.RLock()
-            self._sqlite_session_locks[session_id] = lock
+            _SQLITE_SESSION_LOCKS[key] = lock
         return lock
 
 
@@ -2294,7 +2349,7 @@ def _session_write_lock(self, conn: Connection, session_id: str):
     """Serialize same-session sequence/version allocators.
 
     PostgreSQL uses the transaction-scoped advisory lock. SQLite uses a
-    process-local per-session RLock around the whole allocator + insert
+    process-wide per-session RLock around the whole allocator + insert
     sequence. Every caller that performs ``SELECT MAX(...) + 1`` for
     ``chat_messages.sequence_no`` or ``composition_states.version`` MUST
     wrap that read and every dependent INSERT in this context.
@@ -2366,7 +2421,7 @@ def test_session_write_lock_serializes_sqlite_same_session_sequence_allocation(s
     the same MAX(sequence_no). This test uses the real StaticPool
     in-memory SQLite engine from the shared fixture and two worker
     threads. The sleep happens inside the session write lock to widen
-    the race window; without the process-local per-session lock both
+    the race window; without the process-wide per-session lock both
     workers can reserve sequence_no=1 and one insert fails."""
     from concurrent.futures import ThreadPoolExecutor
     import threading
@@ -2691,6 +2746,12 @@ refactor + uniform `session_seed`" as papering over real differences.
      PostgreSQL/SQLite session-write discipline that
      ``_insert_composition_state`` enforces — no caller computes a
      version outside the lock.
+- Extract a shared module-level `_enveloped_state_column(...)` helper
+  and replace the existing local `_enveloped` helpers in
+  `save_composition_state` and `fork_session` with it. The reviewed
+  plan's `_insert_composition_state` snippet called `_enveloped(...)`,
+  but in live code that helper is local to the two existing methods
+  and is not visible from the new private helper.
 
 This keeps the helper focused on a single semantic ("a composition
 state derived inside a session-scoped session-write-locked transaction
@@ -2787,6 +2848,20 @@ Phase 3 wires `persist_compose_turn` in):
 `save_composition_state`, `set_active_state`) serialise on the same
 per-session lock on both PostgreSQL and SQLite.
 
+**State-intent race (compose vs revert) is separate from allocator
+serialization.** The lock makes version allocation safe, but it does
+not by itself prove that a compose result was based on the still-current
+state. Phase 3's compose endpoint can begin with state A, release the
+event loop while the LLM runs, then race a revert/save that makes state B
+current. If the compose result then persists under the lock and creates
+state C as the newest row, it silently overrides the user's intervening
+revert intent. Therefore `persist_compose_turn` must accept
+`expected_current_state_id: str | None` and compare it to the current
+latest state for the session under `_session_write_lock` before sequence
+or version allocation. A mismatch raises `StaleComposeStateError` and
+rolls back the compose turn; lock discipline remains necessary but is
+not sufficient for intent preservation.
+
 **Effect on the existing retry loops.** Both methods currently wrap
 their version-allocation in a 3-attempt retry on `IntegrityError`.
 After the lock is held, the SELECT MAX → INSERT sequence is
@@ -2802,7 +2877,7 @@ unreachable post-lock; remove in OQ-3-followup` comment so future
 readers know the rationale.
 
 **Files:**
-- Modify: `src/elspeth/web/sessions/service.py` — add `_insert_composition_state` helper; refactor only site `~1191` to use it; add `provenance="session_seed"` to the inline inserts at sites `~403` and `~834`.
+- Modify: `src/elspeth/web/sessions/service.py` — add `_insert_composition_state` helper; extract shared `_enveloped_state_column`; refactor only site `~1191` to use the helper; add `provenance="session_seed"` to the inline inserts at sites `~403` and `~834`.
 - Test: `tests/unit/web/sessions/test_persist_compose_turn.py` (extend)
 
 - [ ] **Step 1: Write the failing test**
@@ -2859,9 +2934,9 @@ def test_insert_composition_state_allocates_contiguous_versions(service):
     """B1 (Phase 1 plan-review synthesis): under the held advisory
     lock, repeated calls to ``_insert_composition_state`` for the same
     session allocate contiguous versions starting at 1. The test runs
-    serially within a single transaction; the concurrent / cross-thread
-    case is exercised on PostgreSQL by Task 16's
-    ``test_concurrent_persist_compose_turn_versions_contiguous``."""
+    serially within a single transaction. The concurrent same-state
+    compose case is exercised on PostgreSQL by Task 16's stale-rejection
+    regression."""
     from elspeth.web.sessions._persist_payload import _StatePayload
     from elspeth.web.sessions.protocol import CompositionStateData
 
@@ -2970,9 +3045,24 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement the helper and refactor existing inline inserts**
 
-Add to `SessionServiceImpl`:
+Add the shared envelope helper at module scope, then add
+`_insert_composition_state` to `SessionServiceImpl`:
 
 ```python
+def _enveloped_state_column(value: Any) -> Any:
+    """Return the JSON envelope stored by composition_states JSON columns.
+
+    Existing `save_composition_state` and `fork_session` each carried a
+    local `_enveloped` helper. `_insert_composition_state` is module/class
+    scope, so the envelope rule must be extracted before the helper can
+    call it. Do not duplicate the helper back into individual methods.
+    """
+    raw = deep_thaw(value)
+    if raw is None:
+        return None
+    return {"_version": 1, "data": raw}
+
+
 def _insert_composition_state(
     self,
     conn: Connection,
@@ -3015,9 +3105,8 @@ def _insert_composition_state(
 
     Writes the real per-column schema (source/nodes/edges/outputs/
     metadata_/is_valid/validation_errors/derived_from_state_id), using
-    the same ``_enveloped(...)`` and ``deep_thaw(...)`` patterns the
-    existing ``save_composition_state`` insert (service.py:395-418)
-    uses today.
+    the shared ``_enveloped_state_column(...)`` and ``deep_thaw(...)``
+    patterns the existing inline inserts use today.
 
     The ``provenance`` argument must satisfy the
     ``ck_composition_states_provenance`` CHECK constraint added in
@@ -3056,11 +3145,11 @@ def _insert_composition_state(
             id=state_id,
             session_id=session_id,
             version=int(next_version),
-            source=_enveloped(payload.data.source),
-            nodes=_enveloped(payload.data.nodes),
-            edges=_enveloped(payload.data.edges),
-            outputs=_enveloped(payload.data.outputs),
-            metadata_=_enveloped(payload.data.metadata_),
+            source=_enveloped_state_column(payload.data.source),
+            nodes=_enveloped_state_column(payload.data.nodes),
+            edges=_enveloped_state_column(payload.data.edges),
+            outputs=_enveloped_state_column(payload.data.outputs),
+            metadata_=_enveloped_state_column(payload.data.metadata_),
             is_valid=payload.data.is_valid,
             validation_errors=deep_thaw(payload.data.validation_errors),
             derived_from_state_id=payload.derived_from_state_id,
@@ -3071,7 +3160,7 @@ def _insert_composition_state(
     return state_id
 ```
 
-(Add `from elspeth.contracts.freeze import deep_thaw` and `from elspeth.web.sessions._persist_payload import _StatePayload` to the imports if not already present. ``select`` and ``func`` are already imported at the module top — they are used by ``save_composition_state`` and ``_reserve_sequence_range`` for the same SQLAlchemy 2.x SELECT-MAX idiom; no new import is required for the B1 version-allocation query. The `_enveloped` helper is defined locally in service.py — see its existing use at line 407.)
+(Add `Any` to the typing imports, and add `from elspeth.contracts.freeze import deep_thaw` and `from elspeth.web.sessions._persist_payload import _StatePayload` to the imports if not already present. ``select`` and ``func`` are already imported at the module top — they are used by ``save_composition_state`` and ``_reserve_sequence_range`` for the same SQLAlchemy 2.x SELECT-MAX idiom; no new import is required for the B1 version-allocation query. Replace the existing method-local `_enveloped` helpers in `save_composition_state` and `fork_session` with `_enveloped_state_column` in this same task.)
 
 Then make the per-site updates. There are **three** existing inline
 `composition_states` inserts in `service.py`; locate them via
@@ -3082,7 +3171,7 @@ Then make the per-site updates. There are **three** existing inline
 
 | Site | Method | Treatment | Provenance |
 |---|---|---|---|
-| `service.py:~403` | `save_composition_state` (general route-level state save) | KEEP inline. Two additions: (1) add `provenance="session_seed",` to the existing `.values(...)` call; (2) wrap the existing `SELECT MAX(version)` + INSERT retry body in `with self._session_write_lock(conn, sid):` as the FIRST operation inside the `engine.begin()` block at `_try_insert_state` (line ~396). The context makes the SELECT-then-INSERT sequence atomic against every other writer for this `session_id` — closing B3 from the Phase 1 plan-review synthesis. The retry loop is kept as belt-and-suspenders (see B3 prologue above). | `"session_seed"` (broadened semantics — spec §4.1.2 amendment in Task 3) |
+| `service.py:~403` | `save_composition_state` (general route-level state save) | KEEP inline. Three additions: (1) add `provenance="session_seed",` to the existing `.values(...)` call; (2) wrap the existing `SELECT MAX(version)` + INSERT retry body in `with self._session_write_lock(conn, sid):` as the FIRST operation inside the `engine.begin()` block at `_try_insert_state` (line ~396); (3) replace the local `_enveloped` helper with shared `_enveloped_state_column`. The context makes the SELECT-then-INSERT sequence atomic against every other writer for this `session_id` — closing B3 from the Phase 1 plan-review synthesis. The retry loop is kept as belt-and-suspenders (see B3 prologue above). | `"session_seed"` (broadened semantics — spec §4.1.2 amendment in Task 3) |
 | `service.py:~834` | `set_active_state` (same-session state revert/pin) | KEEP inline. Two additions: (1) add `provenance="session_seed",` to the `.values(...)` call; (2) wrap the prior-row SELECT, `SELECT MAX(version)`, and INSERT in `with self._session_write_lock(conn, sid):` inside the `engine.begin()` block at `_try_insert_revert` (line ~794). The `derived_from_state_id` is already populated correctly. The retry loop is kept as belt-and-suspenders (see B3 prologue above). | `"session_seed"` (same broadened semantics) |
 | `service.py:~1191` | `fork_session` (cross-session state copy at fork) | REFACTOR to call `_insert_composition_state`. Build a `_StatePayload` from the source state's fields and call the helper with `provenance="session_fork"` and `created_at=now`. Note: §14.6's fork sweep already requires entering `_session_write_lock` for the new session_id BEFORE this state insert (see §14.6 Step 1.5). The fork is a single-shot insert with no retry loop, which matches the helper's contract. | `"session_fork"` (new enum value — see Task 3) |
 
@@ -3147,15 +3236,17 @@ with self._session_write_lock(conn, new_session_id_str):
 ```
 
 (The helper internally rewraps the per-column data via
-`_enveloped(...)` and `deep_thaw(...)`, matching the surrounding
+`_enveloped_state_column(...)` and `deep_thaw(...)`, matching the surrounding
 inline-insert behaviour. The explicit ``created_at=now`` parameter
 preserves the cross-table timestamp invariant that the original
 inline insert relied on — see B1 in the Phase 1 plan-review JSON
 for context.)
 
-The other two sites (`~403` and `~834`) require ONLY the addition of
-`provenance="session_seed",` to their existing `.values(...)`
-clauses — no other restructuring.
+The other two sites (`~403` and `~834`) stay inline, but they are not
+"provenance only": they also enter `_session_write_lock` around their
+SELECT-MAX/INSERT regions, and `save_composition_state` must use the
+shared `_enveloped_state_column` helper instead of keeping a private
+method-local duplicate.
 
 - [ ] **Step 4: Run tests to verify pass**
 
@@ -3210,6 +3301,7 @@ def test_persist_compose_turn_happy_path(service):
             ),
         ),
         parent_composition_state_id=None,
+        expected_current_state_id=None,
         writer_principal="compose_loop",
         plugin_crash_pending=False,
     )
@@ -3264,6 +3356,7 @@ def test_persist_compose_turn_zero_tool_rows(service):
         redacted_assistant_tool_calls=(),
         redacted_tool_rows=(),
         parent_composition_state_id=None,
+        expected_current_state_id=None,
         writer_principal="compose_loop",
         plugin_crash_pending=False,
     )
@@ -3314,6 +3407,7 @@ def test_persist_compose_turn_persists_raw_content(service):
             _RedactedToolRow(tool_call_id="tc_1", content="{}", composition_state_payload=None),
         ),
         parent_composition_state_id=None,
+        expected_current_state_id=None,
         writer_principal="compose_loop",
         plugin_crash_pending=False,
     )
@@ -3360,17 +3454,17 @@ def test_persist_compose_turn_rejects_cross_session_parent_state(service):
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s_A")
         _make_session(conn, session_id="s_B")
-        service._acquire_session_advisory_lock(conn, "s_A")
-        state_a_id = service._insert_composition_state(
-            conn,
-            session_id="s_A",
-            # B1: no ``version=`` — helper allocates under the lock.
-            payload=_StatePayload(
-                data=CompositionStateData(),
-                derived_from_state_id=None,
-            ),
-            provenance="session_seed",
-        )
+        with service._session_write_lock(conn, "s_A"):
+            state_a_id = service._insert_composition_state(
+                conn,
+                session_id="s_A",
+                # B1: no ``version=`` — helper allocates under the lock.
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
+                provenance="session_seed",
+            )
 
     # Now try to persist a turn on session B that references session A's state.
     # The guard MUST fire BEFORE the FK does and produce the precise
@@ -3386,6 +3480,7 @@ def test_persist_compose_turn_rejects_cross_session_parent_state(service):
             redacted_assistant_tool_calls=(),
             redacted_tool_rows=(),
             parent_composition_state_id=state_a_id,
+            expected_current_state_id=None,
             writer_principal="compose_loop",
             plugin_crash_pending=False,
         )
@@ -3414,17 +3509,17 @@ def test_persist_compose_turn_accepts_valid_same_session_parent_state(service):
 
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s_C")
-        service._acquire_session_advisory_lock(conn, "s_C")
-        state_c_id = service._insert_composition_state(
-            conn,
-            session_id="s_C",
-            # B1: no ``version=`` — helper allocates under the lock.
-            payload=_StatePayload(
-                data=CompositionStateData(),
-                derived_from_state_id=None,
-            ),
-            provenance="session_seed",
-        )
+        with service._session_write_lock(conn, "s_C"):
+            state_c_id = service._insert_composition_state(
+                conn,
+                session_id="s_C",
+                # B1: no ``version=`` — helper allocates under the lock.
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
+                provenance="session_seed",
+            )
 
     outcome = service.persist_compose_turn(
         session_id="s_C",
@@ -3432,6 +3527,7 @@ def test_persist_compose_turn_accepts_valid_same_session_parent_state(service):
         redacted_assistant_tool_calls=(),
         redacted_tool_rows=(),
         parent_composition_state_id=state_c_id,
+        expected_current_state_id=state_c_id,
         writer_principal="compose_loop",
         plugin_crash_pending=False,
     )
@@ -3448,12 +3544,105 @@ def test_persist_compose_turn_accepts_valid_same_session_parent_state(service):
         assert assistant_row.composition_state_id == state_c_id
 
 
+def test_persist_compose_turn_rejects_stale_expected_current_state(service):
+    """A compose turn may not persist if the session's current state
+    changed while the LLM call was in flight.
+
+    The session-write lock serializes the DB mutation, but the intent
+    check is what prevents a compose based on state A from becoming the
+    newest state after a concurrent revert/save already made state B
+    current. Closes the compose-vs-revert race identified in plan review.
+    """
+    from elspeth.web.sessions._persist_payload import _StatePayload
+    from elspeth.web.sessions.protocol import CompositionStateData
+    from elspeth.web.sessions.service import StaleComposeStateError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_stale")
+        with service._session_write_lock(conn, "s_stale"):
+            stale_state_id = service._insert_composition_state(
+                conn,
+                session_id="s_stale",
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
+                provenance="session_seed",
+            )
+            current_state_id = service._insert_composition_state(
+                conn,
+                session_id="s_stale",
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=stale_state_id,
+                ),
+                provenance="session_seed",
+            )
+
+    with pytest.raises(
+        StaleComposeStateError,
+        match=r"current composition state changed.*expected=.*actual=",
+    ):
+        service.persist_compose_turn(
+            session_id="s_stale",
+            assistant_content="stale",
+            redacted_assistant_tool_calls=(),
+            redacted_tool_rows=(),
+            parent_composition_state_id=stale_state_id,
+            expected_current_state_id=stale_state_id,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+
+    with service._engine.begin() as conn:
+        rows = conn.execute(text(
+            "SELECT role FROM chat_messages WHERE session_id='s_stale'"
+        )).fetchall()
+        latest = conn.execute(text(
+            "SELECT id FROM composition_states WHERE session_id='s_stale' "
+            "ORDER BY version DESC LIMIT 1"
+        )).scalar_one()
+    assert rows == []
+    assert latest == current_state_id
+
+
+def test_persist_compose_turn_accepts_matching_expected_current_state(service):
+    from elspeth.web.sessions._persist_payload import _StatePayload
+    from elspeth.web.sessions.protocol import CompositionStateData
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="s_current_ok")
+        with service._session_write_lock(conn, "s_current_ok"):
+            current_state_id = service._insert_composition_state(
+                conn,
+                session_id="s_current_ok",
+                payload=_StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
+                provenance="session_seed",
+            )
+
+    outcome = service.persist_compose_turn(
+        session_id="s_current_ok",
+        assistant_content="ok",
+        redacted_assistant_tool_calls=(),
+        redacted_tool_rows=(),
+        parent_composition_state_id=None,
+        expected_current_state_id=current_state_id,
+        writer_principal="compose_loop",
+        plugin_crash_pending=False,
+    )
+    assert outcome.assistant_id is not None
+    assert outcome.unwind_audit_failed is False
+
+
 @pytest.mark.asyncio
 async def test_persist_compose_turn_refuses_async_invocation(service):
     """Calling ``persist_compose_turn`` directly from a coroutine
     must raise RuntimeError. Production callers (Phase 3 compose
-    loop) wrap via ``await self._run_sync(persist_compose_turn,
-    ...)`` which dispatches to a worker thread; the body's
+    loop) use ``await service.persist_compose_turn_async(...)``, which
+    dispatches to a worker thread; the body's
     synchronous SQLAlchemy transaction would otherwise block the
     event loop.
 
@@ -3472,24 +3661,25 @@ async def test_persist_compose_turn_refuses_async_invocation(service):
             redacted_assistant_tool_calls=(),
             redacted_tool_rows=(),
             parent_composition_state_id=None,
+            expected_current_state_id=None,
             writer_principal="compose_loop",
             plugin_crash_pending=False,
         )
 
 
 @pytest.mark.asyncio
-async def test_persist_compose_turn_via_run_sync_succeeds_from_async(service):
-    """Companion to the async-guard test: when correctly dispatched
-    via ``self._run_sync``, persist_compose_turn runs in a worker
-    thread (no running loop in that thread) and the guard passes.
-    This exercises the production-correct call shape."""
+async def test_persist_compose_turn_async_protocol_dispatch_succeeds_from_async(service):
+    """Companion to the async-guard test: production callers use the
+    protocol-public async dispatcher, not the concrete sync primitive
+    and not a concrete ``_run_sync`` bridge. The dispatcher runs the sync
+    primitive in a worker thread (no running loop in that thread), so the
+    guard passes while routes keep depending on SessionServiceProtocol."""
     from elspeth.web.sessions._persist_payload import _RedactedToolRow
 
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s_run_sync")
 
-    outcome = await service._run_sync(
-        service.persist_compose_turn,
+    outcome = await service.persist_compose_turn_async(
         session_id="s_run_sync",
         assistant_content="ok",
         redacted_assistant_tool_calls=(
@@ -3497,6 +3687,7 @@ async def test_persist_compose_turn_via_run_sync_succeeds_from_async(service):
         ),
         redacted_tool_rows=(_RedactedToolRow("tc_run_sync", "{}", None),),
         parent_composition_state_id=None,
+        expected_current_state_id=None,
         writer_principal="compose_loop",
         plugin_crash_pending=False,
     )
@@ -3507,7 +3698,7 @@ async def test_persist_compose_turn_via_run_sync_succeeds_from_async(service):
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k "happy_path or zero_tool_rows or persists_raw_content or rejects_cross_session_parent_state or accepts_valid_same_session_parent_state or refuses_async_invocation or via_run_sync_succeeds_from_async"
+.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k "happy_path or zero_tool_rows or persists_raw_content or rejects_cross_session_parent_state or accepts_valid_same_session_parent_state or rejects_stale_expected_current_state or accepts_matching_expected_current_state or refuses_async_invocation or async_protocol_dispatch_succeeds_from_async"
 ```
 Expected: FAIL — `persist_compose_turn` does not yet exist (or, after Step 3, a partial implementation is missing the `raw_content` plumbing that
 `test_persist_compose_turn_persists_raw_content` asserts).
@@ -3517,6 +3708,10 @@ Expected: FAIL — `persist_compose_turn` does not yet exist (or, after Step 3, 
 In `src/elspeth/web/sessions/service.py`, add the method (full body in spec §5.2.2; success-path implementation here, error-path tasks later):
 
 ```python
+class StaleComposeStateError(RuntimeError):
+    """Compose result was based on a no-longer-current composition state."""
+
+
 def persist_compose_turn(
     self,
     *,
@@ -3526,15 +3721,18 @@ def persist_compose_turn(
     redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
     redacted_tool_rows: tuple[_RedactedToolRow, ...],
     parent_composition_state_id: str | None,
+    expected_current_state_id: str | None,
     writer_principal: str,
     plugin_crash_pending: bool,
 ) -> _AuditOutcome:
     """Synchronous, single-transaction persistence of one compose turn.
 
-    Spec §5.2.2. MUST be invoked from a worker thread via
-    ``await self._run_sync(self.persist_compose_turn, ...)``. Calling
-    it directly from async land would block the event loop because
-    the body opens a synchronous SQLAlchemy transaction.
+    Spec §5.2.2. Concrete sync primitive. Production async callers MUST
+    invoke ``await self.persist_compose_turn_async(...)`` through
+    ``SessionServiceProtocol``; that dispatcher uses ``_run_sync`` under
+    the hood. Calling this sync primitive directly from async land would
+    block the event loop because the body opens a synchronous SQLAlchemy
+    transaction.
 
     The guard below uses ``asyncio.get_running_loop()`` to detect
     misuse: if there is a running loop in the calling thread, we are
@@ -3553,7 +3751,7 @@ def persist_compose_turn(
     else:
         raise RuntimeError(
             "persist_compose_turn must be dispatched via "
-            "await self._run_sync(self.persist_compose_turn, ...) — "
+            "await self.persist_compose_turn_async(...) — "
             "calling it directly from a coroutine blocks the event "
             "loop on synchronous DB I/O."
         )
@@ -3578,6 +3776,21 @@ def persist_compose_turn(
                     state_id=parent_composition_state_id,
                     expected_session_id=session_id,
                     caller="persist_compose_turn",
+                )
+
+            current_state_id = conn.execute(
+                select(models.composition_states_table.c.id)
+                .where(models.composition_states_table.c.session_id == session_id)
+                .order_by(models.composition_states_table.c.version.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if current_state_id != expected_current_state_id:
+                raise StaleComposeStateError(
+                    "persist_compose_turn: current composition state changed "
+                    f"for session_id={session_id!r}; "
+                    f"expected={expected_current_state_id!r}, "
+                    f"actual={current_state_id!r}. Refusing to persist a "
+                    "compose result based on a stale state."
                 )
 
             base_seq = self._reserve_sequence_range(
@@ -3650,12 +3863,14 @@ def persist_compose_turn(
         )
 ```
 
-- [ ] **Step 3b: Expose the primitive on `SessionServiceProtocol`**
+- [ ] **Step 3b: Expose only the async dispatcher on `SessionServiceProtocol`**
 
 In `src/elspeth/web/sessions/protocol.py`, add the protocol method in
 the same task that introduces `SessionServiceImpl.persist_compose_turn`.
 This keeps the overview's public contract true for Phase 1 and prevents
-Phase 3 from reaching into the concrete service type.
+Phase 3 from reaching into the concrete service type or its `_run_sync`
+bridge. The sync `SessionServiceImpl.persist_compose_turn` remains
+concrete-only and guarded against direct async-loop use.
 
 Avoid a runtime circular import: Task 6's `_persist_payload.py` imports
 `CompositionStateData` from `protocol.py`, so `protocol.py` must import
@@ -3671,7 +3886,7 @@ if TYPE_CHECKING:
 class SessionServiceProtocol(Protocol):
     # ... existing methods ...
 
-    def persist_compose_turn(
+    async def persist_compose_turn_async(
         self,
         *,
         session_id: str,
@@ -3680,9 +3895,41 @@ class SessionServiceProtocol(Protocol):
         redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
         redacted_tool_rows: tuple[_RedactedToolRow, ...],
         parent_composition_state_id: str | None,
+        expected_current_state_id: str | None,
         writer_principal: str,
         plugin_crash_pending: bool,
     ) -> _AuditOutcome: ...
+```
+
+In `SessionServiceImpl`, add the matching async dispatcher with the same
+signature:
+
+```python
+async def persist_compose_turn_async(
+    self,
+    *,
+    session_id: str,
+    assistant_content: str,
+    raw_content: str | None = None,
+    redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
+    redacted_tool_rows: tuple[_RedactedToolRow, ...],
+    parent_composition_state_id: str | None,
+    expected_current_state_id: str | None,
+    writer_principal: str,
+    plugin_crash_pending: bool,
+) -> _AuditOutcome:
+    return await self._run_sync(
+        self.persist_compose_turn,
+        session_id=session_id,
+        assistant_content=assistant_content,
+        raw_content=raw_content,
+        redacted_assistant_tool_calls=redacted_assistant_tool_calls,
+        redacted_tool_rows=redacted_tool_rows,
+        parent_composition_state_id=parent_composition_state_id,
+        expected_current_state_id=expected_current_state_id,
+        writer_principal=writer_principal,
+        plugin_crash_pending=plugin_crash_pending,
+    )
 ```
 
 If `from __future__ import annotations` is ever removed from this file,
@@ -3691,10 +3938,10 @@ the annotation strategy must be revisited before landing the change.
 - [ ] **Step 4: Run tests to verify pass**
 
 ```bash
-.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k "happy_path or zero_tool_rows or persists_raw_content or rejects_cross_session_parent_state or accepts_valid_same_session_parent_state or refuses_async_invocation or via_run_sync_succeeds_from_async"
+.venv/bin/python -m pytest tests/unit/web/sessions/test_persist_compose_turn.py -v -k "happy_path or zero_tool_rows or persists_raw_content or rejects_cross_session_parent_state or accepts_valid_same_session_parent_state or rejects_stale_expected_current_state or accepts_matching_expected_current_state or refuses_async_invocation or async_protocol_dispatch_succeeds_from_async"
 .venv/bin/python -m mypy src/elspeth/web/sessions/protocol.py src/elspeth/web/sessions/service.py
 ```
-Expected: PASS for all seven Task-11 tests:
+Expected: PASS for all nine Task-11 tests:
 - `test_persist_compose_turn_happy_path`
 - `test_persist_compose_turn_zero_tool_rows` (W10a fix — pins the
   assistant-only call shape with empty `redacted_tool_rows` and empty
@@ -3704,8 +3951,10 @@ Expected: PASS for all seven Task-11 tests:
   it on the assistant row)
 - `test_persist_compose_turn_rejects_cross_session_parent_state`
 - `test_persist_compose_turn_accepts_valid_same_session_parent_state`
+- `test_persist_compose_turn_rejects_stale_expected_current_state`
+- `test_persist_compose_turn_accepts_matching_expected_current_state`
 - `test_persist_compose_turn_refuses_async_invocation`
-- `test_persist_compose_turn_via_run_sync_succeeds_from_async`
+- `test_persist_compose_turn_async_protocol_dispatch_succeeds_from_async`
 
 - [ ] **Step 5: Commit**
 
@@ -3742,6 +3991,7 @@ def test_persist_compose_turn_integrity_error_propagates(service):
         redacted_assistant_tool_calls=({"id": "dup", "function": {"name": "x"}},),
         redacted_tool_rows=(_RedactedToolRow("dup", "{}", None),),
         parent_composition_state_id=None,
+        expected_current_state_id=None,
         writer_principal="compose_loop",
         plugin_crash_pending=False,
     )
@@ -3760,6 +4010,7 @@ def test_persist_compose_turn_integrity_error_propagates(service):
             redacted_assistant_tool_calls=({"id": "dup", "function": {"name": "x"}},),
             redacted_tool_rows=(_RedactedToolRow("dup", "{}", None),),
             parent_composition_state_id=None,
+            expected_current_state_id=None,
             writer_principal="compose_loop",
             plugin_crash_pending=False,
         )
@@ -3846,6 +4097,7 @@ def test_persist_compose_turn_integrity_error_matrix(
             _RedactedToolRow(f"{scenario_name}_tc", "{}", None),
         ),
         "parent_composition_state_id": None,
+        "expected_current_state_id": None,
         "writer_principal": "compose_loop",
         "plugin_crash_pending": False,
     }
@@ -3894,6 +4146,7 @@ def test_persist_compose_turn_rejects_missing_parent_state_before_insert(service
                 _RedactedToolRow("missing_parent_tc", "{}", None),
             ),
             parent_composition_state_id="doesnotexist",
+            expected_current_state_id=None,
             writer_principal="compose_loop",
             plugin_crash_pending=False,
         )
@@ -3926,9 +4179,8 @@ def test_persist_compose_turn_state_versions_do_not_collide(service):
     This replacement test pins the post-B1 behaviour: serial successful
     persists allocate contiguous versions and never increment the
     integrity counter for the version-collision constraint. The
-    concurrent / cross-thread version-allocation contract is exercised
-    on PostgreSQL by Task 16's
-    ``test_concurrent_persist_compose_turn_versions_contiguous``."""
+    concurrent same-state compose contract is exercised on PostgreSQL by
+    Task 16's stale-rejection regression."""
     from elspeth.web.sessions._persist_payload import _RedactedToolRow, _StatePayload
     from elspeth.web.sessions.protocol import CompositionStateData
     from elspeth.web.sessions.telemetry import observed_value
@@ -3953,9 +4205,16 @@ def test_persist_compose_turn_state_versions_do_not_collide(service):
             ),
         ),
         parent_composition_state_id=None,
+        expected_current_state_id=None,
         writer_principal="compose_loop",
         plugin_crash_pending=False,
     )
+
+    with service._engine.begin() as conn:
+        first_state_id = conn.execute(text(
+            "SELECT id FROM composition_states "
+            "WHERE session_id='s_ver' ORDER BY version DESC LIMIT 1"
+        )).scalar_one()
 
     # Second turn — pre-B1 this would have collided on
     # uq_composition_state_version because the test supplied
@@ -3975,6 +4234,7 @@ def test_persist_compose_turn_state_versions_do_not_collide(service):
             ),
         ),
         parent_composition_state_id=None,
+        expected_current_state_id=first_state_id,
         writer_principal="compose_loop",
         plugin_crash_pending=False,
     )
@@ -4181,6 +4441,7 @@ def test_audit_fail_no_plugin_crash_raises_audit_integrity_error(service):
                 redacted_assistant_tool_calls=(),
                 redacted_tool_rows=(),
                 parent_composition_state_id=None,
+                expected_current_state_id=None,
                 writer_principal="compose_loop",
                 plugin_crash_pending=False,
             )
@@ -4225,6 +4486,7 @@ def test_audit_fail_during_plugin_crash_records_unwind_failure(service):
             redacted_assistant_tool_calls=(),
             redacted_tool_rows=(),
             parent_composition_state_id=None,
+            expected_current_state_id=None,
             writer_principal="compose_loop",
             plugin_crash_pending=True,
         )
@@ -4440,6 +4702,19 @@ The test must create or load an actual `chat_messages.role='audit'`
 row through the service/database path before calling the route helper;
 do not satisfy this requirement by testing only a synthetic in-memory
 `ChatMessageRecord` list.
+
+The filtering predicate must treat `role="audit"` as internal even when
+its envelope looks like a tool/audit breadcrumb:
+
+```python
+if message.role == "audit":
+    return True
+if message.role != "tool":
+    return False
+```
+
+Update both the public route response path and the prompt-history helper;
+fixing only one leaves either API leakage or hidden prompt pollution.
 
 ### 14.5 Test-suite call-site migration
 
@@ -5392,6 +5667,7 @@ def test_backward_direction_holds_after_successful_persist(service):
             ),
         ),
         parent_composition_state_id=None,
+        expected_current_state_id=None,
         writer_principal="compose_loop",
         plugin_crash_pending=False,
     )
@@ -5424,9 +5700,15 @@ def test_backward_direction_holds_after_integrity_error_rollback(service):
             ),
         ),
         parent_composition_state_id=None,
+        expected_current_state_id=None,
         writer_principal="compose_loop",
         plugin_crash_pending=False,
     )
+    with service._engine.begin() as conn:
+        first_state_id = conn.execute(text(
+            "SELECT id FROM composition_states "
+            "WHERE session_id='b2' ORDER BY version DESC LIMIT 1"
+        )).scalar_one()
     # Second turn deliberately reuses tc_x to trigger the partial
     # unique index ``uq_chat_messages_tool_call_id`` (added in Task 2).
     with pytest.raises(
@@ -5452,6 +5734,7 @@ def test_backward_direction_holds_after_integrity_error_rollback(service):
                 ),
             ),
             parent_composition_state_id=None,
+            expected_current_state_id=first_state_id,
             writer_principal="compose_loop",
             plugin_crash_pending=False,
         )
@@ -5513,6 +5796,7 @@ def test_get_messages_orders_assistant_before_tool_rows_within_one_turn(service)
             _RedactedToolRow("tc_c", "{}", _StatePayload(data=CompositionStateData(), derived_from_state_id=None)),
         ),
         parent_composition_state_id=None,
+        expected_current_state_id=None,
         writer_principal="compose_loop",
         plugin_crash_pending=False,
     )
@@ -5560,18 +5844,21 @@ git commit -m "test(integration): schema-level INV-AUDIT-AHEAD backward-directio
 - Create: `tests/integration/web/test_compose_loop_concurrent_sessions.py`
 - Modify: `pyproject.toml` — register the `testcontainer` pytest marker AND add `testcontainers[postgres]` to the dev optional-dependencies group.
 - Modify: `uv.lock` — required because CI uses frozen dependency sync.
-- Modify: `.github/workflows/ci.yaml` — add a Docker-enabled testcontainer lane/step.
+- Modify: `.github/workflows/ci.yaml` — add a Docker-enabled testcontainer lane/step, update every explicit non-Docker pytest marker expression to exclude `testcontainer`, and include the Docker lane in the aggregate `ci-success` result check.
 
-**Why a dedicated marker.** The default test invocation
+**Why a dedicated marker.** The default local test invocation
 (`pytest tests/`) is configured with
 `addopts = ["-m", "not slow and not stress and not performance"]`
 in `pyproject.toml` and does NOT auto-skip Docker-required tests.
-Without registering a `testcontainer` marker AND adding it to the
-`addopts` deselect list, every developer without Docker on their
-workstation gets a noisy fail. With the marker registered (and the
-default `addopts` updated to deselect it) the test runs in CI's
-Docker-enabled lane and is opt-in locally via `pytest -m
-testcontainer`. Closes synthesised review findings M8 / Q-F-07.
+The GitHub Actions workflow also contains explicit `pytest -m "not slow
+and not stress and not performance"` commands, so changing only
+`pyproject.toml` is insufficient. Without registering a `testcontainer`
+marker AND adding it to the default deselect list and every non-Docker
+CI marker expression, every developer or CI job without Docker gets a
+noisy fail. With the marker registered (and the default/CI non-Docker
+selectors updated to deselect it) the test runs in CI's Docker-enabled
+lane and is opt-in locally via `pytest -m testcontainer`. Closes
+synthesised review findings M8 / Q-F-07.
 
 - [ ] **Step 1: Register the `testcontainer` marker and add the dependency**
 
@@ -5636,10 +5923,19 @@ Do not rely on the default unit/integration jobs: `addopts` deselects
 `testcontainer` by design. The lane must fail if PostgreSQL cannot be
 started through testcontainers. If this is implemented as a separate
 GitHub Actions job, add that job name to the aggregate `ci-success`
-job's `needs:` list in the same edit; otherwise branch protection can
-remain green while CL-PP-11 is red. If it is implemented as a step
-inside an existing job that already feeds `ci-success`, document that
-choice in the PR body.
+job's `needs:` list AND update the `ci-success` shell/script logic that
+checks `needs.<job>.result` so a failed or skipped testcontainer job
+fails the aggregate gate; otherwise branch protection can remain green
+while CL-PP-11 is red. If it is implemented as a step inside an existing
+job that already feeds `ci-success`, update that job's explicit marker
+expressions to:
+
+```bash
+-m "not slow and not stress and not performance and not testcontainer"
+```
+
+Do this for both coverage and non-coverage test commands. Document the
+chosen CI shape in the PR body.
 
 - [ ] **Step 3: Write the test**
 
@@ -5710,34 +6006,35 @@ def service(pg_engine, tmp_path):
 import traceback
 
 
-def _worker(service, session_id: str, n: int, errors: list, tracebacks: list) -> None:
+def _worker(
+    service,
+    session_id: str,
+    writer_id: str,
+    n: int,
+    errors: list,
+    tracebacks: list,
+) -> None:
     """Concurrent-write worker. Captures the traceback alongside any
     exception so test failures are diagnosable rather than just
     showing the exception class. Closes synthesised review nit P-N-2."""
     try:
         for i in range(n):
+            tool_call_id = f"{session_id}_{writer_id}_tc_{i}"
             service.persist_compose_turn(
                 session_id=session_id,
                 assistant_content=f"turn {i}",
                 redacted_assistant_tool_calls=(
-                    {"id": f"{session_id}_tc_{i}", "function": {"name": "f"}},
+                    {"id": tool_call_id, "function": {"name": "f"}},
                 ),
                 redacted_tool_rows=(
                     _RedactedToolRow(
-                        f"{session_id}_tc_{i}",
+                        tool_call_id,
                         "{}",
-                        # B1 (Phase 1 plan-review synthesis): no
-                        # ``version=`` kwarg. The helper allocates
-                        # version under the session-scoped advisory
-                        # lock; supplying it from caller code would
-                        # reintroduce the dual-allocator race.
-                        _StatePayload(
-                            data=CompositionStateData(),
-                            derived_from_state_id=None,
-                        ),
+                        None,
                     ),
                 ),
                 parent_composition_state_id=None,
+                expected_current_state_id=None,
                 writer_principal="compose_loop",
                 plugin_crash_pending=False,
             )
@@ -5768,8 +6065,8 @@ def test_concurrent_DIFFERENT_sessions_do_not_deadlock(service):
     tracebacks: list[str] = []
 
     threads = [
-        threading.Thread(target=_worker, args=(service, "s_a", 5, errors, tracebacks)),
-        threading.Thread(target=_worker, args=(service, "s_b", 5, errors, tracebacks)),
+        threading.Thread(target=_worker, args=(service, "s_a", "writer_a", 5, errors, tracebacks)),
+        threading.Thread(target=_worker, args=(service, "s_b", "writer_b", 5, errors, tracebacks)),
     ]
     for t in threads:
         t.start()
@@ -5824,12 +6121,12 @@ def test_concurrent_SAME_session_serialises_via_advisory_lock(service):
     threads = [
         threading.Thread(
             target=_worker,
-            args=(service, "s_shared", 10, errors, tracebacks),
+            args=(service, "s_shared", "writer_A", 10, errors, tracebacks),
             name="writer_A",
         ),
         threading.Thread(
             target=_worker,
-            args=(service, "s_shared", 10, errors, tracebacks),
+            args=(service, "s_shared", "writer_B", 10, errors, tracebacks),
             name="writer_B",
         ),
     ]
@@ -5945,12 +6242,15 @@ def test_cross_allocator_save_state_serialises_with_persist_turn(service):
     under the audit-grade doctrine.)
 
     Post-B3, ``save_composition_state`` (and ``set_active_state``)
-    also enter ``_session_write_lock`` before their SELECT MAX. Two concurrent
-    callers — one ``save_composition_state``, one ``persist_compose_turn``,
-    both targeting the same session — must serialise on the lock and
-    produce sequential, contiguous version numbers in
-    ``composition_states`` with NO ``IntegrityError`` raised on either
-    path.
+    also enter ``_session_write_lock`` before their SELECT MAX. The
+    persist side also has the stale-current-state guard introduced in
+    Task 11: if a save wins after the persist worker reads the current
+    state but before it acquires the write lock, ``persist_compose_turn``
+    rejects with ``StaleComposeStateError``. That is the correct
+    compose-vs-revert disposition and must NOT be counted as an audit
+    integrity failure. Successful writers must still leave sequential,
+    contiguous version numbers in ``composition_states`` with NO
+    ``IntegrityError`` raised on either path.
 
     This test would have failed pre-B3 by either crashing one path
     with ``IntegrityError`` or, worse, by silently incrementing the
@@ -5959,6 +6259,8 @@ def test_cross_allocator_save_state_serialises_with_persist_turn(service):
     """
     from elspeth.web.sessions._persist_payload import _RedactedToolRow, _StatePayload
     from elspeth.web.sessions.protocol import CompositionStateData
+    from elspeth.web.sessions.service import StaleComposeStateError
+    from elspeth.web.sessions.telemetry import observed_value
 
     session_uuid = uuid.uuid4()
     sid = str(session_uuid)
@@ -5966,9 +6268,13 @@ def test_cross_allocator_save_state_serialises_with_persist_turn(service):
         _make_session(conn, session_id=sid)
 
     errors: list[Exception] = []
+    stale_rejections: list[StaleComposeStateError] = []
     tracebacks: list[str] = []
     persist_count = 5
     save_count = 5
+    starting_counter = observed_value(
+        service._telemetry.tool_row_integrity_violation_total
+    )
 
     def _persist_worker():
         # B2 (Phase 1 plan-review synthesis): pre-B2 this loop passed
@@ -5981,19 +6287,28 @@ def test_cross_allocator_save_state_serialises_with_persist_turn(service):
         # is omitted entirely (this test exercises the
         # cross-allocator race, not the redaction-attribution path).
         try:
-            for _ in range(persist_count):
+            for i in range(persist_count):
+                with service._engine.begin() as conn:
+                    expected_current_state_id = conn.execute(text(
+                        "SELECT id FROM composition_states "
+                        "WHERE session_id = :sid ORDER BY version DESC LIMIT 1"
+                    ), {"sid": sid}).scalar_one_or_none()
+                tool_call_id = f"tc_persist_{i}"
                 service.persist_compose_turn(
                     session_id=sid,
                     assistant_content="ok",
-                    redacted_assistant_tool_calls=({"id": "tc_x", "function": {"name": "f"}},),
+                    redacted_assistant_tool_calls=({"id": tool_call_id, "function": {"name": "f"}},),
                     redacted_tool_rows=(
                         # B1: no ``version=``; helper allocates under lock.
-                        _RedactedToolRow("tc_x", "{}", _StatePayload(data=CompositionStateData(), derived_from_state_id=None)),
+                        _RedactedToolRow(tool_call_id, "{}", _StatePayload(data=CompositionStateData(), derived_from_state_id=None)),
                     ),
                     parent_composition_state_id=None,
+                    expected_current_state_id=expected_current_state_id,
                     writer_principal="compose_loop",
                     plugin_crash_pending=False,
                 )
+        except StaleComposeStateError as e:
+            stale_rejections.append(e)
         except Exception as e:
             import traceback
             errors.append(e)
@@ -6027,6 +6342,9 @@ def test_cross_allocator_save_state_serialises_with_persist_turn(service):
         f"cross-allocator race not serialised; errors:\n"
         f"{errors}\ntracebacks:\n" + "\n---\n".join(tracebacks)
     )
+    assert observed_value(
+        service._telemetry.tool_row_integrity_violation_total
+    ) == starting_counter
 
     # Sanity: every allocated version is unique and contiguous from 1.
     with service._engine.begin() as conn:
@@ -6037,52 +6355,34 @@ def test_cross_allocator_save_state_serialises_with_persist_turn(service):
                 "WHERE session_id = :sid ORDER BY version"
             ), {"sid": sid})
         )
-    # persist_count assistant turns × 1 state per turn (the redacted_tool_rows
-    # _StatePayload) + save_count saves = 5 + 5 = 10 versions.
-    assert versions == list(range(1, 11)), (
+    # Successful writers only: stale compose attempts roll back before
+    # inserting state rows. Whatever succeeded must still be contiguous
+    # from 1 with no duplicate/gap evidence of allocator races.
+    assert versions == list(range(1, len(versions) + 1)), (
         f"cross-allocator versions not contiguous: {versions}"
     )
+    assert len(versions) + len(stale_rejections) >= save_count
 
 
-def test_concurrent_persist_compose_turn_versions_contiguous(service):
-    """B1 (Phase 1 plan-review synthesis): two concurrent
-    ``persist_compose_turn`` calls for the same session must allocate
-    contiguous ``composition_states.version`` values WITHOUT raising
-    ``IntegrityError`` on either path.
+def test_concurrent_persist_compose_turn_same_state_stale_rejects_without_integrity_alert(service):
+    """B1 plus stale-state guard: two concurrent state-changing compose
+    persists based on the same current state must not fabricate a Tier-1
+    integrity alert.
 
-    Pre-B1 the contract was unsafe: ``_StatePayload`` carried a
-    caller-supplied ``version`` field, so two compose turns that read
-    ``state.version = N`` in async land before either acquired the
-    session write lock could both serialise into
-    ``_insert_composition_state`` with ``version = N + 1``. The loser
-    hit ``uq_composition_state_version`` and the locked path's
-    ``IntegrityError`` handler classified that as a Tier-1
-    audit-integrity violation — fabricating a Tier-1 alert from a
-    benign contention loss. SLO threshold for
-    ``tool_row_integrity_violation_total`` is 0; under ELSPETH's
-    auditability standard a fabricated Tier-1 alert is
-    evidence-tampering-class harm.
+    Pre-B1, both writers could try to insert the same caller-supplied
+    ``composition_states.version`` and one would hit
+    ``uq_composition_state_version``. Post-B1 the helper allocates the
+    version under the lock, but Task 11's stale-current-state guard adds
+    the stronger user-intent rule: after the first writer creates the new
+    current state, the second writer's ``expected_current_state_id=None``
+    is stale and should be rejected with ``StaleComposeStateError`` before
+    it inserts any audit rows. The integrity counter must not move.
 
-    Post-B1 the contract is structural: ``_StatePayload`` carries no
-    ``version`` field, and ``_insert_composition_state`` allocates it
-    inside the session-write-locked transaction via
-    ``SELECT COALESCE(MAX(version), 0) + 1 FROM composition_states
-    WHERE session_id = :sid``. The SELECT-MAX-then-INSERT sequence is
-    atomic against every other writer for this session — the second
-    writer blocks on the lock, then sees the first writer's committed
-    MAX, and allocates the next contiguous version. Neither writer
-    raises; the counter does not increment.
-
-    This test is the canonical regression for the B1 contract on
-    PostgreSQL. The serial-allocation case is covered by Task 10's
-    ``test_insert_composition_state_allocates_contiguous_versions``;
-    the cross-allocator case (mixed ``persist_compose_turn`` and
-    ``save_composition_state``) is covered by
-    ``test_cross_allocator_save_state_serialises_with_persist_turn``
-    above. This test specifically pins the ``persist_compose_turn``
-    vs ``persist_compose_turn`` race that B1 was filed against.
-
-    Closes B1 from the Phase 1 plan-review synthesis."""
+    Closes B1 and the compose-vs-revert stale-state race from the Phase 1
+    plan-review synthesis."""
+    from elspeth.web.sessions._persist_payload import _RedactedToolRow, _StatePayload
+    from elspeth.web.sessions.protocol import CompositionStateData
+    from elspeth.web.sessions.service import StaleComposeStateError
     from elspeth.web.sessions.telemetry import observed_value
 
     sid = "s_b1_concurrent"
@@ -6094,18 +6394,50 @@ def test_concurrent_persist_compose_turn_versions_contiguous(service):
     )
 
     errors: list[Exception] = []
+    stale_rejections: list[StaleComposeStateError] = []
     tracebacks: list[str] = []
-    turns_per_writer = 10
+    barrier = threading.Barrier(2)
+
+    def _stateful_worker(writer_id: str) -> None:
+        try:
+            barrier.wait(timeout=10)
+            tool_call_id = f"{sid}_{writer_id}_tc_0"
+            service.persist_compose_turn(
+                session_id=sid,
+                assistant_content="ok",
+                redacted_assistant_tool_calls=(
+                    {"id": tool_call_id, "function": {"name": "f"}},
+                ),
+                redacted_tool_rows=(
+                    _RedactedToolRow(
+                        tool_call_id,
+                        "{}",
+                        _StatePayload(
+                            data=CompositionStateData(),
+                            derived_from_state_id=None,
+                        ),
+                    ),
+                ),
+                parent_composition_state_id=None,
+                expected_current_state_id=None,
+                writer_principal="compose_loop",
+                plugin_crash_pending=False,
+            )
+        except StaleComposeStateError as exc:
+            stale_rejections.append(exc)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+            tracebacks.append(traceback.format_exc())
 
     threads = [
         threading.Thread(
-            target=_worker,
-            args=(service, sid, turns_per_writer, errors, tracebacks),
+            target=_stateful_worker,
+            args=("b1_writer_A",),
             name="b1_writer_A",
         ),
         threading.Thread(
-            target=_worker,
-            args=(service, sid, turns_per_writer, errors, tracebacks),
+            target=_stateful_worker,
+            args=("b1_writer_B",),
             name="b1_writer_B",
         ),
     ]
@@ -6114,13 +6446,13 @@ def test_concurrent_persist_compose_turn_versions_contiguous(service):
     for t in threads:
         t.join(timeout=30)
 
-    # B1: NO IntegrityError on either path. Pre-B1 this assertion would
-    # fail with uq_composition_state_version on roughly half the
-    # interleavings (the loser of every contended SELECT-MAX race).
+    # B1/stale-guard: NO IntegrityError on either path. The loser of the
+    # same-state race is a stale compose, not an audit-integrity event.
     assert not errors, (
         f"B1 regression: dual-allocator race not closed. errors:\n"
         f"{errors}\ntracebacks:\n" + "\n---\n".join(tracebacks)
     )
+    assert len(stale_rejections) == 1
 
     # B1: the integrity-violation counter MUST NOT have moved. Any
     # increment here is a fabricated Tier-1 alert (SLO threshold = 0).
@@ -6133,9 +6465,9 @@ def test_concurrent_persist_compose_turn_versions_contiguous(service):
         "evidence-tampering-class harm under ELSPETH's audit doctrine."
     )
 
-    # Versions must be contiguous from 1 to 2*N. Each ``persist_compose_turn``
-    # call inserts exactly one ``composition_states`` row (one tool row
-    # per turn, each carrying a non-None ``composition_state_payload``).
+    # Exactly one writer commits; the stale writer rolls back before
+    # inserting any state or chat rows. The one committed state receives
+    # version 1.
     with service._engine.begin() as conn:
         versions = [
             row.version
@@ -6144,14 +6476,7 @@ def test_concurrent_persist_compose_turn_versions_contiguous(service):
                 "WHERE session_id = :sid ORDER BY version"
             ), {"sid": sid})
         ]
-    expected = list(range(1, 2 * turns_per_writer + 1))
-    assert versions == expected, (
-        f"B1 regression: per-session versions not contiguous; "
-        f"got {versions}, expected {expected}. Either the lock did "
-        "not serialise the SELECT-MAX-then-INSERT sequence (race) or "
-        "the COALESCE allocation lost its WHERE session_id filter "
-        "(global instead of per-session)."
-    )
+    assert versions == [1]
 ```
 
 - [ ] **Step 4: Apply the `testcontainer` marker to the whole module**
@@ -6277,7 +6602,7 @@ def test_per_turn_p95_under_250ms_with_8_tool_calls(service):
     This test measures the SYNC-ONLY path:
     ``service.persist_compose_turn(...)`` invoked directly. In
     production (Phase 3), the compose loop calls
-    ``await service._run_sync(persist_compose_turn, ...)``, which
+    ``await service.persist_compose_turn_async(...)``, which
     additionally pays for ``ThreadPoolExecutor`` allocation + the
     ``run_in_executor`` scheduling round-trip. Phase 3 must add a
     parallel test that exercises the full async dispatch path so
@@ -6288,6 +6613,8 @@ def test_per_turn_p95_under_250ms_with_8_tool_calls(service):
     with service._engine.begin() as conn:
         _make_session(conn, session_id="lat")
 
+    expected_current_state_id = None
+
     # Warm-up: discard timings.
     for turn in range(_WARMUP_TURNS):
         calls, rows = _build_turn(turn)
@@ -6297,9 +6624,15 @@ def test_per_turn_p95_under_250ms_with_8_tool_calls(service):
             redacted_assistant_tool_calls=calls,
             redacted_tool_rows=rows,
             parent_composition_state_id=None,
+            expected_current_state_id=expected_current_state_id,
             writer_principal="compose_loop",
             plugin_crash_pending=False,
         )
+        with service._engine.begin() as conn:
+            expected_current_state_id = conn.execute(text(
+                "SELECT id FROM composition_states "
+                "WHERE session_id='lat' ORDER BY version DESC LIMIT 1"
+            )).scalar_one()
 
     # Measured: 50 turns is enough for stable p95 via 20-quantiles
     # (the 19th quantile == p95).
@@ -6313,10 +6646,16 @@ def test_per_turn_p95_under_250ms_with_8_tool_calls(service):
             redacted_assistant_tool_calls=calls,
             redacted_tool_rows=rows,
             parent_composition_state_id=None,
+            expected_current_state_id=expected_current_state_id,
             writer_principal="compose_loop",
             plugin_crash_pending=False,
         )
         durations.append((time.perf_counter() - start) * 1000)
+        with service._engine.begin() as conn:
+            expected_current_state_id = conn.execute(text(
+                "SELECT id FROM composition_states "
+                "WHERE session_id='lat' ORDER BY version DESC LIMIT 1"
+            )).scalar_one()
 
     p95 = statistics.quantiles(durations, n=20)[18]  # 19th of 20 quantiles == p95
     assert p95 < 250, (
@@ -6525,22 +6864,39 @@ so downstream phases do not copy stale source-of-truth text:
 - §5.2.2: add `raw_content: str | None = None` to
   `persist_compose_turn` and plumb it to the assistant
   `_insert_chat_message` call.
+- §5.2.2: add `expected_current_state_id: str | None` to
+  `persist_compose_turn` and document the under-lock stale-state guard:
+  current latest state must equal the expected state or the helper raises
+  `StaleComposeStateError` before sequence/version allocation.
+- §5.2.2 / protocol handoff: public async callers use
+  `SessionServiceProtocol.persist_compose_turn_async(...)`; the sync
+  `SessionServiceImpl.persist_compose_turn(...)` stays concrete-only and
+  async-loop guarded.
+- §5.2.2 helper snippets: replace local `_enveloped(...)` assumptions
+  with the shared `_enveloped_state_column(...)` helper used by
+  `_insert_composition_state`, `save_composition_state`, and `fork_session`.
 - §5.2.2: update `_AuditOutcome` to the two-field shape
   `(assistant_id, unwind_audit_failed)` and make Tier-1 audit-write
   failures raise `AuditIntegrityError` inside the sync worker rather
   than returning a flag for the caller to re-raise.
+- §6.3: define `audit_access_log.session_id` with
+  `ForeignKey("sessions.id", ondelete="CASCADE")` (or the equivalent SQL
+  `ON DELETE CASCADE`) so `archive_session` can delete sessions that have
+  audit-grade view rows.
 - §5.7.1: replace the single-argument advisory-lock SQL with
   `_session_write_lock`: PostgreSQL uses
   `pg_advisory_xact_lock(ELSPETH_SESSIONS_LOCK_CLASSID,
-  hashtext(session_id))` and SQLite uses a
-  process-local per-session lock for the current single-process
-  staging deployment.
+  hashtext(session_id))` and SQLite uses a process-wide `(database_url,
+  session_id)` RLock for the current single-process staging deployment.
 - §8.6: replace bare `sqlalchemy.create_engine("sqlite:///:memory:")`
   + `metadata.create_all()` test guidance with
   `create_session_engine(..., poolclass=StaticPool)` +
   `initialize_session_schema()`.
 - §10 / OQ-4: replace row-level DELETE framing with the
   session-DB archive/delete/restart recreation procedure.
+- CI handoff text: document the `testcontainer` marker, explicit
+  non-Docker CI marker expressions, and `ci-success` `needs.<job>.result`
+  check for the Docker-enabled lane.
 
 - [ ] **Step 4: Update overview handoff text if needed**
 
@@ -6610,9 +6966,9 @@ in the collection output (`test_concurrent_DIFFERENT_sessions_do_not_deadlock`,
 `test_concurrent_SAME_session_serialises_via_advisory_lock`,
 `test_advisory_lock_actually_acquired_on_postgres`,
 `test_cross_allocator_save_state_serialises_with_persist_turn`, and
-`test_concurrent_persist_compose_turn_versions_contiguous` — the B1
-regression for the dual-``persist_compose_turn`` allocator race that
-the version-on-payload contract previously fabricated as a Tier-1
+`test_concurrent_persist_compose_turn_same_state_stale_rejects_without_integrity_alert`
+— the B1/stale regression for the dual-``persist_compose_turn`` race
+that the version-on-payload contract previously fabricated as a Tier-1
 violation). If the grep returns empty, the marker registration or
 `addopts` deselect is broken and the testcontainer lane is silently
 green for the wrong reason.
@@ -6629,14 +6985,16 @@ those); Step 2 is the Docker-free regression check.
 - [ ] **Step 3: Run mypy**
 
 ```bash
-.venv/bin/python -m mypy src/
+uv run mypy src/ tests/
 ```
-Expected: clean. Address any new errors before opening the PR.
+Expected: clean, matching the CI mypy scope. Address any new errors
+before opening the PR.
 
 - [ ] **Step 4: Run ruff**
 
 ```bash
-.venv/bin/python -m ruff check src/ tests/
+uv run ruff check src/ tests/ scripts/ examples/
+uv run ruff format --check src/ tests/ scripts/ examples/
 ```
 Expected: clean.
 
@@ -6656,13 +7014,13 @@ gh pr create --title "feat(composer): progress persistence phase 1 — data laye
 
 Phase 1 of composer-progress-persistence (spec §11):
 - Adds `writer_principal`, internal `audit` chat-message role, `provenance` discriminator, `audit_access_log` table
-- Adds `SessionServiceImpl.persist_compose_turn` synchronous primitive
-- Adds session write-lock + sequence-reservation helpers (PostgreSQL two-argument form `pg_advisory_xact_lock(ELSPETH_SESSIONS_LOCK_CLASSID, hashtext(session_id))`; SQLite process-local per-session lock for the current single-process deployment)
+- Adds concrete `SessionServiceImpl.persist_compose_turn` synchronous primitive plus protocol-public `SessionServiceProtocol.persist_compose_turn_async` dispatcher
+- Adds session write-lock + sequence-reservation helpers (PostgreSQL two-argument form `pg_advisory_xact_lock(ELSPETH_SESSIONS_LOCK_CLASSID, hashtext(session_id))`; SQLite process-wide `(database_url, session_id)` lock for the current single-process deployment)
 - Adds `src/elspeth/contracts/advisory_locks.py` registering `ELSPETH_SESSIONS_LOCK_CLASSID = 0x454C5350` as the on-the-wire-ABI classid namespace for the sessions DB lock — closes B3 from the Phase 1 plan-review synthesis (single-argument advisory locks share one cluster-wide namespace and were unsafe in shared-cluster deployments)
 - Adds telemetry counters
 - Updates all six existing `add_message` route/helper callers to pass `writer_principal` and use parented `tool` rows or unparented internal `audit` rows as appropriate (BREAKING)
 - Keeps `save_composition_state` / `set_active_state` inline with provenance + session-write-lock additions; refactors `fork_session` through `_insert_composition_state`
-- Removes the `version` field from `_StatePayload`; `_insert_composition_state` allocates `composition_states.version` under `_session_write_lock` via `SELECT COALESCE(MAX(version), 0) + 1 WHERE session_id = :sid` — closes B1/B3 from the Phase 1 plan-review synthesis (the dual-allocator race could fabricate Tier-1 audit-integrity violations from contention losses; SLO threshold is 0; under ELSPETH's auditability standard fabricated Tier-1 alerts are evidence-tampering-class harm)
+- Removes the `version` field from `_StatePayload`; `_insert_composition_state` allocates `composition_states.version` under `_session_write_lock` via `SELECT COALESCE(MAX(version), 0) + 1 WHERE session_id = :sid`; `persist_compose_turn(expected_current_state_id=...)` rejects stale compose results before allocation — closes B1/B3 and the compose-vs-revert stale-state race from the Phase 1 plan-review synthesis (the dual-allocator race could fabricate Tier-1 audit-integrity violations from contention losses; SLO threshold is 0; under ELSPETH's auditability standard fabricated Tier-1 alerts are evidence-tampering-class harm)
 
 ## Spec
 
@@ -6679,7 +7037,7 @@ Phase 1 of composer-progress-persistence (spec §11):
 - [OQ-1] elspeth-XXXXXXXX (chat_messages retention CLI extension)
 - [OQ-3] to be filed in Phase 3
 - [OQ-4] staging runbook documents session-DB archive/delete/restart recreation procedure (supersedes the original "pre-deploy DELETE" framing, which did not match codebase reality — no Alembic exists for the session DB)
-- [Spec alignment] `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md` amended for Phase 1 corrections: audit role, session_fork principal, no `_StatePayload.version`, `persist_compose_turn(raw_content)`, two-field `_AuditOutcome`, `_session_write_lock`, production-equivalent session DB tests, and no row-level DELETE migration framing.
+- [Spec alignment] `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md` amended for Phase 1 corrections: audit role, session_fork principal, no `_StatePayload.version`, `persist_compose_turn(raw_content, expected_current_state_id)`, async dispatcher on `SessionServiceProtocol`, two-field `_AuditOutcome`, `_session_write_lock`, audit_access_log cascade, production-equivalent session DB tests, and no row-level DELETE migration framing.
 
 ## Test plan
 
@@ -6716,7 +7074,7 @@ that child instead and link it from the feature comment.
 Task 0 and Tasks 1-20 above are complete. Specifically:
 
 1. [ ] All new tests pass against in-memory SQLite.
-2. [ ] CL-PP-11 + the B3 cross-allocator test (`test_cross_allocator_save_state_serialises_with_persist_turn`) + the B1 dual-`persist_compose_turn` test (`test_concurrent_persist_compose_turn_versions_contiguous`) pass against testcontainer PostgreSQL **via Task 20 Step 1b explicitly** — passing tests in the Docker-free `pytest tests/ -x` run does NOT count for this gate (the marker deselect silently skips them; B4 from the plan-review synthesis). The B1 regression closes the helper-contract-level fabricated-Tier-1-violation vector.
+2. [ ] CL-PP-11 + the B3 cross-allocator test (`test_cross_allocator_save_state_serialises_with_persist_turn`) + the B1/stale dual-`persist_compose_turn` test (`test_concurrent_persist_compose_turn_same_state_stale_rejects_without_integrity_alert`) pass against testcontainer PostgreSQL **via Task 20 Step 1b explicitly** — passing tests in the Docker-free `pytest tests/ -x` run does NOT count for this gate (the marker deselect silently skips them; B4 from the plan-review synthesis). The B1 regression closes the helper-contract-level fabricated-Tier-1-violation vector and proves stale same-state compose rejects do not increment the integrity counter.
 3. [ ] The schema-level backward-direction post-condition is enforced and tested, including intra-turn ordering (B2 fix, see T15).
 4. [ ] Existing `add_message` callers updated to pass `writer_principal` — including `_persist_tool_invocations`, `_persist_llm_calls`, and the `fork_session` batch-insert sweep.
 5. [ ] tier-model and freeze-guard CI green.
@@ -6734,7 +7092,7 @@ Phase 2 begins after this PR merges. Phase 2 builds on the schema delivered here
 **No user-visible change.** Phase 1 ships:
 
 - New schema columns (`chat_messages.tool_call_id`, `parent_assistant_id`, `sequence_no`, `writer_principal`, `composition_states.provenance`), an internal `chat_messages.role="audit"` storage shape for unparented composer breadcrumbs, and a new `audit_access_log` table.
-- A synchronous persistence primitive (`SessionServiceImpl.persist_compose_turn`) with its async-loop guard, `_session_write_lock` + sequence-allocation helpers, and `_AuditOutcome` disposition.
+- A synchronous persistence primitive (`SessionServiceImpl.persist_compose_turn`) with its async-loop guard, protocol-public async dispatcher, stale-current-state guard, `_session_write_lock` + sequence-allocation helpers, and `_AuditOutcome` disposition.
 - An advisory-lock classid registry (`src/elspeth/contracts/advisory_locks.py`) defining `ELSPETH_SESSIONS_LOCK_CLASSID` as on-the-wire ABI under change control — the namespace partition that makes the two-argument `pg_advisory_xact_lock` form safe in shared-cluster deployments (B3 fix). Future ELSPETH advisory locks register their classid here.
 - The `_StatePayload` contract change closing B1/B3: no `version` field on the payload; `_insert_composition_state` allocates per-session `composition_states.version` under `_session_write_lock`. The dual-allocator race that previously fabricated Tier-1 audit-integrity violations (when two compose turns observed the same `state.version` in async land before the sync worker acquired the lock) is now structurally impossible. This is a contract-level fix that hardens Phase 3's compose-loop wiring against a defect class the Phase 3 plan would otherwise have inherited.
 - A telemetry container (`_SessionsTelemetry`) wired into the service constructor and into `app.py`'s production wiring.
@@ -6777,12 +7135,13 @@ event-based:
    wired.
 
 2. **Phase 2 ships, Phase 3 stalls indefinitely.** The compose
-   loop is the consumer of `persist_compose_turn`. If Phase 3
-   stalls, the primitive remains dead code. Because it is
-   private (`SessionServiceImpl.persist_compose_turn`, not on
-   the public Protocol), there is no caller-side maintenance
-   burden — it can stay dormant indefinitely without coupling
-   accumulating against it.
+   loop is the first production consumer of
+   `persist_compose_turn_async`. If Phase 3 stalls, the concrete sync
+   primitive remains uncalled and the async protocol dispatcher remains
+   a dormant typed contract. This is acceptable only while there is no
+   production caller: the sync primitive stays concrete-only, so routes
+   do not accumulate direct `_run_sync` coupling, and the single public
+   surface is the async dispatcher that Phase 3 will use.
 
 3. **Phase 3 ships, Phase 4 stalls indefinitely.** Frontend is
    independent — Phase 3's audit-grade view route (with

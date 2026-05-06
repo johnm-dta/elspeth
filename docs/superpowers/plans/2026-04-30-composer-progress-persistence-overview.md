@@ -8,7 +8,7 @@
 
 **Architecture:** Four sequential phases. Phase 1 establishes the data layer and the synchronous transaction primitive. Phase 2 adds the type-driven redaction primitive (`Sensitive[T]`) plus the legacy declarative escape valve. Phase 3 wires the compose loop through the new persistence boundary, including the per-turn tool-call cap. Phase 4 builds the frontend recovery panel. Each phase is one PR.
 
-**Tech Stack:** Python 3.13, SQLAlchemy 2.x (sync `Engine`), Pydantic 2.x, FastAPI, structlog, OpenTelemetry, Hypothesis (property tests), pytest with chaos fixtures, React/TypeScript for the frontend.
+**Tech Stack:** Python 3.12 and 3.13 (matching supported CI), SQLAlchemy 2.x (sync `Engine`), Pydantic 2.x, FastAPI, structlog, OpenTelemetry, Hypothesis (property tests), pytest with chaos fixtures, React/TypeScript for the frontend.
 
 ---
 
@@ -16,7 +16,7 @@
 
 | Phase | File | What it delivers |
 |---|---|---|
-| 1 | `2026-04-30-composer-progress-persistence-phase-1-data-layer.md` | Schema additions (`writer_principal`, `provenance`, `audit_access_log`), `SessionServiceImpl.persist_compose_turn` / `SessionServiceProtocol.persist_compose_turn` sync primitive, advisory-lock + sequence-reservation helpers, SQLite same-session serialization, route-layer caller migrations, and DB-level same-session enforcement for tool-row parent links. |
+| 1 | `2026-04-30-composer-progress-persistence-phase-1-data-layer.md` | Schema additions (`writer_principal`, `provenance`, `audit_access_log`), private concrete `SessionServiceImpl.persist_compose_turn` sync primitive plus protocol-public `SessionServiceProtocol.persist_compose_turn_async` dispatcher, advisory-lock + sequence-reservation helpers, SQLite same-session serialization, route-layer caller migrations, stale-state compare-and-set protection, and DB-level same-session enforcement for tool-row parent links. |
 | 2 | `2026-04-30-composer-progress-persistence-phase-2-redaction.md` | `Sensitive[T]` type-driven primitive, legacy `ToolRedactionPolicy` with structured `HandlesNoSensitiveDataReason`, recursive adequacy guard, policy-hash snapshot test, CODEOWNERS entries. |
 | 3 | `2026-04-30-composer-progress-persistence-phase-3-compose-loop.md` | Compose-loop integration: gather tool outcomes async, dispatch one sync write per turn, enforce the per-turn tool-call cap, surface `failed_turn` + `tool_responses_persisted` on error responses, expose `include_tool_rows=true` with audit-grade access logging. |
 | 4 | `2026-04-30-composer-progress-persistence-phase-4-frontend.md` | `RecoveryPanel.tsx`, `RecoveryDiff.tsx`, `RecoveryTranscript.tsx`, `useRecoveryPanel.ts` with concurrent-edit guard and accessibility hooks. |
@@ -26,7 +26,8 @@
 - Phase 2 depends on Phase 1's schema (the `writer_principal` column is required to insert any chat_messages row).
 - Phase 3 depends on Phase 2's redaction primitives (the compose loop uses `redact_tool_call` and `lookup_tool_class`).
 - Phase 4 depends on Phase 3's response shape (`failed_turn`, `tool_responses_persisted`, the `include_tool_rows` query parameter).
-- Phase 2 and Phase 3 depend on Phase 1's spec-cleanup task: stale spec snippets for `_StatePayload.version`, `persist_compose_turn(raw_content)`, advisory-lock SQL, writer principals, and session-test engine construction must not remain the governing handoff text.
+- Phase 2 and Phase 3 depend on Phase 1's spec-cleanup task: stale spec snippets for `_StatePayload.version`, `persist_compose_turn(raw_content, expected_current_state_id)`, the async dispatcher contract, advisory-lock SQL, writer principals, audit-access cascade, and session-test engine construction must not remain the governing handoff text.
+- Phase 3 depends on Phase 1's async dispatcher contract: composer routes and services call `await service.persist_compose_turn_async(...)` through `SessionServiceProtocol`, never the concrete `_run_sync` bridge and never the sync primitive directly.
 - Phase 3 remains mandatory before anyone claims recovery fidelity. Phase 1 creates the persistence primitive but does not yet make the live compose loop persist assistant/tool rows and composition state atomically.
 - Each PR description must cite the previous phase's commit as a dependency. Reviewers can merge in order without re-reviewing earlier phases.
 

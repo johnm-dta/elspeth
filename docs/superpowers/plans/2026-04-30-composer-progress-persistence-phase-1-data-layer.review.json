@@ -1,12 +1,12 @@
 {
   "verdict": "APPROVED",
-  "summary": "Go for Phase 1 execution after the plan repair pass. The previous six blockers are resolved in the Phase 1 plan: PostgreSQL lock SQL now uses an executable int4 hash key, tool parentage is mechanically same-session scoped, tool linkage fields are hydrated through ChatMessageRecord read/write paths, IntegrityError tests now match the real guard/dialect behavior, the protocol method is planned, and the overview VAL binding has been corrected.",
+  "summary": "Go for Phase 1 execution after the repair pass. The plan now resolves the protocol/sync mismatch via a public async dispatcher, adds stale-current-state protection, cascades audit-access rows on session delete, fixes concurrency test identities and stale-race expectations, aligns CI testcontainer and mypy/ruff gates, extracts the shared state-envelope helper, and keeps the earlier advisory-lock, parentage, hydration, IntegrityError, and VAL repairs intact.",
   "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1-data-layer.md",
   "related_plan_files": [
     "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md",
     "/home/john/elspeth/docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md"
   ],
-  "reviewed_at": "2026-05-05T21:23:52Z",
+  "reviewed_at": "2026-05-06T00:01:06Z",
   "reviewers": [
     "reality",
     "architecture",
@@ -43,8 +43,8 @@
     {
       "id": "B5",
       "status": "RESOLVED",
-      "issue": "The overview promised `SessionServiceProtocol.persist_compose_turn`, but Phase 1 did not plan it.",
-      "resolution": "Task 11 now adds `SessionServiceProtocol.persist_compose_turn` with `TYPE_CHECKING` payload imports and mypy coverage."
+      "issue": "The overview promised a sync protocol persistence method, but Phase 1 did not plan a safe public async contract.",
+      "resolution": "Task 11 now keeps `SessionServiceImpl.persist_compose_turn` concrete-only, adds protocol-public `SessionServiceProtocol.persist_compose_turn_async`, and verifies the async dispatcher rather than direct `_run_sync` route coupling."
     },
     {
       "id": "B6",
@@ -56,7 +56,7 @@
       "id": "W1",
       "status": "RESOLVED",
       "issue": "A separate testcontainer CI job might not be branch-protected.",
-      "resolution": "Task 16 now requires any standalone Docker/testcontainer job to be included in `ci-success.needs`, and the overview done conditions repeat the aggregate-gate requirement."
+      "resolution": "Task 16 now requires any standalone Docker/testcontainer job to be included in `ci-success.needs`, requires the aggregate `needs.<job>.result` check, and updates explicit non-Docker marker expressions to exclude `testcontainer`."
     },
     {
       "id": "W2",
@@ -69,6 +69,66 @@
       "status": "RESOLVED",
       "issue": "Internal `audit` role filtering needed a direct route regression.",
       "resolution": "Task 14 now requires the filtering regression to create or load a real `chat_messages.role='audit'` row through the service/database path before exercising route/helper behavior."
+    },
+    {
+      "id": "B7",
+      "status": "RESOLVED",
+      "issue": "`persist_compose_turn` had contradictory public/private contracts across the overview and Phase 1 plan.",
+      "resolution": "The sync primitive remains concrete-only and async-loop guarded; the protocol exposes `persist_compose_turn_async`, and Phase 3 is instructed to call that dispatcher through `SessionServiceProtocol`."
+    },
+    {
+      "id": "B8",
+      "status": "RESOLVED",
+      "issue": "The plan serialized version/sequence allocation but did not prevent stale compose results from overwriting an intervening revert or save.",
+      "resolution": "Task 10 documents the state-intent race, Task 11 adds `expected_current_state_id` plus `StaleComposeStateError`, and tests now cover stale rejection and matching-current acceptance."
+    },
+    {
+      "id": "B9",
+      "status": "RESOLVED",
+      "issue": "`audit_access_log.session_id` lacked cascade behavior, which would break session archive/delete after audit-grade views exist.",
+      "resolution": "Task 4 now specifies `ForeignKey(\"sessions.id\", ondelete=\"CASCADE\")` and adds a session-delete cascade regression."
+    },
+    {
+      "id": "B10",
+      "status": "RESOLVED",
+      "issue": "Concurrency tests reused identical tool_call_id values across same-session writers.",
+      "resolution": "Task 16 workers now include a writer id in generated tool_call_id values; the deliberate duplicate-id tests remain isolated to IntegrityError coverage."
+    },
+    {
+      "id": "B11",
+      "status": "RESOLVED",
+      "issue": "The final CI instructions did not match current CI scope or explicit marker expressions.",
+      "resolution": "Task 16 now updates explicit CI marker expressions and `ci-success`; Task 20 now uses `uv run mypy src/ tests/` plus ruff check and format-check over the CI-scoped paths."
+    },
+    {
+      "id": "B12",
+      "status": "RESOLVED",
+      "issue": "`_insert_composition_state` called `_enveloped`, but live code only had method-local envelope helpers.",
+      "resolution": "Task 10 now extracts `_enveloped_state_column` at module scope and requires save/fork/helper call sites to use it."
+    },
+    {
+      "id": "W4",
+      "status": "RESOLVED",
+      "issue": "The plan assumed Python 3.13 only.",
+      "resolution": "Overview and Phase 1 tech-stack lines now state Python 3.12 and 3.13 to match supported CI."
+    },
+    {
+      "id": "W5",
+      "status": "RESOLVED",
+      "issue": "The audit-role filtering requirement was too easy to satisfy in only one path.",
+      "resolution": "Task 14 now includes the explicit `role == \"audit\"` predicate and requires both public route response filtering and composer prompt-history filtering."
+    },
+    {
+      "id": "W6",
+      "status": "RESOLVED",
+      "issue": "The fake telemetry Counter signature was narrower than the real OpenTelemetry API.",
+      "resolution": "Task 5 now models `Counter.add(amount: int | float, attributes: Attributes | None, context: Context | None)` and records `(amount, attributes, context)`."
+    },
+    {
+      "id": "W7",
+      "status": "RESOLVED",
+      "issue": "SQLite serialization was described as process-local but implemented as service-instance-local.",
+      "resolution": "Task 7 now uses a module-level process-wide `(database_url, session_id)` RLock registry."
     }
   ],
   "reviewer_summaries": {
